@@ -6,6 +6,15 @@ use std::time::SystemTime;
 use crate::event::HookEvent;
 use crate::session::{Phase, Session};
 
+/// Where [`Registry::route`] sends an event.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Route {
+    /// To the session with this Horadric id, adopted if unknown.
+    To(String),
+    /// A conversation no tile holds. It may be a background session.
+    Stranger,
+}
+
 /// The set of sessions Horadric knows about. Not thread safe on its own; the
 /// owner wraps it in a mutex.
 #[derive(Debug, Default)]
@@ -59,6 +68,30 @@ impl Registry {
                 Session::new(horadric_id, name, event.cwd.clone())
             });
         session.apply(event, now)
+    }
+
+    /// Which tile an event belongs to. The conversation's id decides
+    /// first, since a background session posts under whatever tag its
+    /// daemon was born with, or none. The tag decides for Horadric's own
+    /// events, a tile's first, and those after a `/clear`.
+    pub fn route(&self, tag: &str, event: &HookEvent) -> Route {
+        let id = event.session_id.as_str();
+        if !id.is_empty() {
+            let owner = self
+                .sessions
+                .values()
+                .find(|s| s.claude_session_id.as_deref() == Some(id));
+            if let Some(s) = owner {
+                return Route::To(s.id.clone());
+            }
+        }
+        if tag.is_empty() {
+            return Route::Stranger;
+        }
+        match self.sessions.get(tag) {
+            Some(s) if !s.takes_id(event) => Route::Stranger,
+            _ => Route::To(tag.to_string()),
+        }
     }
 
     /// Every session, in a stable order.
@@ -142,6 +175,68 @@ mod tests {
         let s = r.get("g1").unwrap();
         assert_eq!(s.status.as_ref().and_then(|st| st.context), Some(40.0));
         assert_eq!(s.phase, Phase::Idle);
+    }
+
+    fn event(name: &str, id: &str) -> HookEvent {
+        HookEvent {
+            session_id: id.into(),
+            ..HookEvent::synthetic(name)
+        }
+    }
+
+    #[test]
+    fn events_go_to_the_tile_that_holds_their_conversation() {
+        let mut r = Registry::new();
+        r.apply(
+            "tile-a",
+            &event("UserPromptSubmit", "c1"),
+            SystemTime::now(),
+        );
+        let mut bg = Session::new("bg-93", "x", "C:/p");
+        bg.claude_session_id = Some("c9".into());
+        r.add(bg);
+        let prompt = event("UserPromptSubmit", "c1");
+        assert_eq!(r.route("tile-a", &prompt), Route::To("tile-a".into()));
+        // Under another tag, or none, it is still tile-a's.
+        assert_eq!(r.route("tile-z", &prompt), Route::To("tile-a".into()));
+        assert_eq!(r.route("", &prompt), Route::To("tile-a".into()));
+        // The background tile's conversation wearing tile-a's tag.
+        let stranger = event("PreToolUse", "c9");
+        assert_eq!(r.route("tile-a", &stranger), Route::To("bg-93".into()));
+    }
+
+    #[test]
+    fn a_conversation_nobody_holds_is_a_stranger() {
+        let mut r = Registry::new();
+        r.apply(
+            "tile-a",
+            &event("UserPromptSubmit", "c1"),
+            SystemTime::now(),
+        );
+        let other = event("PreToolUse", "c2");
+        assert_eq!(r.route("tile-a", &other), Route::Stranger);
+        assert_eq!(r.route("", &other), Route::Stranger);
+        assert_eq!(r.route("", &event("Stop", "")), Route::Stranger);
+        // An unknown tag is still adopted, and Horadric's own events go by
+        // their tag.
+        assert_eq!(r.route("tile-b", &other), Route::To("tile-b".into()));
+        let register = event(HookEvent::REGISTER, "");
+        assert_eq!(r.route("tile-a", &register), Route::To("tile-a".into()));
+    }
+
+    #[test]
+    fn after_a_clear_the_tag_takes_the_next_conversation() {
+        let mut r = Registry::new();
+        r.apply(
+            "tile-a",
+            &event("UserPromptSubmit", "c1"),
+            SystemTime::now(),
+        );
+        let mut end = event("SessionEnd", "c1");
+        end.reason = Some("clear".into());
+        r.apply("tile-a", &end, SystemTime::now());
+        let next = event("UserPromptSubmit", "c2");
+        assert_eq!(r.route("tile-a", &next), Route::To("tile-a".into()));
     }
 
     #[test]

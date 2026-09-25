@@ -103,6 +103,11 @@ pub struct Session {
     /// The git worktree of its own the session works in, if it has one.
     #[serde(default)]
     pub worktree: Option<Worktree>,
+    /// The short id of a Claude Code background session, which the daemon
+    /// runs and a click attaches to. Such a tile is never saved or resumed:
+    /// the daemon keeps the session, and a resume would be a second copy.
+    #[serde(default)]
+    pub background: Option<String>,
     /// What its worktree has changed, as last counted. Counted again after
     /// the agent does something, so it is not saved.
     #[serde(skip)]
@@ -151,6 +156,7 @@ impl Session {
             shell: false,
             ssh: None,
             worktree: None,
+            background: None,
             diff: None,
             phase: Phase::Idle,
             since: now,
@@ -222,9 +228,15 @@ impl Session {
 
     /// Applies a hook event. Returns true when the phase changed.
     pub fn apply(&mut self, event: &HookEvent, now: SystemTime) -> bool {
-        // Horadric's own events carry no id. Keeping the latest real one
-        // follows the session through `/clear`.
+        // Horadric's own events carry no id. A different id is someone
+        // else's conversation wearing this tile's tag: Claude Code's
+        // background daemon hands the environment of the session that
+        // started it to every `claude --bg` after. Only the conversation
+        // that follows a `/clear` or `/resume` may take over.
         if !event.session_id.is_empty() {
+            if !self.takes_id(event) {
+                return false;
+            }
             self.claude_session_id = Some(event.session_id.clone());
         }
         // An event's cwd follows the agent's shell, so a `cd` into a subfolder
@@ -300,8 +312,11 @@ impl Session {
                 // never reaches an http hook, so nothing would revive the
                 // tile before it is pruned.
                 Some("clear" | "resume") => {
-                    // The next conversation has a title of its own, or none yet.
+                    // The next conversation has a title of its own, or none
+                    // yet, and an id this tile has not seen. Saved as none,
+                    // so a restart before it speaks does not shut it out.
                     self.title = None;
+                    self.claude_session_id = None;
                     Some(Phase::Idle)
                 }
                 _ => Some(Phase::Ended),
@@ -324,6 +339,20 @@ impl Session {
             }
             _ => false,
         }
+    }
+
+    /// Whether the event's conversation is this tile's: the one it knows,
+    /// the first it hears of, or the one a `SessionStart` from `/clear` or
+    /// `/resume` names. Horadric's own events have none and always are.
+    pub fn takes_id(&self, event: &HookEvent) -> bool {
+        let fresh = event.hook_event_name == "SessionStart"
+            && matches!(event.source.as_deref(), Some("clear" | "resume"));
+        event.session_id.is_empty()
+            || fresh
+            || self
+                .claude_session_id
+                .as_ref()
+                .is_none_or(|own| *own == event.session_id)
     }
 
     /// Keeps the tool the turn is in and when the agent last did something.
@@ -604,8 +633,43 @@ mod tests {
         s.apply(&cleared, now());
         assert_eq!(s.claude_session_id.as_deref(), Some("c2"));
         assert!(!s.prompted);
-        s.apply(&ev("UserPromptSubmit"), now());
+        let mut prompt = ev("UserPromptSubmit");
+        prompt.session_id = "c2".into();
+        s.apply(&prompt, now());
         assert!(s.prompted);
+    }
+
+    #[test]
+    fn another_conversation_under_the_same_tag_is_ignored() {
+        let mut s = Session::new("g1", "x", "");
+        s.apply(&ev("UserPromptSubmit"), now());
+        s.apply(&ev("Stop"), now());
+        let activity = s.activity.len();
+        let mut stranger = ev("PreToolUse");
+        stranger.session_id = "bg".into();
+        stranger.tool_name = Some("Bash".into());
+        assert!(!s.apply(&stranger, now()));
+        assert_eq!(s.phase, Phase::Done);
+        assert_eq!(s.claude_session_id.as_deref(), Some("c1"));
+        assert_eq!(s.tool, None);
+        assert_eq!(s.activity.len(), activity);
+    }
+
+    #[test]
+    fn clear_and_resume_let_the_next_conversation_in() {
+        for reason in ["clear", "resume"] {
+            let mut s = Session::new("g1", "x", "");
+            s.apply(&ev("UserPromptSubmit"), now());
+            let mut end = ev("SessionEnd");
+            end.reason = Some(reason.into());
+            s.apply(&end, now());
+            assert_eq!(s.claude_session_id, None);
+            let mut next = ev("UserPromptSubmit");
+            next.session_id = "c2".into();
+            assert!(s.apply(&next, now()));
+            assert_eq!(s.claude_session_id.as_deref(), Some("c2"));
+            assert_eq!(s.phase, Phase::Working);
+        }
     }
 
     #[test]

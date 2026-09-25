@@ -218,6 +218,29 @@ pub fn ssh_program() -> Option<PathBuf> {
     })
 }
 
+/// Claude Code itself, for commands of its own such as `claude agents`,
+/// whatever `HORADRIC_AGENT` puts in the tiles.
+pub fn claude_program() -> Option<PathBuf> {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    find_program("claude", &path, PROGRAM_EXTS, Path::is_file)
+}
+
+/// `claude` with these arguments, without a window, and without the
+/// variables that name a parent session or a tile: the command is
+/// Horadric's, not any session's.
+pub fn claude_command(args: &[&str]) -> Option<std::process::Command> {
+    let mut command = std::process::Command::new(claude_program()?);
+    command
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW);
+    for name in PARENT_SESSION_ENV.iter().chain(&[SESSION_ENV, OWNER_ENV]) {
+        command.env_remove(name);
+    }
+    Some(command)
+}
+
 /// The name of a session's host pipe for this Horadric instance.
 pub fn pipe_name(id: &str) -> String {
     wire::pipe_name(&horadric_hooks::instance(), id)

@@ -45,13 +45,14 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
+use horadric_core::background::Asked;
 use horadric_core::diff::{self as changes, Diff, FileDiff, Recount};
 use horadric_core::release::{self, Manifest};
 use horadric_core::ssh;
 use horadric_core::usage::has_flag;
 use horadric_core::worktree::{self as tree, Worktree};
 use horadric_core::{
-    session_id, Carry, HookEvent, Phase, Registry, SavedCluster, SavedPanel, SavedSession,
+    session_id, Carry, HookEvent, Phase, Registry, Route, SavedCluster, SavedPanel, SavedSession,
     SavedState, Session, Setting, Usage,
 };
 use horadric_hooks::listener::{self, Command, Reload, Tagged};
@@ -81,6 +82,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WS_EX_TOOLWINDOW, WS_POPUP,
 };
 
+use crate::agents;
 use crate::columns::{self, Columns};
 use crate::console::{self, Console, Launch};
 use crate::dropdown::{self, Dropdown};
@@ -331,6 +333,12 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
     let feed_registry = Arc::clone(&registry);
     let feed_usage = Arc::clone(&usage);
     thread::spawn(move || {
+        // Background sessions already running get their tiles now, not at
+        // their next hook, which may be a while for one that is done.
+        if agents::list().is_some_and(|list| agents::adopt_all(&feed_registry, &list)) {
+            post(notify_id, WM_HORADRIC_EVENT, 1);
+        }
+        let mut asked = Asked::default();
         for t in rx {
             let limits = t.event.status.as_ref().map(|s| &s.limits);
             if let (Some(limits), Ok(mut u)) = (limits.filter(|l| !l.is_empty()), feed_usage.lock())
@@ -340,9 +348,30 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
                     at: unix_now(),
                 });
             }
+            let route = feed_registry
+                .lock()
+                .map(|r| {
+                    let route = r.route(&t.horadric_id, &t.event);
+                    // A tag no tile has, on a real conversation, may be a
+                    // background session born of a tile long gone.
+                    let unknown = matches!(&route, Route::To(id) if r.get(id).is_none());
+                    (route, unknown && !t.event.session_id.is_empty())
+                })
+                .unwrap_or((Route::Stranger, false));
+            let target = match route {
+                (Route::To(id), false) => Some(id),
+                (Route::To(id), true) => {
+                    agents::adopt(&feed_registry, &t.event, &mut asked).or(Some(id))
+                }
+                (Route::Stranger, _) => agents::adopt(&feed_registry, &t.event, &mut asked),
+            };
+            // Nobody's conversation: a plain `claude` somewhere else.
+            let Some(target) = target else {
+                continue;
+            };
             let changed = feed_registry
                 .lock()
-                .map(|mut r| r.apply(&t.horadric_id, &t.event, SystemTime::now()))
+                .map(|mut r| r.apply(&target, &t.event, SystemTime::now()))
                 .unwrap_or(false);
             post(notify_id, WM_HORADRIC_EVENT, changed as usize);
         }
@@ -896,6 +925,8 @@ enum TileKind {
     Paused,
     /// Started with `horadric run` in someone else's terminal.
     Elsewhere,
+    /// A Claude Code background session no pane is attached to.
+    Background,
 }
 
 fn tile_menu(hwnd: HWND, id: &str) {
@@ -932,6 +963,12 @@ fn tile_menu(hwnd: HWND, id: &str) {
             Item::action(END, "Remove terminal"),
         ],
         (TileKind::Elsewhere, _) => vec![rename, Item::action(END, "Remove tile")],
+        (TileKind::Background, _) => vec![
+            Item::action(OPEN, "Attach"),
+            rename,
+            Item::Separator,
+            Item::action(END, "End session"),
+        ],
     };
     let tree = with_app(|app| app.diff_of(id)).flatten();
     let mut items = items;
@@ -1077,6 +1114,9 @@ pub(crate) enum Run {
     Shell,
     /// `ssh` to this host, a shell on another machine.
     Ssh(String),
+    /// `claude attach` to the background session with this short id. The
+    /// daemon runs the agent; the pane only shows it.
+    Attach(String),
 }
 
 fn project_menu(hwnd: HWND, key: &str) {
@@ -1710,7 +1750,11 @@ impl App {
 
     /// What a tile's menu offers, and whether it is a plain terminal.
     fn tile_kind(&self, id: &str) -> Option<(TileKind, bool)> {
-        let shell = self.shared.registry.lock().ok()?.get(id)?.shell;
+        let (shell, background) = {
+            let r = self.shared.registry.lock().ok()?;
+            let s = r.get(id)?;
+            (s.shell, s.background.is_some())
+        };
         let kind = if self.paused.contains_key(id) {
             TileKind::Paused
         } else if self
@@ -1719,6 +1763,8 @@ impl App {
             .is_some_and(|c| c.exit_code().is_none())
         {
             TileKind::Live
+        } else if background {
+            TileKind::Background
         } else {
             TileKind::Elsewhere
         };
@@ -1741,7 +1787,7 @@ impl App {
         if console.shell {
             let title = console.title();
             if let Ok(mut r) = self.shared.registry.lock() {
-                if let Some(s) = r.get_mut(&console.id) {
+                if let Some(s) = r.get_mut(&console.id).filter(|s| s.background.is_none()) {
                     s.touch(SystemTime::now());
                     s.last_line = title.or_else(|| s.ssh.clone()).unwrap_or_default();
                 }
@@ -1759,6 +1805,14 @@ impl App {
         let Some(console) = self.console_by_serial(serial).cloned() else {
             return;
         };
+        // Detaching closes the pane and nothing more: the daemon runs the
+        // session on. Unless it was the session that ended.
+        if let Some((short, _, _)) = self.background_of(&console.id) {
+            self.consoles.remove(&console.id);
+            self.check_background(console.id.clone(), short);
+            self.reconcile(true);
+            return;
+        }
         // A shell has nothing to resume, and `exit` means done with it
         // whatever code the last command left behind. `ssh` failing to
         // connect or dropping is the exception: it pauses below, and a
@@ -2289,7 +2343,10 @@ impl App {
         {
             return Err(format!("{id} is already running"));
         }
+        // An attached pane is started like a shell, untagged: the session's
+        // hooks come from the daemon, not from this console.
         let shell = run != Run::Agent;
+        let attach = matches!(run, Run::Attach(_));
         let host = match &run {
             Run::Ssh(h) => Some(h.clone()),
             _ => None,
@@ -2307,6 +2364,10 @@ impl App {
             Run::Ssh(h) => (
                 console::ssh_program().ok_or("no ssh found (install OpenSSH Client)")?,
                 ssh::args(h),
+            ),
+            Run::Attach(short) => (
+                console::claude_program().ok_or("claude not found on PATH")?,
+                vec!["attach".to_string(), short.clone()],
             ),
         };
         let fresh = self.new_trees.remove(id);
@@ -2326,13 +2387,16 @@ impl App {
             .lock()
             .map(|mut r| {
                 let known = r.get(id).is_some();
-                r.apply(id, &register, SystemTime::now());
+                // A background tile keeps the phase its hooks gave it.
+                if !attach {
+                    r.apply(id, &register, SystemTime::now());
+                }
                 if let Some(s) = r.get_mut(id) {
                     if let Some((w, _)) = &fresh {
                         s.worktree = Some(w.clone());
                     }
                     own_tree = s.worktree.clone();
-                    s.shell = shell;
+                    s.shell = shell && !attach;
                     // Until the remote shell sets a title, the tile says
                     // where it is.
                     if let Some(h) = &host {
@@ -2344,7 +2408,11 @@ impl App {
             })
             .unwrap_or(false);
 
-        let extra = self.extra_args(id, &program, &args, &cwd);
+        let extra = if attach {
+            Vec::new()
+        } else {
+            self.extra_args(id, &program, &args, &cwd)
+        };
         let env = own_tree
             .as_ref()
             .map(|w| {
@@ -2372,7 +2440,9 @@ impl App {
         )
         .map_err(|e| {
             if let Ok(mut r) = self.shared.registry.lock() {
-                if was_known {
+                if attach {
+                    // The session runs on in the daemon whatever the pane did.
+                } else if was_known {
                     r.apply(
                         id,
                         &HookEvent::synthetic(HookEvent::PAUSE),
@@ -2495,6 +2565,10 @@ impl App {
     /// Ends a session for good: the process, the window, the tile, and its
     /// place in the saved state.
     fn end(&mut self, id: &str) {
+        // Forgetting alone would leave it running, and back at its next hook.
+        if let Some((short, _, _)) = self.background_of(id) {
+            agents::stop(&short);
+        }
         self.forget(id);
         self.reconcile(false);
     }
@@ -2629,7 +2703,13 @@ impl App {
             return;
         }
         let Some(serial) = self.consoles.get(id).map(|c| c.serial) else {
-            // Started with `horadric run`: its terminal is the one it was run in.
+            if let Some((short, name, cwd)) = self.background_of(id) {
+                if let Err(e) = self.launch(id, &name, cwd, Vec::new(), Run::Attach(short), true) {
+                    eprintln!("horadric: cannot attach to {id}: {e}");
+                }
+            }
+            // Otherwise started with `horadric run`: its terminal is the
+            // one it was run in.
             return;
         };
         if let Some(stage) = self.stage_showing(serial) {
@@ -2648,6 +2728,31 @@ impl App {
                 stage.focus_session(id);
             }
         }
+    }
+
+    /// A background tile's short id, name and folder.
+    fn background_of(&self, id: &str) -> Option<(String, String, PathBuf)> {
+        let r = self.shared.registry.lock().ok()?;
+        let s = r.get(id)?;
+        Some((s.background.clone()?, s.name.clone(), PathBuf::from(&s.cwd)))
+    }
+
+    /// Ends a background tile whose session no longer runs. Asked off the
+    /// UI thread, since `claude agents` takes a moment.
+    fn check_background(&self, id: String, short: String) {
+        let registry = Arc::clone(&self.shared.registry);
+        let notify = self.notify.0 as isize;
+        thread::spawn(move || {
+            if agents::running(&short) != Some(false) {
+                return;
+            }
+            if let Ok(mut r) = registry.lock() {
+                if r.get(&id).is_some() {
+                    r.apply(&id, &HookEvent::synthetic("SessionEnd"), SystemTime::now());
+                }
+            }
+            post(notify, WM_HORADRIC_EVENT, 1);
+        });
     }
 
     fn project_of(&self, id: &str) -> Option<String> {
@@ -3267,7 +3372,9 @@ impl App {
     fn snapshot(&self) -> SavedState {
         let mut sessions = Vec::new();
         if let Ok(r) = self.shared.registry.lock() {
-            for s in r.all() {
+            // A background session is the daemon's to keep. Found again at
+            // the next start, never resumed into a second copy.
+            for s in r.all().filter(|s| s.background.is_none()) {
                 if let Some(p) = self.paused.get(&s.id) {
                     sessions.push(SavedSession::from_session(s, p.args.clone(), false));
                 } else if let Some(c) = self.consoles.get(&s.id) {
@@ -3363,6 +3470,15 @@ impl App {
     /// Saves one last time and stops saving.
     fn freeze(&mut self) {
         self.save();
+        // Nothing brings an attached pane back, so its host must not
+        // outlive this app. The session itself runs on in the daemon.
+        if let Ok(r) = self.shared.registry.lock() {
+            for (id, c) in &self.consoles {
+                if r.get(id).is_some_and(|s| s.background.is_some()) {
+                    c.kill();
+                }
+            }
+        }
         self.frozen = true;
     }
 
