@@ -1676,9 +1676,9 @@ the human.
 
 ### Step 5: inbox, installer, updater
 
-- The inbox is the sessions waiting on you, oldest first, with what each is
-  waiting for. The hotkey (see The stage) walks it already. Still open
-  whether it also needs a window or a sort order inside the clusters.
+- The inbox, a list of the sessions waiting on you, is dropped (decided
+  2026-09-26). The tiles, the hotkey that walks the waiting sessions (see
+  The stage) and the notification already give the overview.
 - A signed updater, planned below under "The updater". `horadric install`
   covers installing for now; NSIS only if a download for other people
   needs it.
