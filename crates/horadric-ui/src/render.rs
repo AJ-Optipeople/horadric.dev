@@ -1578,37 +1578,57 @@ impl Painter<'_> {
             &s.last_line
         };
         // Stopping short of the buttons at its end.
-        let buttons = usize::from(mark.is_some()) + usize::from(code.is_some());
-        let short = buttons as f32 * (m.mark_w + 2.0);
-        let mut bottom = Rect::new(bottom.x, bottom.y, bottom.w - short, bottom.h);
+        // A button is a glyph with room around it, so the line runs up to
+        // the button's box rather than stopping a whole pad short of it.
+        let end = [mark, code]
+            .into_iter()
+            .flatten()
+            .map(|b| b.x - 2.0)
+            .fold(bottom.right(), f32::min);
+        let mut bottom = Rect::new(bottom.x, bottom.y, end - bottom.x, bottom.h);
         // What its worktree changed, in the files tile's colours, so a
         // session with work to look at shows it from across the screen.
-        if let Some((added, removed)) = s.diff.as_ref().map(Diff::totals) {
-            if added + removed > 0 {
+        let diff = s
+            .diff
+            .as_ref()
+            .map(Diff::totals)
+            .filter(|&(added, removed)| added + removed > 0)
+            .map(|(added, removed)| {
                 let minus = format!("\u{2212}{removed}");
                 let plus = format!("+{added}");
                 let minus_w = self.measure(gpu, &gpu.small, &minus);
                 let plus_w = self.measure(gpu, &gpu.small, &plus);
-                let ink = |c: Color| c.fade(presence);
-                self.text_tabular(
-                    gpu,
-                    &gpu.small_right,
-                    ink(theme::GIT_DELETED),
-                    &minus,
-                    bottom,
-                );
-                let left = Rect::new(bottom.x, bottom.y, bottom.w - minus_w - 4.0, bottom.h);
-                self.text_tabular(gpu, &gpu.small_right, ink(theme::GIT_ADDED), &plus, left);
-                bottom.w -= minus_w + plus_w + 4.0 + 8.0;
-            }
-        }
-        // A context nearly full is worth words, not only the ring: it says
-        // the session is due a `/compact` or a fresh start. It takes the
-        // trace's place.
+                (plus, minus, plus_w, minus_w)
+            });
+        // A context nearly full is worth words, not only the meter: it says
+        // the session is due a `/compact` or a fresh start.
         let crowded = context.filter(|&c| c >= 75.0);
-        if let Some(c) = crowded {
-            let w = 58.0;
-            let at = Rect::new(bottom.right() - w, bottom.y, w, bottom.h);
+        let crowded_w = 58.0;
+        let activity = s.activity(scene.now, TRACE_BARS);
+        let trace_w = TRACE_BARS as f32 * (TRACE_BAR_W + TRACE_GAP) - TRACE_GAP;
+        let busy = activity.iter().any(|&a| a > 0.0);
+        let gap = 8.0;
+        let parts = layout::tile_line(
+            bottom.w,
+            diff.as_ref().map(|d| d.2 + 4.0 + d.3 + gap),
+            crowded.map(|_| crowded_w + gap),
+            busy.then_some(trace_w + gap),
+        );
+        if let Some((plus, minus, plus_w, minus_w)) = diff.filter(|_| parts.diff) {
+            let ink = |c: Color| c.fade(presence);
+            self.text_tabular(
+                gpu,
+                &gpu.small_right,
+                ink(theme::GIT_DELETED),
+                &minus,
+                bottom,
+            );
+            let left = Rect::new(bottom.x, bottom.y, bottom.w - minus_w - 4.0, bottom.h);
+            self.text_tabular(gpu, &gpu.small_right, ink(theme::GIT_ADDED), &plus, left);
+            bottom.w -= minus_w + 4.0 + plus_w + gap;
+        }
+        if let Some(c) = crowded.filter(|_| parts.context) {
+            let at = Rect::new(bottom.right() - crowded_w, bottom.y, crowded_w, bottom.h);
             self.text_tabular(
                 gpu,
                 &gpu.small_right,
@@ -1616,23 +1636,9 @@ impl Painter<'_> {
                 &format!("ctx {}%", c.round()),
                 at,
             );
-            bottom.w -= w + 4.0;
+            bottom.w -= crowded_w + gap;
         }
-        let activity = s.activity(scene.now, TRACE_BARS);
-        let trace_w = TRACE_BARS as f32 * (TRACE_BAR_W + TRACE_GAP) - TRACE_GAP;
-        let busy = crowded.is_none() && activity.iter().any(|&a| a > 0.0);
-        let text_w = if busy {
-            bottom.w - trace_w - 8.0
-        } else {
-            bottom.w
-        };
-        self.text(
-            &gpu.small,
-            theme::TEXT_DIM.fade(presence),
-            last,
-            Rect::new(bottom.x, bottom.y, text_w, bottom.h),
-        );
-        if busy {
+        if parts.trace {
             let trace_c = if icon_c == theme::TEXT_DIM {
                 theme::TEXT_DIM.with_alpha(0.45)
             } else {
@@ -1645,7 +1651,9 @@ impl Painter<'_> {
                 base,
                 trace_c.fade(presence),
             );
+            bottom.w -= trace_w + gap;
         }
+        self.text(&gpu.small, theme::TEXT_DIM.fade(presence), last, bottom);
         if let Some(mark) = mark {
             self.browser_mark(&mark, scene.button(Hit::Browser(i)));
         }
@@ -1814,7 +1822,7 @@ impl Painter<'_> {
             &gpu.small_right,
             theme::TEXT_DIM,
             &t.summary,
-            Rect::new(summary_x, h.y, l.mode.x - 6.0 - summary_x, h.h),
+            Rect::new(summary_x, h.y, l.mode.x - 10.0 - summary_x, h.h),
         );
 
         // The mode, as a small key: a click offers the others.
@@ -1822,8 +1830,8 @@ impl Painter<'_> {
         let (fill, ink) = theme::button_look(mode);
         self.fill_rounded(&l.mode, 5.0, fill.unwrap_or(theme::SURFACE.with_alpha(0.6)));
         let word_w = self.measure(gpu, &gpu.chip, t.mode);
-        let caret_w = 10.0;
-        let x = l.mode.x + (l.mode.w - word_w - caret_w) / 2.0;
+        let (caret_gap, caret_w) = (3.0, 10.0);
+        let x = l.mode.x + (l.mode.w - word_w - caret_gap - caret_w) / 2.0;
         self.text(
             &gpu.chip,
             ink,
@@ -1834,7 +1842,7 @@ impl Painter<'_> {
             &gpu.icon_small,
             ink,
             '\u{E70D}',
-            Rect::new(x + word_w + 1.0, l.mode.y, caret_w, l.mode.h),
+            Rect::new(x + word_w + caret_gap, l.mode.y, caret_w, l.mode.h),
         );
 
         let add = scene.button(Hit::TasksAdd);

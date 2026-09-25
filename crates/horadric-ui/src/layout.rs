@@ -290,12 +290,22 @@ pub fn cluster(
     }
 }
 
+/// How far the tasks tile's plus stands in from the tile's right edge.
+const TASKS_ADD_IN: f32 = 6.0;
+
 /// The tasks tile with its top at `y`, a row for each of `approve`.
 fn tasks_tile(m: &Metrics, y: f32, approve: &[bool]) -> TasksLayout {
     let full = m.width - 2.0 * m.pad;
     let header = Rect::new(m.pad, y, full, m.files_header_h);
-    let add = Rect::new(header.right() - header.h, y, header.h, header.h);
-    let mode = Rect::new(add.x - m.mode_w, y + 4.0, m.mode_w, header.h - 8.0);
+    // The plus is a glyph in a square, so the square stands in from the
+    // edge for the glyph to line up with the padded text of the rows.
+    let add = Rect::new(
+        header.right() - TASKS_ADD_IN - header.h,
+        y,
+        header.h,
+        header.h,
+    );
+    let mode = Rect::new(add.x - 4.0 - m.mode_w, y + 4.0, m.mode_w, header.h - 8.0);
     let mut rows = Vec::new();
     let mut buttons = Vec::new();
     let mut row_y = header.bottom();
@@ -343,6 +353,44 @@ pub fn mark(layout: &mut ClusterLayout, m: &Metrics, marked: &[bool], coded: &[b
     layout.codes = (layout.tiles.iter().enumerate())
         .map(|(i, t)| on(coded, i).then(|| button(t, usize::from(on(marked, i)))))
         .collect();
+}
+
+/// The least of a tile's second line its text keeps. Less than this and
+/// the line reads as an ellipsis, which says nothing.
+pub const LINE_TEXT_MIN: f32 = 84.0;
+
+/// What a tile's second line shows beside its text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct LineParts {
+    pub diff: bool,
+    pub context: bool,
+    pub trace: bool,
+}
+
+/// Which of the parts a tile's second line wants fit in `width` beside
+/// its text, each width with its gap. The worktree's diff goes first, as
+/// it is work to look at; then the context warning, which the meter under
+/// the icon also gives; the trace last, as the icon already says busy.
+/// Whatever would squeeze the text under [`LINE_TEXT_MIN`] is left out.
+pub fn tile_line(
+    width: f32,
+    diff: Option<f32>,
+    context: Option<f32>,
+    trace: Option<f32>,
+) -> LineParts {
+    let mut room = width - LINE_TEXT_MIN;
+    let mut take = |w: Option<f32>| match w {
+        Some(w) if w <= room => {
+            room -= w;
+            true
+        }
+        _ => false,
+    };
+    LineParts {
+        diff: take(diff),
+        context: take(context),
+        trace: take(trace),
+    }
 }
 
 /// The shortest a files tile is before its column folds it to its header.
@@ -1357,7 +1405,7 @@ mod tests {
         assert_eq!(hit(&l, 20.0, t.header.y + 1.0), Hit::TasksHeader);
         assert_eq!(hit(&l, a.x + 1.0, a.y + 1.0), Hit::TaskApprove(1));
         assert_eq!(hit(&l, 20.0, t.rows[1].y + 1.0), Hit::Task(1));
-        assert!(t.mode.right() <= t.add.x && t.add.right() == t.header.right());
+        assert!(t.mode.right() <= t.add.x && t.add.right() == t.header.right() - TASKS_ADD_IN);
     }
 
     #[test]
@@ -1493,6 +1541,50 @@ mod tests {
             beside_stage(WORK, &tiles, stage, (400, 700), 12, 12, 300),
             None
         );
+    }
+
+    #[test]
+    fn a_tile_line_keeps_room_for_its_text() {
+        let all = LineParts {
+            diff: true,
+            context: true,
+            trace: true,
+        };
+        assert_eq!(tile_line(400.0, Some(60.0), Some(60.0), Some(50.0)), all);
+        // The trace goes first, then the context warning, the diff last.
+        let no_trace = LineParts {
+            trace: false,
+            ..all
+        };
+        assert_eq!(
+            tile_line(210.0, Some(60.0), Some(60.0), Some(50.0)),
+            no_trace
+        );
+        let diff_only = LineParts {
+            diff: true,
+            ..LineParts::default()
+        };
+        assert_eq!(
+            tile_line(170.0, Some(60.0), Some(60.0), Some(50.0)),
+            diff_only
+        );
+        assert_eq!(
+            tile_line(100.0, Some(60.0), None, None),
+            LineParts::default()
+        );
+        // A smaller part still fits where a bigger one did not.
+        let trace = LineParts {
+            trace: true,
+            ..LineParts::default()
+        };
+        assert_eq!(
+            tile_line(150.0, None, Some(60.0), Some(50.0)),
+            LineParts {
+                context: true,
+                ..LineParts::default()
+            }
+        );
+        assert_eq!(tile_line(140.0, Some(70.0), None, Some(50.0)), trace);
     }
 
     #[test]
