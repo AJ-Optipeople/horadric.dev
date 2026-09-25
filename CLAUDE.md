@@ -41,6 +41,11 @@ Do not reopen these without asking. They were argued through and chosen.
 - `cargo fmt --all`, then `cargo clippy --workspace --all-targets -- -D
   warnings`, then `cargo test --workspace`. All three before every commit.
 - Commit messages: one line saying what changed, a blank line, then why.
+- Work lands on `main`. When a piece of work is finished, and always
+  before shipping, merge its branch into `main`. No branch is left with
+  work `main` lacks. From a worktree: merge `main` into the branch first
+  if it has moved, run the three checks again, then `git -C
+  <main checkout> merge --ff-only <branch>`.
 
 ## Verifying Windows code
 
@@ -96,7 +101,8 @@ The agent working on Horadric runs in a terminal of the installed Horadric. It
 builds and tests dev instances as above and never touches the installed
 one, with one exception: shipping, and only when the human says to ship.
 
-Shipping is `cargo build --release`, then `target\release\horadric.exe
+Shipping is merging into `main` as above, `cargo build --release` from
+the merged code, then `target\release\horadric.exe
 reload`. The installed Horadric hands over to the new build at once, and
 the new build attaches to every session's host, including the agent's
 own, which keeps running through it. An installed Horadric from before
