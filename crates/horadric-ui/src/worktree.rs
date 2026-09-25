@@ -115,6 +115,58 @@ pub fn remove(w: Worktree) {
     });
 }
 
+/// The commit checked out in `dir`.
+pub fn head(dir: &Path) -> Option<String> {
+    git(dir, &["rev-parse", "HEAD"])
+        .ok()
+        .map(|h| h.trim().to_string())
+}
+
+/// Removes the linked worktrees of the repository `dir` is in that are
+/// done with: the branch is merged into what the main tree has checked
+/// out, nothing in the tree is changed or untracked, and no session in
+/// `busy` has its folder there. Hand-made ones too, since an agent that
+/// adds a worktree itself rarely removes it after the merge. The branch
+/// must have been committed to, or a worktree just added and not yet
+/// worked in would count as merged and go. Their branches go with them.
+/// Returns the folders removed.
+pub fn sweep(dir: &Path, busy: &[String]) -> Vec<String> {
+    let Some(place) = main_tree(dir) else {
+        return Vec::new();
+    };
+    let main = Path::new(&place.top);
+    let Ok(list) = git(main, &["worktree", "list", "--porcelain"]) else {
+        return Vec::new();
+    };
+    let mut removed = Vec::new();
+    for w in worktree::linked(&list) {
+        if busy.iter().any(|d| worktree::inside(d, &w.path)) {
+            continue;
+        }
+        let branch = format!("refs/heads/{}", w.branch);
+        let merged = git(main, &["merge-base", "--is-ancestor", &branch, "HEAD"]).is_ok();
+        let worked_in = git(main, &["reflog", "show", "--format=%H", &branch])
+            .is_ok_and(|log| log.lines().count() > 1);
+        let clean = git(
+            Path::new(&w.path),
+            &["--no-optional-locks", "status", "--porcelain"],
+        )
+        .is_ok_and(|s| s.trim().is_empty());
+        if !(merged && worked_in && clean) {
+            continue;
+        }
+        if let Err(e) = git(main, &["worktree", "remove", &w.path]) {
+            eprintln!("horadric: kept the worktree {}: {e}", w.path);
+            continue;
+        }
+        if let Err(e) = git(main, &["branch", "-d", &w.branch]) {
+            eprintln!("horadric: kept the branch {}: {e}", w.branch);
+        }
+        removed.push(w.path);
+    }
+    removed
+}
+
 /// Counts what a session's worktree has changed: against its last commit,
 /// untracked files included, and on its branch since the main tree's
 /// commit. None once the worktree is gone. `--no-optional-locks` keeps

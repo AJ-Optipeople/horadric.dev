@@ -236,6 +236,48 @@ pub fn main_tree(out: &str) -> Option<Place> {
     })
 }
 
+/// A linked worktree as `git worktree list --porcelain` lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Linked {
+    pub path: String,
+    /// The branch checked out, without `refs/heads/`.
+    pub branch: String,
+}
+
+/// The linked worktrees a sweep may look at, from `git worktree list
+/// --porcelain`: not the main tree, which comes first, and not one that is
+/// locked, detached, or whose folder is gone, since each of those was left
+/// that way on purpose or is git's to prune.
+pub fn linked(out: &str) -> Vec<Linked> {
+    out.replace("\r\n", "\n")
+        .split("\n\n")
+        .skip(1)
+        .filter_map(|entry| {
+            let mut path = None;
+            let mut branch = None;
+            for line in entry.lines() {
+                match line.split_once(' ').unwrap_or((line, "")) {
+                    ("worktree", p) => path = Some(p.to_string()),
+                    ("branch", b) => branch = b.strip_prefix("refs/heads/").map(String::from),
+                    ("locked" | "prunable" | "detached" | "bare", _) => return None,
+                    _ => {}
+                }
+            }
+            Some(Linked {
+                path: path?,
+                branch: branch?,
+            })
+        })
+        .collect()
+}
+
+/// Whether `dir`, a session's folder, is `tree` or inside it.
+pub fn inside(dir: &str, tree: &str) -> bool {
+    let norm = |p: &str| p.replace('\\', "/").trim_end_matches('/').to_lowercase();
+    let (dir, tree) = (norm(dir), norm(tree));
+    dir == tree || dir.starts_with(&format!("{tree}/"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -435,5 +477,31 @@ mod tests {
         // `--show-toplevel` prints nothing in a bare repository.
         assert_eq!(main_tree("C:/Code/app.git\nC:/Code/app.git\n"), None);
         assert_eq!(main_tree(""), None);
+    }
+
+    #[test]
+    fn linked_worktrees_skip_the_main_tree_and_those_left_on_purpose() {
+        let out = "worktree C:/Code/app\nHEAD 1\nbranch refs/heads/main\n\n\
+                   worktree C:/Code/app.fix\nHEAD 2\nbranch refs/heads/fix\n\n\
+                   worktree C:/Code/app.held\nHEAD 3\nbranch refs/heads/held\nlocked busy\n\n\
+                   worktree C:/Code/app.gone\nHEAD 4\nbranch refs/heads/gone\nprunable gone\n\n\
+                   worktree C:/Code/app.look\nHEAD 5\ndetached\n\n";
+        assert_eq!(
+            linked(out),
+            vec![Linked {
+                path: "C:/Code/app.fix".into(),
+                branch: "fix".into()
+            }]
+        );
+        assert_eq!(linked(&out.replace('\n', "\r\n")).len(), 1);
+        assert!(linked("").is_empty());
+    }
+
+    #[test]
+    fn a_folder_is_inside_its_tree_and_not_a_sibling() {
+        assert!(inside("C:/Code/app.fix", "C:/Code/app.fix"));
+        assert!(inside(r"c:\code\app.fix\web", "C:/Code/app.fix/"));
+        assert!(!inside("C:/Code/app.fix-2", "C:/Code/app.fix"));
+        assert!(!inside("C:/Code/app", "C:/Code/app.fix"));
     }
 }

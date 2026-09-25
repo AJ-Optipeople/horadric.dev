@@ -1299,6 +1299,25 @@ session gets a worktree of its own, and its tile shows what it changed.
   changed or untracked files and the second while the branch has commits
   the main tree lacks, so nothing is lost: what refuses stays for the human.
   Quitting pauses and removes nothing.
+- **Sweeping merged worktrees.** Ending a session cannot clean up a
+  worktree whose branch was merged later, nor one an agent added by hand,
+  and those piled up: eight of them beside this repository after one
+  evening of parallel branches. So the app sweeps each project with a
+  session at startup and after any of its sessions is heard from, at most
+  every 10 s a project, and only once the main tree's HEAD has moved, since
+  nothing is merged while it stays put. A linked worktree goes, with `git
+  worktree remove` and then `git branch -d`, when its branch is merged into
+  what the main tree has checked out, `git status` in it says nothing, no
+  session (running or paused, or about to start) has its folder there, and
+  the branch's reflog shows at least one commit on it. The last keeps a
+  worktree just added and not yet worked in, which counts as merged. A
+  locked or detached worktree is left alone. Gitignored files in a swept
+  worktree go with it. Tested with a dev instance on a scratch repository
+  of five worktrees: the merged one went with its branch, the busy, dirty,
+  fresh and unmerged ones stayed, and merging the unmerged one got it swept
+  at the next hook. That dev instance still held sessions in this
+  repository, so its first sweep also removed the eight leftovers here,
+  and kept the four worktrees in use.
 - **The task runner** holds one item at a time in the shared tree, unless
   `"tasks": {"parallel": 3}` in the config lets it hold several. Then each
   item it takes (or a click takes) gets a worktree of its own, its branch

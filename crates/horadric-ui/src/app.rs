@@ -152,6 +152,9 @@ const ENDED_LINGER: Duration = Duration::from_secs(20);
 /// A crash this long after resuming sessions after a crash is a crash of
 /// its own, not the same one again, so the next start resumes once more.
 const RECOVERED_AFTER: Duration = Duration::from_secs(60);
+/// The least time between two sweeps of one project's worktrees. Hook
+/// events come many a second while an agent works.
+const SWEEP_GAP: Duration = Duration::from_secs(10);
 /// Starts the id of a file view, which is no session.
 const VIEW: &str = "view:";
 pub(crate) const MARGIN_DIP: i32 = 12;
@@ -462,6 +465,9 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             new_trees: HashMap::new(),
             recounts: HashMap::new(),
             counted: Arc::new(Mutex::new(Vec::new())),
+            sweep_due: HashSet::new(),
+            swept_at: HashMap::new(),
+            swept_heads: Arc::new(Mutex::new(HashMap::new())),
             update: None,
             last_check: None,
             checking: false,
@@ -1408,6 +1414,15 @@ struct App {
     recounts: HashMap<String, Recount>,
     /// Counts back from their threads.
     counted: Arc<Mutex<Vec<Counted>>>,
+    /// Projects whose worktrees are to be swept, by project key: every
+    /// project with a session at startup, and one whose session was heard
+    /// from since, since that may have been a merge.
+    sweep_due: HashSet<String>,
+    /// When each project was last swept, by project key.
+    swept_at: HashMap<String, Instant>,
+    /// The main tree's HEAD at each project's last sweep, by project key.
+    /// Nothing is merged while it stays put, so the sweep stops there.
+    swept_heads: Arc<Mutex<HashMap<String, String>>>,
     /// A newer release, verified, that the tray offers.
     update: Option<Manifest>,
     /// When the last update check started. The first tick checks.
@@ -1447,6 +1462,7 @@ impl App {
                 self.switch_free();
                 self.run_tasks();
                 self.recount();
+                self.mark_sweeps();
             }
             WM_HORADRIC_COUNTED => self.take_counts(),
             WM_HORADRIC_UPDATE => self.take_update(),
@@ -1488,6 +1504,10 @@ impl App {
                 self.tick();
                 // Activity heard while a count was due too soon.
                 self.recount();
+                if self.swept_at.is_empty() {
+                    self.mark_sweeps();
+                }
+                self.sweep();
                 self.switch_free();
                 self.tick_tasks();
                 self.reload_when_ready();
@@ -1852,6 +1872,62 @@ impl App {
                     c.push((id, diff));
                 }
                 post(notify, WM_HORADRIC_COUNTED, 0);
+            });
+        }
+    }
+
+    /// Marks every project with a session as due for a sweep.
+    fn mark_sweeps(&mut self) {
+        if let Ok(r) = self.shared.registry.lock() {
+            self.sweep_due.extend(r.all().map(project_key));
+        }
+    }
+
+    /// Sweeps the worktrees that are done with out of each due project, on
+    /// a thread each, at most every [`SWEEP_GAP`] a project.
+    fn sweep(&mut self) {
+        let now = Instant::now();
+        let ready: Vec<String> = self
+            .sweep_due
+            .iter()
+            .filter(|k| self.swept_at.get(*k).is_none_or(|t| now - *t >= SWEEP_GAP))
+            .cloned()
+            .collect();
+        if ready.is_empty() {
+            return;
+        }
+        // Every session's folder, paused ones too, and the worktrees of
+        // sessions about to start.
+        let mut busy: Vec<String> = match self.shared.registry.lock() {
+            Ok(r) => r
+                .all()
+                .flat_map(|s| {
+                    std::iter::once(s.cwd.clone())
+                        .chain(s.worktree.as_ref().map(|w| w.path.clone()))
+                })
+                .collect(),
+            Err(_) => return,
+        };
+        busy.extend(self.new_trees.values().map(|(w, _)| w.path.clone()));
+        for key in ready {
+            self.sweep_due.remove(&key);
+            self.swept_at.insert(key.clone(), now);
+            let heads = Arc::clone(&self.swept_heads);
+            let busy = busy.clone();
+            std::thread::spawn(move || {
+                let dir = Path::new(&key);
+                let Some(head) = worktree::head(dir) else {
+                    return;
+                };
+                if heads.lock().is_ok_and(|h| h.get(&key) == Some(&head)) {
+                    return;
+                }
+                for path in worktree::sweep(dir, &busy) {
+                    eprintln!("horadric: removed the merged worktree {path}");
+                }
+                if let Ok(mut h) = heads.lock() {
+                    h.insert(key, head);
+                }
             });
         }
     }
