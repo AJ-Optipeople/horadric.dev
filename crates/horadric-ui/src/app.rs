@@ -357,10 +357,12 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
     });
 
     // Start with Windows is on unless the user switched it off. Only the
-    // first run decides it; later runs respect whatever the menu says. A dev
-    // instance would point it at a build that is about to be replaced.
+    // first run decides it; later runs respect whatever the menu says. Only
+    // the installed copy decides: a dev instance or a build run from target
+    // would point it at a build about to be replaced, and a fake install
+    // with its own APPDATA has a first run of its own but shares the value.
     let mut autostart_offered = saved.autostart_offered;
-    if !autostart_offered && !horadric_hooks::dev() {
+    if !autostart_offered && !horadric_hooks::dev() && autostart::running_installed() {
         autostart_offered = autostart::enable();
     }
 

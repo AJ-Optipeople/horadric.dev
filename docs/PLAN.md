@@ -1746,7 +1746,10 @@ served byte changed, both were fetched, nothing was written and nothing
 reloaded. No session hosts, no `claude.exe`. The fake install's first
 start pointed the real "Start with Windows" value at the fake folder
 (it is in `HKCU`, shared with the installed Horadric), and it had to be
-put back by hand; a fake install test must check that value after.
+put back by hand. Now only a binary in `Programs\Horadric` under the real
+`%LOCALAPPDATA%` (the known folder, not the variable a fake install sets)
+turns it on at first start. A fake install test should still check that
+value after.
 
 **Not covered.** Authenticode. Downloads of the updater's own binaries do
 not go through SmartScreen, so it is not needed to update; it is needed only
