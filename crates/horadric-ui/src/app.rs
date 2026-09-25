@@ -3772,9 +3772,6 @@ impl App {
         c.scroll != was
     }
 
-    /// A screen came or went, or the taskbar moved: the columns fit the new
-    /// work area, and a stage left off every screen or over the tiles docks
-    /// beside them again.
     /// Stands the columns on another screen, None for the primary one. The
     /// stage stays where it is, since tiles on a small screen beside a
     /// terminal on the big one is a reason to move them, unless the tiles
@@ -3788,6 +3785,9 @@ impl App {
         self.screen_changed();
     }
 
+    /// A screen came or went, or the taskbar moved: the columns fit the new
+    /// work area, and a stage left off every screen or over the tiles docks
+    /// beside them again.
     fn screen_changed(&mut self) {
         self.arrange();
         self.stage_rect = self.stage_rect.filter(|r| on_screen(r[0], r[1]));
