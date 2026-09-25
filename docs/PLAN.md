@@ -1678,8 +1678,7 @@ the human.
 
 - The inbox is the sessions waiting on you, oldest first, with what each is
   waiting for. The hotkey (see The stage) walks it already. Still open
-  whether it also needs a window or a sort order inside the clusters. Decide
-  when forty sessions is real, not before.
+  whether it also needs a window or a sort order inside the clusters.
 - A signed updater, planned below under "The updater". `horadric install`
   covers installing for now; NSIS only if a download for other people
   needs it.
@@ -1846,11 +1845,6 @@ if people download Horadric by hand, the same point as NSIS above.
 
 Carried from the concept, with what is known now.
 
-- **Does forty sessions hold up?** Five tiles cost 45 MB and no CPU. One
-  open terminal adds a few MB. History is bounded at 10,000 rows a session,
-  so the worst case for the grids is about 1.1 GB, reached only if all forty
-  fill theirs. The other cost is forty
-  `claude` processes, which is not ours. Not yet tried with forty.
 - **Can a tile light up without stealing focus?** Yes, so far.
   `WS_EX_NOACTIVATE` plus `SWP_NOACTIVATE` holds through raising.
 - **How does a session get named?** Claude Code writes its own title for
