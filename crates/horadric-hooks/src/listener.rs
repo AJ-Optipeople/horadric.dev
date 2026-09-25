@@ -212,8 +212,15 @@ fn handle(
         // posted straight to the owner, so there is nothing to pass on.
         respond(&mut stream, "200 OK")?;
         if let (false, Some(status)) = (horadric_id.is_empty(), Status::from_json(&body)) {
+            // The id lets the tile tell its own status line from one a
+            // background session sends under its tag.
+            let session_id = serde_json::from_slice::<serde_json::Value>(&body)
+                .ok()
+                .and_then(|v| v.get("session_id")?.as_str().map(str::to_string))
+                .unwrap_or_default();
             let event = HookEvent {
                 status: Some(status),
+                session_id,
                 ..HookEvent::synthetic(HookEvent::STATUS)
             };
             let _ = tx.send(Tagged { horadric_id, event });

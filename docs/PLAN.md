@@ -54,7 +54,19 @@ machine. Superset got this wrong and wrote it up in their
 The state machine is in `horadric-core/src/session.rs`. Prompt and tool events
 mean working, permission and notification events mean waiting, `Stop` means
 done, `SessionEnd` means ended. Subagent events and compaction restarts
-change nothing. `horadric run` posts a `HoradricRegister` event of its own before
+change nothing.
+
+The tag alone is not enough. Claude Code's background sessions (`claude
+--bg`, and the left arrow in a session, which opens its agent view) are
+started by one shared `claude daemon`, which copies the environment of
+the session that started it. Every background session after that posts
+under that session's `HORADRIC_SESSION`, whoever asked for it. Seen with
+a probe on 2026-09-26: a `--bg` started with its own tag arrived under
+the tag of the Horadric session that had spawned the daemon. So a tile
+keeps the Claude `session_id` it first hears and ignores events, status
+lines included, that carry another. A `SessionEnd` from `/clear` or
+`/resume` lets go of the id, so the next conversation can take the tile.
+Showing those background sessions as tiles of their own is next. `horadric run` posts a `HoradricRegister` event of its own before
 starting Claude, because Claude Code sends no hook until the first prompt and
 a fresh session would otherwise be invisible.
 
