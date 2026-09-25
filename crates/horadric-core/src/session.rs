@@ -103,6 +103,11 @@ pub struct Session {
     /// The git worktree of its own the session works in, if it has one.
     #[serde(default)]
     pub worktree: Option<Worktree>,
+    /// The short id of a Claude Code background session, which the daemon
+    /// runs and a click attaches to. Such a tile is never saved or resumed:
+    /// the daemon keeps the session, and a resume would be a second copy.
+    #[serde(default)]
+    pub background: Option<String>,
     /// What its worktree has changed, as last counted. Counted again after
     /// the agent does something, so it is not saved.
     #[serde(skip)]
@@ -151,6 +156,7 @@ impl Session {
             shell: false,
             ssh: None,
             worktree: None,
+            background: None,
             diff: None,
             phase: Phase::Idle,
             since: now,
@@ -337,11 +343,12 @@ impl Session {
 
     /// Whether the event's conversation is this tile's: the one it knows,
     /// the first it hears of, or the one a `SessionStart` from `/clear` or
-    /// `/resume` names.
-    fn takes_id(&self, event: &HookEvent) -> bool {
+    /// `/resume` names. Horadric's own events have none and always are.
+    pub fn takes_id(&self, event: &HookEvent) -> bool {
         let fresh = event.hook_event_name == "SessionStart"
             && matches!(event.source.as_deref(), Some("clear" | "resume"));
-        fresh
+        event.session_id.is_empty()
+            || fresh
             || self
                 .claude_session_id
                 .as_ref()

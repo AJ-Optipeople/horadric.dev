@@ -32,6 +32,9 @@ pub fn serve() -> Result<(), String> {
 
     loop {
         match rx.recv_timeout(Duration::from_secs(1)) {
+            // Nobody's conversation. The tiles ask whether it is a
+            // background session; this table has no tiles.
+            Ok(t) if t.horadric_id.is_empty() => {}
             Ok(t) => {
                 let now = SystemTime::now();
                 let changed = registry.apply(&t.horadric_id, &t.event, now);

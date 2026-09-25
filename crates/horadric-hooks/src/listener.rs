@@ -256,10 +256,10 @@ fn handle(
     // Reply before parsing. The agent should not wait on us for anything.
     respond(&mut stream, "200 OK")?;
 
-    if horadric_id.is_empty() {
-        return Ok(());
-    }
-    if let Some(owner) = owner.filter(|&o| o != port) {
+    // Untagged events are kept too: a background session whose daemon was
+    // started outside Horadric has no tag, and the app asks Claude Code
+    // whether a conversation is one of those before it shows anything.
+    if let Some(owner) = owner.filter(|&o| o != port && !horadric_id.is_empty()) {
         // Without the owner header the other Horadric keeps it, so this can
         // not bounce back. Nobody listening there means the event is lost,
         // which is what it would be without the hop.
@@ -383,11 +383,13 @@ mod tests {
     }
 
     #[test]
-    fn untagged_post_is_accepted_and_dropped() {
+    fn untagged_post_is_passed_on_without_a_tag() {
         let (port, rx) = start();
         let reply = post(port, "", r#"{"session_id":"c","hook_event_name":"Stop"}"#);
         assert!(reply.starts_with("HTTP/1.1 200"));
-        assert!(rx.recv_timeout(Duration::from_millis(200)).is_err());
+        let got = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(got.horadric_id, "");
+        assert_eq!(got.event.session_id, "c");
     }
 
     fn start_with_new() -> (u16, mpsc::Receiver<Command>) {

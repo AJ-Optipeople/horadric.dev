@@ -5,6 +5,7 @@
 //! reads [`Session`]s out of a [`Registry`]. Everything here is testable
 //! without a terminal or a network.
 
+pub mod background;
 pub mod diff;
 pub mod event;
 pub mod registry;
@@ -18,7 +19,7 @@ pub mod usage;
 pub mod worktree;
 
 pub use event::HookEvent;
-pub use registry::Registry;
+pub use registry::{Registry, Route};
 pub use saved::{Carry, SavedCluster, SavedPanel, SavedSession, SavedState};
 pub use session::{format_age, session_id, Phase, Session, WaitReason};
 pub use title::Title;

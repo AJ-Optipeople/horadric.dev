@@ -58,6 +58,8 @@ pub mod theme;
 pub mod viewer;
 
 #[cfg(windows)]
+mod agents;
+#[cfg(windows)]
 pub mod app;
 #[cfg(windows)]
 mod ask;
