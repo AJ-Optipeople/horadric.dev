@@ -1064,7 +1064,9 @@ and a terminal is a screen set into the panel.
   the power down and the ghost, three sparks, the icon turning, the
   context bar rising to 88 %, a struck task folding, the light from a
   taken row. A new cluster's arrival was read back from its window's
-  alpha and position.
+  alpha and position. A real drag of one cluster up over another in its
+  column: the other glided down while the button was held, and the drop
+  landed in the gap.
 - **Type.** Project names in Segoe UI Variable Display, session names
   semibold, ages with tabular digits so they do not shuffle each second,
   FILES and RECENT letter spaced like legends printed on the plate.
