@@ -113,6 +113,13 @@ pub struct Session {
     #[serde(skip)]
     pub diff: Option<Diff>,
     pub phase: Phase,
+    /// The turn it finished has not been looked at yet: unidentified, as
+    /// Diablo drops an item until you identify it. Set when a turn ends,
+    /// cleared by [`Session::identify`] when its pane has the keyboard on
+    /// the stage in front, or by the next phase. Like the phase, it is not
+    /// saved.
+    #[serde(skip)]
+    pub unseen: bool,
     /// When the current phase began. The tile's age line counts from here.
     pub since: SystemTime,
     /// The last thing worth showing: a tool name, a question, a final message.
@@ -159,6 +166,7 @@ impl Session {
             background: None,
             diff: None,
             phase: Phase::Idle,
+            unseen: false,
             since: now,
             last_line: String::new(),
             created: now,
@@ -185,6 +193,16 @@ impl Session {
             (Some(_), None) => false,
         };
         !self.shell && at_prompt && self.status.is_some() && no_draft
+    }
+
+    /// A finished turn nobody has looked at. Its lamp stays lit until then.
+    pub fn unread(&self) -> bool {
+        self.phase == Phase::Done && self.unseen
+    }
+
+    /// The human looked at it. True when that changed anything.
+    pub fn identify(&mut self) -> bool {
+        std::mem::take(&mut self.unseen)
     }
 
     /// How long the session has been in its current phase.
@@ -333,6 +351,7 @@ impl Session {
 
         match next {
             Some(phase) if phase != self.phase => {
+                self.unseen = phase == Phase::Done;
                 self.phase = phase;
                 self.since = now;
                 true
@@ -498,6 +517,39 @@ mod tests {
 
     fn now() -> SystemTime {
         SystemTime::now()
+    }
+
+    #[test]
+    fn a_finished_turn_is_unread_until_identified() {
+        let mut s = Session::new("g1", "fix-login", "C:/repo");
+        s.apply(&ev("UserPromptSubmit"), now());
+        assert!(!s.unread());
+        s.apply(&ev("Stop"), now());
+        assert!(s.unread());
+        assert!(s.identify());
+        assert!(!s.unread());
+        assert!(!s.identify(), "a second look changes nothing");
+    }
+
+    #[test]
+    fn the_next_turn_clears_unread_and_its_end_sets_it_again() {
+        let mut s = Session::new("g1", "fix-login", "C:/repo");
+        s.apply(&ev("Stop"), now());
+        s.apply(&ev("UserPromptSubmit"), now());
+        assert!(!s.unread());
+        assert!(!s.unseen);
+        s.apply(&ev("Stop"), now());
+        assert!(s.unread());
+    }
+
+    #[test]
+    fn a_stop_while_done_and_read_stays_read() {
+        let mut s = Session::new("g1", "fix-login", "C:/repo");
+        s.apply(&ev("Stop"), now());
+        s.identify();
+        // No phase change, so nothing new to look at.
+        s.apply(&ev("Stop"), now());
+        assert!(!s.unread());
     }
 
     #[test]

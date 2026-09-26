@@ -1803,7 +1803,15 @@ impl Painter<'_> {
         let code = slide(&scene.layout.codes);
         let phase = &s.phase;
         let c = theme::phase_color(phase);
-        let presence = theme::presence(phase) * look.enter;
+        // A finished turn you have looked at is identified: nothing left
+        // for you there, so its lamp goes dark and it stands back like an
+        // idle one. Only an unread one keeps the green light.
+        let lit = if *phase == Phase::Done && !s.unread() {
+            &Phase::Idle
+        } else {
+            phase
+        };
+        let presence = theme::presence(lit) * look.enter;
         let radius = m.tile_radius;
         let ambient = scene.ambient;
 
@@ -1865,12 +1873,12 @@ impl Painter<'_> {
         let level = if breathing {
             0.0
         } else {
-            (theme::lamp(phase) + 0.3 * arrival) * look.enter
+            (theme::lamp(lit) + 0.3 * arrival) * look.enter
         };
         self.lamp(&lamp_rect(r), c, level);
 
         // The icon: what the agent is doing, in the phase's light.
-        let icon_c = if matches!(phase, Phase::Idle | Phase::Ended | Phase::Paused) {
+        let icon_c = if matches!(lit, Phase::Idle | Phase::Ended | Phase::Paused) {
             theme::TEXT_DIM
         } else {
             c

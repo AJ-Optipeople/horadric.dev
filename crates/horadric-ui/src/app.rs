@@ -3481,6 +3481,9 @@ impl App {
                 c.invalidate();
             }
         }
+        // Bringing the stage to the front says nothing to the app, so a
+        // look is noticed here, within a second.
+        self.identify();
         self.save();
     }
 
@@ -3694,7 +3697,31 @@ impl App {
             (t, w) => format!("{app}: {t} sessions, {w} waiting"),
         };
         self.tray.set_tip(&tip);
+        self.identify();
         self.announce();
+    }
+
+    /// The session whose pane has the keyboard, with the stage in front,
+    /// has been looked at, so a turn it finished is no longer unread.
+    fn identify(&mut self) {
+        let Some(id) = self
+            .stage
+            .as_ref()
+            .filter(|s| s.is_foreground())
+            .and_then(|s| s.active())
+        else {
+            return;
+        };
+        let changed = self
+            .shared
+            .registry
+            .lock()
+            .is_ok_and(|mut r| r.get_mut(&id).is_some_and(Session::identify));
+        if changed {
+            for c in &self.clusters {
+                c.invalidate();
+            }
+        }
     }
 
     /// Clicks and drags collected by the window procedures.
@@ -3764,6 +3791,7 @@ impl App {
                 Input::FilesChanged(key) => self.files_changed(&key),
                 Input::Arrange => relayout = true,
                 Input::Spotlight => {
+                    self.identify();
                     for c in &self.clusters {
                         c.invalidate();
                     }

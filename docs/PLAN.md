@@ -7,7 +7,10 @@ document: someone picking the project up cold should need nothing else.
 Last updated 2026-09-26, after step 3, the launchers, persistence, install,
 the stage, reload, the project grid, browser windows, the look, plain
 terminals, a pass of quality of life, the columns, the task list, session
-hosts, and drawing every last piece of chrome ourselves.
+hosts, drawing every last piece of chrome ourselves, and identify.
+
+Ideas that are not planned yet, most of them from the Diablo name, are in
+[IDEAS.md](IDEAS.md).
 
 ## Shape of the thing
 
@@ -1375,7 +1378,68 @@ conversation; ending the attach closed the pane and kept the tile;
 the installed column stood over the dev one. A background tile looks like
 any other; a mark of its own would help.
 
+### Identify
+
+In Diablo an unidentified item drops grey until you identify it. A turn
+that finished while you looked elsewhere is the same: you do not know what
+it did until you look. Before this a finished tile stayed green until its
+next prompt, so ten green tiles said nothing about which ones you had read.
+
+- **Unread** (`Session::unseen`, `Session::unread`, pure and tested). Set
+  when the phase becomes done, cleared by the next phase or when you look.
+  Only a change into done sets it, so a second `Stop` on a turn you have
+  read changes nothing. Not saved, like the phase it belongs to.
+- **Looking** is the session's pane having the keyboard with the stage in
+  front (`App::identify`), the same session whose key is latched in. Just
+  being in the grid is not enough: the panes without the keyboard step back
+  behind a veil, and you may be typing into the one beside it. Checked when
+  the keyboard moves (`Input::Spotlight`), after hook events, and every
+  second, since the stage coming to the front tells the app nothing.
+- **On the tile** an unread turn keeps the green lamp it has now. Once
+  identified the lamp goes dark, the check mark dims and the key stands back
+  like an idle one (`render.rs`, drawn as idle). So a lit lamp still always
+  means something for you, which is the rule of "The look".
+
+Tested on screen with a dev instance on its own port and `APPDATA`, two
+`cmd.exe` sessions given a fake prompt and `Stop` each: with the stage
+behind other windows both lamps stayed green; with the stage in front the
+one with the keyboard went dark within a second and the other stayed lit;
+Ctrl+Alt+Left moved the keyboard over and that one went dark too.
+
 ## Next
+
+### Stay a while and listen
+
+Deckard Cain's catch-up. Asked for after the task list ran by itself for
+more than six hours: coming back, the only way to know what had happened
+was to read every terminal. The tiles say what is true now, not what
+happened while you were gone.
+
+- **When.** On coming back after being away: no real input for 15 minutes
+  (`GetLastInputInfo`) or the screen locked (`WTSRegisterSessionNotification`),
+  then input again, and only if something happened meanwhile. Also on
+  demand from the tray menu and a hotkey, for "since this morning".
+- **What it says,** in the order you act on it: sessions waiting on you,
+  oldest first; task items ready for review; turns that finished unread
+  (see Identify above); items blocked, with the reason; then what simply
+  happened: items the runner finished and their commits, branches merged,
+  sessions that ended, a usage limit that ran out and when it reset. One
+  line each, grouped by project, and a click on a line shows that session
+  the way a tile click does.
+- **A journal** is what makes it possible, since the registry only knows
+  the present. An append only `journal.jsonl` beside `state.json`: a line
+  per thing worth telling (a phase into waiting, done or ended, a task
+  mark, a runner start, a merge, a limit), with the time, the session and
+  its project. Trimmed to a week. `horadric_core::journal` reads it and
+  turns the lines since a time into the summary; that is pure and tested.
+- **Drawn like the rest,** a panel on the plate in the look of the toasts
+  and the picker, not a window of Windows'. Dismissed with Esc or a click
+  outside, and it marks nothing read by itself: identifying is still
+  looking.
+- **Later.** A sentence per session on what it did, not just its last
+  message. The last assistant message and the commits say a lot already;
+  asking a small model to summarise a run is a step after that, and a
+  cost to justify.
 
 ### Step 4: worktrees and the git glance
 
