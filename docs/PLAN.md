@@ -2099,17 +2099,12 @@ if people download Horadric by hand, the same point as NSIS above.
 
 ## Not in any step yet, but needed before daily use
 
-- **Sessions die with Horadric.** The consoles live in the Horadric process, so
-  quitting or crashing it ends every agent in a terminal. The options and a
-  decision (A, then B) are under "Sessions that outlive Horadric" in
-  Next.
 - **Terminal gaps.** The kitty keyboard protocol is not implemented.
 - **Expanding from a synthetic click can open behind other windows.** Windows
   only lets a process take the foreground after real input. A real click on
   a tile is real input, so this only bites scripted tests.
 - **New tray icons start hidden.** Windows 11 puts them behind the `^`
   overflow until the user drags them out or turns them on in Settings.
-- **No remote.** The repository exists on one disk. Push it somewhere.
 
 ## Open questions
 
