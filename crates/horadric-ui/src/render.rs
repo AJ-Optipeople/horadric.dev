@@ -87,6 +87,10 @@ const TRACE_BARS: usize = 20;
 const TRACE_BAR_W: f32 = 1.6;
 const TRACE_GAP: f32 = 0.8;
 const TRACE_H: f32 = 11.0;
+/// How far a finished turn's key jumps, in DIPs.
+const LAND_RISE: f32 = 3.0;
+/// How tall a finished turn's loot beam grows above its key, in DIPs.
+const BEAM_H: f32 = 120.0;
 
 /// How many shapes make one soft edge. Fewer shows as bands.
 const BLUR_STEPS: usize = 8;
@@ -695,6 +699,7 @@ impl Painter<'_> {
                 self.stroke_rounded(&r, m.tile_radius, theme::WORKING.with_alpha(0.7), 1.5);
             }
         }
+        self.beams(scene);
         if let Some(add) = &scene.layout.add {
             self.add(gpu, m, add, scene.button(Hit::Add), '\u{E710}');
         }
@@ -1281,6 +1286,35 @@ impl Painter<'_> {
         }
     }
 
+    /// A finished turn is loot dropping: a beam of its lamp's green shoots
+    /// up off the key and fades, over the tiles above it, the moment the
+    /// turn ends. Drawn after every key so none covers it.
+    unsafe fn beams(&self, scene: &Scene) {
+        if !scene.ambient {
+            return;
+        }
+        for (r, s, look) in tiles(scene) {
+            if s.phase != Phase::Done || look.phase_age >= motion::BEAM {
+                continue;
+            }
+            let (grown, bright) = motion::beam(look.phase_age);
+            let strength = bright * look.enter;
+            if strength <= 0.0 {
+                continue;
+            }
+            let c = theme::phase_color(&Phase::Done);
+            let (x, base) = icon_centre(&r);
+            let tall = 12.0 + BEAM_H * grown;
+            let stops = [(0.0, c.with_alpha(0.0)), (1.0, c)];
+            for (w, a) in [(14.0, 0.18), (6.0, 0.45), (2.0, 0.9)] {
+                let shaft = Rect::new(x - w / 2.0, base - tall, w, tall);
+                self.fill_rounded_gradient(&shaft, w / 2.0, &stops, a * strength);
+            }
+            let white = Color::rgb(0xFFFFFF);
+            self.glow_dot(x, base, 16.0, c.mix(white, 0.3), 0.6 * strength);
+        }
+    }
+
     /// The project's colour, washed faintly down from the top edge, so each
     /// cluster reads as its own project before a word is read.
     unsafe fn wash(&self, scene: &Scene) {
@@ -1789,6 +1823,14 @@ impl Painter<'_> {
         look: &Look,
     ) {
         let b = scene.button(Hit::Tile(i));
+        // A finished turn jumps off the plate and settles, so the moment
+        // it lands is seen from across the screen.
+        let landing = if scene.ambient && s.phase == Phase::Done {
+            motion::land(look.phase_age)
+        } else {
+            0.0
+        };
+        let r = &Rect::new(r.x, r.y - LAND_RISE * landing, r.w, r.h);
         // The layout puts the browser button where the tile will be; the
         // tile may still be sliding there.
         let slid = r.y - scene.layout.tiles.get(i).map_or(r.y, |t| t.y);
@@ -1828,7 +1870,7 @@ impl Painter<'_> {
             _ => 0.3 * look.hover,
         };
         let held = if scene.held == Some(i) { 1.0 } else { 0.0 };
-        let depth = rest + lift + held;
+        let depth = rest + lift + held + 0.9 * landing;
         let face = theme::phase_fill(phase).mix(theme::TEXT, 0.03 * look.hover);
         let face = if selected {
             face.mix(theme::WELL, 0.25)

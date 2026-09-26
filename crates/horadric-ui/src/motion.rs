@@ -73,6 +73,32 @@ pub fn ease_out(t: f32) -> f32 {
     1.0 - (1.0 - t).powi(3)
 }
 
+/// A finished turn's key jumping and settling.
+pub const LAND: Duration = Duration::from_millis(650);
+/// A finished turn's loot beam rising off its key.
+pub const BEAM: Duration = Duration::from_millis(1100);
+
+/// How far a finished turn's key stands out of its place `elapsed` after
+/// the turn ended, from 0 to 1: up fast, down, and one small bounce.
+pub fn land(elapsed: Duration) -> f32 {
+    let t = progress(elapsed, LAND);
+    if t >= 1.0 {
+        return 0.0;
+    }
+    (1.0 - t).powi(2) * (PI * 2.0 * t).sin().abs()
+}
+
+/// The loot beam rising off a finished turn `elapsed` after it ended: how
+/// tall it has grown and how bright it still is, both 0 to 1.
+pub fn beam(elapsed: Duration) -> (f32, f32) {
+    let t = progress(elapsed, BEAM);
+    if t >= 1.0 {
+        return (1.0, 0.0);
+    }
+    // It shoots up in the first third and fades the whole way.
+    (ease_out((t * 3.0).min(1.0)), 1.0 - ease_in_out(t))
+}
+
 /// A popup arriving `elapsed` into an arrival of `length`: how opaque it
 /// is, and how much of its rise into place is still to go, both 0 to 1.
 pub fn arrive(elapsed: Duration, length: Duration) -> (f32, f32) {
@@ -198,6 +224,27 @@ mod tests {
         assert!(alpha > 0.3 && lift < 0.7, "most of the way early");
         assert_eq!(arrive(ms(100), ms(100)), (1.0, 0.0));
         assert_eq!(arrive(ms(900), ms(100)), (1.0, 0.0));
+    }
+
+    #[test]
+    fn a_landing_jumps_bounces_once_and_rests() {
+        assert_eq!(land(ms(0)), 0.0);
+        let first = land(ms(130));
+        let dip = land(LAND / 2);
+        let second = land(LAND * 3 / 4);
+        assert!(first > 0.4, "up fast");
+        assert!(dip < 0.01, "back down half way");
+        assert!(second > 0.0 && second < first, "a smaller bounce");
+        assert_eq!(land(LAND), 0.0);
+        assert_eq!(land(LAND * 3), 0.0);
+    }
+
+    #[test]
+    fn a_beam_shoots_up_and_fades_out() {
+        assert_eq!(beam(ms(0)), (0.0, 1.0));
+        let (h, a) = beam(BEAM / 3);
+        assert!((h - 1.0).abs() < 1e-6 && a > 0.5);
+        assert_eq!(beam(BEAM).1, 0.0);
     }
 
     #[test]
