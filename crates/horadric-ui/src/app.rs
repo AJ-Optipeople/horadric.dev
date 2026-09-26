@@ -2082,7 +2082,10 @@ impl App {
             }
             WM_HOTKEY if wparam as i32 == HOTKEY_NEXT => self.next_waiting(),
             WM_HOTKEY if wparam as i32 == HOTKEY_LISTEN => self.listen_on_demand(),
-            WM_TIMER if wparam == GLIDE_TIMER => self.glide(),
+            WM_TIMER if wparam == GLIDE_TIMER => {
+                crate::vsync::took(self.notify, GLIDE_TIMER);
+                self.glide();
+            }
             WM_TIMER if wparam == SCREEN_TIMER => {
                 unsafe {
                     let _ = KillTimer(Some(self.notify), SCREEN_TIMER);
@@ -4913,14 +4916,7 @@ impl App {
         self.arranged = !self.clusters.is_empty() || self.start_window.is_some();
         if self.glides.borrow().moving() && self.glided.get().is_none() {
             self.glided.set(Some(Instant::now()));
-            unsafe {
-                SetTimer(
-                    Some(self.notify),
-                    GLIDE_TIMER,
-                    crate::motion::FRAME_FAST.as_millis() as u32,
-                    None,
-                );
-            }
+            crate::vsync::start(self.notify, GLIDE_TIMER);
         }
     }
 
@@ -4946,7 +4942,7 @@ impl App {
             }
             if !glides.moving() {
                 self.glided.set(None);
-                let _ = KillTimer(Some(self.notify), GLIDE_TIMER);
+                crate::vsync::stop(self.notify, GLIDE_TIMER);
             }
         }
     }

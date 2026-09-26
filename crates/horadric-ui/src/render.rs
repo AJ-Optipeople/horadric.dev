@@ -38,7 +38,7 @@ use windows::Win32::Graphics::Direct2D::{
     D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE, D2D1_EXTEND_MODE_CLAMP,
     D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_FEATURE_LEVEL_DEFAULT, D2D1_GAMMA_2_2,
     D2D1_HWND_RENDER_TARGET_PROPERTIES, D2D1_LAYER_OPTIONS_NONE, D2D1_LAYER_PARAMETERS,
-    D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES, D2D1_LINE_JOIN_ROUND, D2D1_PRESENT_OPTIONS_NONE,
+    D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES, D2D1_LINE_JOIN_ROUND, D2D1_PRESENT_OPTIONS_IMMEDIATELY,
     D2D1_RADIAL_GRADIENT_BRUSH_PROPERTIES, D2D1_RENDER_TARGET_PROPERTIES,
     D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_USAGE_NONE, D2D1_ROUNDED_RECT,
     D2D1_STROKE_STYLE_PROPERTIES,
@@ -625,7 +625,11 @@ pub fn hwnd_target(
                 width: width_px.max(1),
                 height: height_px.max(1),
             },
-            presentOptions: D2D1_PRESENT_OPTIONS_NONE,
+            // Every window paints on the one UI thread. Waiting for the
+            // vertical blank in each EndDraw would cost a whole frame per
+            // window that moves. The vsync clock paces paints instead, and
+            // DWM composes them, so nothing tears.
+            presentOptions: D2D1_PRESENT_OPTIONS_IMMEDIATELY,
         };
         let rt = gpu.d2d.CreateHwndRenderTarget(&props, &hwnd_props)?;
         rt.SetDpi(dpi as f32, dpi as f32);
