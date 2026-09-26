@@ -56,7 +56,7 @@ use windows::Win32::Graphics::DirectWrite::{
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows_numerics::{Matrix3x2, Vector2};
 
-use crate::anim::Look;
+use crate::anim::{Look, Stance};
 use crate::board::RowState;
 use crate::files::{Row, Tree};
 use crate::layout::{
@@ -1853,7 +1853,6 @@ impl Painter<'_> {
         } else {
             phase
         };
-        let presence = theme::presence(lit) * look.enter;
         let radius = m.tile_radius;
         let ambient = scene.ambient;
 
@@ -1863,7 +1862,20 @@ impl Painter<'_> {
         // stays latched in, level with the plate and out of the light, and
         // does not rise under the cursor.
         let selected = scene.selected == Some(i) && scene.held != Some(i);
-        let rest = theme::key_depth(phase, selected);
+        // A new phase moves the key from where the last one stood it: out
+        // of a pause it rises and its lamp warms up from dark glass.
+        let stance = Stance {
+            depth: theme::key_depth(phase, selected),
+            presence: theme::presence(lit),
+            lamp: theme::lamp(lit),
+        };
+        let stance = if selected || !ambient {
+            stance
+        } else {
+            stance.from(look.was, look.settle)
+        };
+        let rest = stance.depth;
+        let presence = stance.presence * look.enter;
         let lift = match b {
             Button::Pressed => (0.15 - rest).min(0.0),
             _ if selected => 0.0,
@@ -1915,7 +1927,7 @@ impl Painter<'_> {
         let level = if breathing {
             0.0
         } else {
-            (theme::lamp(lit) + 0.3 * arrival) * look.enter
+            (stance.lamp + 0.3 * arrival) * look.enter
         };
         self.lamp(&lamp_rect(r), c, level);
 

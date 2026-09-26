@@ -9,7 +9,8 @@ use std::time::{Duration, Instant};
 
 use horadric_core::Phase;
 
-use crate::motion::{self, ARRIVAL, ENTER, FRAME_BREATH, FRAME_FAST, FRAME_ORBIT, HOVER};
+use crate::motion::{self, ARRIVAL, ENTER, FRAME_BREATH, FRAME_FAST, FRAME_ORBIT, HOVER, SETTLE};
+use crate::theme;
 
 /// How fast a tile slides to a new place: half the way every this long.
 const SLIDE: Duration = Duration::from_millis(60);
@@ -40,9 +41,54 @@ pub struct Look {
     pub arrival: f32,
     /// Time in the current phase, for the light that moves with it.
     pub phase_age: Duration,
+    /// How far the key still has to go from how the last phase stood it:
+    /// 1 the moment the phase changed, 0 once it has settled.
+    pub settle: f32,
+    /// How the last phase stood the key: its depth, presence and lamp.
+    pub was: Stance,
+}
+
+/// How a phase stands a key, from `theme`: how far off the plate, how
+/// present, how bright its lamp.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Stance {
+    pub depth: f32,
+    pub presence: f32,
+    pub lamp: f32,
+}
+
+impl Stance {
+    pub fn of(phase: &Phase) -> Stance {
+        Stance {
+            depth: theme::depth(phase),
+            presence: theme::presence(phase),
+            lamp: theme::lamp(phase),
+        }
+    }
+
+    /// `self` moved `settle` of the way back toward `was`.
+    pub fn from(self, was: Stance, settle: f32) -> Stance {
+        let k = motion::ease_in_out(settle.clamp(0.0, 1.0));
+        let mix = |now: f32, then: f32| now + (then - now) * k;
+        Stance {
+            depth: mix(self.depth, was.depth),
+            presence: mix(self.presence, was.presence),
+            lamp: mix(self.lamp, was.lamp),
+        }
+    }
 }
 
 impl Look {
+    /// Whether it is still on its way somewhere, `y` being where the
+    /// layout puts it: the frame after needs drawing afresh.
+    pub fn moving(&self, y: f32) -> bool {
+        self.enter < 1.0
+            || self.arrival > 0.0
+            || self.settle > 0.0
+            || (self.hover > 0.0 && self.hover < 1.0)
+            || self.y != y
+    }
+
     /// A tile with nothing moving.
     pub fn still(y: f32) -> Look {
         Look {
@@ -51,12 +97,15 @@ impl Look {
             hover: 0.0,
             arrival: 0.0,
             phase_age: Duration::ZERO,
+            settle: 0.0,
+            was: Stance::of(&Phase::Idle),
         }
     }
 }
 
 struct State {
     phase: Phase,
+    was: Phase,
     changed: Instant,
     born: Instant,
     y: f32,
@@ -91,6 +140,7 @@ impl Tiles {
                     };
                     State {
                         phase: t.phase.clone(),
+                        was: t.phase.clone(),
                         changed: long_ago,
                         born,
                         y,
@@ -98,7 +148,7 @@ impl Tiles {
                     }
                 });
                 if &s.phase != t.phase {
-                    s.phase = t.phase.clone();
+                    s.was = std::mem::replace(&mut s.phase, t.phase.clone());
                     s.changed = now;
                 }
                 // A tile born this frame starts where it was put.
@@ -116,6 +166,8 @@ impl Tiles {
                     hover: s.hover,
                     arrival: motion::decay(since, ARRIVAL),
                     phase_age: since,
+                    settle: 1.0 - motion::progress(since, SETTLE),
+                    was: Stance::of(&s.was),
                 }
             })
             .collect()
@@ -130,9 +182,7 @@ impl Tiles {
         targets: &[f32],
         ambient: bool,
     ) -> Option<Duration> {
-        let moving = looks.iter().zip(targets).any(|(l, &y)| {
-            l.enter < 1.0 || l.arrival > 0.0 || (l.hover > 0.0 && l.hover < 1.0) || l.y != y
-        });
+        let moving = looks.iter().zip(targets).any(|(l, &y)| l.moving(y));
         if moving {
             return Some(FRAME_FAST);
         }
@@ -207,6 +257,24 @@ mod tests {
         let l = t.step(now + ms(10) + ARRIVAL, &[tile("a", &waiting, 0.0, false)]);
         assert_eq!(l[0].arrival, 0.0);
         assert_eq!(l[0].phase_age, ARRIVAL);
+    }
+
+    #[test]
+    fn a_resumed_key_rises_from_where_the_pause_left_it() {
+        let mut t = Tiles::default();
+        let now = Instant::now();
+        t.step(now, &[tile("a", &Phase::Paused, 0.0, false)]);
+        let l = t.step(now + ms(10), &[tile("a", &Phase::Working, 0.0, false)]);
+        assert_eq!(l[0].settle, 1.0);
+        assert_eq!(l[0].was, Stance::of(&Phase::Paused));
+        let now_stance = Stance::of(&Phase::Working);
+        assert_eq!(now_stance.from(l[0].was, 1.0), Stance::of(&Phase::Paused));
+        assert_eq!(now_stance.from(l[0].was, 0.0), now_stance);
+        let later = t.step(
+            now + ms(10) + SETTLE,
+            &[tile("a", &Phase::Working, 0.0, false)],
+        );
+        assert_eq!(later[0].settle, 0.0);
     }
 
     #[test]

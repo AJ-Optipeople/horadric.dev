@@ -13,6 +13,9 @@ use std::time::Duration;
 pub const ARRIVAL: Duration = Duration::from_millis(1400);
 /// How long a new tile takes to slide into place.
 pub const ENTER: Duration = Duration::from_millis(320);
+/// A key moving from how one phase stands it to how the next does:
+/// rising out of a pause, sinking as its session ends.
+pub const SETTLE: Duration = Duration::from_millis(450);
 /// Hover fades in and out this fast. Fast enough to feel instant, slow
 /// enough to not flicker as the cursor crosses a column of tiles.
 pub const HOVER: Duration = Duration::from_millis(120);

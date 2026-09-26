@@ -681,9 +681,7 @@ impl Cluster {
         let looks = self.tiles.borrow_mut().step(Instant::now(), &inputs);
         let ambient = backdrop::animations_on();
         // A tile on its way somewhere changes what holds still.
-        let moving = looks.iter().zip(&inputs).any(|(l, t)| {
-            l.enter < 1.0 || l.arrival > 0.0 || (l.hover > 0.0 && l.hover < 1.0) || l.y != t.y
-        });
+        let moving = looks.iter().zip(&inputs).any(|(l, t)| l.moving(t.y));
         let rebuild = self.dirty.replace(false) || moving;
         let scene = Scene {
             layout: &layout,
