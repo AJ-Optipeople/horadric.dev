@@ -83,7 +83,7 @@ impl Kind {
 /// `SHQueryUserNotificationState` says: 3 a full screen game, 4
 /// presentation mode. Not 2, a window the size of the screen, which the
 /// stage often is: the toasts would never show while it is in front.
-fn hold_back(state: i32) -> bool {
+pub(crate) fn hold_back(state: i32) -> bool {
     matches!(state, 3 | 4)
 }
 

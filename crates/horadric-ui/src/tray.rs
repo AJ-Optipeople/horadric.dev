@@ -47,6 +47,8 @@ pub enum Choice {
     ShowStage,
     /// Show the session that has waited on you longest.
     NextWaiting,
+    /// Say what happened since this morning.
+    Listen,
     /// Fill the space beside the clusters with the terminal.
     Arrange,
     /// Stand the columns on the screen at this place in the list given.
@@ -127,8 +129,8 @@ impl Drop for Tray {
 pub const HISTORY: usize = 1000;
 
 /// The tray menu. `autostart` is None when the switch is not offered,
-/// `hotkey` is the shortcut for the next waiting session, if it has one,
-/// and `notify` whether a session that starts waiting says so. `history`
+/// `hotkeys` are the shortcuts for the next waiting session and for the
+/// catch-up, where they have one, and `notify` whether a session that starts waiting says so. `history`
 /// holds a History menu for each of `recent_projects`, in order.
 /// `screens` are offered when there is more than one, with the one named
 /// `shown` checked. `update` is a newer release's version, when a check
@@ -139,7 +141,7 @@ pub fn menu(
     recent_projects: &[String],
     history: Vec<Vec<Item>>,
     autostart: Option<bool>,
-    hotkey: Option<&str>,
+    hotkeys: [Option<&str>; 2],
     notify: bool,
     terminal: bool,
     screens: &[Screen],
@@ -160,6 +162,7 @@ pub fn menu(
     const STAGE: usize = 10;
     const CHECK: usize = 11;
     const UPDATE: usize = 12;
+    const LISTEN: usize = 13;
     const SCREEN: usize = 50;
     const RECENT: usize = 100;
     const FONT: usize = 200;
@@ -186,11 +189,18 @@ pub fn menu(
         items.push(Item::Submenu("History".into(), past));
     }
     items.push(Item::Separator);
-    let next = match hotkey {
-        Some(key) => format!("Next waiting session	{key}"),
-        None => "Next waiting session".into(),
+    let with_key = |label: &str, key: Option<&str>| match key {
+        Some(key) => format!("{label}\t{key}"),
+        None => label.to_string(),
     };
-    items.push(Item::action(NEXT, next));
+    items.push(Item::action(
+        NEXT,
+        with_key("Next waiting session", hotkeys[0]),
+    ));
+    items.push(Item::action(
+        LISTEN,
+        with_key("Stay a while and listen", hotkeys[1]),
+    ));
     // A closed terminal leaves only its tiles, and a tile click shows one
     // project. This is the way back without picking one.
     if terminal {
@@ -255,6 +265,7 @@ pub fn menu(
         NOTIFY => Some(Choice::ToggleNotify),
         TIDY => Some(Choice::Tidy),
         NEXT => Some(Choice::NextWaiting),
+        LISTEN => Some(Choice::Listen),
         ARRANGE => Some(Choice::Arrange),
         RAISE => Some(Choice::Raise),
         STAGE => Some(Choice::ShowStage),

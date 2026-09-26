@@ -60,9 +60,9 @@ use crate::anim::Look;
 use crate::board::RowState;
 use crate::files::{Row, Tree};
 use crate::layout::{
-    self, AskLayout, Button, CaptionHit, CaptionLayout, ClusterLayout, DialogLayout,
-    DropdownLayout, FilesLayout, Hit, MenuLayout, Metrics, Rect, SettingRow, StartHit, StartLayout,
-    TasksLayout, ToastLayout, UsageHit, UsageLayout, KNOB_R,
+    self, AskLayout, Button, CaptionHit, CaptionLayout, CatchupLayout, CatchupRow, ClusterLayout,
+    DialogLayout, DropdownLayout, FilesLayout, Hit, MenuLayout, Metrics, Rect, SettingRow,
+    StartHit, StartLayout, TasksLayout, ToastLayout, UsageHit, UsageLayout, KNOB_R,
 };
 use crate::motion::{self, BREATH, ORBIT};
 use crate::theme::{self, Color};
@@ -369,6 +369,29 @@ pub struct ToastScene<'a> {
     pub close_hot: bool,
 }
 
+/// Everything one frame of the catch-up needs.
+pub struct CatchupScene<'a> {
+    pub layout: &'a CatchupLayout,
+    pub title: &'a str,
+    /// What it covers: how long you were away, or since when.
+    pub sub: &'a str,
+    /// One look per row of the layout, in order.
+    pub rows: &'a [CatchupLook<'a>],
+    /// Says how many rows did not fit, when some did not.
+    pub more: &'a str,
+    pub hot: Option<usize>,
+    pub close_hot: bool,
+}
+
+/// A row of the catch-up as it is drawn. A heading uses only the text.
+pub struct CatchupLook<'a> {
+    pub text: &'a str,
+    pub detail: &'a str,
+    pub age: &'a str,
+    /// The lamp's colour, None for a line that asks nothing of you.
+    pub tone: Option<Color>,
+}
+
 /// Everything one frame of a dialog needs.
 pub struct DialogScene<'a> {
     pub layout: &'a DialogLayout,
@@ -626,6 +649,15 @@ impl Target {
         unsafe {
             self.rt.BeginDraw();
             self.painter(&self.rt).toast(gpu, m, scene);
+            self.rt.EndDraw(None, None)
+        }
+    }
+
+    /// Draws the catch-up. `Err` means the target must be recreated.
+    pub fn draw_catchup(&self, gpu: &Gpu, m: &Metrics, scene: &CatchupScene) -> Result<()> {
+        unsafe {
+            self.rt.BeginDraw();
+            self.painter(&self.rt).catchup(gpu, m, scene);
             self.rt.EndDraw(None, None)
         }
     }
@@ -1046,6 +1078,59 @@ impl Painter<'_> {
             }
             self.icon(&gpu.icon_small, ink, '\u{E711}', l.close);
         }
+    }
+
+    /// The catch-up: its title, then each project's name engraved over
+    /// its lines, a lamp by each in the colour of what it asks of you, dark
+    /// for what simply happened.
+    unsafe fn catchup(&self, gpu: &Gpu, m: &Metrics, scene: &CatchupScene) {
+        let l = scene.layout;
+        self.plate(m, l.size);
+        self.text(&gpu.title, theme::TEXT, scene.title, l.title);
+        self.text(&gpu.small, theme::TEXT_DIM, scene.sub, l.sub);
+        for (i, (row, look)) in l.rows.iter().zip(scene.rows).enumerate() {
+            match *row {
+                CatchupRow::Heading(r) => {
+                    self.text_spaced(gpu, &gpu.chip, theme::LEGEND, look.text, 1.2, r);
+                }
+                CatchupRow::Line {
+                    rect: r,
+                    lamp,
+                    text,
+                    detail,
+                    age,
+                } => {
+                    let hot = scene.hot == Some(i);
+                    if hot {
+                        self.fill_rounded(&r.inset(1.0), 7.0, theme::HOVER_FILL);
+                    }
+                    self.led(lamp.0, lamp.1, look.tone.unwrap_or(theme::LAMP_OFF));
+                    let ink = if look.tone.is_some() || hot {
+                        theme::TEXT
+                    } else {
+                        theme::TEXT_DIM.mix(theme::TEXT, 0.35)
+                    };
+                    self.text(&gpu.name, ink, look.text, text);
+                    if let Some(d) = detail {
+                        self.text(&gpu.small, theme::TEXT_DIM, look.detail, d);
+                    }
+                    self.text(&gpu.small_right, theme::LEGEND, look.age, age);
+                }
+            }
+        }
+        if let Some(r) = l.more {
+            self.text(&gpu.small, theme::LEGEND, scene.more, r);
+        }
+        let b = if scene.close_hot {
+            Button::Hover
+        } else {
+            Button::Idle
+        };
+        let (fill, ink) = theme::button_look(b);
+        if let Some(fill) = fill {
+            self.fill_rounded(&l.close, 6.0, fill);
+        }
+        self.icon(&gpu.icon_small, ink, '\u{E711}', l.close);
     }
 
     /// A dialog: a lamp in its tone by the title, the text, and a key for

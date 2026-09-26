@@ -4,6 +4,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use horadric_core::journal::{self, Entry};
 use horadric_core::SavedState;
 
 pub(crate) fn dir() -> Option<PathBuf> {
@@ -79,6 +80,46 @@ pub fn save(state: &SavedState) {
         let _ = fs::rename(&tmp, dir.join("state.json"));
     }
     let _ = fs::remove_file(dir.join("recent.json"));
+}
+
+/// Adds a line to the journal the catch-up reads.
+pub fn journal(e: &Entry) {
+    use std::io::Write;
+    let Some(dir) = dir() else { return };
+    let _ = fs::create_dir_all(&dir);
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join(journal::FILE));
+    if let Ok(mut f) = file {
+        let _ = f.write_all(e.line().as_bytes());
+    }
+}
+
+/// The journal's lines from `since` on, in Unix seconds.
+pub fn journal_since(since: u64) -> Vec<Entry> {
+    let Some(dir) = dir() else {
+        return Vec::new();
+    };
+    let text = fs::read_to_string(dir.join(journal::FILE)).unwrap_or_default();
+    let mut entries = journal::parse(&text);
+    entries.retain(|e| e.at >= since);
+    entries
+}
+
+/// Drops the journal's lines older than a week, the way [`save`] writes.
+pub fn trim_journal(now: u64) {
+    let Some(dir) = dir() else { return };
+    let path = dir.join(journal::FILE);
+    let Ok(text) = fs::read_to_string(&path) else {
+        return;
+    };
+    if let Some(kept) = journal::trimmed(&text, now) {
+        let tmp = dir.join("journal.jsonl.tmp");
+        if fs::write(&tmp, kept).is_ok() {
+            let _ = fs::rename(&tmp, &path);
+        }
+    }
 }
 
 #[cfg(test)]

@@ -47,6 +47,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use horadric_core::background::Asked;
 use horadric_core::diff::{self as changes, Diff, FileDiff, Recount};
+use horadric_core::journal::{self, Entry, What};
 use horadric_core::release::{self, Manifest};
 use horadric_core::ssh;
 use horadric_core::usage::has_flag;
@@ -66,13 +67,18 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::RemoteDesktop::{
+    WTSRegisterSessionNotification, NOTIFY_FOR_THIS_SESSION,
+};
+use windows::Win32::System::SystemInformation::{GetLocalTime, GetTickCount};
 use windows::Win32::UI::HiDpi::{
     SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    RegisterHotKey, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, VK_SPACE,
+    GetLastInputInfo, RegisterHotKey, LASTINPUTINFO, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT,
+    VK_HOME, VK_SPACE,
 };
-use windows::Win32::UI::Shell::NIN_BALLOONUSERCLICK;
+use windows::Win32::UI::Shell::{SHQueryUserNotificationState, NIN_BALLOONUSERCLICK};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, GetWindowRect, KillTimer,
     PostMessageW, PostQuitMessage, RegisterClassW, RegisterWindowMessageW, SetTimer, SetWindowPos,
@@ -84,6 +90,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use crate::agents;
 use crate::caption;
+use crate::catchup::{self, Away, Catchup};
 use crate::columns::{self, Columns};
 use crate::console::{self, Console, Launch};
 use crate::dialog::{self, Dialog, Tone};
@@ -152,6 +159,15 @@ const APP_CLASS: PCWSTR = w!("HoradricApp");
 /// Runs a console program without giving it a console window.
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const HOTKEY_NEXT: i32 = 1;
+/// The catch-up, on demand.
+const HOTKEY_LISTEN: i32 = 2;
+/// Not in the `windows` crate's WindowsAndMessaging.
+const WM_WTSSESSION_CHANGE: u32 = 0x02B1;
+const WTS_SESSION_LOCK: usize = 7;
+const WTS_SESSION_UNLOCK: usize = 8;
+/// How far back the catch-up on demand looks at least, in seconds: since
+/// this morning, or the last eight hours early in the day.
+const LISTEN_BACK: u64 = 8 * 3600;
 /// The app window's timer that moves the ages on and saves.
 const TICK_TIMER: usize = 1;
 /// Fires once, a moment after a screen change, to lay the tiles out again
@@ -237,6 +253,9 @@ pub(crate) enum Input {
     Picked(Setting, Option<Option<String>>),
     /// A slider in the usage window let go at a new value.
     SetDefault(Setting, Option<String>),
+    /// The catch-up closed, with the session of the line clicked, if one
+    /// was.
+    Listened(Option<String>),
     /// The start window's tile clicked: pick a folder for the first
     /// project.
     Pick,
@@ -312,12 +331,19 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
     caption::register_class()?;
     dialog::register_class()?;
     toast::register_class()?;
+    catchup::register_class()?;
     start::register_class()?;
     terminal::register_class()?;
     let notify = create_app_window()?;
     let notify_id = notify.0 as isize;
     APP_WINDOW.with(|w| w.set(notify_id));
     let hotkey = register_hotkey(notify);
+    let listen_key = register_listen_key(notify);
+    // Locking the screen is going away, and unlocking it coming back.
+    unsafe {
+        let _ = WTSRegisterSessionNotification(notify, NOTIFY_FOR_THIS_SESSION);
+    }
+    store::trim_journal(unix_now());
     browsers::watch(notify, WM_HORADRIC_WINDOW_SHOWN, WM_HORADRIC_WINDOW_GONE);
 
     let saved = store::load();
@@ -474,6 +500,10 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             stage_rect: saved.stage.filter(|r| on_screen(r[0], r[1])),
             stage_key: None,
             hotkey,
+            listen_key,
+            away: Away::default(),
+            catchup: None,
+            journaled: HashMap::new(),
             next_serial: 1,
             requests,
             notify,
@@ -596,6 +626,49 @@ fn register_hotkey(hwnd: HWND) -> Option<&'static str> {
     ok.ok().map(|_| label)
 }
 
+/// The shortcut for the catch-up, or None when another app holds it. A
+/// dev instance adds Shift, as for the next waiting session.
+fn register_listen_key(hwnd: HWND) -> Option<&'static str> {
+    let (mods, label) = if horadric_hooks::dev() {
+        (MOD_CONTROL | MOD_ALT | MOD_SHIFT, "Ctrl+Alt+Shift+Home")
+    } else {
+        (MOD_CONTROL | MOD_ALT, "Ctrl+Alt+Home")
+    };
+    let ok = unsafe {
+        RegisterHotKey(
+            Some(hwnd),
+            HOTKEY_LISTEN,
+            mods | MOD_NOREPEAT,
+            VK_HOME.0 as u32,
+        )
+    };
+    if let Err(e) = &ok {
+        eprintln!("horadric: {label} is taken, no hotkey for the catch-up: {e}");
+    }
+    ok.ok().map(|_| label)
+}
+
+/// Seconds since the last real input anywhere in this session.
+fn idle_secs() -> u64 {
+    let mut info = LASTINPUTINFO {
+        cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32,
+        dwTime: 0,
+    };
+    unsafe {
+        if !GetLastInputInfo(&mut info).as_bool() {
+            return 0;
+        }
+        // Both wrap after 49 days, together.
+        u64::from(GetTickCount().wrapping_sub(info.dwTime) / 1000)
+    }
+}
+
+/// Seconds since local midnight.
+fn local_secs() -> u64 {
+    let t = unsafe { GetLocalTime() };
+    u64::from(t.wHour) * 3600 + u64::from(t.wMinute) * 60 + u64::from(t.wSecond)
+}
+
 fn create_app_window() -> windows::core::Result<HWND> {
     unsafe {
         let instance = GetModuleHandleW(None)?;
@@ -660,6 +733,20 @@ unsafe extern "system" fn app_proc(
                 tray_menu(hwnd);
             } else if mouse == NIN_BALLOONUSERCLICK {
                 with_app(App::open_alert);
+            }
+            return LRESULT(0);
+        }
+        WM_WTSSESSION_CHANGE => {
+            match wparam.0 {
+                WTS_SESSION_LOCK => {
+                    with_app(|app| app.away.lock(unix_now()));
+                }
+                WTS_SESSION_UNLOCK => {
+                    if let Some(since) = with_app(|app| app.away.unlock()).flatten() {
+                        with_app(|app| app.welcome_back(since));
+                    }
+                }
+                _ => {}
             }
             return LRESULT(0);
         }
@@ -752,10 +839,10 @@ fn with_app<R>(f: impl FnOnce(&mut App) -> R) -> Option<R> {
 }
 
 fn tray_menu(hwnd: HWND) {
-    let (recent, hotkey, notify, terminal, update) = with_app(|app| {
+    let (recent, hotkeys, notify, terminal, update) = with_app(|app| {
         (
             app.recent.clone(),
-            app.hotkey,
+            [app.hotkey, app.listen_key],
             !app.quiet,
             !app.consoles.is_empty(),
             app.update.as_ref().map(|m| m.version.clone()),
@@ -789,7 +876,7 @@ fn tray_menu(hwnd: HWND) {
         &projects,
         lines,
         autostart,
-        hotkey,
+        hotkeys,
         notify,
         terminal,
         &screens,
@@ -825,6 +912,9 @@ fn tray_menu(hwnd: HWND) {
         }
         Some(Choice::NextWaiting) => {
             with_app(App::next_waiting);
+        }
+        Some(Choice::Listen) => {
+            with_app(App::listen_on_demand);
         }
         Some(Choice::Arrange) => {
             with_app(App::fit_stage);
@@ -1530,6 +1620,16 @@ struct App {
     stage_key: Option<String>,
     /// The next waiting session's shortcut, as the tray menu shows it.
     hotkey: Option<&'static str>,
+    /// The catch-up's shortcut, likewise.
+    listen_key: Option<&'static str>,
+    /// Whether you are away, for the catch-up when you come back.
+    away: Away,
+    /// The catch-up, while it is open.
+    catchup: Option<Box<Catchup>>,
+    /// Each session's phase as last journaled, with its project and name,
+    /// by session id, so only a change is written, and a session that
+    /// vanishes can still be named.
+    journaled: HashMap<String, (Phase, String, String)>,
     next_serial: usize,
     requests: Arc<Mutex<Vec<Command>>>,
     notify: HWND,
@@ -1681,6 +1781,7 @@ impl App {
                 }
             }
             WM_HOTKEY if wparam as i32 == HOTKEY_NEXT => self.next_waiting(),
+            WM_HOTKEY if wparam as i32 == HOTKEY_LISTEN => self.listen_on_demand(),
             WM_TIMER if wparam == GLIDE_TIMER => self.glide(),
             WM_TIMER if wparam == SCREEN_TIMER => {
                 unsafe {
@@ -3494,6 +3595,9 @@ impl App {
         // Bringing the stage to the front says nothing to the app, so a
         // look is noticed here, within a second.
         self.identify();
+        if let Some(since) = self.away.idle(idle_secs(), unix_now()) {
+            self.welcome_back(since);
+        }
         self.save();
     }
 
@@ -3710,6 +3814,145 @@ impl App {
         self.tray.set_tip(&tip);
         self.identify();
         self.announce();
+        self.journal_phases();
+    }
+
+    /// Writes a line for each session whose phase became one worth telling:
+    /// waiting, done, or ended, which a session that vanishes did too.
+    fn journal_phases(&mut self) {
+        let now = unix_now();
+        let mut lines = Vec::new();
+        let mut seen = HashSet::new();
+        if let Ok(r) = self.shared.registry.lock() {
+            for s in r.all() {
+                seen.insert(s.id.clone());
+                let (project, name) = (project_key(s), s.label().to_string());
+                let before = self.journaled.insert(
+                    s.id.clone(),
+                    (s.phase.clone(), project.clone(), name.clone()),
+                );
+                // A session first seen here, at a start or a reload, has
+                // told nothing new yet.
+                let Some((before, _, _)) = before else {
+                    continue;
+                };
+                if before == s.phase {
+                    continue;
+                }
+                let what = match &s.phase {
+                    Phase::Waiting(_) => What::Waiting {
+                        line: s.last_line.clone(),
+                    },
+                    Phase::Done => What::Done {
+                        line: s.last_line.clone(),
+                    },
+                    Phase::Ended => What::Ended,
+                    _ => continue,
+                };
+                lines.push(Entry {
+                    at: now,
+                    session: s.id.clone(),
+                    name,
+                    project,
+                    what,
+                });
+            }
+        }
+        let gone: Vec<String> = self
+            .journaled
+            .keys()
+            .filter(|id| !seen.contains(*id))
+            .cloned()
+            .collect();
+        for id in gone {
+            let Some((phase, project, name)) = self.journaled.remove(&id) else {
+                continue;
+            };
+            if phase != Phase::Ended && !self.frozen {
+                lines.push(Entry {
+                    at: now,
+                    session: id,
+                    name,
+                    project,
+                    what: What::Ended,
+                });
+            }
+        }
+        for e in &lines {
+            store::journal(e);
+        }
+    }
+
+    /// You came back after being away since `since`: say what happened, if
+    /// anything did.
+    fn welcome_back(&mut self, since: u64) {
+        self.listen(since, Some(since), false);
+    }
+
+    /// The catch-up from the tray or its hotkey: since this morning.
+    fn listen_on_demand(&mut self) {
+        let now = unix_now();
+        let since = now
+            .saturating_sub(local_secs())
+            .min(now.saturating_sub(LISTEN_BACK));
+        self.listen(since, None, true);
+    }
+
+    /// Opens the catch-up with what happened since `since`, `away` being
+    /// when you left if that is why. Asked for, it opens even with nothing
+    /// to tell, to say so; on coming back it stays shut.
+    fn listen(&mut self, since: u64, away: Option<u64>, asked: bool) {
+        if let Some(c) = self.catchup.take() {
+            c.destroy();
+        }
+        let now = unix_now();
+        let entries = store::journal_since(since);
+        let groups = {
+            let Ok(r) = self.shared.registry.lock() else {
+                return;
+            };
+            let boards = self.shared.boards.borrow();
+            let item_is = |e: &Entry, mark: horadric_core::tasks::Mark, title: &str| {
+                boards
+                    .get(&e.project)
+                    .is_some_and(|b| b.tasks.iter().any(|t| t.mark == mark && t.title == title))
+            };
+            journal::summary(&entries, since, now, |e| match &e.what {
+                What::Waiting { .. } => r.get(&e.session).is_some_and(|s| s.phase.is_waiting()),
+                What::Done { .. } => r.get(&e.session).is_some_and(Session::unread),
+                What::Review { title } => item_is(e, horadric_core::tasks::Mark::Review, title),
+                What::Blocked { title, .. } => {
+                    item_is(e, horadric_core::tasks::Mark::Blocked, title)
+                }
+                _ => false,
+            })
+        };
+        if groups.is_empty() && !asked {
+            return;
+        }
+        // Coming back to a full screen game or a presentation is not the
+        // moment; the tray and the hotkey still open it.
+        let state = unsafe { SHQueryUserNotificationState() }.map_or(5, |s| s.0);
+        if !asked && toast::hold_back(state) {
+            return;
+        }
+        let mut rows = catchup::rows(&groups, now, project_name);
+        if rows.is_empty() {
+            rows.push(catchup::Row {
+                kind: layout::CatchupKind::Line { detail: false },
+                text: "Nothing happened".to_string(),
+                detail: String::new(),
+                age: String::new(),
+                section: None,
+                session: String::new(),
+            });
+        }
+        let clock = catchup::clock(local_secs(), now, since);
+        let sub = catchup::covers(away, since, now, &clock);
+        match Catchup::open(Rc::clone(&self.shared), sub, rows) {
+            Ok(c) => self.catchup = Some(c),
+            Err(e) => eprintln!("horadric: cannot open the catch-up: {e}"),
+        }
     }
 
     /// The session whose pane has the keyboard, with the stage in front,
@@ -3824,6 +4067,21 @@ impl App {
                     }
                 }
                 Input::SetDefault(setting, value) => self.set_default(setting, value),
+                Input::Listened(session) => {
+                    if let Some(c) = self.catchup.take() {
+                        c.destroy();
+                    }
+                    if let Some(id) = session {
+                        let known = self
+                            .shared
+                            .registry
+                            .lock()
+                            .is_ok_and(|r| r.get(&id).is_some());
+                        if known {
+                            self.reveal(&id, false);
+                        }
+                    }
+                }
                 Input::Pick => {
                     // A new project most likely sits beside the last one.
                     self.pick_from = self

@@ -1137,6 +1137,134 @@ pub fn toast_place(size: (i32, i32), work: [i32; 4], margin: i32) -> (i32, i32) 
     )
 }
 
+/// A row of the catch-up, as far as laying it out goes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CatchupKind {
+    /// A project's name over its lines.
+    Heading,
+    /// A line, with a fainter detail under it or without.
+    Line { detail: bool },
+}
+
+/// Where a row of the catch-up is.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CatchupRow {
+    Heading(Rect),
+    Line {
+        /// The whole row, lit under the mouse.
+        rect: Rect,
+        lamp: (f32, f32),
+        text: Rect,
+        detail: Option<Rect>,
+        /// How long ago, right aligned on the text's row.
+        age: Rect,
+    },
+}
+
+/// The geometry of the catch-up: a title and what it covers, a cross, then
+/// the rows given, as many as fit in the height it may have, and a last
+/// line saying how many more there are.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CatchupLayout {
+    pub size: (f32, f32),
+    pub title: Rect,
+    pub sub: Rect,
+    pub close: Rect,
+    pub rows: Vec<CatchupRow>,
+    /// Where "and so many more" goes, when not every row fits.
+    pub more: Option<Rect>,
+}
+
+pub const CATCHUP_W: f32 = 440.0;
+const CATCHUP_PAD: f32 = 18.0;
+const CATCHUP_HEADING_H: f32 = 26.0;
+const CATCHUP_LINE_H: f32 = 30.0;
+const CATCHUP_DETAIL_H: f32 = 18.0;
+const CATCHUP_AGE_W: f32 = 64.0;
+
+/// Lays out the catch-up with `rows`, at most `max_h` DIPs tall. A heading
+/// never stands last without a line under it.
+pub fn catchup(rows: &[CatchupKind], max_h: f32) -> CatchupLayout {
+    let pad = CATCHUP_PAD;
+    let full = CATCHUP_W - 2.0 * pad;
+    let title = Rect::new(pad, 14.0, full - 30.0, 24.0);
+    let sub = Rect::new(pad, title.bottom(), full - 30.0, 18.0);
+    let close = Rect::new(CATCHUP_W - 10.0 - 26.0, 10.0, 26.0, 26.0);
+    let height = |k: &CatchupKind| match k {
+        CatchupKind::Heading => CATCHUP_HEADING_H,
+        CatchupKind::Line { detail: false } => CATCHUP_LINE_H,
+        CatchupKind::Line { detail: true } => CATCHUP_LINE_H + CATCHUP_DETAIL_H,
+    };
+    let top = sub.bottom() + 6.0;
+    let room = max_h - pad;
+    let mut y = top;
+    let mut placed = Vec::new();
+    for (i, k) in rows.iter().enumerate() {
+        let mut need = height(k);
+        if *k == CatchupKind::Heading {
+            need += rows.get(i + 1).map_or(0.0, height);
+        }
+        let last = i + 1 == rows.len();
+        let more = if last { 0.0 } else { CATCHUP_LINE_H };
+        if y + need + more > room {
+            break;
+        }
+        let h = height(k);
+        placed.push(match k {
+            CatchupKind::Heading => CatchupRow::Heading(Rect::new(pad, y + 6.0, full, h - 6.0)),
+            CatchupKind::Line { detail } => {
+                let text_x = pad + 22.0;
+                let text_w = full - 22.0 - CATCHUP_AGE_W - 8.0;
+                CatchupRow::Line {
+                    rect: Rect::new(pad - 8.0, y, full + 16.0, h),
+                    lamp: (pad + 5.0, y + CATCHUP_LINE_H / 2.0),
+                    text: Rect::new(text_x, y, text_w, CATCHUP_LINE_H),
+                    detail: detail.then(|| {
+                        Rect::new(
+                            text_x,
+                            y + CATCHUP_LINE_H - 6.0,
+                            full - 22.0,
+                            CATCHUP_DETAIL_H,
+                        )
+                    }),
+                    age: Rect::new(pad + full - CATCHUP_AGE_W, y, CATCHUP_AGE_W, CATCHUP_LINE_H),
+                }
+            }
+        });
+        y += h;
+    }
+    let more = (placed.len() < rows.len()).then(|| {
+        let r = Rect::new(pad + 22.0, y, full - 22.0, CATCHUP_LINE_H);
+        y += CATCHUP_LINE_H;
+        r
+    });
+    CatchupLayout {
+        size: (CATCHUP_W, y + pad - 6.0),
+        title,
+        sub,
+        close,
+        rows: placed,
+        more,
+    }
+}
+
+/// The row under a point, if it is a line.
+pub fn catchup_hit(l: &CatchupLayout, x: f32, y: f32) -> Option<usize> {
+    l.rows.iter().position(|r| match r {
+        CatchupRow::Line { rect, .. } => rect.contains(x, y),
+        CatchupRow::Heading(_) => false,
+    })
+}
+
+/// Where the catch-up `size` goes: across the middle of the work area
+/// `work`, a little above the centre. All in screen pixels.
+pub fn catchup_place(size: (i32, i32), work: [i32; 4]) -> (i32, i32) {
+    let [wl, wt, wr, wb] = work;
+    let x = wl + (wr - wl - size.0) / 2;
+    let y = wt + (wb - wt - size.1) / 3;
+    (x.max(wl), y.max(wt))
+}
+
 /// Where a window `size` goes beside `owner`, both in screen pixels, with
 /// its top a little above `y`, the height it was asked from. Clusters
 /// stand at the right edge of the screen, so it goes to the left when there
@@ -2460,5 +2588,59 @@ mod tests {
         assert_eq!(neighbour(&rects, 3, Dir::Up), Some(1));
         assert_eq!(neighbour(&rects, 3, Dir::Left), Some(2));
         assert_eq!(neighbour(&[], 0, Dir::Up), None);
+    }
+
+    #[test]
+    fn the_catchup_places_every_row_that_fits() {
+        use CatchupKind::*;
+        let rows = [Heading, Line { detail: true }, Line { detail: false }];
+        let l = catchup(&rows, 1000.0);
+        assert_eq!(l.rows.len(), 3);
+        assert!(l.more.is_none());
+        let bottoms: Vec<f32> = l
+            .rows
+            .iter()
+            .map(|r| match r {
+                CatchupRow::Heading(r) => r.bottom(),
+                CatchupRow::Line { rect, .. } => rect.bottom(),
+            })
+            .collect();
+        assert!(bottoms.windows(2).all(|w| w[0] <= w[1]));
+        assert!(l.size.1 > bottoms[2]);
+        assert_eq!(catchup_hit(&l, 100.0, bottoms[0] + 2.0), Some(1));
+        assert_eq!(catchup_hit(&l, 100.0, bottoms[0] - 2.0), None);
+    }
+
+    #[test]
+    fn the_catchup_stops_at_its_height_and_says_there_is_more() {
+        use CatchupKind::*;
+        let mut rows = vec![Heading];
+        rows.extend([Line { detail: false }; 40]);
+        let l = catchup(&rows, 400.0);
+        assert!(l.rows.len() < rows.len());
+        assert!(l.more.is_some());
+        assert!(l.size.1 <= 400.0);
+    }
+
+    #[test]
+    fn a_catchup_heading_never_stands_last_alone() {
+        use CatchupKind::*;
+        let one = catchup(&[Heading, Line { detail: false }], 1000.0);
+        let h = one.size.1;
+        let rows = [
+            Heading,
+            Line { detail: false },
+            Heading,
+            Line { detail: false },
+        ];
+        // Room for the first project and the second's heading, not its line.
+        let l = catchup(&rows, h + CATCHUP_HEADING_H + CATCHUP_LINE_H + 4.0);
+        assert!(matches!(l.rows.last(), Some(CatchupRow::Line { .. })));
+    }
+
+    #[test]
+    fn the_catchup_stands_a_little_above_the_middle() {
+        assert_eq!(catchup_place((400, 300), [0, 0, 1000, 900]), (300, 200));
+        assert_eq!(catchup_place((400, 1000), [0, 0, 1000, 900]), (300, 0));
     }
 }
