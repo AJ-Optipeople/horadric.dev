@@ -299,6 +299,17 @@ pub fn linked(out: &str) -> Vec<Linked> {
         .collect()
 }
 
+/// The file a dev instance leaves in the git folder of each worktree it
+/// adds. Git keeps that folder per worktree and removes it with the tree.
+pub const DEV_MARK: &str = "horadric-dev";
+
+/// Whether a sweep may remove a worktree. A dev instance only knows its own
+/// sessions, so a worktree in use by another instance's session looks free
+/// to it; it therefore sweeps only the worktrees it added itself.
+pub fn sweepable(dev: bool, dev_made: bool) -> bool {
+    !dev || dev_made
+}
+
 /// Whether `dir`, a session's folder, is `tree` or inside it.
 pub fn inside(dir: &str, tree: &str) -> bool {
     let norm = |p: &str| p.replace('\\', "/").trim_end_matches('/').to_lowercase();
@@ -561,5 +572,13 @@ mod tests {
         assert!(inside(r"c:\code\app.fix\web", "C:/Code/app.fix/"));
         assert!(!inside("C:/Code/app.fix-2", "C:/Code/app.fix"));
         assert!(!inside("C:/Code/app", "C:/Code/app.fix"));
+    }
+
+    #[test]
+    fn a_dev_instance_sweeps_only_what_it_made() {
+        assert!(sweepable(false, false));
+        assert!(sweepable(false, true));
+        assert!(sweepable(true, true));
+        assert!(!sweepable(true, false));
     }
 }

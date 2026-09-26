@@ -1636,6 +1636,12 @@ session gets a worktree of its own, and its tile shows what it changed.
   at the next hook. That dev instance still held sessions in this
   repository, so its first sweep also removed the eight leftovers here,
   and kept the four worktrees in use.
+  A dev instance knows only its own sessions, so to it a worktree another
+  instance's agent works in looks free, and a test session in a worktree
+  of this repository once swept other agents' merged, clean worktrees
+  from under them. So a dev instance leaves a `horadric-dev` file in the
+  git folder of each worktree it adds (git keeps that folder per worktree
+  and removes it with the tree) and sweeps only worktrees that carry it.
 - **The task runner** holds one item at a time in the shared tree, unless
   `"tasks": {"parallel": 3}` in the config lets it hold several. Then each
   item it takes (or a click takes) gets a worktree of its own, its branch

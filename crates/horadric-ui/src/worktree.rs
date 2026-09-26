@@ -72,6 +72,9 @@ pub fn add(dir: &Path, name: &str, taken: &[Ports]) -> Result<Option<Fresh>, Str
     });
     let path = worktree::folder(&place.top, &branch);
     git(top, &["worktree", "add", "-b", &branch, &path])?;
+    if horadric_hooks::dev() {
+        mark_dev_made(Path::new(&path));
+    }
     let cwd = if place.prefix.is_empty() {
         PathBuf::from(&path)
     } else {
@@ -87,6 +90,27 @@ pub fn add(dir: &Path, name: &str, taken: &[Ports]) -> Result<Option<Fresh>, Str
         },
         setup: settings.setup,
     }))
+}
+
+/// The worktree's own git folder, where git keeps what is per worktree.
+fn admin_dir(tree: &Path) -> Option<PathBuf> {
+    git(tree, &["rev-parse", "--path-format=absolute", "--git-dir"])
+        .ok()
+        .map(|d| PathBuf::from(d.trim()))
+}
+
+fn mark_dev_made(tree: &Path) {
+    let written = admin_dir(tree).map(|d| std::fs::write(d.join(worktree::DEV_MARK), ""));
+    if !matches!(written, Some(Ok(()))) {
+        eprintln!(
+            "horadric: could not mark {} as a dev worktree",
+            tree.display()
+        );
+    }
+}
+
+fn dev_made(tree: &Path) -> bool {
+    admin_dir(tree).is_some_and(|d| d.join(worktree::DEV_MARK).is_file())
 }
 
 /// Removes a session's worktree once the session has ended, and its branch
@@ -171,7 +195,8 @@ pub fn head(dir: &Path) -> Option<String> {
 /// adds a worktree itself rarely removes it after the merge. The branch
 /// must have been committed to, or a worktree just added and not yet
 /// worked in would count as merged and go. Their branches go with them.
-/// Returns the folders removed.
+/// A dev instance sweeps only the worktrees it added, see
+/// [`worktree::sweepable`]. Returns the folders removed.
 pub fn sweep(dir: &Path, busy: &[String]) -> Vec<String> {
     let Some(place) = main_tree(dir) else {
         return Vec::new();
@@ -180,9 +205,13 @@ pub fn sweep(dir: &Path, busy: &[String]) -> Vec<String> {
     let Ok(list) = git(main, &["worktree", "list", "--porcelain"]) else {
         return Vec::new();
     };
+    let dev = horadric_hooks::dev();
     let mut removed = Vec::new();
     for w in worktree::linked(&list) {
         if busy.iter().any(|d| worktree::inside(d, &w.path)) {
+            continue;
+        }
+        if !worktree::sweepable(dev, dev && dev_made(Path::new(&w.path))) {
             continue;
         }
         let branch = format!("refs/heads/{}", w.branch);
