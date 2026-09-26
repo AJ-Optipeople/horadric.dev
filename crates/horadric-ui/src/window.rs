@@ -1030,14 +1030,16 @@ impl Cluster {
                         // instead, so the button lets go.
                         self.press(None);
                         self.move_to(d.start_window.x + dx, d.start_window.y + dy);
+                        app::push(Input::Carry(self.key.clone(), Some((cursor.x, cursor.y))));
                     }
                 }
                 Some(LRESULT(0))
             }
             WM_LBUTTONUP => {
                 // Taken first: letting go of the capture below sends
-                // WM_CAPTURECHANGED, which drops a lift it still finds.
+                // WM_CAPTURECHANGED, which drops a lift or calls off a drag it still finds.
                 let lift = self.lift.borrow_mut().take();
+                let drag = self.drag.borrow_mut().take();
                 unsafe {
                     let _ = ReleaseCapture();
                 }
@@ -1047,7 +1049,6 @@ impl Cluster {
                     return Some(LRESULT(0));
                 }
                 self.press(None);
-                let drag = self.drag.borrow_mut().take();
                 match drag {
                     Some(d) if d.moved => {
                         let mut cursor = POINT::default();
@@ -1070,6 +1071,10 @@ impl Cluster {
             // up comes, so nothing else would let go of the button.
             WM_CAPTURECHANGED => {
                 self.press(None);
+                // Lost mid drag: the window goes back to its place.
+                if self.drag.borrow_mut().take().is_some_and(|d| d.moved) {
+                    app::push(Input::Carry(self.key.clone(), None));
+                }
                 // The tile goes back where it was.
                 if self.lift.borrow_mut().take().is_some_and(|l| l.moved) {
                     self.fit();

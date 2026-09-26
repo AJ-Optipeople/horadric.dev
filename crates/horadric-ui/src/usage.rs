@@ -515,6 +515,10 @@ impl UsageWindow {
                         d.moved = true;
                         self.press(None);
                         self.move_to(d.start_window.x + dx, d.start_window.y + dy);
+                        app::push(Input::Carry(
+                            columns::USAGE.into(),
+                            Some((cursor.x, cursor.y)),
+                        ));
                     }
                 }
                 Some(LRESULT(0))
@@ -528,6 +532,9 @@ impl UsageWindow {
                     self.slide_to(lparam);
                     self.release_slider();
                 }
+                // Taken first: letting go of the capture sends
+                // WM_CAPTURECHANGED, which calls off a drag it still finds.
+                let drag = self.drag.borrow_mut().take();
                 unsafe {
                     let _ = ReleaseCapture();
                 }
@@ -535,7 +542,6 @@ impl UsageWindow {
                 if sliding {
                     return Some(LRESULT(0));
                 }
-                let drag = self.drag.borrow_mut().take();
                 match drag {
                     Some(d) if d.moved => {
                         let mut cursor = POINT::default();
@@ -557,6 +563,9 @@ impl UsageWindow {
             }
             WM_CAPTURECHANGED => {
                 self.press(None);
+                if self.drag.borrow_mut().take().is_some_and(|d| d.moved) {
+                    app::push(Input::Carry(columns::USAGE.into(), None));
+                }
                 // Taken away mid slide: the stop it was at counts.
                 self.release_slider();
                 None

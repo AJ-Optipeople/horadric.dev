@@ -185,6 +185,10 @@ pub(crate) enum Input {
     /// after a drag with the cursor here: it takes the place in the columns
     /// under the cursor.
     Drop(String, i32, i32),
+    /// A cluster, or the usage window, being dragged with the cursor here:
+    /// the others in the column under it make room. None when the drag
+    /// was lost without a drop.
+    Carry(String, Option<(i32, i32)>),
     /// The wheel turned this many notches over the window with this key,
     /// outside anything that scrolls by itself: its column scrolls.
     Scroll(String, i32),
@@ -483,6 +487,8 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             glides: RefCell::default(),
             glided: Cell::new(None),
             arranged: false,
+            carried: None,
+            carry_at: None,
             paused: saved
                 .sessions
                 .iter()
@@ -1544,6 +1550,11 @@ struct App {
     glided: Cell<Option<Instant>>,
     /// The columns have been laid out with windows in them once.
     arranged: bool,
+    /// The key of the window being dragged, which the layout leaves where
+    /// the cursor holds it, and the column and place the others make room
+    /// for.
+    carried: Option<String>,
+    carry_at: Option<(usize, usize)>,
     /// Sessions with no process that a click resumes: restored from disk,
     /// or left behind by a crash.
     paused: HashMap<String, SavedSession>,
@@ -3752,7 +3763,17 @@ impl App {
                         relayout = true;
                     }
                 }
-                Input::Drop(key, x, y) => self.drop_window(&key, x, y),
+                Input::Drop(key, x, y) => {
+                    self.carried = None;
+                    self.carry_at = None;
+                    self.drop_window(&key, x, y);
+                }
+                Input::Carry(key, Some((x, y))) => self.carry_window(&key, x, y),
+                Input::Carry(_, None) => {
+                    self.carried = None;
+                    self.carry_at = None;
+                    self.arrange();
+                }
                 Input::Scroll(key, notches) => {
                     if self.scroll_column(&key, notches) {
                         relayout = true;
@@ -4059,6 +4080,10 @@ impl App {
             let (filled, room) = columns::fill(&items, g.top, g.height, g.gap, g.min_files, scroll);
             scrolls.push((*model, scroll.clamp(0, room)));
             for (t, f) in tiles.iter().zip(filled) {
+                // The one being dragged is where the cursor holds it.
+                if t.key().is_some() && t.key() == self.carried.as_deref() {
+                    continue;
+                }
                 t.place(x, f, &mut self.glides.borrow_mut(), animate, self.arranged);
             }
         }
@@ -4133,15 +4158,60 @@ impl App {
     /// A window let go of after a drag takes the place in the columns under
     /// the cursor, or a new column right of the last when there is room.
     fn drop_window(&mut self, key: &str, x: i32, y: i32) {
-        let Some(g) = self.grid() else {
+        let mut cols = self.columns.clone();
+        let Some((col, slot, _)) = self.drop_place(&mut cols, key, x, y) else {
             return;
         };
+        let present = self.present();
+        cols.move_to(key, col, slot, |k| present.contains(k));
+        self.columns = cols;
+        self.arrange();
+        self.save();
+    }
+
+    /// A window being dragged is over (x, y): the others lay out as if it
+    /// were let go there, and glide to make room. Only in a column that is
+    /// already there, and not for a window alone in its own, since those
+    /// change which column is where and the columns would move under the
+    /// cursor. Nothing is saved until the drop.
+    fn carry_window(&mut self, key: &str, x: i32, y: i32) {
+        self.carried = Some(key.to_string());
+        let mut cols = self.columns.clone();
+        let Some((col, slot, room)) = self.drop_place(&mut cols, key, x, y) else {
+            return;
+        };
+        let want = room.then_some((col, slot));
+        if want == self.carry_at {
+            return;
+        }
+        self.carry_at = want;
+        let saved = self.columns.clone();
+        if let Some((col, slot)) = want {
+            let present = self.present();
+            cols.move_to(key, col, slot, |k| present.contains(k));
+            self.columns = cols;
+        }
+        self.arrange();
+        self.columns = saved;
+    }
+
+    /// Where a window let go of at (x, y) goes in `cols`: its column and
+    /// its place in it, and whether that column is one already there that
+    /// it does not stand in alone.
+    fn drop_place(
+        &self,
+        cols: &mut Columns,
+        key: &str,
+        x: i32,
+        y: i32,
+    ) -> Option<(usize, usize, bool)> {
+        let g = self.grid()?;
         let present = self.present();
         let is_present = |k: &str| present.contains(k);
         // Moved against what the screen shows, so extra columns folded into
         // the last one on a narrow screen become part of it.
-        self.columns.merge_past(g.fits, is_present);
-        let shown = self.columns.shown(g.fits, is_present);
+        cols.merge_past(g.fits, is_present);
+        let shown = cols.shown(g.fits, is_present);
         let lefts: Vec<i32> = (0..shown.len()).map(|i| g.x(i)).collect();
         let alone = shown
             .iter()
@@ -4161,9 +4231,7 @@ impl App {
             })
             .unwrap_or_default();
         let slot = columns::drop_slot(&others, y);
-        self.columns.move_to(key, col, slot, is_present);
-        self.arrange();
-        self.save();
+        Some((col, slot, col < shown.len() && !alone))
     }
 
     /// Scrolls the column holding the window with this key by the wheel's
@@ -4269,6 +4337,15 @@ impl Tile<'_> {
                 fixed: c.fixed_px(),
                 files: c.files_claim(),
             },
+        }
+    }
+
+    /// Its key in the columns. The start window has none.
+    fn key(&self) -> Option<&str> {
+        match self {
+            Tile::Usage(_) => Some(columns::USAGE),
+            Tile::Start(_) => None,
+            Tile::Cluster(c) => Some(&c.key),
         }
     }
 
