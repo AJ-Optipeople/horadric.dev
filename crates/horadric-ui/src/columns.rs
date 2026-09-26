@@ -18,6 +18,9 @@ pub const USAGE: &str = "horadric:usage";
 /// The key the stash stands in the columns by.
 pub const STASH: &str = "horadric:stash";
 
+/// The key the cube stands in the columns by.
+pub const CUBE: &str = "horadric:cube";
+
 /// One column: its keys top to bottom, some of them projects with nothing
 /// open right now, which keep their place for when they come back.
 #[derive(Debug, Clone, Default, PartialEq)]

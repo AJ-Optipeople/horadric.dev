@@ -95,6 +95,7 @@ use crate::caption;
 use crate::catchup::{self, Away, Catchup};
 use crate::columns::{self, Columns};
 use crate::console::{self, Console, Launch};
+use crate::cube::{self as cube_window, CubeWindow};
 use crate::dialog::{self, Dialog, Tone};
 use crate::dropdown::{self, Dropdown};
 use crate::glide::Glides;
@@ -291,6 +292,14 @@ pub(crate) enum Input {
     Unstash(String),
     /// A stashed session's slot right clicked.
     StashMenu(String),
+    /// A tile or a pane let go over the cube, by its session's id.
+    ToCube(String),
+    /// A session's slot in the cube clicked: it comes out.
+    CubeOut(String),
+    /// The cube's `main` rune clicked: in, or out again.
+    CubeMain,
+    /// The cube's button: run the recipe.
+    Transmute,
 }
 
 thread_local! {
@@ -341,6 +350,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
     window::register_class()?;
     usage::register_class()?;
     stash::register_class()?;
+    cube_window::register_class()?;
     dropdown::register_class()?;
     ask::register_class()?;
     menu::register_class()?;
@@ -482,6 +492,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
         usage,
         defaults: RefCell::new(saved.defaults.clone()),
         boards: RefCell::new(HashMap::new()),
+        cube: Cell::new(None),
     });
     menu::init(Rc::clone(&shared));
     let toasts = Toasts::new(Rc::clone(&shared), notify, WM_HORADRIC_TRAY);
@@ -505,6 +516,9 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             shared,
             usage_window,
             stash_window: None,
+            cube_window: None,
+            cube: Vec::new(),
+            cube_main: false,
             start_window: None,
             status_settings,
             setting_menu_for: None,
@@ -614,6 +628,9 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
                 u.destroy();
             }
             if let Some(w) = &app.stash_window {
+                w.destroy();
+            }
+            if let Some(w) = &app.cube_window {
                 w.destroy();
             }
             if let Some(s) = &app.start_window {
@@ -1786,6 +1803,12 @@ struct App {
     usage_window: Option<Box<UsageWindow>>,
     /// The sessions put away for later, there while it holds any.
     stash_window: Option<Box<StashWindow>>,
+    /// The cube, there while there is anything to drop in it.
+    cube_window: Option<Box<CubeWindow>>,
+    /// The sessions in the cube, by id, in the order they went in.
+    cube: Vec<String>,
+    /// `main` is in the cube beside them.
+    cube_main: bool,
     /// Stands where the first project will go while none is open.
     start_window: Option<Box<StartWindow>>,
     /// The settings file that gives a session `horadric status` as its status
@@ -3878,11 +3901,13 @@ impl App {
             .stash_window
             .iter()
             .map(|w| (w.position(), w.size_px()));
+        let cube = self.cube_window.iter().map(|w| (w.position(), w.size_px()));
         self.clusters
             .iter()
             .map(|c| (c.position(), c.size_px()))
             .chain(usage)
             .chain(stash)
+            .chain(cube)
             .map(|((x, y), (w, h))| [x, y, x + w, y + h])
             .collect()
     }
@@ -4027,6 +4052,7 @@ impl App {
         columns.forget(|k| {
             k == columns::USAGE
                 || k == columns::STASH
+                || k == columns::CUBE
                 || recent.contains(k)
                 || self.clusters.iter().any(|c| c.key == k)
         });
@@ -4172,6 +4198,7 @@ impl App {
             c.fit();
         }
         self.sync_stash();
+        self.sync_cube();
         self.sync_start();
         // A status line can bring the first limits, which adds rows.
         if let Some(u) = &self.usage_window {
@@ -4429,6 +4456,19 @@ impl App {
                 }
                 Input::Expand(id) => self.reveal(&id, true),
                 Input::Unstash(id) => self.unstash(&id, true),
+                Input::ToCube(id) => {
+                    self.put_in_cube(&id);
+                    relayout |= self.sync_cube();
+                }
+                Input::CubeOut(id) => {
+                    self.out_of_cube(&id);
+                    relayout |= self.sync_cube();
+                }
+                Input::CubeMain => {
+                    self.cube_main = !self.cube_main;
+                    relayout |= self.sync_cube();
+                }
+                Input::Transmute => self.transmute(),
                 Input::StashMenu(id) => {
                     self.stash_menu_for = Some(id);
                     post(self.notify.0 as isize, WM_HORADRIC_STASH_MENU, 0);
@@ -4613,6 +4653,9 @@ impl App {
         if let Some(w) = &self.stash_window {
             w.raise();
         }
+        if let Some(w) = &self.cube_window {
+            w.raise();
+        }
         if let Some(s) = &self.start_window {
             s.raise();
         }
@@ -4664,6 +4707,7 @@ impl App {
             .map(|c| c.key.clone())
             .chain(self.usage_window.iter().map(|_| columns::USAGE.to_string()))
             .chain(self.stash_window.iter().map(|_| columns::STASH.to_string()))
+            .chain(self.cube_window.iter().map(|_| columns::CUBE.to_string()))
             .collect()
     }
 
@@ -4679,6 +4723,9 @@ impl App {
                 }
                 if k == columns::STASH {
                     return self.stash_window.as_deref().map(Tile::Stash);
+                }
+                if k == columns::CUBE {
+                    return self.cube_window.as_deref().map(Tile::Cube);
                 }
                 self.clusters
                     .iter()
@@ -4994,6 +5041,7 @@ impl Grid {
 enum Tile<'a> {
     Usage(&'a UsageWindow),
     Stash(&'a StashWindow),
+    Cube(&'a CubeWindow),
     Start(&'a StartWindow),
     Cluster(&'a Cluster),
 }
@@ -5006,6 +5054,10 @@ impl Tile<'_> {
                 files: None,
             },
             Tile::Stash(w) => columns::Stacked {
+                fixed: w.size_px().1,
+                files: None,
+            },
+            Tile::Cube(w) => columns::Stacked {
                 fixed: w.size_px().1,
                 files: None,
             },
@@ -5025,6 +5077,7 @@ impl Tile<'_> {
         match self {
             Tile::Usage(_) => Some(columns::USAGE),
             Tile::Stash(_) => Some(columns::STASH),
+            Tile::Cube(_) => Some(columns::CUBE),
             Tile::Start(_) => None,
             Tile::Cluster(c) => Some(&c.key),
         }
@@ -5034,6 +5087,7 @@ impl Tile<'_> {
         match self {
             Tile::Usage(u) => u.hwnd,
             Tile::Stash(w) => w.hwnd,
+            Tile::Cube(w) => w.hwnd,
             Tile::Start(s) => s.hwnd,
             Tile::Cluster(c) => c.hwnd,
         }
@@ -5043,6 +5097,7 @@ impl Tile<'_> {
         match self {
             Tile::Usage(u) => u.size_px().1,
             Tile::Stash(w) => w.size_px().1,
+            Tile::Cube(w) => w.size_px().1,
             Tile::Start(s) => s.size_px().1,
             Tile::Cluster(c) => c.size_px().1,
         }
@@ -5070,6 +5125,10 @@ impl Tile<'_> {
                 u.invalidate();
             }
             Tile::Stash(w) => {
+                w.move_to(x, y);
+                w.invalidate();
+            }
+            Tile::Cube(w) => {
                 w.move_to(x, y);
                 w.invalidate();
             }

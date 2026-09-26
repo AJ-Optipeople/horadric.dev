@@ -6,6 +6,7 @@
 //! without a terminal or a network.
 
 pub mod background;
+pub mod cube;
 pub mod diff;
 pub mod event;
 pub mod fleet;

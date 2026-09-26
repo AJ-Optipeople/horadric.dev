@@ -20,13 +20,14 @@ use std::mem::ManuallyDrop;
 use std::time::{Duration, SystemTime};
 
 use horadric_core::diff::Diff;
+use horadric_core::rarity::Rarity;
 use horadric_core::usage::format_until;
 use horadric_core::{format_age, Limit, Phase, Session, Usage};
 use windows::core::{w, Interface, Result, BOOL, PCWSTR};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D1_ALPHA_MODE_IGNORE, D2D1_COLOR_F, D2D1_GRADIENT_STOP, D2D1_PIXEL_FORMAT, D2D_RECT_F,
-    D2D_SIZE_U,
+    D2D1_ALPHA_MODE_IGNORE, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED,
+    D2D1_GRADIENT_STOP, D2D1_PIXEL_FORMAT, D2D_RECT_F, D2D_SIZE_U,
 };
 use windows::Win32::Graphics::Direct2D::{
     D2D1CreateFactory, ID2D1BitmapRenderTarget, ID2D1Factory, ID2D1Geometry,
@@ -61,8 +62,9 @@ use crate::board::RowState;
 use crate::files::{Row, Tree};
 use crate::layout::{
     self, AskLayout, Button, CaptionHit, CaptionLayout, CatchupLayout, CatchupRow, ClusterLayout,
-    DialogLayout, DropdownLayout, FilesLayout, Hit, MenuLayout, Metrics, Rect, SettingRow,
-    StartHit, StartLayout, StashLayout, TasksLayout, ToastLayout, UsageHit, UsageLayout, KNOB_R,
+    CubeHit, CubeLayout, DialogLayout, DropdownLayout, FilesLayout, Hit, MenuLayout, Metrics, Rect,
+    SettingRow, StartHit, StartLayout, StashLayout, TasksLayout, ToastLayout, UsageHit,
+    UsageLayout, KNOB_R,
 };
 use crate::motion::{self, ORBIT};
 use crate::theme::{self, Color};
@@ -504,6 +506,24 @@ pub struct StashLook {
     pub ink: Color,
 }
 
+/// Everything one frame of the cube needs.
+pub struct CubeScene<'a> {
+    pub layout: &'a CubeLayout,
+    /// The sessions in it, one per slot from the first, as the stash shows
+    /// them.
+    pub items: &'a [&'a StashLook],
+    /// `main` went in beside them.
+    pub main: bool,
+    /// The recipe they make, by its button's word.
+    pub recipe: Option<&'a str>,
+    /// What is missing, when they make none.
+    pub hint: &'a str,
+    /// A tile is carried over it, so its lid lifts.
+    pub open: bool,
+    pub hot: CubeHit,
+    pub pressed: Option<CubeHit>,
+}
+
 /// Everything one frame of the start window needs.
 pub struct StartScene<'a> {
     pub layout: &'a StartLayout,
@@ -679,6 +699,15 @@ impl Target {
         unsafe {
             self.rt.BeginDraw();
             self.painter(&self.rt).stash(gpu, m, scene);
+            self.rt.EndDraw(None, None)
+        }
+    }
+
+    /// Draws the cube. `Err` means the target must be recreated.
+    pub fn draw_cube(&self, gpu: &Gpu, m: &Metrics, scene: &CubeScene) -> Result<()> {
+        unsafe {
+            self.rt.BeginDraw();
+            self.painter(&self.rt).cube(gpu, m, scene);
             self.rt.EndDraw(None, None)
         }
     }
@@ -917,6 +946,156 @@ impl Painter<'_> {
             self.led(led_x, project.y + project.h / 2.0, item.accent);
             self.text(&gpu.small, theme::TEXT_DIM, &item.project, project);
         }
+    }
+
+    /// The cube: the cube itself, a key that runs the recipe what it holds
+    /// makes, the rune that puts `main` in, and a well of three slots. With
+    /// no recipe the key is latched and says what is missing instead.
+    unsafe fn cube(&self, gpu: &Gpu, m: &Metrics, scene: &CubeScene) {
+        let l = scene.layout;
+        self.plate(m, l.size);
+        let gold = theme::rarity_color(Rarity::Unique);
+        self.cube_art(gpu, &l.cube, scene.open, scene.recipe.is_some(), gold);
+        let radius = m.tile_radius - 4.0;
+        let depth = |b: Button| match b {
+            Button::Hover => 0.9,
+            Button::Idle => 0.45,
+            Button::Pressed => 0.1,
+        };
+        let t = &l.transmute;
+        let inner = Rect::new(t.x + 8.0, t.y, t.w - 16.0, t.h);
+        match scene.recipe {
+            Some(name) => {
+                let b = layout::button(CubeHit::Transmute, scene.hot, scene.pressed);
+                self.key(gpu, t, radius, theme::SURFACE, depth(b), 1.0);
+                let half = inner.h / 2.0;
+                let line = Rect::new(inner.x, inner.y + 4.0, inner.w, half - 4.0);
+                self.text(&gpu.small, theme::TEXT_DIM, "Transmute", line);
+                let below = Rect::new(inner.x, inner.y + half, inner.w, half - 4.0);
+                self.text(&gpu.small, gold, name, below);
+            }
+            None => {
+                self.latched(gpu, t, radius, 0.5);
+                if let Some(lay) = self.layout(gpu, &gpu.small, scene.hint, inner) {
+                    let _ = lay.SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
+                    let _ = lay.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+                    self.draw_layout(&lay, theme::TEXT_DIM, inner);
+                }
+            }
+        }
+        let r = &l.main;
+        let label = Rect::new(r.x, r.y + 18.0, r.w, r.h - 20.0);
+        if scene.main {
+            let b = layout::button(CubeHit::Main, scene.hot, scene.pressed);
+            self.key(gpu, r, radius, theme::SURFACE, depth(b), 1.0);
+            self.led(r.x + r.w / 2.0, r.y + 11.0, gold);
+            self.text(&gpu.small_centre, theme::TEXT, "main", label);
+        } else {
+            self.latched(gpu, r, radius, 0.5);
+            if scene.hot == CubeHit::Main {
+                self.fill_rounded(r, radius, theme::HOVER_FILL);
+            }
+            self.text(&gpu.small_centre, theme::TEXT_DIM, "main", label);
+        }
+        self.sunk(gpu, &l.well, m.tile_radius, theme::WELL);
+        for (i, r) in l.slots.iter().enumerate() {
+            let Some(item) = scene.items.get(i) else {
+                self.latched(gpu, r, radius, 0.5);
+                continue;
+            };
+            let b = layout::button(CubeHit::Slot(i), scene.hot, scene.pressed);
+            self.key(gpu, r, radius, theme::SURFACE, depth(b), 1.0);
+            let pad = 7.0;
+            let line_h = (r.h - 6.0) / 2.0;
+            let name = Rect::new(r.x + pad, r.y + 3.0, r.w - 2.0 * pad, line_h);
+            self.text(&gpu.small, item.ink, &item.name, name);
+            let led_x = r.x + pad + 2.5;
+            let w = r.right() - pad - led_x - 7.0;
+            let project = Rect::new(led_x + 7.0, name.bottom(), w, line_h);
+            self.led(led_x, project.y + project.h / 2.0, item.accent);
+            self.text(&gpu.small, theme::TEXT_DIM, &item.project, project);
+        }
+    }
+
+    /// The cube itself, seen from above one corner: a lid and two sides,
+    /// lit from above. Its lid lifts off with the light inside showing
+    /// while a tile is carried over it, and a recipe ready glows in it.
+    unsafe fn cube_art(&self, gpu: &Gpu, r: &Rect, open: bool, ready: bool, gold: Color) {
+        let cx = r.x + r.w / 2.0;
+        let s = r.w * 0.36;
+        let (dx, dy) = (s * 0.866, s * 0.5);
+        let top = r.y + r.h / 2.0 + 3.0 - dy;
+        let bottom = top + s + dy;
+        let white = Color::rgb(0xFFFFFF);
+        let black = Color::rgb(0);
+        let face = theme::SURFACE.mix(gold, 0.18);
+        let pt = |x: f32, y: f32| Vector2 { X: x, Y: y };
+        let lift = if open { s * 0.45 } else { 0.0 };
+        let diamond = |up: f32| {
+            [
+                pt(cx, top - dy - up),
+                pt(cx + dx, top - up),
+                pt(cx, top + dy - up),
+                pt(cx - dx, top - up),
+            ]
+        };
+        let left = [
+            pt(cx - dx, top),
+            pt(cx, top + dy),
+            pt(cx, bottom),
+            pt(cx - dx, bottom - dy),
+        ];
+        let right = [
+            pt(cx, top + dy),
+            pt(cx + dx, top),
+            pt(cx + dx, bottom - dy),
+            pt(cx, bottom),
+        ];
+        self.glow_dot(cx, bottom + 1.0, s * 1.1, theme::CAST, 0.6);
+        self.polygon(gpu, &left, face.mix(black, 0.25));
+        self.polygon(gpu, &right, face.mix(black, 0.5));
+        if open {
+            // The mouth, lit from inside.
+            self.polygon(gpu, &diamond(0.0), theme::WELL);
+            self.glow_dot(cx, top - lift / 2.0, s * 1.2, gold, 0.9);
+        } else if ready {
+            self.glow_dot(cx, top, s * 1.2, gold, 0.4);
+        }
+        let lid = if ready && !open {
+            face.mix(gold, 0.25)
+        } else {
+            face.mix(white, 0.08)
+        };
+        self.polygon(gpu, &diamond(lift), lid);
+        // A rune cut in each side, lit once a recipe is ready.
+        let ink = if ready { gold } else { gold.mix(black, 0.45) };
+        for side in [left, right] {
+            let x = side.iter().map(|p| p.X).sum::<f32>() / 4.0;
+            let y = side.iter().map(|p| p.Y).sum::<f32>() / 4.0;
+            self.fill_rounded(&Rect::new(x - 1.0, y - s * 0.28, 2.0, s * 0.56), 1.0, ink);
+            self.fill_rounded(&Rect::new(x - s * 0.18, y - 1.0, s * 0.36, 2.0), 1.0, ink);
+        }
+    }
+
+    /// A filled shape through `points`.
+    unsafe fn polygon(&self, gpu: &Gpu, points: &[Vector2], c: Color) {
+        let Some((first, rest)) = points.split_first() else {
+            return;
+        };
+        let Ok(path) = gpu.d2d.CreatePathGeometry() else {
+            return;
+        };
+        let Ok(sink) = path.Open() else {
+            return;
+        };
+        sink.BeginFigure(*first, D2D1_FIGURE_BEGIN_FILLED);
+        sink.AddLines(rest);
+        sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+        if sink.Close().is_err() {
+            return;
+        }
+        self.brush.SetColor(&color(c));
+        self.rt.FillGeometry(&path, self.brush, None);
     }
 
     /// A setting's row: its name, its value, and either the chevron of the

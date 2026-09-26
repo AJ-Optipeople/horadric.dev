@@ -49,6 +49,7 @@ use crate::app::{self, Input};
 use crate::appear;
 use crate::backdrop;
 use crate::board::{self, Board, RowState};
+use crate::cube;
 use crate::files::{Change, Expansion, Row, Tree};
 use crate::glyphs::Font;
 use crate::layout::{self, ClusterLayout, Hit, Metrics};
@@ -93,6 +94,8 @@ pub struct Shared {
     pub defaults: RefCell<Defaults>,
     /// Each project's task list as last read, by project key.
     pub boards: RefCell<HashMap<String, Board>>,
+    /// The cube's window while there is one, for what is carried over it.
+    pub cube: Cell<Option<HWND>>,
 }
 
 /// One project cluster on screen.
@@ -1014,6 +1017,9 @@ impl Cluster {
                 self.hover(self.hit(lparam));
                 if self.lift.borrow().is_some() {
                     self.carry(lparam);
+                    if self.lift.borrow().as_ref().is_some_and(|l| l.moved) {
+                        cube::lid(&self.shared, cube::under_cursor(&self.shared));
+                    }
                     return Some(LRESULT(0));
                 }
                 let mut drag = self.drag.borrow_mut();
@@ -1031,6 +1037,9 @@ impl Cluster {
                         self.press(None);
                         self.move_to(d.start_window.x + dx, d.start_window.y + dy);
                         app::push(Input::Carry(self.key.clone(), Some((cursor.x, cursor.y))));
+                        let over =
+                            self.sole_session().is_some() && cube::under_cursor(&self.shared);
+                        cube::lid(&self.shared, over);
                     }
                 }
                 Some(LRESULT(0))
@@ -1043,13 +1052,28 @@ impl Cluster {
                 unsafe {
                     let _ = ReleaseCapture();
                 }
+                let into_cube = cube::under_cursor(&self.shared);
+                cube::lid(&self.shared, false);
                 if let Some(l) = lift {
                     self.press(None);
-                    self.put_down(l, lparam);
+                    if l.moved && into_cube {
+                        app::push(Input::ToCube(l.id));
+                        self.fit();
+                    } else {
+                        self.put_down(l, lparam);
+                    }
                     return Some(LRESULT(0));
                 }
                 self.press(None);
                 match drag {
+                    // A lone tile drags its window, so the window is what
+                    // is dropped in the cube, and it goes back to its place.
+                    Some(d) if d.moved && into_cube && self.sole_session().is_some() => {
+                        if let Some(id) = self.sole_session() {
+                            app::push(Input::ToCube(id));
+                        }
+                        app::push(Input::Carry(self.key.clone(), None));
+                    }
                     Some(d) if d.moved => {
                         let mut cursor = POINT::default();
                         unsafe {
@@ -1071,6 +1095,7 @@ impl Cluster {
             // up comes, so nothing else would let go of the button.
             WM_CAPTURECHANGED => {
                 self.press(None);
+                cube::lid(&self.shared, false);
                 // Lost mid drag: the window goes back to its place.
                 if self.drag.borrow_mut().take().is_some_and(|d| d.moved) {
                     app::push(Input::Carry(self.key.clone(), None));
@@ -1156,6 +1181,15 @@ impl Cluster {
     fn press(&self, pressed: Option<Hit>) {
         if self.pressed.replace(pressed) != pressed {
             self.invalidate();
+        }
+    }
+
+    /// The one session a cluster of one tile shows.
+    fn sole_session(&self) -> Option<String> {
+        let sessions = self.sessions();
+        match sessions.as_slice() {
+            [s] => Some(s.id.clone()),
+            _ => None,
         }
     }
 

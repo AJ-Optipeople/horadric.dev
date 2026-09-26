@@ -43,6 +43,8 @@ use crate::{ask, store, watch};
 
 #[path = "tomb.rs"]
 pub(super) mod tomb;
+#[path = "transmute.rs"]
+pub(super) mod transmute;
 
 /// The least time between two sessions the runner starts in one project.
 const START_GAP: Duration = Duration::from_secs(10);
@@ -63,7 +65,7 @@ pub(super) struct State {
     stamps: HashMap<String, Stamp>,
     /// The first prompt of a session about to start on an item, taken by
     /// the launch.
-    prompts: HashMap<String, String>,
+    pub(super) prompts: HashMap<String, String>,
     /// Sessions already asked whether they are finished, and when.
     nudged: HashMap<String, SystemTime>,
     /// Nudges whose Enter is still to be sent.

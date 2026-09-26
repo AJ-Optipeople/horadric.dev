@@ -3,6 +3,8 @@
 //! Pure functions so the geometry can be tested without a window. The
 //! renderer scales by DPI, this module never sees a physical pixel.
 
+use horadric_core::cube;
+
 /// A rectangle in DIPs.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Rect {
@@ -673,6 +675,82 @@ pub fn stash(m: &Metrics) -> StashLayout {
 /// The slot under a point, if any.
 pub fn stash_hit(l: &StashLayout, x: f32, y: f32) -> Option<usize> {
     l.slots.iter().position(|r| r.contains(x, y))
+}
+
+/// The geometry of the cube: the cube itself beside the button that runs
+/// the recipe and the rune that puts `main` in, then a well of the three
+/// slots tiles are dropped into.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CubeLayout {
+    pub size: (f32, f32),
+    /// Where the cube is drawn.
+    pub cube: Rect,
+    pub transmute: Rect,
+    pub main: Rect,
+    pub well: Rect,
+    pub slots: Vec<Rect>,
+}
+
+const CUBE_TOP_H: f32 = 44.0;
+const CUBE_MAIN_W: f32 = 52.0;
+const CUBE_SLOT_H: f32 = 44.0;
+
+pub fn cube(m: &Metrics) -> CubeLayout {
+    let full = m.width - 2.0 * m.pad;
+    let top = m.pad + 2.0;
+    let cube = Rect::new(m.pad + 2.0, top, CUBE_TOP_H, CUBE_TOP_H);
+    let main = Rect::new(m.pad + full - CUBE_MAIN_W, top, CUBE_MAIN_W, CUBE_TOP_H);
+    let gap = STASH_SLOT_GAP;
+    let transmute = Rect::new(
+        cube.right() + gap,
+        top,
+        main.x - gap - cube.right() - gap,
+        CUBE_TOP_H,
+    );
+    let well_top = cube.bottom() + gap;
+    let side = cube::SLOTS as f32;
+    let slot_w = (full - 2.0 * STASH_INNER - (side - 1.0) * gap) / side;
+    let slots = (0..cube::SLOTS)
+        .map(|i| {
+            Rect::new(
+                m.pad + STASH_INNER + i as f32 * (slot_w + gap),
+                well_top + STASH_INNER,
+                slot_w,
+                CUBE_SLOT_H,
+            )
+        })
+        .collect();
+    let well = Rect::new(m.pad, well_top, full, 2.0 * STASH_INNER + CUBE_SLOT_H);
+    CubeLayout {
+        size: (m.width, well.bottom() + m.pad),
+        cube,
+        transmute,
+        main,
+        well,
+        slots,
+    }
+}
+
+/// Which part of the cube a point is on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CubeHit {
+    Slot(usize),
+    Main,
+    Transmute,
+    Nothing,
+}
+
+pub fn cube_hit(l: &CubeLayout, x: f32, y: f32) -> CubeHit {
+    if let Some(i) = l.slots.iter().position(|r| r.contains(x, y)) {
+        return CubeHit::Slot(i);
+    }
+    if l.main.contains(x, y) {
+        return CubeHit::Main;
+    }
+    if l.transmute.contains(x, y) {
+        return CubeHit::Transmute;
+    }
+    CubeHit::Nothing
 }
 
 /// Which part of the usage window a point is on.
@@ -2774,6 +2852,29 @@ mod tests {
     fn the_catchup_stands_a_little_above_the_middle() {
         assert_eq!(catchup_place((400, 300), [0, 0, 1000, 900]), (300, 200));
         assert_eq!(catchup_place((400, 1000), [0, 0, 1000, 900]), (300, 0));
+    }
+
+    #[test]
+    fn the_cube_has_a_row_of_parts_over_a_well_of_three() {
+        let m = Metrics::default();
+        let l = cube(&m);
+        assert_eq!(l.slots.len(), 3);
+        assert_eq!(l.size.0, m.width);
+        assert!(l.cube.right() < l.transmute.x);
+        assert!(l.transmute.right() < l.main.x);
+        assert!(l.main.right() <= m.width - m.pad + 0.01);
+        assert!(l.transmute.w > 80.0);
+        for r in &l.slots {
+            assert!(r.x >= l.well.x && r.right() <= l.well.right() + 0.01);
+            assert!(r.y >= l.well.y && r.bottom() <= l.well.bottom() + 0.01);
+        }
+        assert!(l.well.y > l.main.bottom());
+        assert!(l.well.bottom() < l.size.1);
+        let at = |r: &Rect| cube_hit(&l, r.x + 1.0, r.y + 1.0);
+        assert_eq!(at(&l.slots[2]), CubeHit::Slot(2));
+        assert_eq!(at(&l.main), CubeHit::Main);
+        assert_eq!(at(&l.transmute), CubeHit::Transmute);
+        assert_eq!(at(&l.cube), CubeHit::Nothing);
     }
 
     #[test]

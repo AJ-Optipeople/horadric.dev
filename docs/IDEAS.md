@@ -27,6 +27,8 @@ A recipe is a small, named, combinable action, the same shape as the
 runewords below. The two could be one system: recipes for things you
 combine, runewords for sequences.
 
+Built, with these three recipes: see "Transmute" in [PLAN.md](PLAN.md).
+
 ### Identify
 
 In Diablo an unidentified item drops grey and you do not know what it is

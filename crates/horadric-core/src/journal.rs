@@ -52,6 +52,11 @@ pub enum What {
     },
     /// The session's process ended.
     Ended,
+    /// The session was closed in the cube, and the one line it left.
+    Closed {
+        #[serde(default)]
+        line: String,
+    },
     /// A session took a task item.
     Started { title: String },
     /// An item's agent says it is done and wants a look.
@@ -96,7 +101,7 @@ impl Entry {
     fn phase(&self) -> bool {
         matches!(
             self.what,
-            What::Waiting { .. } | What::Done { .. } | What::Ended
+            What::Waiting { .. } | What::Done { .. } | What::Ended | What::Closed { .. }
         )
     }
 }
@@ -330,6 +335,8 @@ fn phase_line(e: &Entry, still: &impl Fn(&Entry) -> bool) -> Option<Line> {
         What::Waiting { line } if still(e) => (Section::Waiting, line.clone()),
         What::Done { line } if still(e) => (Section::Unread, line.clone()),
         What::Ended => (Section::Happened, "ended".to_string()),
+        What::Closed { line } if line.is_empty() => (Section::Happened, "closed".to_string()),
+        What::Closed { line } => (Section::Happened, format!("closed: {line}")),
         _ => return None,
     };
     Some(Line {
@@ -442,6 +449,25 @@ mod tests {
             [("p".into(), vec![(Section::Unread, "A".into())])]
         );
         assert_eq!(groups[0].lines[0].detail, "All green.");
+    }
+
+    #[test]
+    fn a_session_closed_in_the_cube_is_told_with_its_line() {
+        let closed = |line: &str| What::Closed {
+            line: line.to_string(),
+        };
+        let entries = [
+            entry(10, "a", "p", done("Fixed the login.")),
+            entry(20, "a", "p", closed("Fixed the login.")),
+            entry(30, "b", "p", closed("")),
+        ];
+        let groups = summary(&entries, 0, 40, |_| true);
+        let lines = &groups[0].lines;
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].section, Section::Happened);
+        assert_eq!(lines[0].detail, "closed: Fixed the login.");
+        assert_eq!(lines[1].detail, "closed");
+        assert_eq!(parse(&entries[1].line()), vec![entries[1].clone()]);
     }
 
     #[test]

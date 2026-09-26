@@ -60,6 +60,7 @@ use crate::app::{self, Input};
 use crate::backdrop;
 use crate::caption::Caption;
 use crate::console::Console;
+use crate::cube;
 use crate::glide::Glides;
 use crate::layout::CaptionHit;
 use crate::menu::{self, Item};
@@ -901,7 +902,9 @@ impl TerminalWindow {
         unsafe {
             SetCursor(LoadCursorW(None, IDC_SIZEALL).ok());
         }
-        let slot = self.slot_under_cursor();
+        let over = cube::under_cursor(&self.shared);
+        cube::lid(&self.shared, over);
+        let slot = self.slot_under_cursor().filter(|_| !over);
         for (i, p) in self.panes.borrow().iter().enumerate() {
             p.set_lifted(p.serial() == d.serial);
             p.set_drop_target(Some(i) == slot && p.serial() != d.serial);
@@ -913,7 +916,12 @@ impl TerminalWindow {
         let Some(d) = self.drag.take() else {
             return;
         };
-        if d.moved {
+        if d.moved && cube::under_cursor(&self.shared) {
+            let panes = self.panes.borrow();
+            if let Some(p) = panes.iter().find(|p| p.serial() == d.serial) {
+                app::push(Input::ToCube(p.session().into()));
+            }
+        } else if d.moved {
             let slot = self.slot_under_cursor();
             let panes = self.panes.borrow();
             let from = panes.iter().find(|p| p.serial() == d.serial);
@@ -929,6 +937,7 @@ impl TerminalWindow {
 
     fn end_drag(&self) {
         self.drag.set(None);
+        cube::lid(&self.shared, false);
         for p in self.panes.borrow().iter() {
             p.set_lifted(false);
             p.set_drop_target(false);

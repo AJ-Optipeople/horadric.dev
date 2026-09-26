@@ -83,6 +83,8 @@ mod clipboard;
 #[cfg(windows)]
 mod console;
 #[cfg(windows)]
+mod cube;
+#[cfg(windows)]
 mod dialog;
 #[cfg(windows)]
 pub use dialog::error_alone;
