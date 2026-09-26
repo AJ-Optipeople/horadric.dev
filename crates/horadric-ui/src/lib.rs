@@ -111,6 +111,8 @@ mod sound;
 #[cfg(windows)]
 mod start;
 #[cfg(windows)]
+mod stash;
+#[cfg(windows)]
 mod store;
 #[cfg(windows)]
 mod terminal;

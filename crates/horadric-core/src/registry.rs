@@ -4,7 +4,11 @@ use std::collections::BTreeMap;
 use std::time::SystemTime;
 
 use crate::event::HookEvent;
+use crate::saved::SavedSession;
 use crate::session::{Phase, Session};
+
+/// How many sessions the stash holds: a three by three grid.
+pub const STASH_SLOTS: usize = 9;
 
 /// Where [`Registry::route`] sends an event.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -20,6 +24,10 @@ pub enum Route {
 #[derive(Debug, Default)]
 pub struct Registry {
     sessions: BTreeMap<String, Session>,
+    /// Sessions put away for later, oldest first. Paused and out of the
+    /// columns, so they are not sessions here: nothing lists them, and a
+    /// hook still on its way from one does not bring back a tile.
+    stash: Vec<SavedSession>,
 }
 
 impl Registry {
@@ -52,6 +60,9 @@ impl Registry {
     /// name, since the project folder is already the cluster's title.
     /// Returns true when the session's phase changed.
     pub fn apply(&mut self, horadric_id: &str, event: &HookEvent, now: SystemTime) -> bool {
+        if self.is_stashed(horadric_id) {
+            return false;
+        }
         // A status line says nothing about whether a session is alive. One
         // ended and pruned must not come back as a tile from it.
         if event.hook_event_name == HookEvent::STATUS && !self.sessions.contains_key(horadric_id) {
@@ -130,11 +141,127 @@ impl Registry {
     pub fn is_empty(&self) -> bool {
         self.sessions.is_empty()
     }
+
+    /// Puts a session in the stash as `saved`, its tile gone. False when
+    /// the stash is full or `saved` is not a session here.
+    pub fn stash(&mut self, saved: SavedSession) -> bool {
+        if self.stash.len() >= STASH_SLOTS || self.sessions.remove(&saved.id).is_none() {
+            return false;
+        }
+        self.stash.push(saved);
+        true
+    }
+
+    /// Takes a session out of the stash and gives it its tile back,
+    /// paused, as it came in.
+    pub fn unstash(&mut self, id: &str, now: SystemTime) -> Option<SavedSession> {
+        let saved = self.discard(id)?;
+        self.add(saved.to_session(now));
+        Some(saved)
+    }
+
+    /// Takes a session out of the stash for good.
+    pub fn discard(&mut self, id: &str) -> Option<SavedSession> {
+        let at = self.stash.iter().position(|s| s.id == id)?;
+        Some(self.stash.remove(at))
+    }
+
+    /// The stash as saved, oldest first. A session also here as a tile is
+    /// left out, and so is any past the last slot.
+    pub fn set_stash(&mut self, saved: &[SavedSession]) {
+        self.stash.clear();
+        for s in saved {
+            if self.stash.len() < STASH_SLOTS
+                && !self.sessions.contains_key(&s.id)
+                && !self.is_stashed(&s.id)
+            {
+                self.stash.push(s.clone());
+            }
+        }
+    }
+
+    pub fn stashed(&self) -> &[SavedSession] {
+        &self.stash
+    }
+
+    pub fn is_stashed(&self, id: &str) -> bool {
+        self.stash.iter().any(|s| s.id == id)
+    }
+
+    pub fn stash_full(&self) -> bool {
+        self.stash.len() >= STASH_SLOTS
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn stashable(r: &mut Registry, id: &str) -> SavedSession {
+        r.add(Session::new(id, id, "C:/p"));
+        SavedSession::from_session(
+            r.get(id).unwrap(),
+            vec!["--model".into(), "x".into()],
+            false,
+        )
+    }
+
+    #[test]
+    fn a_stashed_session_leaves_the_tiles_and_comes_back_paused() {
+        let mut r = Registry::new();
+        let saved = stashable(&mut r, "a");
+        assert!(r.stash(saved));
+        assert!(r.get("a").is_none());
+        assert!(r.is_stashed("a"));
+        assert_eq!(r.len(), 0);
+        let back = r.unstash("a", SystemTime::now()).unwrap();
+        assert_eq!(back.args, ["--model", "x"]);
+        assert_eq!(r.get("a").unwrap().phase, Phase::Paused);
+        assert!(r.stashed().is_empty());
+        assert!(r.unstash("a", SystemTime::now()).is_none());
+    }
+
+    #[test]
+    fn the_stash_holds_nine_and_only_sessions_it_knows() {
+        let mut r = Registry::new();
+        for i in 0..STASH_SLOTS {
+            let saved = stashable(&mut r, &format!("s{i}"));
+            assert!(r.stash(saved));
+        }
+        assert!(r.stash_full());
+        let tenth = stashable(&mut r, "s9");
+        assert!(!r.stash(tenth));
+        assert!(r.get("s9").is_some());
+        let stranger = SavedSession::from_session(&Session::new("x", "x", "C:/p"), vec![], false);
+        r.discard("s0");
+        assert!(!r.stash(stranger));
+        assert_eq!(r.stashed().len(), STASH_SLOTS - 1);
+    }
+
+    #[test]
+    fn a_hook_from_a_stashed_session_brings_back_no_tile() {
+        let mut r = Registry::new();
+        let saved = stashable(&mut r, "a");
+        r.stash(saved);
+        assert!(!r.apply("a", &event("Stop", "c1"), SystemTime::now()));
+        assert!(r.is_empty());
+    }
+
+    #[test]
+    fn a_saved_stash_skips_tiles_repeats_and_the_overflow() {
+        let mut r = Registry::new();
+        let tile = stashable(&mut r, "tile");
+        let mut saved = vec![tile];
+        for i in 0..12 {
+            let s = Session::new(format!("s{i}"), "x", "C:/p");
+            saved.push(SavedSession::from_session(&s, vec![], false));
+        }
+        saved.push(saved[1].clone());
+        r.set_stash(&saved);
+        let ids: Vec<&str> = r.stashed().iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, ["s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8"]);
+        assert!(r.get("tile").is_some());
+    }
 
     #[test]
     fn adopts_unknown_session_named_by_id() {

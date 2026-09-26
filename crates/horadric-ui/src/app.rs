@@ -103,17 +103,18 @@ use crate::keys::{self, FontStep};
 use crate::layout::{self, Metrics};
 use crate::loot::Loot;
 use crate::menu::{self, Item};
-use crate::render::Gpu;
+use crate::render::{Gpu, StashLook};
 use crate::screens::{self, Screen};
 use crate::sound;
 use crate::start::{self, StartWindow};
+use crate::stash::{self, StashWindow};
 use crate::terminal::{self, Place, TerminalWindow};
 use crate::toast::{self, Kind, Toasts};
 use crate::tray::{self, Choice, Tray};
 use crate::usage::{self, UsageWindow};
 use crate::window::{self, folder_key, project_key, project_name, Cluster, Shared};
 use crate::{
-    ask, autostart, browsers, history, inbox, paths, picker, recent, shell, snapping, store,
+    ask, autostart, browsers, history, inbox, paths, picker, recent, shell, snapping, store, theme,
     update, watch, worktree,
 };
 
@@ -158,6 +159,8 @@ const WM_HORADRIC_UPDATE: u32 = WM_APP + 16;
 const WM_HORADRIC_DOWNLOADED: u32 = WM_APP + 17;
 /// A worktree went but its branch stayed, into the runner's `kept`.
 const WM_HORADRIC_KEPT: u32 = WM_APP + 18;
+/// Show the menu for the stashed session the app's `stash_menu_for` names.
+const WM_HORADRIC_STASH_MENU: u32 = WM_APP + 19;
 
 const APP_CLASS: PCWSTR = w!("HoradricApp");
 /// Runs a console program without giving it a console window.
@@ -284,6 +287,10 @@ pub(crate) enum Input {
     TasksMode(String),
     /// The plus in a tasks tile's header: ask for a new item.
     TaskAdd(String),
+    /// A stashed session's slot clicked: bring it back.
+    Unstash(String),
+    /// A stashed session's slot right clicked.
+    StashMenu(String),
 }
 
 thread_local! {
@@ -333,6 +340,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
     }
     window::register_class()?;
     usage::register_class()?;
+    stash::register_class()?;
     dropdown::register_class()?;
     ask::register_class()?;
     menu::register_class()?;
@@ -360,6 +368,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
     for s in &saved.sessions {
         registry.add(s.to_session(now));
     }
+    registry.set_stash(&saved.stash);
     let registry = Arc::new(Mutex::new(registry));
     let usage = Arc::new(Mutex::new(saved.usage.clone()));
     let requests: Arc<Mutex<Vec<Command>>> = Arc::new(Mutex::new(Vec::new()));
@@ -495,6 +504,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
         let mut app = App {
             shared,
             usage_window,
+            stash_window: None,
             start_window: None,
             status_settings,
             setting_menu_for: None,
@@ -543,6 +553,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             frozen: false,
             pick_from: None,
             menu_for: None,
+            stash_menu_for: None,
             project_menu_for: None,
             recent_menu_for: None,
             reload: None,
@@ -601,6 +612,9 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             }
             if let Some(u) = &app.usage_window {
                 u.destroy();
+            }
+            if let Some(w) = &app.stash_window {
+                w.destroy();
             }
             if let Some(s) = &app.start_window {
                 s.destroy();
@@ -770,6 +784,12 @@ unsafe extern "system" fn app_proc(
         WM_HORADRIC_TILE_MENU => {
             if let Some(id) = with_app(|app| app.menu_for.take()).flatten() {
                 tile_menu(&id);
+            }
+            return LRESULT(0);
+        }
+        WM_HORADRIC_STASH_MENU => {
+            if let Some(id) = with_app(|app| app.stash_menu_for.take()).flatten() {
+                stash_menu(&id);
             }
             return LRESULT(0);
         }
@@ -1067,14 +1087,21 @@ fn tile_menu(id: &str) {
     const OPEN: usize = 1;
     const END: usize = 2;
     const RENAME: usize = 3;
+    const STASH: usize = 4;
     let Some((kind, shell)) = with_app(|app| app.tile_kind(id)).flatten() else {
         return;
     };
     let rename = Item::action(RENAME, "Rename\u{2026}");
+    let full = with_app(|app| app.shared.registry.lock().is_ok_and(|r| r.stash_full()));
+    let stash = match full {
+        Some(false) => Item::action(STASH, "Stash"),
+        _ => Item::Disabled("Stash is full".into()),
+    };
     let items = match (kind, shell) {
         (TileKind::Live, false) => vec![
             Item::action(OPEN, "Show terminal"),
             rename,
+            stash,
             Item::Separator,
             Item::action(END, "End session"),
         ],
@@ -1087,6 +1114,7 @@ fn tile_menu(id: &str) {
         (TileKind::Paused, false) => vec![
             Item::action(OPEN, "Resume"),
             rename,
+            stash,
             Item::Separator,
             Item::action(END, "End session"),
         ],
@@ -1139,6 +1167,62 @@ fn tile_menu(id: &str) {
             with_app(|app| app.end(id));
         }
         Some(RENAME) => rename_session(id),
+        Some(STASH) if confirm_stash(id) => {
+            with_app(|app| app.stash(id));
+        }
+        _ => {}
+    }
+}
+
+/// Asks before stashing a session mid turn, which stops the turn. One
+/// waiting or at its prompt loses nothing: it resumes to the same place.
+fn confirm_stash(id: &str) -> bool {
+    let busy = with_app(|app| {
+        app.consoles
+            .get(id)
+            .is_some_and(|c| c.exit_code().is_none())
+            && app
+                .shared
+                .registry
+                .lock()
+                .is_ok_and(|r| r.get(id).is_some_and(|s| s.phase.mid_turn()))
+    });
+    if busy != Some(true) {
+        return true;
+    }
+    let pressed = ask(&Dialog {
+        tone: Tone::Warning,
+        title: "Stash session",
+        text: "It is mid turn. Stashing stops it now, and the turn is cut short. A click \
+               on it in the stash resumes the conversation.",
+        buttons: &["Stash", "Cancel"],
+        default: 1,
+    });
+    pressed == Some(0)
+}
+
+/// The menu for a stashed session: bring it back running or paused, or
+/// end it for good.
+fn stash_menu(id: &str) {
+    const BACK: usize = 1;
+    const PAUSED: usize = 2;
+    const END: usize = 3;
+    let items = vec![
+        Item::action(BACK, "Bring back"),
+        Item::action(PAUSED, "Bring back paused"),
+        Item::Separator,
+        Item::action(END, "End session"),
+    ];
+    match menu::popup(&items) {
+        Some(BACK) => {
+            with_app(|app| app.unstash(id, true));
+        }
+        Some(PAUSED) => {
+            with_app(|app| app.unstash(id, false));
+        }
+        Some(END) => {
+            with_app(|app| app.end_stashed(id));
+        }
         _ => {}
     }
 }
@@ -1694,6 +1778,8 @@ struct App {
     shared: Rc<Shared>,
     /// The account's usage and the defaults for new sessions.
     usage_window: Option<Box<UsageWindow>>,
+    /// The sessions put away for later, there while it holds any.
+    stash_window: Option<Box<StashWindow>>,
     /// Stands where the first project will go while none is open.
     start_window: Option<Box<StartWindow>>,
     /// The settings file that gives a session `horadric status` as its status
@@ -1778,6 +1864,8 @@ struct App {
     pick_from: Option<PathBuf>,
     /// The tile whose menu is about to show.
     menu_for: Option<String>,
+    /// The stashed session whose menu is about to show.
+    stash_menu_for: Option<String>,
     /// The project whose menu is about to show.
     project_menu_for: Option<String>,
     /// The recent project whose menu is about to show.
@@ -2350,6 +2438,10 @@ impl App {
                     std::iter::once(s.cwd.clone())
                         .chain(s.worktree.as_ref().map(|w| w.path.clone()))
                 })
+                .chain(r.stashed().iter().flat_map(|s| {
+                    std::iter::once(s.cwd.clone())
+                        .chain(s.worktree.as_ref().map(|w| w.path.clone()))
+                }))
                 .collect(),
             Err(_) => return,
         };
@@ -2580,6 +2672,11 @@ impl App {
             Ok(r) => r
                 .all()
                 .filter_map(|s| s.claude_session_id.clone())
+                .chain(
+                    r.stashed()
+                        .iter()
+                        .filter_map(|s| s.claude_session_id.clone()),
+                )
                 .collect(),
             Err(_) => return Vec::new(),
         };
@@ -2942,6 +3039,135 @@ impl App {
         }
     }
 
+    /// Puts a session in the stash: its process stops, its tile and pane
+    /// go, and its conversation, arguments and worktree are kept for a
+    /// click to bring back.
+    fn stash(&mut self, id: &str) {
+        let args = match (self.paused.get(id), self.consoles.get(id)) {
+            (Some(p), _) => p.args.clone(),
+            (None, Some(c)) => c.args.clone(),
+            (None, None) => return,
+        };
+        let stashed = match self.shared.registry.lock() {
+            Ok(mut r) => {
+                let Some(s) = r.get(id).filter(|s| !s.shell && s.background.is_none()) else {
+                    return;
+                };
+                let saved = SavedSession::from_session(s, args, false);
+                r.stash(saved)
+            }
+            Err(_) => false,
+        };
+        if !stashed {
+            return;
+        }
+        // Out of the registry before the process goes, so its exit finds no
+        // session to pause and no console to report on.
+        if let Some(c) = self.consoles.remove(id) {
+            if c.exit_code().is_none() {
+                c.kill();
+            }
+        }
+        self.paused.remove(id);
+        self.journaled.remove(id);
+        self.browsers.retain(|&hwnd, b| {
+            let keep = b.session != id;
+            if !keep {
+                browsers::untrack(hwnd_of(hwnd));
+            }
+            keep
+        });
+        for order in self.shared.orders.borrow_mut().values_mut() {
+            order.retain(|s| s != id);
+        }
+        self.reconcile(false);
+    }
+
+    /// Takes a session out of the stash into its project's tiles, paused,
+    /// and with `run` resumes it on the stage as well.
+    fn unstash(&mut self, id: &str, run: bool) {
+        let saved = match self.shared.registry.lock() {
+            Ok(mut r) => r.unstash(id, SystemTime::now()),
+            Err(_) => None,
+        };
+        let Some(saved) = saved else {
+            return;
+        };
+        self.paused.insert(id.to_string(), saved);
+        self.reconcile(false);
+        if run {
+            if let Err(e) = self.resume(id, true) {
+                eprintln!("horadric: cannot resume {id}: {e}");
+            }
+        }
+    }
+
+    /// Ends a stashed session for good, its worktree with it.
+    fn end_stashed(&mut self, id: &str) {
+        let saved = match self.shared.registry.lock() {
+            Ok(mut r) => r.discard(id),
+            Err(_) => None,
+        };
+        let Some(saved) = saved else {
+            return;
+        };
+        if let Some(w) = saved.worktree.clone() {
+            let key = project_key(&saved.to_session(SystemTime::now()));
+            self.remove_tree(key, w);
+        }
+        self.reconcile(false);
+    }
+
+    /// Makes the stash window match the stash: there while it holds any,
+    /// under the usage window when it first comes, each slot's look.
+    fn sync_stash(&mut self) {
+        let now = SystemTime::now();
+        let items: Vec<(String, StashLook)> = match self.shared.registry.lock() {
+            Ok(r) => r
+                .stashed()
+                .iter()
+                .map(|saved| {
+                    let s = saved.to_session(now);
+                    let key = project_key(&s);
+                    let look = StashLook {
+                        name: s.label().to_string(),
+                        project: project_name(&key),
+                        accent: theme::accent(&key),
+                        ink: theme::rarity_color(s.rarity()),
+                    };
+                    (s.id.clone(), look)
+                })
+                .collect(),
+            Err(_) => return,
+        };
+        if items.is_empty() {
+            if let Some(w) = self.stash_window.take() {
+                self.glides.borrow_mut().forget(w.hwnd.0 as isize);
+                w.destroy();
+            }
+            return;
+        }
+        if self.stash_window.is_none() {
+            match StashWindow::create(Rc::clone(&self.shared), -10_000, -10_000) {
+                // Born under whatever else stands there.
+                Ok(w) => {
+                    w.raise();
+                    self.stash_window = Some(w);
+                }
+                Err(e) => {
+                    eprintln!("horadric: cannot create the stash: {e}");
+                    return;
+                }
+            }
+        }
+        if !self.columns.contains(columns::STASH) {
+            self.columns.add_under(columns::STASH, columns::USAGE);
+        }
+        if let Some(w) = &self.stash_window {
+            w.set_items(items);
+        }
+    }
+
     /// Ends a session for good: the process, the window, the tile, and its
     /// place in the saved state.
     fn end(&mut self, id: &str) {
@@ -3059,7 +3285,7 @@ impl App {
                     .shared
                     .registry
                     .lock()
-                    .map(|r| r.get(candidate).is_some())
+                    .map(|r| r.get(candidate).is_some() || r.is_stashed(candidate))
                     .unwrap_or(false)
         };
         if !taken(&id) {
@@ -3639,10 +3865,15 @@ impl App {
             .usage_window
             .iter()
             .map(|u| (u.position(), u.size_px()));
+        let stash = self
+            .stash_window
+            .iter()
+            .map(|w| (w.position(), w.size_px()));
         self.clusters
             .iter()
             .map(|c| (c.position(), c.size_px()))
             .chain(usage)
+            .chain(stash)
             .map(|((x, y), (w, h))| [x, y, x + w, y + h])
             .collect()
     }
@@ -3785,7 +4016,10 @@ impl App {
         let mut columns = self.columns.clone();
         let recent: HashSet<String> = self.recent.iter().map(|p| folder_key(p)).collect();
         columns.forget(|k| {
-            k == columns::USAGE || recent.contains(k) || self.clusters.iter().any(|c| c.key == k)
+            k == columns::USAGE
+                || k == columns::STASH
+                || recent.contains(k)
+                || self.clusters.iter().any(|c| c.key == k)
         });
         SavedState {
             clusters,
@@ -3818,6 +4052,12 @@ impl App {
                 .filter(|(_, order)| !order.is_empty())
                 .collect(),
             sessions,
+            stash: self
+                .shared
+                .registry
+                .lock()
+                .map(|r| r.stashed().to_vec())
+                .unwrap_or_default(),
             defaults: self.shared.defaults.borrow().clone(),
             usage: self.shared.usage.lock().ok().and_then(|u| u.clone()),
             usage_window: self.usage_window.as_ref().map(|u| SavedPanel {
@@ -3922,6 +4162,7 @@ impl App {
         for c in &self.clusters {
             c.fit();
         }
+        self.sync_stash();
         self.sync_start();
         // A status line can bring the first limits, which adds rows.
         if let Some(u) = &self.usage_window {
@@ -4178,6 +4419,11 @@ impl App {
                     }
                 }
                 Input::Expand(id) => self.reveal(&id, true),
+                Input::Unstash(id) => self.unstash(&id, true),
+                Input::StashMenu(id) => {
+                    self.stash_menu_for = Some(id);
+                    post(self.notify.0 as isize, WM_HORADRIC_STASH_MENU, 0);
+                }
                 Input::TileMenu(id) => {
                     self.menu_for = Some(id);
                     post(self.notify.0 as isize, WM_HORADRIC_TILE_MENU, 0);
@@ -4355,6 +4601,9 @@ impl App {
         if let Some(u) = &self.usage_window {
             u.raise();
         }
+        if let Some(w) = &self.stash_window {
+            w.raise();
+        }
         if let Some(s) = &self.start_window {
             s.raise();
         }
@@ -4405,6 +4654,7 @@ impl App {
             .iter()
             .map(|c| c.key.clone())
             .chain(self.usage_window.iter().map(|_| columns::USAGE.to_string()))
+            .chain(self.stash_window.iter().map(|_| columns::STASH.to_string()))
             .collect()
     }
 
@@ -4417,6 +4667,9 @@ impl App {
             .filter_map(|k| {
                 if k == columns::USAGE {
                     return self.usage_window.as_deref().map(Tile::Usage);
+                }
+                if k == columns::STASH {
+                    return self.stash_window.as_deref().map(Tile::Stash);
                 }
                 self.clusters
                     .iter()
@@ -4731,6 +4984,7 @@ impl Grid {
 /// A window that stands in the columns.
 enum Tile<'a> {
     Usage(&'a UsageWindow),
+    Stash(&'a StashWindow),
     Start(&'a StartWindow),
     Cluster(&'a Cluster),
 }
@@ -4740,6 +4994,10 @@ impl Tile<'_> {
         match self {
             Tile::Usage(u) => columns::Stacked {
                 fixed: u.size_px().1,
+                files: None,
+            },
+            Tile::Stash(w) => columns::Stacked {
+                fixed: w.size_px().1,
                 files: None,
             },
             Tile::Start(s) => columns::Stacked {
@@ -4757,6 +5015,7 @@ impl Tile<'_> {
     fn key(&self) -> Option<&str> {
         match self {
             Tile::Usage(_) => Some(columns::USAGE),
+            Tile::Stash(_) => Some(columns::STASH),
             Tile::Start(_) => None,
             Tile::Cluster(c) => Some(&c.key),
         }
@@ -4765,6 +5024,7 @@ impl Tile<'_> {
     fn hwnd(&self) -> HWND {
         match self {
             Tile::Usage(u) => u.hwnd,
+            Tile::Stash(w) => w.hwnd,
             Tile::Start(s) => s.hwnd,
             Tile::Cluster(c) => c.hwnd,
         }
@@ -4773,6 +5033,7 @@ impl Tile<'_> {
     fn height(&self) -> i32 {
         match self {
             Tile::Usage(u) => u.size_px().1,
+            Tile::Stash(w) => w.size_px().1,
             Tile::Start(s) => s.size_px().1,
             Tile::Cluster(c) => c.size_px().1,
         }
@@ -4798,6 +5059,10 @@ impl Tile<'_> {
             Tile::Usage(u) => {
                 u.move_to(x, y);
                 u.invalidate();
+            }
+            Tile::Stash(w) => {
+                w.move_to(x, y);
+                w.invalidate();
             }
             Tile::Start(s) => {
                 s.move_to(x, y);

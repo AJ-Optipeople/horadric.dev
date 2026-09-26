@@ -62,7 +62,7 @@ use crate::files::{Row, Tree};
 use crate::layout::{
     self, AskLayout, Button, CaptionHit, CaptionLayout, CatchupLayout, CatchupRow, ClusterLayout,
     DialogLayout, DropdownLayout, FilesLayout, Hit, MenuLayout, Metrics, Rect, SettingRow,
-    StartHit, StartLayout, TasksLayout, ToastLayout, UsageHit, UsageLayout, KNOB_R,
+    StartHit, StartLayout, StashLayout, TasksLayout, ToastLayout, UsageHit, UsageLayout, KNOB_R,
 };
 use crate::motion::{self, ORBIT};
 use crate::theme::{self, Color};
@@ -485,6 +485,25 @@ impl UsageScene<'_> {
     }
 }
 
+/// Everything one frame of the stash needs.
+pub struct StashScene<'a> {
+    pub layout: &'a StashLayout,
+    /// The stashed sessions, one per slot from the first.
+    pub items: &'a [&'a StashLook],
+    pub hot: Option<usize>,
+    pub pressed: Option<Option<usize>>,
+}
+
+/// A stashed session as its slot shows it.
+pub struct StashLook {
+    pub name: String,
+    pub project: String,
+    /// Its project's accent, as its cluster wears it.
+    pub accent: Color,
+    /// How it ended, in item colours, as its tile's name was.
+    pub ink: Color,
+}
+
 /// Everything one frame of the start window needs.
 pub struct StartScene<'a> {
     pub layout: &'a StartLayout,
@@ -651,6 +670,15 @@ impl Target {
         unsafe {
             self.rt.BeginDraw();
             self.painter(&self.rt).usage(gpu, m, scene);
+            self.rt.EndDraw(None, None)
+        }
+    }
+
+    /// Draws the stash. `Err` means the target must be recreated.
+    pub fn draw_stash(&self, gpu: &Gpu, m: &Metrics, scene: &StashScene) -> Result<()> {
+        unsafe {
+            self.rt.BeginDraw();
+            self.painter(&self.rt).stash(gpu, m, scene);
             self.rt.EndDraw(None, None)
         }
     }
@@ -846,6 +874,48 @@ impl Painter<'_> {
         for (i, (row, look)) in l.settings.iter().zip(&scene.settings).enumerate() {
             let b = scene.button(UsageHit::Setting(i));
             self.setting(gpu, m, row, look, b, scene.open == Some(i));
+        }
+    }
+
+    /// The stash: its name and how full it is, then a well of nine slots,
+    /// a stashed session a key standing in its slot and an empty slot a
+    /// bay. Keys are latched further in than a tile's: put away, not at
+    /// work.
+    unsafe fn stash(&self, gpu: &Gpu, m: &Metrics, scene: &StashScene) {
+        let l = scene.layout;
+        self.plate(m, l.size);
+        let h = &l.header;
+        let label = Rect::new(h.x + 4.0, h.y, h.w - 8.0, h.h);
+        self.text(&gpu.small, theme::TEXT_DIM, "Stash", label);
+        let count = format!("{} of {}", scene.items.len(), l.slots.len());
+        self.text_tabular(gpu, &gpu.small_right, theme::TEXT_DIM, &count, label);
+        self.sunk(gpu, &l.well, m.tile_radius, theme::WELL);
+        let radius = m.tile_radius - 4.0;
+        for (i, r) in l.slots.iter().enumerate() {
+            let Some(item) = scene.items.get(i) else {
+                self.latched(gpu, r, radius, 0.5);
+                continue;
+            };
+            let b = layout::button(Some(i), scene.hot, scene.pressed);
+            let depth = match b {
+                Button::Hover => 0.9,
+                Button::Idle => 0.45,
+                Button::Pressed => 0.1,
+            };
+            self.key(gpu, r, radius, theme::SURFACE, depth, 1.0);
+            let pad = 8.0;
+            let line_h = (r.h - 8.0) / 2.0;
+            let name = Rect::new(r.x + pad, r.y + 4.0, r.w - 2.0 * pad, line_h);
+            self.text(&gpu.small, item.ink, &item.name, name);
+            let led_x = r.x + pad + 2.5;
+            let project = Rect::new(
+                led_x + 7.0,
+                name.bottom(),
+                r.right() - pad - led_x - 7.0,
+                line_h,
+            );
+            self.led(led_x, project.y + project.h / 2.0, item.accent);
+            self.text(&gpu.small, theme::TEXT_DIM, &item.project, project);
         }
     }
 

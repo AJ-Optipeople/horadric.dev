@@ -26,6 +26,9 @@ pub struct SavedState {
     pub version: u32,
     #[serde(default)]
     pub sessions: Vec<SavedSession>,
+    /// The sessions put away in the stash, oldest first. Never running.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stash: Vec<SavedSession>,
     #[serde(default)]
     pub clusters: Vec<SavedCluster>,
     /// The columns the tiles stand in, left to right, each a list of keys

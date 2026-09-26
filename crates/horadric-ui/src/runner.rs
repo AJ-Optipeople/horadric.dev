@@ -284,8 +284,12 @@ impl App {
         Some(self.shared.registry.lock().ok()?.get(id)?.phase.clone())
     }
 
+    /// A stashed session holds its item as a paused one does: kept for
+    /// later, and only a click brings it back.
     fn holder(&self, id: &str) -> Holder {
+        let stashed = self.shared.registry.lock().is_ok_and(|r| r.is_stashed(id));
         match self.phase_of(id) {
+            None if stashed => Holder::Paused,
             None => Holder::Gone,
             Some(Phase::Paused) => Holder::Paused,
             Some(_) => Holder::Live,

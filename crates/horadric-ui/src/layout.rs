@@ -626,6 +626,55 @@ pub fn slider_stop(track: &Rect, n: usize, x: f32) -> usize {
     (t * (n - 1) as f32).round() as usize
 }
 
+/// The geometry of the stash: a line naming it, then a three by three
+/// grid of slots sunk into the plate, the first filled first.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StashLayout {
+    pub size: (f32, f32),
+    pub header: Rect,
+    /// The well the slots sit in.
+    pub well: Rect,
+    pub slots: Vec<Rect>,
+}
+
+pub const STASH_SIDE: usize = 3;
+const STASH_HEADER_H: f32 = 22.0;
+const STASH_SLOT_H: f32 = 50.0;
+const STASH_SLOT_GAP: f32 = 8.0;
+const STASH_INNER: f32 = 8.0;
+
+pub fn stash(m: &Metrics) -> StashLayout {
+    let full = m.width - 2.0 * m.pad;
+    let header = Rect::new(m.pad, m.pad, full, STASH_HEADER_H);
+    let top = header.bottom() + 6.0;
+    let side = STASH_SIDE as f32;
+    let slot_w = (full - 2.0 * STASH_INNER - (side - 1.0) * STASH_SLOT_GAP) / side;
+    let mut slots = Vec::with_capacity(STASH_SIDE * STASH_SIDE);
+    for row in 0..STASH_SIDE {
+        for col in 0..STASH_SIDE {
+            slots.push(Rect::new(
+                m.pad + STASH_INNER + col as f32 * (slot_w + STASH_SLOT_GAP),
+                top + STASH_INNER + row as f32 * (STASH_SLOT_H + STASH_SLOT_GAP),
+                slot_w,
+                STASH_SLOT_H,
+            ));
+        }
+    }
+    let h = 2.0 * STASH_INNER + side * STASH_SLOT_H + (side - 1.0) * STASH_SLOT_GAP;
+    let well = Rect::new(m.pad, top, full, h);
+    StashLayout {
+        size: (m.width, well.bottom() + m.pad),
+        header,
+        well,
+        slots,
+    }
+}
+
+/// The slot under a point, if any.
+pub fn stash_hit(l: &StashLayout, x: f32, y: f32) -> Option<usize> {
+    l.slots.iter().position(|r| r.contains(x, y))
+}
+
 /// Which part of the usage window a point is on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UsageHit {
@@ -2725,5 +2774,24 @@ mod tests {
     fn the_catchup_stands_a_little_above_the_middle() {
         assert_eq!(catchup_place((400, 300), [0, 0, 1000, 900]), (300, 200));
         assert_eq!(catchup_place((400, 1000), [0, 0, 1000, 900]), (300, 0));
+    }
+
+    #[test]
+    fn the_stash_is_three_by_three_inside_its_well_and_the_window() {
+        let m = Metrics::default();
+        let l = stash(&m);
+        assert_eq!(l.slots.len(), 9);
+        assert_eq!(l.size.0, m.width);
+        for r in &l.slots {
+            assert!(r.x >= l.well.x && r.right() <= l.well.right() + 0.01);
+            assert!(r.y >= l.well.y && r.bottom() <= l.well.bottom() + 0.01);
+        }
+        assert!(l.well.bottom() < l.size.1);
+        // Filled row by row, left to right.
+        assert_eq!(l.slots[1].y, l.slots[0].y);
+        assert!(l.slots[3].y > l.slots[2].y);
+        let (x, y) = (l.slots[4].x + 1.0, l.slots[4].y + 1.0);
+        assert_eq!(stash_hit(&l, x, y), Some(4));
+        assert_eq!(stash_hit(&l, l.header.x + 1.0, l.header.y + 1.0), None);
     }
 }

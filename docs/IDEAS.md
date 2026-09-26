@@ -52,6 +52,8 @@ to keep for later. History already has every session, but history is
 everything; the stash is the few you chose. A stashed session is paused and
 out of the columns, and a click brings it back as it was.
 
+Built: see "The stash" in [PLAN.md](PLAN.md).
+
 ### Tal Rasha's tombs
 
 Seven tombs and only one is real. Start the same task in several sessions

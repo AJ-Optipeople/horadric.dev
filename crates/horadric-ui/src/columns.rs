@@ -15,6 +15,9 @@
 /// folder path, so it can never be this.
 pub const USAGE: &str = "horadric:usage";
 
+/// The key the stash stands in the columns by.
+pub const STASH: &str = "horadric:stash";
+
 /// One column: its keys top to bottom, some of them projects with nothing
 /// open right now, which keep their place for when they come back.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -132,6 +135,18 @@ impl Columns {
                 scroll: 0,
             }),
         }
+    }
+
+    /// Puts `key` right under `above`, or at the top of the first column
+    /// when `above` stands nowhere. The stash goes under the usage window:
+    /// it belongs to no project either.
+    pub fn add_under(&mut self, key: &str, above: &str) {
+        let Some(i) = self.find(above) else {
+            return self.add_first(key);
+        };
+        let keys = &mut self.cols[i].keys;
+        let at = keys.iter().position(|k| k == above).map_or(0, |p| p + 1);
+        keys.insert(at, key.to_string());
     }
 
     /// Puts `key` at the bottom of the visible column `col`, as
@@ -373,6 +388,11 @@ mod tests {
         let mut c = cols(&[&["a"], &["b"]]);
         c.add_first(USAGE);
         assert_eq!(c.keys(), vec![vec![USAGE, "a"], vec!["b"]]);
+        c.add_under(STASH, USAGE);
+        assert_eq!(c.keys(), vec![vec![USAGE, STASH, "a"], vec!["b"]]);
+        let mut alone = Columns::from_keys(&[vec!["a".into()]]);
+        alone.add_under(STASH, USAGE);
+        assert_eq!(alone.keys(), vec![vec![STASH, "a"]]);
         let mut empty = Columns::default();
         empty.add_first(USAGE);
         assert_eq!(empty.keys(), vec![vec![USAGE]]);
