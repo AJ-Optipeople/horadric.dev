@@ -30,7 +30,7 @@ use horadric_core::journal::{self, Entry, What};
 use horadric_core::tasks::{self, Holder, Mark, Mode, Next, Task, TASKS_FILE};
 use horadric_core::usage::format_until;
 use horadric_core::worktree::{self, Worktree};
-use horadric_core::{ssh, Phase, WaitReason};
+use horadric_core::{fleet, ssh, Phase, WaitReason};
 use horadric_hooks::tasks as file;
 
 use super::{post, unix_now, with_app, App, WM_HORADRIC_KEPT, WM_HORADRIC_TASK_MENU};
@@ -158,13 +158,17 @@ fn horadric_command() -> String {
         .unwrap_or_else(|_| "horadric".into())
 }
 
-/// What an agent started in `dir` is told about the project's hosts,
-/// with the Windows `ssh` it should run, the one an SSH terminal runs.
+/// What an agent started in `dir` is told about the project's hosts and
+/// fleet, with the Windows `ssh` it should run, the one an SSH terminal
+/// runs.
 pub fn ssh_prompt(dir: &Path) -> Option<String> {
     let ssh = crate::console::ssh_program()
         .map(|p| command_for(&p.to_string_lossy()))
         .unwrap_or_else(|| "ssh".into());
-    ssh::system_prompt(&file::hosts(dir), &ssh)
+    let fleet = file::fleet(dir).map(|(path, devices)| {
+        fleet::system_prompt(&path.to_string_lossy().replace('\\', "/"), &devices)
+    });
+    ssh::system_prompt(&file::hosts(dir), &ssh, fleet)
 }
 
 impl App {

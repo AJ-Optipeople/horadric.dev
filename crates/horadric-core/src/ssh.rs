@@ -27,10 +27,23 @@ pub fn hosts(config: &str) -> Vec<String> {
 }
 
 /// Whether `ssh` would take `host` as one destination and nothing else.
-fn usable(host: &str) -> bool {
+pub fn usable(host: &str) -> bool {
     !host.is_empty()
         && !host.starts_with('-')
         && !host.chars().any(|c| c.is_whitespace() || c.is_control())
+}
+
+/// Why a typed `host` cannot be connected to or added, None when it can.
+/// A `known` name is one from a list, taken as it is.
+pub fn refusal(host: &str, known: bool) -> Option<String> {
+    let host = host.trim();
+    if host.is_empty() {
+        Some("Type a name, or pick one from the list".into())
+    } else if known || usable(host) {
+        None
+    } else {
+        Some("ssh takes one word that does not start with -".into())
+    }
 }
 
 /// `config` with `host` added to the end of its hosts, everything else
@@ -107,26 +120,50 @@ pub fn keeps(code: u32) -> bool {
 /// `BatchMode` makes a host that wants a password, a passphrase or a new
 /// host key fail at once, since nobody can answer a prompt in the agent's
 /// shell.
-pub fn system_prompt(hosts: &[String], ssh: &str) -> Option<String> {
-    if hosts.is_empty() {
+///
+/// `fleet` is what [`crate::fleet::system_prompt`] says about the
+/// project's inventory, if it has one. Past [`LISTED_HOSTS`] the hosts are
+/// counted rather than named, for the same reason the fleet's devices are.
+pub fn system_prompt(hosts: &[String], ssh: &str, fleet: Option<String>) -> Option<String> {
+    if hosts.is_empty() && fleet.is_none() {
         return None;
     }
-    let list = hosts
-        .iter()
-        .map(|h| format!("`{h}`"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    Some(format!(
-        "This project has servers you can reach over SSH: {list}. Run a command on \
-         one with `{ssh} -o BatchMode=yes <host> '<command>'` from your shell. Use \
-         that `ssh` rather than the one on your PATH: it is the Windows one, which \
-         reaches the keys in the Windows ssh-agent. Your shell can not answer a \
-         prompt, so with BatchMode a host that asks for a password or a passphrase, \
-         or whose host key is not known yet, fails at once. If that happens, say so \
-         and ask the human to connect once from the project's SSH terminal instead \
-         of working around it."
-    ))
+    let mut out = String::new();
+    if hosts.len() > LISTED_HOSTS {
+        out.push_str(&format!(
+            "This project has {} servers you can reach over SSH, listed under \
+             `hosts` in its {}. ",
+            hosts.len(),
+            crate::tasks::CONFIG_FILE
+        ));
+    } else if !hosts.is_empty() {
+        let list = hosts
+            .iter()
+            .map(|h| format!("`{h}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        out.push_str(&format!(
+            "This project has servers you can reach over SSH: {list}. "
+        ));
+    }
+    if let Some(fleet) = fleet {
+        out.push_str(&fleet);
+        out.push(' ');
+    }
+    out.push_str(&format!(
+        "Run a command on one with `{ssh} -o BatchMode=yes <host> '<command>'` from \
+         your shell. Use that `ssh` rather than the one on your PATH: it is the \
+         Windows one, which reaches the keys in the Windows ssh-agent. Your shell can \
+         not answer a prompt, so with BatchMode a host that asks for a password or a \
+         passphrase, or whose host key is not known yet, fails at once. If that \
+         happens, say so and ask the human to connect once from the project's SSH \
+         terminal instead of working around it."
+    ));
+    Some(out)
 }
+
+/// How many hosts the agent's prompt names before it only counts them.
+pub const LISTED_HOSTS: usize = 20;
 
 /// A name for the `n`th SSH terminal of a project, counting from zero.
 pub fn name(n: usize) -> String {
@@ -221,6 +258,16 @@ Host myvps
     }
 
     #[test]
+    fn a_typed_host_is_refused_only_when_ssh_would_misread_it() {
+        assert_eq!(refusal(" myvps ", false), None);
+        assert_eq!(refusal("pi@10.0.0.5", false), None);
+        assert!(refusal("  ", true).is_some());
+        assert!(refusal("-oProxyCommand=calc", false).is_some());
+        assert!(refusal("my vps", false).is_some());
+        assert_eq!(refusal("my vps", true), None);
+    }
+
+    #[test]
     fn the_host_goes_after_the_end_of_options() {
         assert_eq!(args("myvps"), vec!["--", "myvps"]);
     }
@@ -236,7 +283,7 @@ Host myvps
     #[test]
     fn the_prompt_names_every_host_and_the_ssh_to_run() {
         let hosts = vec!["myvps".to_string(), "deploy@203.0.113.7".to_string()];
-        let p = system_prompt(&hosts, "C:/Windows/System32/OpenSSH/ssh.exe").unwrap();
+        let p = system_prompt(&hosts, "C:/Windows/System32/OpenSSH/ssh.exe", None).unwrap();
         assert!(p.contains("`myvps`, `deploy@203.0.113.7`."));
         assert!(
             p.contains("`C:/Windows/System32/OpenSSH/ssh.exe -o BatchMode=yes <host> '<command>'`")
@@ -246,7 +293,26 @@ Host myvps
 
     #[test]
     fn no_prompt_without_hosts() {
-        assert_eq!(system_prompt(&[], "ssh"), None);
+        assert_eq!(system_prompt(&[], "ssh", None), None);
+    }
+
+    #[test]
+    fn many_hosts_are_counted_not_named() {
+        let hosts: Vec<String> = (0..=LISTED_HOSTS).map(|i| format!("h{i}")).collect();
+        let p = system_prompt(&hosts, "ssh", None).unwrap();
+        assert!(p.contains("has 21 servers you can reach over SSH, listed under `hosts`"));
+        assert!(!p.contains("`h0`"));
+        let p = system_prompt(&hosts[..LISTED_HOSTS], "ssh", None).unwrap();
+        assert!(p.contains("`h0`"));
+    }
+
+    #[test]
+    fn a_fleet_alone_is_told_how_to_reach_it() {
+        let p = system_prompt(&[], "ssh", Some("A fleet.".into())).unwrap();
+        assert!(p.starts_with("A fleet. Run a command on one with `ssh -o BatchMode=yes"));
+        let hosts = vec!["myvps".to_string()];
+        let p = system_prompt(&hosts, "ssh", Some("A fleet.".into())).unwrap();
+        assert!(p.contains("`myvps`. A fleet. Run a command"));
     }
 
     #[test]

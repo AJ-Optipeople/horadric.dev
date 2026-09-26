@@ -454,6 +454,8 @@ pub struct AskScene<'a> {
     /// the one Enter takes.
     pub list: &'a [(&'a str, &'a str)],
     pub picked: Option<usize>,
+    /// The icon on each suggestion.
+    pub glyph: char,
     /// The Browse key's look, when it has one.
     pub browse: Button,
 }
@@ -1231,7 +1233,7 @@ impl Painter<'_> {
             }
             let ink = if lit { theme::TEXT } else { theme::TEXT_DIM };
             let glyph = Rect::new(r.x + 4.0, r.y, 22.0, r.h);
-            self.icon(&gpu.icon_small, ink, '\u{E8B7}', glyph);
+            self.icon(&gpu.icon_small, ink, scene.glyph, glyph);
             let text = Rect::new(r.x + 32.0, r.y, r.w - 32.0 - 10.0, r.h);
             self.text(&gpu.small, ink, label, text);
             if !detail.is_empty() {
