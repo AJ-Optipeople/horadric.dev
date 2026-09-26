@@ -1049,7 +1049,16 @@ and a terminal is a screen set into the panel.
   Windows' animations off, and none of it asks for a frame at rest.
   - *A finished turn lands*: its key jumps and bounces once, and a loot
     beam of the lamp's green shoots up over the tiles above and fades in
-    a second ("Loot drops" in IDEAS.md, without the sound).
+    a second ("Loot drops" in IDEAS.md).
+  - *Loot is heard* (`loot.rs`, pure and tested; `sound.rs`): a soft
+    thump and a rising glint with the beam, and a high two note bell, E6
+    then B6, when a session's work lands on `main`, merged from its menu or
+    found there by git. Made from sine waves into a WAV in memory and
+    played by `PlaySound`, so they are our own and need no crate or file.
+    Off until "Loot sounds" in the tray turns them on, which plays the drop
+    so the choice is heard. Silent in a full screen game, a presentation,
+    quiet time, and under focus assist or do not disturb, which
+    `ToastNotificationManager::NotificationMode` says.
   - *Waiting quickens*: the breath goes from 1.8 s to 1.4, 1.1 and 0.9 s
     at 1, 5 and 15 minutes, counted across the steps so it never jumps.
   - *Every phase change eases* the key's depth, presence and lamp from the

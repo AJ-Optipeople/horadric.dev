@@ -29,7 +29,7 @@
 //! app can work down the list by itself ([`board`], `horadric_core::tasks`).
 //!
 //! [`anim`], [`board`], [`columns`], [`field`], [`files`], [`find`], [`layout`], [`theme`], [`palette`], [`paste`],
-//! [`keys`], [`frame`], [`icon`], [`inbox`], [`motion`], [`paths`], [`viewer`],
+//! [`keys`], [`frame`], [`icon`], [`inbox`], [`loot`], [`motion`], [`paths`], [`viewer`],
 //! [`highlight`], [`history`], [`screens`] and [`shell`] are pure and tested, and so is
 //! the list logic in `recent`.
 //! `update` is the updater's crypto through CNG, tested with keys made in
@@ -50,6 +50,7 @@ pub mod icon;
 pub mod inbox;
 pub mod keys;
 pub mod layout;
+pub mod loot;
 pub mod motion;
 pub mod palette;
 pub mod paste;
@@ -105,6 +106,8 @@ mod recent;
 mod render;
 #[cfg(windows)]
 mod snapping;
+#[cfg(windows)]
+mod sound;
 #[cfg(windows)]
 mod start;
 #[cfg(windows)]

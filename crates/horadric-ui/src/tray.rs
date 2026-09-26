@@ -59,6 +59,8 @@ pub enum Choice {
     ToggleAutostart,
     /// Say, or stop saying, when a session starts waiting.
     ToggleNotify,
+    /// Play, or stop playing, the loot sounds.
+    ToggleSounds,
     /// Look for a newer release now, and say what was found.
     CheckUpdates,
     /// Install the newer release the menu offered.
@@ -130,7 +132,8 @@ pub const HISTORY: usize = 1000;
 
 /// The tray menu. `autostart` is None when the switch is not offered,
 /// `hotkeys` are the shortcuts for the next waiting session and for the
-/// catch-up, where they have one, and `notify` whether a session that starts waiting says so. `history`
+/// catch-up, where they have one, `notify` whether a session that starts
+/// waiting says so, and `sounds` whether loot drops are heard. `history`
 /// holds a History menu for each of `recent_projects`, in order.
 /// `screens` are offered when there is more than one, with the one named
 /// `shown` checked. `update` is a newer release's version, when a check
@@ -143,6 +146,7 @@ pub fn menu(
     autostart: Option<bool>,
     hotkeys: [Option<&str>; 2],
     notify: bool,
+    sounds: bool,
     terminal: bool,
     screens: &[Screen],
     shown: Option<&str>,
@@ -163,6 +167,7 @@ pub fn menu(
     const CHECK: usize = 11;
     const UPDATE: usize = 12;
     const LISTEN: usize = 13;
+    const SOUNDS: usize = 14;
     const SCREEN: usize = 50;
     const RECENT: usize = 100;
     const FONT: usize = 200;
@@ -243,6 +248,11 @@ pub fn menu(
         label: "Notify when a session needs you".into(),
         checked: notify,
     });
+    items.push(Item::Action {
+        id: SOUNDS,
+        label: "Loot sounds".into(),
+        checked: sounds,
+    });
     if let Some(checked) = autostart {
         items.push(Item::Action {
             id: AUTOSTART,
@@ -263,6 +273,7 @@ pub fn menu(
         QUIT => Some(Choice::Quit),
         AUTOSTART => Some(Choice::ToggleAutostart),
         NOTIFY => Some(Choice::ToggleNotify),
+        SOUNDS => Some(Choice::ToggleSounds),
         TIDY => Some(Choice::Tidy),
         NEXT => Some(Choice::NextWaiting),
         LISTEN => Some(Choice::Listen),

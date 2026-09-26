@@ -83,8 +83,7 @@ When a session finishes, a beam of light rises from its tile, like an item
 dropping, with a short sound. A high chime, like a rune dropping, when its
 work lands on `main`. The sounds have to be our own, never Blizzard's.
 
-The beam is built, without the sounds: see "Life in the tiles" in
-[PLAN.md](PLAN.md).
+Built, sounds and all: see "Life in the tiles" in [PLAN.md](PLAN.md).
 
 ### The transmute animation
 

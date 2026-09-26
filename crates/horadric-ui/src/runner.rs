@@ -930,13 +930,18 @@ impl App {
             })
             .map(|s| s.id.clone())
             .collect();
+        let mut rune = false;
         for id in ids {
             if let Some(s) = r.get_mut(&id) {
+                rune |= !s.loot.landed;
                 s.loot.committed = true;
                 s.loot.landed = true;
             }
         }
         drop(r);
+        if rune {
+            self.sound(crate::loot::Loot::Rune);
+        }
         for c in &self.clusters {
             c.invalidate();
         }

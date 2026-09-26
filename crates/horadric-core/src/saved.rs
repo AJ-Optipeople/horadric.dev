@@ -70,6 +70,10 @@ pub struct SavedState {
     /// No notification when a session starts waiting on you.
     #[serde(default)]
     pub quiet: bool,
+    /// Loot sounds when a turn finishes and when work lands, off until
+    /// turned on from the tray.
+    #[serde(default)]
+    pub sounds: bool,
     /// The device name of the screen the columns stand on, when it is not
     /// the primary one.
     #[serde(default)]
@@ -383,6 +387,7 @@ mod tests {
             usage_window: Some(SavedPanel { collapsed: true }),
             font_size: Some(17.0),
             quiet: true,
+            sounds: true,
             screen: Some(r"\\.\DISPLAY2".into()),
             ..Default::default()
         };
@@ -399,6 +404,7 @@ mod tests {
         assert_eq!(back.usage_window, state.usage_window);
         assert_eq!(back.font_size, state.font_size);
         assert!(back.quiet);
+        assert!(back.sounds);
         assert_eq!(back.screen, state.screen);
         let tile = back.sessions[0].to_session(SystemTime::now());
         assert_eq!(tile.phase, Phase::Paused);

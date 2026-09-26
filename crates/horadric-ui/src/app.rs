@@ -101,9 +101,11 @@ use crate::glide::Glides;
 use crate::glyphs::{self, Font};
 use crate::keys::{self, FontStep};
 use crate::layout::{self, Metrics};
+use crate::loot::Loot;
 use crate::menu::{self, Item};
 use crate::render::Gpu;
 use crate::screens::{self, Screen};
+use crate::sound;
 use crate::start::{self, StartWindow};
 use crate::terminal::{self, Place, TerminalWindow};
 use crate::toast::{self, Kind, Toasts};
@@ -534,6 +536,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             recent: saved.recent.clone(),
             autostart_offered,
             quiet: saved.quiet,
+            sounds: saved.sounds,
             font_family: saved.font_family.clone(),
             screen: saved.screen.clone(),
             last_saved: Some(saved),
@@ -848,11 +851,12 @@ fn with_app<R>(f: impl FnOnce(&mut App) -> R) -> Option<R> {
 }
 
 fn tray_menu(hwnd: HWND) {
-    let (recent, hotkeys, notify, terminal, update) = with_app(|app| {
+    let (recent, hotkeys, notify, sounds, terminal, update) = with_app(|app| {
         (
             app.recent.clone(),
             [app.hotkey, app.listen_key],
             !app.quiet,
+            app.sounds,
             !app.consoles.is_empty(),
             app.update.as_ref().map(|m| m.version.clone()),
         )
@@ -887,6 +891,7 @@ fn tray_menu(hwnd: HWND) {
         autostart,
         hotkeys,
         notify,
+        sounds,
         terminal,
         &screens,
         shown.as_deref(),
@@ -899,6 +904,14 @@ fn tray_menu(hwnd: HWND) {
             with_app(|app| {
                 app.quiet = !app.quiet;
                 app.save();
+            });
+        }
+        Some(Choice::ToggleSounds) => {
+            with_app(|app| {
+                app.sounds = !app.sounds;
+                app.save();
+                // So the choice is heard the moment it is made.
+                app.sound(Loot::Drop);
             });
         }
         Some(Choice::New) => pick_and_start(hwnd, projects.first().map(PathBuf::from)),
@@ -1791,6 +1804,8 @@ struct App {
     alert_for: Option<String>,
     /// No notifications, from the tray menu.
     quiet: bool,
+    /// Loot sounds, from the tray menu.
+    sounds: bool,
     /// The terminal font picked from the tray menu. Kept as picked, so a
     /// family that is uninstalled for a while comes back when it is not.
     font_family: Option<String>,
@@ -2501,6 +2516,7 @@ impl App {
         if counts.is_empty() {
             return;
         }
+        let mut rune = false;
         if let Ok(mut r) = self.shared.registry.lock() {
             for (id, diff, landed) in counts {
                 if let Some(rc) = self.recounts.get_mut(&id) {
@@ -2510,10 +2526,14 @@ impl App {
                     s.diff = diff;
                     // A worktree swept after its merge can no longer say.
                     if let Some(landed) = landed {
+                        rune |= landed && !s.loot.landed;
                         s.loot.landed = landed;
                     }
                 }
             }
+        }
+        if rune {
+            self.sound(Loot::Rune);
         }
         for c in &self.clusters {
             c.invalidate();
@@ -3805,6 +3825,7 @@ impl App {
             }),
             font_size: Some(self.shared.font.size()).filter(|&s| s != keys::FONT_DEFAULT),
             quiet: self.quiet,
+            sounds: self.sounds,
             font_family: self.font_family.clone(),
             screen: self.screen.clone(),
             live: !self.quit,
@@ -3956,6 +3977,7 @@ impl App {
         let now = unix_now();
         let mut lines = Vec::new();
         let mut seen = HashSet::new();
+        let mut dropped = false;
         if let Ok(r) = self.shared.registry.lock() {
             for s in r.all() {
                 seen.insert(s.id.clone());
@@ -3976,9 +3998,12 @@ impl App {
                     Phase::Waiting(_) => What::Waiting {
                         line: s.last_line.clone(),
                     },
-                    Phase::Done => What::Done {
-                        line: s.last_line.clone(),
-                    },
+                    Phase::Done => {
+                        dropped = true;
+                        What::Done {
+                            line: s.last_line.clone(),
+                        }
+                    }
                     Phase::Ended => What::Ended,
                     _ => continue,
                 };
@@ -4013,6 +4038,17 @@ impl App {
         }
         for e in &lines {
             store::journal(e);
+        }
+        // With the beam, which rises the moment the tile turns done.
+        if dropped {
+            self.sound(Loot::Drop);
+        }
+    }
+
+    /// Plays `loot` when the tray says loot is heard.
+    fn sound(&self, loot: Loot) {
+        if self.sounds {
+            sound::play(loot);
         }
     }
 
