@@ -67,7 +67,7 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{
-    SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+    GetDpiForWindow, SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     RegisterHotKey, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, VK_SPACE,
@@ -83,6 +83,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::agents;
+use crate::appear;
 use crate::caption;
 use crate::columns::{self, Columns};
 use crate::console::{self, Console, Launch};
@@ -481,6 +482,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             toasts,
             glides: RefCell::default(),
             glided: Cell::new(None),
+            arranged: false,
             paused: saved
                 .sessions
                 .iter()
@@ -1540,6 +1542,8 @@ struct App {
     glides: RefCell<Glides>,
     /// When the glides last moved on, while they move.
     glided: Cell<Option<Instant>>,
+    /// The columns have been laid out with windows in them once.
+    arranged: bool,
     /// Sessions with no process that a click resumes: restored from disk,
     /// or left behind by a crash.
     paused: HashMap<String, SavedSession>,
@@ -4055,7 +4059,7 @@ impl App {
             let (filled, room) = columns::fill(&items, g.top, g.height, g.gap, g.min_files, scroll);
             scrolls.push((*model, scroll.clamp(0, room)));
             for (t, f) in tiles.iter().zip(filled) {
-                t.place(x, f, &mut self.glides.borrow_mut(), animate);
+                t.place(x, f, &mut self.glides.borrow_mut(), animate, self.arranged);
             }
         }
         if shown.is_empty() {
@@ -4068,12 +4072,16 @@ impl App {
                     },
                     &mut self.glides.borrow_mut(),
                     animate,
+                    self.arranged,
                 );
             }
         }
         for (model, scroll) in scrolls {
             self.columns.cols[model].scroll = scroll;
         }
+        // The windows there at the start stand there at once; the ones
+        // that come after arrive.
+        self.arranged = !self.clusters.is_empty() || self.start_window.is_some();
         if self.glides.borrow().moving() && self.glided.get().is_none() {
             self.glided.set(Some(Instant::now()));
             unsafe {
@@ -4282,12 +4290,16 @@ impl Tile<'_> {
 
     /// Sends it to its place in the column at `x`, a cluster's files tile
     /// sized first. A window already on screen glides there.
-    fn place(&self, x: i32, f: columns::Filled, glides: &mut Glides, animate: bool) {
+    /// With `arrive`, a window coming onto the screen for the first time
+    /// rises into its place and fades in.
+    fn place(&self, x: i32, f: columns::Filled, glides: &mut Glides, animate: bool, arrive: bool) {
         if let Tile::Cluster(c) = self {
             c.set_files_room(f.files);
         }
         let hwnd = self.hwnd();
-        let Some((x, y)) = glides.aim(hwnd.0 as isize, window_at(hwnd), (x, f.y), animate) else {
+        let at = window_at(hwnd);
+        let fresh = at.0 <= -5000 || at.1 <= -5000;
+        let Some((x, y)) = glides.aim(hwnd.0 as isize, at, (x, f.y), animate) else {
             return;
         };
         // A window that was created off screen has never painted. Moving
@@ -4305,6 +4317,11 @@ impl Tile<'_> {
                 c.move_to(x, y);
                 c.invalidate();
             }
+        }
+        if fresh && arrive && !matches!(self, Tile::Usage(_)) {
+            let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96) as f32;
+            let rise = (appear::CLUSTER_RISE * dpi / 96.0).round() as i32;
+            appear::begin(hwnd, appear::CLUSTER, rise);
         }
     }
 }

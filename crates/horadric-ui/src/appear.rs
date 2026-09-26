@@ -27,6 +27,10 @@ pub const TIMER: usize = 0x4150;
 pub const MENU: Duration = Duration::from_millis(90);
 /// A dialog or the picker, a question that waits for its answer.
 pub const DIALOG: Duration = Duration::from_millis(160);
+/// A cluster that opens after the app has started, for a new project.
+pub const CLUSTER: Duration = Duration::from_millis(300);
+/// How far below its place a new cluster starts, in DIPs.
+pub const CLUSTER_RISE: f32 = 14.0;
 /// How far below its place a dialog starts, in DIPs.
 pub const RISE: f32 = 8.0;
 
