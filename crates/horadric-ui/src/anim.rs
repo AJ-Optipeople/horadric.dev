@@ -292,6 +292,62 @@ impl<T: Clone> Leaving<T> {
     }
 }
 
+/// Rows of the tasks tile whose item has just been done, kept a moment in
+/// the place they had while a strike runs through them and they fold.
+#[derive(Default)]
+pub struct Finishing {
+    last: Vec<String>,
+    going: Vec<(String, usize, Instant)>,
+    started: bool,
+}
+
+impl Finishing {
+    /// Takes the titles shown now, in order, and whether a title that is no
+    /// longer shown was done rather than taken out of the list. Returns the
+    /// finishing rows to put back: where, which, and how far through, 0 to
+    /// 1. The second value is true when one has just finished for good.
+    pub fn step(
+        &mut self,
+        now: Instant,
+        shown: Vec<String>,
+        done: impl Fn(&str) -> bool,
+    ) -> (Vec<(usize, String, f32)>, bool) {
+        if self.started {
+            for (i, title) in self.last.iter().enumerate() {
+                let known = self.going.iter().any(|(t, _, _)| t == title);
+                if !shown.contains(title) && !known && done(title) {
+                    self.going.push((title.clone(), i, now));
+                }
+            }
+        }
+        self.started = true;
+        let before = self.going.len();
+        self.going
+            .retain(|(t, _, at)| now.duration_since(*at) < motion::TASK_DONE && !shown.contains(t));
+        let ended = self.going.len() < before;
+        // Where they stood in the list they left, so the others close up
+        // round them.
+        self.last = shown;
+        let mut going: Vec<_> = self
+            .going
+            .iter()
+            .map(|(t, i, at)| {
+                let p = motion::progress(now.duration_since(*at), motion::TASK_DONE);
+                (*i, t.clone(), p)
+            })
+            .collect();
+        going.sort_by_key(|g| g.0);
+        for (t, _, _) in &self.going {
+            if !self.last.contains(t) {
+                let at = going.iter().position(|g| &g.1 == t).unwrap_or(0);
+                let index = going[at].0.min(self.last.len());
+                self.last.insert(index, t.clone());
+            }
+        }
+        (going, ended)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -503,6 +559,38 @@ mod tests {
         let half = l.step(now + ms(32) + motion::LEAVE / 2, only_a());
         assert!((half[0].1 - 0.5).abs() < 1e-3);
         assert!(l.step(now + ms(32) + motion::LEAVE, only_a()).is_empty());
+    }
+
+    #[test]
+    fn a_done_task_stays_in_its_place_while_it_finishes() {
+        let mut f = Finishing::default();
+        let now = Instant::now();
+        let titles = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let (going, _) = f.step(now, titles(&["a", "b", "c"]), |_| true);
+        assert!(going.is_empty());
+        let (going, ended) = f.step(now + ms(16), titles(&["a", "c"]), |t| t == "b");
+        assert_eq!(going, vec![(1, "b".to_string(), 0.0)]);
+        assert!(!ended);
+        // Still where it was a frame later, not seen as leaving again.
+        let (going, _) = f.step(now + ms(32), titles(&["a", "c"]), |_| true);
+        assert_eq!(going.len(), 1);
+        assert_eq!(going[0].0, 1);
+        let (going, ended) = f.step(
+            now + ms(16) + motion::TASK_DONE,
+            titles(&["a", "c"]),
+            |_| true,
+        );
+        assert!(going.is_empty());
+        assert!(ended);
+    }
+
+    #[test]
+    fn a_task_taken_out_of_the_list_just_goes() {
+        let mut f = Finishing::default();
+        let now = Instant::now();
+        f.step(now, vec!["a".into(), "b".into()], |_| false);
+        let (going, _) = f.step(now + ms(16), vec!["a".into()], |_| false);
+        assert!(going.is_empty());
     }
 
     #[test]

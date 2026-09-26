@@ -293,6 +293,8 @@ pub struct TasksScene {
 pub struct TaskRow {
     pub title: String,
     pub state: RowState,
+    /// Done a moment ago: how far through being struck out and folded.
+    pub finish: Option<f32>,
 }
 
 /// Everything one frame of the usage window needs.
@@ -2396,15 +2398,32 @@ impl Painter<'_> {
         }
         self.icon(&gpu.icon_small, ink, '\u{E710}', l.add);
 
+        // A row done a moment ago is struck through left to right, then
+        // folds away, and the rows under it close up over its place.
+        let mut closed = 0.0;
         for (i, (r, row)) in l.rows.iter().zip(&t.rows).enumerate() {
-            if let (Some(fill), _) = theme::button_look(scene.button(Hit::Task(i))) {
-                self.fill_rounded(&r.inset(2.0), 5.0, fill);
+            let r = &Rect::new(r.x, r.y - closed, r.w, r.h);
+            let (strike, fold) = row.finish.map_or((0.0, 0.0), |p| {
+                let share = motion::STRIKE_SHARE;
+                let strike = motion::ease_out((p / share).min(1.0));
+                (strike, ((p - share) / (1.0 - share)).clamp(0.0, 1.0))
+            });
+            let shown = 1.0 - motion::ease_in_out(fold);
+            if row.finish.is_none() {
+                if let (Some(fill), _) = theme::button_look(scene.button(Hit::Task(i))) {
+                    self.fill_rounded(&r.inset(2.0), 5.0, fill);
+                }
             }
-            let c = row.state.color();
+            let (c, glyph) = if row.finish.is_some() {
+                (theme::DONE, '\u{E73E}')
+            } else {
+                (row.state.color(), row.state.icon())
+            };
+            let c = c.fade(shown);
             self.icon(
                 &gpu.icon_small,
                 c,
-                row.state.icon(),
+                glyph,
                 Rect::new(r.x + pad - 3.0, r.y, 14.0, r.h),
             );
             let mut right = r.right() - pad;
@@ -2426,7 +2445,11 @@ impl Painter<'_> {
                 self.icon(&gpu.icon_small, theme::DONE, '\u{E8FB}', *a);
                 right = a.x - 6.0;
             }
-            let word = row.state.label();
+            let word = if row.finish.is_some() {
+                ""
+            } else {
+                row.state.label()
+            };
             let word_w = if word.is_empty() {
                 0.0
             } else {
@@ -2441,17 +2464,31 @@ impl Painter<'_> {
                 );
             }
             let title_x = r.x + pad + 16.0;
-            let ink = if row.state.needs_you() || row.state == RowState::Working {
+            let ink = if row.finish.is_some() {
+                theme::TEXT_DIM
+            } else if row.state.needs_you() || row.state == RowState::Working {
                 theme::TEXT
             } else {
                 theme::TEXT.mix(theme::TEXT_DIM, 0.35)
             };
-            self.text(
-                &gpu.body,
-                ink,
-                &row.title,
-                Rect::new(title_x, r.y, right - word_w - 8.0 - title_x, r.h),
-            );
+            let title_r = Rect::new(title_x, r.y, right - word_w - 8.0 - title_x, r.h);
+            self.text(&gpu.body, ink.fade(shown), &row.title, title_r);
+            if strike > 0.0 {
+                let long = self.measure(gpu, &gpu.body, &row.title).min(title_r.w);
+                let y = (r.y + r.h / 2.0).round() + 0.5;
+                self.brush.SetColor(&color(theme::DONE.fade(0.9 * shown)));
+                self.rt.DrawLine(
+                    Vector2 { X: title_x, Y: y },
+                    Vector2 {
+                        X: title_x + long * strike,
+                        Y: y,
+                    },
+                    self.brush,
+                    1.3,
+                    None,
+                );
+            }
+            closed += r.h * motion::ease_in_out(fold);
         }
 
         // Where the view is in a list longer than the tile.

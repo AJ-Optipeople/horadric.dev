@@ -18,6 +18,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
+use horadric_core::tasks::Mark;
 use horadric_core::{Defaults, Registry, Session, Usage};
 use windows::core::{w, Result, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
@@ -34,12 +35,13 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetCursorPos, GetWindowLongPtrW, GetWindowRect,
-    KillTimer, LoadCursorW, RegisterClassW, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
-    CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, HWND_NOTOPMOST, HWND_TOPMOST, IDC_ARROW,
-    MA_NOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_SHOWNOACTIVATE, WM_APP,
-    WM_CAPTURECHANGED, WM_DPICHANGED, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY, WM_PAINT,
-    WM_RBUTTONUP, WM_SIZE, WM_TIMER, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
+    KillTimer, LoadCursorW, PostMessageW, RegisterClassW, SetTimer, SetWindowLongPtrW,
+    SetWindowPos, ShowWindow, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, HWND_NOTOPMOST,
+    HWND_TOPMOST, IDC_ARROW, MA_NOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+    SW_SHOWNOACTIVATE, WM_APP, WM_CAPTURECHANGED, WM_DPICHANGED, WM_ERASEBKGND, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY,
+    WM_PAINT, WM_RBUTTONUP, WM_SIZE, WM_TIMER, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    WS_POPUP,
 };
 
 use crate::anim::{self, TileIn};
@@ -59,6 +61,8 @@ pub(crate) const CLASS: PCWSTR = w!("HoradricCluster");
 const DRAG_THRESHOLD: i32 = 4;
 /// The watcher left a fresh file tree in the slot.
 const WM_CLUSTER_FILES: u32 = WM_APP + 20;
+/// A finished task's row has folded away: the tasks tile lays out again.
+const WM_CLUSTER_REFIT: u32 = WM_APP + 21;
 /// The windows crate files this under `Win32_UI_Controls`, a large feature
 /// to turn on for one number.
 const WM_MOUSELEAVE: u32 = 0x02A3;
@@ -116,6 +120,10 @@ pub struct Cluster {
     tracking: Cell<bool>,
     /// Where each tile has got to on its way somewhere.
     tiles: RefCell<anim::Tiles>,
+    /// Task rows done a moment ago, struck through and folding away.
+    finishing: RefCell<anim::Finishing>,
+    /// A finished row has folded away since the last layout.
+    refit_due: Cell<bool>,
     /// Tiles whose sessions have gone, fading out where they were.
     leaving: RefCell<anim::Leaving<(layout::Rect, Session)>>,
     /// The frame interval the animation timer runs at, if it runs.
@@ -190,6 +198,8 @@ struct Item {
     line: usize,
     title: String,
     state: RowState,
+    /// Done a moment ago and on its way out of the tile, this far.
+    finish: Option<f32>,
 }
 
 struct Drag {
@@ -267,6 +277,8 @@ impl Cluster {
             tracking: Cell::new(false),
             tiles: RefCell::new(anim::Tiles::default()),
             leaving: RefCell::new(anim::Leaving::default()),
+            finishing: RefCell::new(anim::Finishing::default()),
+            refit_due: Cell::new(false),
             frames: Cell::new(None),
             dirty: Cell::new(true),
         });
@@ -437,19 +449,43 @@ impl Cluster {
             let r = registry.as_ref()?;
             Some(r.get(t.holder.as_deref()?)?.phase.clone())
         };
-        Some(
-            b.shown()
-                .into_iter()
-                .map(|i| {
-                    let t = &b.tasks[i];
-                    Item {
-                        line: t.line,
-                        title: t.title.clone(),
-                        state: board::row_state(t, phase(t).as_ref()),
-                    }
-                })
-                .collect(),
-        )
+        let mut items: Vec<Item> = b
+            .shown()
+            .into_iter()
+            .map(|i| {
+                let t = &b.tasks[i];
+                Item {
+                    line: t.line,
+                    title: t.title.clone(),
+                    state: board::row_state(t, phase(t).as_ref()),
+                    finish: None,
+                }
+            })
+            .collect();
+        let done = |title: &str| {
+            b.tasks
+                .iter()
+                .find(|t| t.title == title && t.mark == Mark::Done)
+        };
+        let titles = items.iter().map(|i| i.title.clone()).collect();
+        let (going, ended) = self
+            .finishing
+            .borrow_mut()
+            .step(Instant::now(), titles, |t| done(t).is_some());
+        if ended {
+            self.refit_due.set(true);
+        }
+        for (at, title, p) in going {
+            let line = done(&title).map_or(usize::MAX, |t| t.line);
+            let item = Item {
+                line,
+                title,
+                state: RowState::Open,
+                finish: Some(p),
+            };
+            items.insert(at.min(items.len()), item);
+        }
+        Some(items)
     }
 
     /// For each row the tasks tile shows, whether it has an approve button,
@@ -653,6 +689,7 @@ impl Cluster {
                     .map(|i| TaskRow {
                         title: i.title.clone(),
                         state: i.state,
+                        finish: i.finish,
                     })
                     .collect(),
                 total: items.len(),
@@ -710,7 +747,10 @@ impl Cluster {
             .collect();
         // A tile on its way somewhere changes what holds still.
         let moving = looks.iter().zip(&inputs).any(|(l, t)| l.moving(t.y));
-        let rebuild = self.dirty.replace(false) || moving || !ghosts.is_empty();
+        let finishing = items
+            .as_ref()
+            .is_some_and(|items| items.iter().any(|i| i.finish.is_some()));
+        let rebuild = self.dirty.replace(false) || moving || !ghosts.is_empty() || finishing;
         let scene = Scene {
             layout: &layout,
             name: &self.name,
@@ -746,11 +786,16 @@ impl Cluster {
         let phases: Vec<&horadric_core::Phase> = refs.iter().map(|s| &s.phase).collect();
         let targets: Vec<f32> = inputs.iter().map(|t| t.y).collect();
         let next = anim::Tiles::next_frame(&looks, &phases, &targets, ambient);
-        self.schedule(if ghosts.is_empty() {
+        self.schedule(if ghosts.is_empty() && !finishing {
             next
         } else {
             Some(motion::FRAME_FAST)
         });
+        if self.refit_due.replace(false) {
+            unsafe {
+                let _ = PostMessageW(Some(self.hwnd), WM_CLUSTER_REFIT, WPARAM(0), LPARAM(0));
+            }
+        }
     }
 
     /// Keeps the animation timer at the rate the next frame needs, or stops
@@ -786,6 +831,10 @@ impl Cluster {
                 unsafe {
                     let _ = InvalidateRect(Some(self.hwnd), None, false);
                 }
+                Some(LRESULT(0))
+            }
+            WM_CLUSTER_REFIT => {
+                self.refit();
                 Some(LRESULT(0))
             }
             WM_CLUSTER_FILES => {

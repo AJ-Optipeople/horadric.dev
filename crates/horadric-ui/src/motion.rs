@@ -20,6 +20,10 @@ pub const SETTLE: Duration = Duration::from_millis(450);
 pub const LEAVE: Duration = Duration::from_millis(320);
 /// A tile's icon turning over to show another tool.
 pub const FLIP: Duration = Duration::from_millis(280);
+/// A finished task's row: struck through, then folded away.
+pub const TASK_DONE: Duration = Duration::from_millis(900);
+/// Of [`TASK_DONE`], how much the strike takes before the row folds.
+pub const STRIKE_SHARE: f32 = 0.6;
 /// Hover fades in and out this fast. Fast enough to feel instant, slow
 /// enough to not flicker as the cursor crosses a column of tiles.
 pub const HOVER: Duration = Duration::from_millis(120);
