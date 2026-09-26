@@ -95,8 +95,8 @@ Built, sounds and all: see "Life in the tiles" in [PLAN.md](PLAN.md).
 
 Tiles swirl into the cube and something comes out, when a recipe runs or a
 batch closes.
-Built for a recipe running: see "Transmute" in [PLAN.md](PLAN.md). A batch
-closing does not play it yet.
+Built, for a recipe running and for a batch of tombs closing: see
+"Transmute" in [PLAN.md](PLAN.md).
 
 ## Gamification
 

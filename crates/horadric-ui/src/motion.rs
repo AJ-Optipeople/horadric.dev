@@ -205,6 +205,19 @@ pub fn swirl(from: (f32, f32), to: (f32, f32), t: f32) -> (f32, f32, f32) {
     )
 }
 
+/// How far behind the first of `count` things swirling in the one at
+/// `index` starts, as a share of the swirl, so they fall in one after
+/// another rather than as a block. A cube's three go 0.12 apart; a batch
+/// of eight tombs closes up so the last still has most of the swirl.
+pub fn stagger(index: usize, count: usize) -> f32 {
+    let step = if count > 1 {
+        (0.36 / (count - 1) as f32).min(0.12)
+    } else {
+        0.0
+    };
+    index as f32 * step
+}
+
 /// A waiting session's breath quickens the longer it waits: from these
 /// times on, one breath every this long. A calm pulse at the end, never a
 /// flash.
@@ -379,6 +392,16 @@ mod tests {
         let end = transmuting(TRANSMUTE);
         assert!(end.done);
         assert!(end.burst.1.abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_stagger_keeps_three_apart_and_packs_a_batch_in() {
+        assert_eq!(stagger(0, 1), 0.0);
+        assert!((stagger(1, 3) - 0.12).abs() < 1e-6);
+        assert!((stagger(2, 3) - 0.24).abs() < 1e-6);
+        assert!((stagger(3, 4) - 0.36).abs() < 1e-6);
+        assert!((stagger(7, 8) - 0.36).abs() < 1e-6);
+        assert!(stagger(1, 8) < stagger(1, 3));
     }
 
     #[test]

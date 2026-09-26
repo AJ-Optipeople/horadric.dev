@@ -52,7 +52,8 @@ pub(in crate::app) fn subject(s: &Session) -> Subject {
     }
 }
 
-fn look(s: &Session) -> StashLook {
+/// A session as the cube's slots and its swirl show it.
+pub(in crate::app) fn look(s: &Session) -> StashLook {
     let key = project_key(s);
     StashLook {
         name: s.label().to_string(),

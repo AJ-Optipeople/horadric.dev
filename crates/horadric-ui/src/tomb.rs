@@ -292,6 +292,7 @@ impl App {
         else {
             return;
         };
+        self.play_batch_closing(&batch, winner, merge);
         for id in self.tombs_of(&batch).into_iter().filter(|id| id != winner) {
             self.discard_tomb(&id);
         }
@@ -315,6 +316,27 @@ impl App {
         self.refresh_boards(true);
         self.reconcile(false);
         self.run_tasks();
+    }
+
+    /// The batch closing, played in the cube: every tomb with a tile
+    /// swirls in, `main` too when the winner merges, and what was kept
+    /// comes out. Before the losers end, so their tiles still say what
+    /// went in.
+    fn play_batch_closing(&self, batch: &str, winner: &str, merge: bool) {
+        let (Some(w), Some((_, n))) = (&self.cube_window, tombs::of(winner)) else {
+            return;
+        };
+        let looks: Vec<_> = {
+            let Ok(r) = self.shared.registry.lock() else {
+                return;
+            };
+            self.tombs_of(batch)
+                .iter()
+                .filter_map(|id| r.get(id))
+                .map(super::transmute::look)
+                .collect()
+        };
+        w.transmute_batch(&looks, merge, &batch_outcome(n, merge));
     }
 
     /// Ends a tomb that lost, stashed or not, and throws its worktree away.
@@ -372,6 +394,15 @@ pub(in crate::app) fn ask_pick(winner: &str) {
     }
 }
 
+/// What the key says came of a batch closing on tomb `n`.
+fn batch_outcome(n: usize, merged: bool) -> String {
+    if merged {
+        format!("Tomb {n} merged")
+    } else {
+        format!("Tomb {n} kept")
+    }
+}
+
 /// What to ask before keeping tomb `n` and throwing away the `others`.
 fn pick_question(n: usize, others: usize, title: &str, branch: &str, into: &str) -> String {
     let rest = match others {
@@ -394,6 +425,12 @@ fn pick_question(n: usize, others: usize, title: &str, branch: &str, into: &str)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_closing_batch_says_which_tomb_it_kept() {
+        assert_eq!(batch_outcome(2, true), "Tomb 2 merged");
+        assert_eq!(batch_outcome(3, false), "Tomb 3 kept");
+    }
 
     #[test]
     fn the_pick_question_says_what_is_thrown_away() {

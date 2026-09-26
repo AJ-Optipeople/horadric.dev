@@ -1069,9 +1069,7 @@ impl Painter<'_> {
         let mouth = (cube.x + cube.w / 2.0, cube.y + cube.h / 2.0 + 3.0 - s * 0.5);
         if let Some(t) = tr.frame.swirl {
             for (i, f) in tr.flying.iter().enumerate() {
-                // Each a little behind the one before, so they fall in one
-                // after another rather than as a block.
-                let lag = i as f32 * 0.12;
+                let lag = motion::stagger(i, tr.flying.len());
                 let own = ((t - lag) / (1.0 - lag).max(0.01)).clamp(0.0, 1.0);
                 let from = (f.from.x + f.from.w / 2.0, f.from.y + f.from.h / 2.0);
                 let (x, y, k) = motion::swirl(from, mouth, own);

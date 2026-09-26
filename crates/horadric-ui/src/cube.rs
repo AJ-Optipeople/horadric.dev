@@ -271,11 +271,7 @@ impl CubeWindow {
     /// empties it, so the slots still say what went in. With Windows'
     /// animations off nothing plays.
     pub fn transmute(&self, outcome: &str, portal: bool) {
-        if !backdrop::animations_on() {
-            return;
-        }
         let c = self.contents.borrow();
-        let gold = theme::rarity_color(horadric_core::rarity::Rarity::Unique);
         let mut flying: Vec<Flying> = c
             .items
             .iter()
@@ -287,11 +283,43 @@ impl CubeWindow {
             })
             .collect();
         if c.main {
-            flying.push(Flying {
-                from: self.layout.main,
-                ink: theme::TEXT,
-                accent: gold,
-            });
+            flying.push(self.main_rune());
+        }
+        drop(c);
+        self.play(flying, outcome, portal);
+    }
+
+    /// Plays a batch closing: `batch` swirling in from the slots, taken in
+    /// turn when there are more than three, with the `main` rune after
+    /// them when the winner merged, and `outcome` coming out. What the cube
+    /// holds stays in it.
+    pub fn transmute_batch(&self, batch: &[StashLook], main: bool, outcome: &str) {
+        let mut flying: Vec<Flying> = batch
+            .iter()
+            .zip(self.layout.slots.iter().cycle())
+            .map(|(look, r)| Flying {
+                from: *r,
+                ink: look.ink,
+                accent: look.accent,
+            })
+            .collect();
+        if main {
+            flying.push(self.main_rune());
+        }
+        self.play(flying, outcome, false);
+    }
+
+    fn main_rune(&self) -> Flying {
+        Flying {
+            from: self.layout.main,
+            ink: theme::TEXT,
+            accent: theme::rarity_color(horadric_core::rarity::Rarity::Unique),
+        }
+    }
+
+    fn play(&self, flying: Vec<Flying>, outcome: &str, portal: bool) {
+        if !backdrop::animations_on() || flying.is_empty() {
+            return;
         }
         *self.transmute.borrow_mut() = Some(Transmute {
             began: Instant::now(),

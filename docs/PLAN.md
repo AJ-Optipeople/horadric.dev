@@ -1836,6 +1836,14 @@ it, and a recipe that runs on what it holds. Dragging tiles together says
   stays while it plays even when the recipe leaves nothing for it to
   hold, and `Input::CubeSettled` lets it go after. With Windows'
   animations off nothing plays.
+- **A batch closing plays it too.** Picking the tomb to keep closes Tal
+  Rasha's batch, and the cube plays it (`CubeWindow::transmute_batch`)
+  before the others end: every tomb with a tile swirls in from the
+  slots, taken in turn past three, `main` after them when the winner
+  merges, and the key says "Tomb 2 merged" or "Tomb 2 kept". What the
+  cube holds stays in it. `motion::stagger` (tested) spaces the keys
+  0.12 of the swirl apart, closer for more, so the last of eight still
+  has most of the swirl.
 
 Tested on screen with a dev instance on its own port, `APPDATA` and
 `LOCALAPPDATA`, three sessions in worktrees of a scratch repository, and
@@ -1859,6 +1867,12 @@ dropped in, Close all three posted, and a `PrintWindow` of the cube every
 110 ms. The keys swirled in inside the window, the burst and "Closed and
 journaled" followed, and the cube went once it had played. Not checked:
 Review and Merge, whose `main` rune swirls in too.
+
+A batch closing was checked with a click on the cube that, in a build
+never committed, played five tombs and `main`: the five swirled in one
+after another from the three slots, `main` last, then the burst and
+"Tomb 2 merged", and the cube settled back to "Drop tiles here". Not
+checked on screen: a real pick of a tomb calling it.
 
 
 ### Runewords
