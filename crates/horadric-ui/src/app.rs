@@ -3007,7 +3007,7 @@ impl App {
             .as_ref()
             .map(|w| {
                 let mut env = w.ports.map(tree::env).unwrap_or_default();
-                // `horadric task` finds the list in the main tree.
+                // `horadric quest` finds the list in the main tree.
                 env.push((TASKS_ENV.into(), folder_key(&cwd.to_string_lossy())));
                 env
             })

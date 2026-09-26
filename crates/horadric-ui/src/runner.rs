@@ -27,7 +27,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use horadric_core::journal::{self, Commit, Entry, What};
-use horadric_core::tasks::{self, Holder, Mark, Mode, Next, Task, TASKS_FILE};
+use horadric_core::tasks::{self, Holder, Mark, Mode, Next, Task};
 use horadric_core::usage::format_until;
 use horadric_core::worktree::{self, Worktree};
 use horadric_core::{fleet, ssh, tombs, Phase, WaitReason};
@@ -340,10 +340,14 @@ impl App {
             .ok()
             .and_then(|r| r.get(id)?.worktree.clone());
         if holds {
-            let list = own_tree
-                .as_ref()
-                .map(|_| format!("{}/{TASKS_FILE}", folder_key(&cwd.to_string_lossy())));
-            system.push(tasks::system_prompt(&horadric_command(), list.as_deref()));
+            let main = folder_key(&cwd.to_string_lossy());
+            let rel = file::rel(Path::new(&main));
+            let list = own_tree.as_ref().map(|_| format!("{main}/{rel}"));
+            system.push(tasks::system_prompt(
+                &horadric_command(),
+                rel,
+                list.as_deref(),
+            ));
             if let Some((batch, n)) = tombs::of(id) {
                 system.push(tombs::system_prompt(n, tombs::weight(batch)));
             }
@@ -390,9 +394,10 @@ impl App {
         if !taken {
             return Err("the list changed, so that item is not there to take".into());
         }
-        self.tasks
-            .prompts
-            .insert(id.clone(), tasks::prompt(&task, &horadric_command()));
+        self.tasks.prompts.insert(
+            id.clone(),
+            tasks::prompt(&task, &horadric_command(), file::rel(&dir)),
+        );
         self.refresh_boards(true);
         let parallel = self
             .shared
@@ -644,7 +649,7 @@ impl App {
                 format!("limit:{at}"),
                 "Usage limit reached".to_string(),
                 format!(
-                    "The task list goes on in {}, once it resets.",
+                    "The quest log goes on in {}, once it resets.",
                     format_until(at.saturating_sub(now))
                 ),
             ));
@@ -844,7 +849,7 @@ impl App {
                 Mark::Working if b.mode.runs() && self.stopped_after_nudge(h) => out.push((
                     format!("asks:{h}"),
                     format!("{} needs you", t.title),
-                    "It stopped without saying the item is done.".to_string(),
+                    "It stopped without saying the quest is completed.".to_string(),
                 )),
                 _ => {}
             }
@@ -853,8 +858,8 @@ impl App {
             if let Next::Finished = tasks::next(&b.tasks, b.mode, b.parallel, |_| Holder::Live) {
                 out.push((
                     format!("finished:{key}"),
-                    "Task list done".to_string(),
-                    format!("Every item in {} is done.", project_name(key)),
+                    "Quest log completed".to_string(),
+                    format!("Every quest in {} is completed.", project_name(key)),
                 ));
             }
         }
@@ -878,7 +883,7 @@ impl App {
                 [(_, title, text)] => self.toasts.show(Kind::Waiting, title, text),
                 many => self.toasts.show(
                     Kind::Waiting,
-                    &format!("{} task list items need you", many.len()),
+                    &format!("{} quests need you", many.len()),
                     &many
                         .iter()
                         .map(|(_, t, _)| t.as_str())
@@ -1053,7 +1058,7 @@ impl App {
             if !file::file(&dir).is_file() {
                 let _ = file::update(&dir, |_| Some(String::new()));
             }
-            watch::open(&dir, TASKS_FILE);
+            watch::open(&dir, file::rel(&dir));
         }
     }
 }
@@ -1072,10 +1077,10 @@ pub(super) fn show_menu(menu: Menu) {
         Menu::Mode(key) => mode_menu(&key),
         Menu::Add(key) => {
             let question = ask::Ask {
-                title: "New task",
+                title: "New quest",
                 prompt: "What should be done? The notes go to the agent with it.",
                 initial: "",
-                placeholder: "A title for the list",
+                placeholder: "A title for the quest",
                 verb: "add it",
                 notes: true,
                 pick: None,
@@ -1088,7 +1093,7 @@ pub(super) fn show_menu(menu: Menu) {
             let into = crate::worktree::checked_out(&m.main).unwrap_or_else(|| "main".into());
             let pressed = super::ask(&crate::dialog::Dialog {
                 tone: crate::dialog::Tone::Question,
-                title: "Merge finished task",
+                title: "Merge completed quest",
                 text: &merge_question(&m.title, &m.branch, &into),
                 buttons: &["Merge", "Not now"],
                 default: 0,
@@ -1152,8 +1157,8 @@ fn item_menu(key: &str, line: usize, title: &str) {
     };
     let mut items = Vec::new();
     match state {
-        RowState::Open => items.push(Item::action(START, "Start")),
-        RowState::Gone => items.push(Item::action(START, "Start again")),
+        RowState::Open => items.push(Item::action(START, "Accept")),
+        RowState::Gone => items.push(Item::action(START, "Accept again")),
         _ => items.push(Item::action(SHOW, "Show session")),
     }
     if state == RowState::Open && own_trees {
@@ -1177,13 +1182,13 @@ fn item_menu(key: &str, line: usize, title: &str) {
         // Done without a pick would leave its tombs running.
         (Some(_), _) | (None, RowState::Open) => {}
         (None, RowState::Review) => items.push(Item::action(APPROVE, "Approve")),
-        (None, _) => items.push(Item::action(DONE, "Mark done")),
+        (None, _) => items.push(Item::action(DONE, "Mark completed")),
     }
     if holder.is_some() {
-        items.push(Item::action(BACK, "Put back in the list"));
+        items.push(Item::action(BACK, "Put back in the log"));
     }
     items.push(Item::Separator);
-    items.push(Item::action(EDIT, "Edit the list"));
+    items.push(Item::action(EDIT, "Edit the quest log"));
     // Outside the app's borrow: the menu's loop dispatches its messages.
     let picked = menu::popup(&items);
     if let Some(i) = picked.filter(|i| *i >= PICK) {
@@ -1245,7 +1250,7 @@ fn mode_menu(key: &str) {
         ));
     }
     items.push(Item::Separator);
-    items.push(Item::action(EDIT, "Edit the list"));
+    items.push(Item::action(EDIT, "Edit the quest log"));
     let picked = menu::popup(&items);
     with_app(|app| match picked {
         Some(EDIT) => app.edit_list(key),

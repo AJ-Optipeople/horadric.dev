@@ -63,7 +63,7 @@ pub const NEW_PATH: &str = "/horadric/new";
 /// new build.
 pub const RELOAD_PATH: &str = "/horadric/reload";
 
-/// Path `horadric task` posts to after it changed a project's task list, so
+/// Path `horadric quest` posts to after it changed a project's task list, so
 /// the app reads it at once rather than on its next look.
 pub const TASKS_PATH: &str = "/horadric/tasks";
 

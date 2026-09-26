@@ -1,5 +1,6 @@
-//! `horadric task`: how an agent working an item of the task list reports
-//! back, and how anyone adds to the list from a shell.
+//! `horadric quest`, or `horadric task` from before the rename: how an
+//! agent working a quest reports back, and how anyone adds to the quest log
+//! from a shell.
 //!
 //! The command changes the file itself rather than asking the app to, so an
 //! agent hears at once whether it worked. It finds its item by the session
@@ -9,7 +10,7 @@
 
 use std::path::{Path, PathBuf};
 
-use horadric_core::tasks::{self, Mark, TASKS_FILE};
+use horadric_core::tasks::{self, Mark};
 use horadric_core::tombs;
 use horadric_hooks::listener::TasksChanged;
 use horadric_hooks::{
@@ -17,10 +18,13 @@ use horadric_hooks::{
 };
 
 const USAGE: &str = "\
-usage: horadric task done              The item this session works is finished
-       horadric task blocked \"why\"     It can not go on without the human
-       horadric task add \"title\"       Add an item to the end of the list
-       horadric task list              Show the list";
+usage: horadric quest done              The quest this session works is completed
+       horadric quest blocked \"why\"     It can not go on without the human
+       horadric quest add \"title\"       Add a quest to the end of the log
+       horadric quest list              Show the log";
+
+/// What the errors call the list, which may still be the old file.
+const NO_LOG: &str = "no quest log (.horadric/quests.md or .horadric/tasks.md) above here";
 
 pub fn run(args: &[String]) -> Result<(), String> {
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
@@ -30,14 +34,14 @@ pub fn run(args: &[String]) -> Result<(), String> {
         Some("blocked") => {
             let why = rest();
             if why.trim().is_empty() {
-                return Err("say why: horadric task blocked \"what you need\"".into());
+                return Err("say why: horadric quest blocked \"what you need\"".into());
             }
             report(&cwd, Some(&why))
         }
         Some("add") => {
             let title = tasks::one_line(&rest());
             if title.is_empty() {
-                return Err("say what: horadric task add \"title\"".into());
+                return Err("say what: horadric quest add \"title\"".into());
             }
             add(&cwd, &title)
         }
@@ -52,9 +56,7 @@ fn report(cwd: &Path, why: Option<&str>) -> Result<(), String> {
     if let Some((batch, _)) = tombs::of(&id) {
         return report_tomb(cwd, &id, batch, why);
     }
-    let project = held(cwd, &id).ok_or(format!(
-        "no {TASKS_FILE} above here has an item held by {id}"
-    ))?;
+    let project = held(cwd, &id).ok_or(format!("{NO_LOG} has a quest held by {id}"))?;
     let mode = file::mode(&project);
     let mark = match why {
         Some(_) => Mark::Blocked,
@@ -63,12 +65,12 @@ fn report(cwd: &Path, why: Option<&str>) -> Result<(), String> {
     let changed = file::update(&project, |text| tasks::set_held(text, &id, mark, why))
         .map_err(|e| format!("{}: {e}", file::file(&project).display()))?;
     if !changed {
-        return Err(format!("the item held by {id} is already done"));
+        return Err(format!("the quest held by {id} is already completed"));
     }
     tell_app(&project);
     match (why, mark) {
         (Some(_), _) => println!("Marked blocked. Say what you need, then wait for the human."),
-        (None, Mark::Done) => println!("Marked done. The next item starts once this turn ends."),
+        (None, Mark::Done) => println!("Quest completed. The next one starts once this turn ends."),
         _ => println!("Marked for review. The human looks next; stop here."),
     }
     Ok(())
@@ -77,9 +79,7 @@ fn report(cwd: &Path, why: Option<&str>) -> Result<(), String> {
 /// A tomb's report leaves the list alone, since the item is the batch's
 /// until the human picks. Only the app keeps it, so it has to hear.
 fn report_tomb(cwd: &Path, id: &str, batch: &str, why: Option<&str>) -> Result<(), String> {
-    let project = held(cwd, batch).ok_or(format!(
-        "no {TASKS_FILE} above here has an item held by {batch}"
-    ))?;
+    let project = held(cwd, batch).ok_or(format!("{NO_LOG} has a quest held by {batch}"))?;
     let heard = post_app(&TasksChanged {
         dir: project.to_string_lossy().into_owned(),
         tomb: Some(id.to_string()),
@@ -109,9 +109,7 @@ fn add(cwd: &Path, title: &str) -> Result<(), String> {
 }
 
 fn list(cwd: &Path) -> Result<(), String> {
-    let project = main_list()
-        .or_else(|| file::find_list(cwd))
-        .ok_or(format!("no {TASKS_FILE} above here"))?;
+    let project = main_list().or_else(|| file::find_list(cwd)).ok_or(NO_LOG)?;
     for t in tasks::parse(&file::read(&project)) {
         let holder = t.holder.map(|h| format!(" @{h}")).unwrap_or_default();
         println!("[{}] {}{holder}", t.mark.char(), t.title);

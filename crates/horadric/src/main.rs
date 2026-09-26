@@ -39,9 +39,10 @@ Usage:
                                Start a session in a Horadric terminal
   horadric run [--name NAME] [--cwd DIR] [-- claude args...]
                                Start a tagged `claude` in this terminal instead
-  horadric task done|blocked WHY|add TITLE|list
-                               Report on the task list item this session works, or
-                               add to the project's list (.horadric/tasks.md)
+  horadric quest done|blocked WHY|add TITLE|list
+                               Report on the quest this session works, or add to
+                               the project's quest log (.horadric/quests.md).
+                               `horadric task` is the same, from before the rename
   horadric serve                 Listen for Claude Code hook events and show a live table
   horadric hooks install         Add Horadric hooks to ~/.claude/settings.json
   horadric hooks uninstall       Remove them
@@ -86,7 +87,8 @@ fn main() -> ExitCode {
         Some("serve") => console::serve(),
         Some("new") => run::new(&args[1..]),
         Some("run") => run::run(&args[1..]),
-        Some("task") => task::run(&args[1..]),
+        // `task` is how sessions started before the rename report back.
+        Some("quest" | "task") => task::run(&args[1..]),
         Some("setup") => setup::run(&args[1..]),
         Some("host") => host(),
         Some("hooks") => hooks(args.get(1).map(String::as_str)),

@@ -1974,6 +1974,34 @@ posted), `main` and the key clicked by posted messages, and a `PrintWindow`
 of the cube every 120 ms. The portal opened and closed as above, both
 tiles stayed, and there were still two hosts and two `cmd.exe`.
 
+### Quests
+
+"Quests" in [IDEAS.md](IDEAS.md). The task list is a quest log: an item
+is a quest, taking it is accepting it, done is completed. Renamed once,
+with the old names still read, since the list that runs the work runs
+through the rename too.
+
+- **The file** is `.horadric/quests.md`. A project with only
+  `.horadric/tasks.md` keeps using it, read and written, until a quest log
+  sits beside it; then the quest log wins. Nothing moves the old file: a
+  running list keeps its file, and an installed build from before the
+  rename, still reading `tasks.md`, sees the same list as the new one. A
+  new list is a quest log. `tasks::list_file` picks, pure and tested;
+  `horadric_hooks::tasks::file` and `rel` are where it is on disk.
+- **The command** is `horadric quest done|blocked WHY|add TITLE|list`.
+  `horadric task` does the same, so every session started with the old
+  prompt still reports back. New prompts say `quest` and name the file the
+  project really has.
+- **The tile** says quests: "New quest", "Accept", "Mark completed",
+  "Edit the quest log", and the toasts "Quest log completed" and "N quests
+  need you".
+- **Left alone**: the `"tasks"` key in `config.json`, the
+  `/horadric/tasks` path, its header and `HORADRIC_TASKS`. They are what
+  builds on either side of the rename say to each other, and no one reads
+  them.
+
+Not checked on screen: the tile's words are the only change there.
+
 ## Next
 
 ### Step 4: worktrees and the git glance

@@ -61,14 +61,15 @@ work. Worktrees are next.
   and plus, minus or the wheel sizes the font, Ctrl+0 puts it back.
 - Ctrl+Shift+F searches a pane's history, which keeps 10,000 lines. Enter
   finds the next match up, Shift+Enter the next one down, Esc closes it.
-- A task list per project: `.horadric/tasks.md`, a Markdown checklist in
-  the repo, shown in a tasks tile in the cluster. Click an item and a
-  session starts on it, with the item as its prompt; the agent reports back
-  with `horadric task done` or `horadric task blocked "why"`, and the row
+- A quest log per project: `.horadric/quests.md` (a `tasks.md` from
+  before the rename is still read), a Markdown checklist in the repo,
+  shown in a quests tile in the cluster. Click a quest and a session
+  starts on it, with the quest as its prompt; the agent reports back with
+  `horadric quest done` or `horadric quest blocked "why"`, and the row
   shows where it is. The mode button picks how the list is worked: Manual,
   one click per item; Review, the next item starts once you approve the
   last; Auto, down the list until it is done. The `+` adds an item, and so
-  does `horadric task add` from any shell.
+  does `horadric quest add` from any shell.
 - Right click a tile to rename its session, or a project's header to open
   its folder in VS Code or Explorer.
 - Ctrl+Alt+Space, from anywhere, shows the session that has waited on you

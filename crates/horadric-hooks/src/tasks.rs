@@ -1,5 +1,5 @@
 //! Reading and writing a project's task list and its mode on disk, for the
-//! app and for `horadric task`. What the file means is
+//! app and for `horadric quest`. What the file means is
 //! `horadric_core::tasks`; this is only where it lives and how a change
 //! lands in it.
 
@@ -9,12 +9,21 @@ use std::path::{Path, PathBuf};
 
 use horadric_core::fleet::{self, Device};
 use horadric_core::runeword::{self, Offered};
-use horadric_core::tasks::{self, Mode, CONFIG_FILE, TASKS_FILE};
+use horadric_core::tasks::{self, Mode, CONFIG_FILE, OLD_FILE, QUESTS_FILE};
 use horadric_core::{ssh, worktree};
 
 /// The list's path in a project.
 pub fn file(project: &Path) -> PathBuf {
-    project.join(TASKS_FILE)
+    project.join(rel(project))
+}
+
+/// The list's path from the project folder: the quest log, or a list from
+/// before the rename while there is no quest log beside it.
+pub fn rel(project: &Path) -> &'static str {
+    tasks::list_file(
+        project.join(QUESTS_FILE).is_file(),
+        project.join(OLD_FILE).is_file(),
+    )
 }
 
 /// The config's path in a project.
@@ -174,7 +183,40 @@ mod tests {
         assert!(update(&dir, |t| Some(tasks::append(t, "First"))).unwrap());
         assert_eq!(read(&dir), "- [ ] First\n");
         assert!(!update(&dir, |_| None).unwrap());
-        assert!(!dir.join(".horadric/tasks.horadric-tmp").exists());
+        assert!(!dir.join(".horadric/quests.horadric-tmp").exists());
+        assert!(dir.join(QUESTS_FILE).is_file());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_list_from_before_the_rename_keeps_its_file() {
+        let dir = scratch("old");
+        write(
+            &dir.join(OLD_FILE),
+            "- [ ] First
+",
+        )
+        .unwrap();
+        assert!(update(&dir, |t| Some(tasks::append(t, "Second"))).unwrap());
+        assert_eq!(
+            read(&dir),
+            "- [ ] First
+- [ ] Second
+"
+        );
+        assert!(!dir.join(QUESTS_FILE).exists());
+        assert_eq!(find_list(&dir.join("src")), Some(dir.clone()));
+        write(
+            &dir.join(QUESTS_FILE),
+            "- [ ] Quest
+",
+        )
+        .unwrap();
+        assert_eq!(
+            read(&dir),
+            "- [ ] Quest
+"
+        );
         fs::remove_dir_all(&dir).unwrap();
     }
 

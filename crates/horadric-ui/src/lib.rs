@@ -24,7 +24,7 @@
 //! whatever else the work needs. They are sessions with a tile and a pane
 //! like the rest ([`shell`]).
 //!
-//! Each project has a task list, `.horadric/tasks.md`, shown in a tasks
+//! Each project has a quest log, `.horadric/quests.md`, shown in a quests
 //! tile in its cluster. A click on an item starts a session on it, and the
 //! app can work down the list by itself ([`board`], `horadric_core::tasks`).
 //!

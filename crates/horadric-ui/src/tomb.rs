@@ -121,9 +121,10 @@ impl App {
         if !self.new_trees.contains_key(&id) {
             return Err("git gave the tomb no worktree of its own".into());
         }
-        self.tasks
-            .prompts
-            .insert(id.clone(), tasks::prompt(task, &horadric_command()));
+        self.tasks.prompts.insert(
+            id.clone(),
+            tasks::prompt(task, &horadric_command(), file::rel(dir)),
+        );
         let name = tombs::name(&task.title, n);
         if let Err(e) = self.launch(&id, &name, cwd, Vec::new(), Run::Agent, false) {
             if let Some((w, _)) = self.new_trees.remove(&id) {

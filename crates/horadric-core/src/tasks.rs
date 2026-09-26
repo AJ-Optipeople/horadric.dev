@@ -1,5 +1,7 @@
-//! A project's task list: `.horadric/tasks.md`, a Markdown checklist that
+//! A project's quest log: `.horadric/quests.md`, a Markdown checklist that
 //! agents take items from, one at a time or all the way down by themselves.
+//! A list from before the rename, `.horadric/tasks.md`, is still read and
+//! written until a quest log sits beside it.
 //!
 //! The file belongs to the human and the agents. Horadric only ever changes
 //! one line at a time, the marker and the session that holds the item, and
@@ -20,7 +22,21 @@ use serde_json::{Map, Value};
 use crate::tombs;
 
 /// Where the list lives, from the project folder.
-pub const TASKS_FILE: &str = ".horadric/tasks.md";
+pub const QUESTS_FILE: &str = ".horadric/quests.md";
+
+/// Where the list lived before it was a quest log.
+pub const OLD_FILE: &str = ".horadric/tasks.md";
+
+/// Which file holds a project's list, given which of the two exist. The
+/// old one only while it is the only one, so a list that is running keeps
+/// its file, and a new list is a quest log.
+pub fn list_file(quests: bool, old: bool) -> &'static str {
+    if old && !quests {
+        OLD_FILE
+    } else {
+        QUESTS_FILE
+    }
+}
 
 /// Where the mode lives, from the project folder.
 pub const CONFIG_FILE: &str = ".horadric/config.json";
@@ -493,30 +509,31 @@ pub fn slug(title: &str) -> String {
 /// The first prompt of a session that takes `task`: the item, its notes,
 /// and how to report back. The system prompt says so too, but an agent
 /// follows its prompt more surely, and the human sees what it was asked.
-pub fn prompt(task: &Task, horadric: &str) -> String {
+pub fn prompt(task: &Task, horadric: &str, file: &str) -> String {
     let mut out = task.title.clone();
     if !task.notes.is_empty() {
         out.push_str("\n\n");
         out.push_str(&task.notes.join("\n"));
     }
     out.push_str(&format!(
-        "\n\n(An item from {TASKS_FILE}. When it is finished, run `{horadric} task done`.)"
+        "\n\n(A quest from {file}. When it is finished, run `{horadric} quest done`.)"
     ));
     out
 }
 
 /// What the agent is told beside its first prompt, every time it starts or
 /// resumes: that it works one item of the list, and how to report back.
-/// `horadric` is how to run this Horadric from the agent's shell. `list`
+/// `horadric` is how to run this Horadric from the agent's shell, `file`
+/// the list's path from the project folder. `list`
 /// is where the list is when the agent works in a worktree of its own,
 /// which has no list or an old copy of it.
-pub fn system_prompt(horadric: &str, list: Option<&str>) -> String {
+pub fn system_prompt(horadric: &str, file: &str, list: Option<&str>) -> String {
     let mut out = format!(
-        "You are working on one item of this project's task list, {TASKS_FILE}.          Horadric started you on it and does not know you are finished until you          tell it, so your last step is always a command in your shell. Do only this          item. When it is finished, commit your work if you changed files, then run          `{horadric} task done` with your Bash tool. If you can not go on without          the human, run `{horadric} task blocked \"<why>\"` instead and say what you          need. If you find other work worth doing, add it to the list with          `{horadric} task add \"<title>\"` instead of doing it now. Items in          {TASKS_FILE} are lines like `- [ ] Title`, in the order they should be          done, with notes indented under them; when your item is to plan work,          write the items you decide on into the file below your own line."
+        "You are working on one quest of this project's quest log, {file}.          Horadric started you on it and does not know you are finished until you          tell it, so your last step is always a command in your shell. Do only this          item. When it is finished, commit your work if you changed files, then run          `{horadric} quest done` with your Bash tool. If you can not go on without          the human, run `{horadric} quest blocked \"<why>\"` instead and say what you          need. If you find other work worth doing, add it to the list with          `{horadric} quest add \"<title>\"` instead of doing it now. Quests in          {file} are lines like `- [ ] Title`, in the order they should be          done, with notes indented under them; when your item is to plan work,          write the items you decide on into the file below your own line."
     );
     if let Some(list) = list {
         out.push_str(&format!(
-            " Other items run beside yours, each in a worktree of its own. The list              lives only in the main working tree, at {list}: read and write it              there, the one file in the main tree you may change, and never a              copy in your worktree. `{horadric} task` finds it from anywhere."
+            " Other items run beside yours, each in a worktree of its own. The list              lives only in the main working tree, at {list}: read and write it              there, the one file in the main tree you may change, and never a              copy in your worktree. `{horadric} quest` finds it from anywhere."
         ));
     }
     out
@@ -525,8 +542,8 @@ pub fn system_prompt(horadric: &str, list: Option<&str>) -> String {
 /// What an agent is told, once, when its turn ended without a report.
 pub fn nudge(horadric: &str) -> String {
     format!(
-        "If you are finished with this item, commit your work and run \
-         `{horadric} task done`. If not, say what you need from me."
+        "If you are finished with this quest, commit your work and run \
+         `{horadric} quest done`. If not, say what you need from me."
     )
 }
 
@@ -535,7 +552,7 @@ pub fn nudge(horadric: &str) -> String {
 pub fn go_on(horadric: &str) -> String {
     format!(
         "The usage limit has reset. Go on with this item where you left off, \
-         and when it is finished, commit your work and run `{horadric} task done`."
+         and when it is finished, commit your work and run `{horadric} quest done`."
     )
 }
 
@@ -860,9 +877,20 @@ mod tests {
 
     #[test]
     fn an_agent_in_a_worktree_is_told_where_the_list_is() {
-        assert!(!system_prompt("hx", None).contains("main working tree"));
-        assert!(system_prompt("hx", Some("C:/app/.horadric/tasks.md"))
-            .contains("at C:/app/.horadric/tasks.md"));
+        assert!(!system_prompt("hx", QUESTS_FILE, None).contains("main working tree"));
+        assert!(
+            system_prompt("hx", QUESTS_FILE, Some("C:/app/.horadric/quests.md"))
+                .contains("at C:/app/.horadric/quests.md")
+        );
+    }
+
+    #[test]
+    fn a_list_from_before_the_rename_is_read_until_a_quest_log_is_beside_it() {
+        assert_eq!(list_file(false, false), QUESTS_FILE);
+        assert_eq!(list_file(false, true), OLD_FILE);
+        assert_eq!(list_file(true, true), QUESTS_FILE);
+        assert_eq!(list_file(true, false), QUESTS_FILE);
+        assert!(system_prompt("hx", OLD_FILE, None).contains("quest log, .horadric/tasks.md."));
     }
 
     #[test]
@@ -876,13 +904,13 @@ mod tests {
     fn the_first_prompt_is_the_item_its_notes_and_how_to_report() {
         let t = &parse(SAMPLE)[1];
         assert_eq!(
-            prompt(t, "hx"),
+            prompt(t, "hx", QUESTS_FILE),
             "Fix the login redirect\n\nHappens only after a session expires.\nRepro in #12.\n\n\
-             (An item from .horadric/tasks.md. When it is finished, run `hx task done`.)"
+             (A quest from .horadric/quests.md. When it is finished, run `hx quest done`.)"
         );
-        assert!(system_prompt("hx", None).contains("`hx task done`"));
-        assert!(nudge("hx").contains("`hx task done`"));
-        assert!(go_on("hx").contains("`hx task done`"));
+        assert!(system_prompt("hx", QUESTS_FILE, None).contains("`hx quest done`"));
+        assert!(nudge("hx").contains("`hx quest done`"));
+        assert!(go_on("hx").contains("`hx quest done`"));
     }
 
     #[test]

@@ -118,6 +118,8 @@ completed, blocked is a quest you cannot finish yet. The tile, the command
 change, so it is a rename worth doing once, deliberately, with the old
 names still read.
 
+Built: see "Quests" in [PLAN.md](PLAN.md).
+
 ### Experience
 
 XP per merged commit and a level in the tray menu. On its own it is a game

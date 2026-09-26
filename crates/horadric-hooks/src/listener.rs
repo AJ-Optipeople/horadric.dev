@@ -1,7 +1,7 @@
 //! A minimal HTTP/1.1 server for five purposes: accept `POST /horadric/hook`
 //! from Claude Code, `POST /horadric/status` from its status line,
 //! `POST /horadric/new` from `horadric new`, `POST /horadric/reload` from
-//! `horadric reload`, and `POST /horadric/tasks` from `horadric task`.
+//! `horadric reload`, and `POST /horadric/tasks` from `horadric quest`.
 //!
 //! Hand rolled on `std::net` because the whole protocol we need is a request
 //! line, a handful of headers, a `Content-Length` body and a fixed reply. A
@@ -82,7 +82,7 @@ impl Reload {
     }
 }
 
-/// `horadric task` changed the task list of the project in this folder,
+/// `horadric quest` changed the task list of the project in this folder,
 /// or a tomb reported on its item, which leaves the list as it is.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TasksChanged {
