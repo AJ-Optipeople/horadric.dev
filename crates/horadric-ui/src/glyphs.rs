@@ -51,6 +51,10 @@ pub const BEZEL: f32 = 6.0;
 /// The glass's corners, in DIPs.
 const SCREEN_RADIUS: f32 = 8.0;
 
+/// The pane's own corners, round the glass's at the bezel's distance so
+/// the two curves run parallel.
+const PANE_RADIUS: f32 = SCREEN_RADIUS + BEZEL;
+
 /// Height of a pane's header, in DIPs: the plate above the glass that the
 /// name is printed on.
 pub const HEADER_H: f32 = 26.0;
@@ -620,23 +624,18 @@ impl GridTarget {
                     .FillRoundedRectangle(&rounded(&screen, SCREEN_RADIUS), &self.brush);
             }
             if drop {
-                let all = D2D_RECT_F {
-                    left: 0.0,
-                    top: 0.0,
-                    right: size.width,
-                    bottom: size.height,
-                };
-                self.brush
-                    .SetColor(&render::color(theme::WORKING.with_alpha(0.12)));
-                self.rt.FillRectangle(&all, &self.brush);
                 let inset = D2D_RECT_F {
                     left: 1.0,
                     top: 1.0,
                     right: size.width - 1.0,
                     bottom: size.height - 1.0,
                 };
+                let edge = rounded(&inset, PANE_RADIUS - 1.0);
+                self.brush
+                    .SetColor(&render::color(theme::WORKING.with_alpha(0.12)));
+                self.rt.FillRoundedRectangle(&edge, &self.brush);
                 self.brush.SetColor(&render::color(theme::WORKING));
-                self.rt.DrawRectangle(&inset, &self.brush, 2.0, None);
+                self.rt.DrawRoundedRectangle(&edge, &self.brush, 2.0, None);
             }
 
             self.rt.EndDraw(None, None)
@@ -665,6 +664,25 @@ impl GridTarget {
         };
         self.rt.FillRectangle(&all, &self.plate);
         self.rt.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+        // A groove cut round the pane, as round a cluster, is what shows
+        // its corners: outside it the plate runs on into the stage's.
+        let groove = D2D_RECT_F {
+            left: 0.5,
+            top: 0.5,
+            right: size.width - 0.5,
+            bottom: size.height - 1.5,
+        };
+        let lit = D2D_RECT_F {
+            top: groove.top + 1.0,
+            bottom: groove.bottom + 1.0,
+            ..groove
+        };
+        self.brush.SetColor(&render::color(theme::ENGRAVE_LIGHT));
+        self.rt
+            .DrawRoundedRectangle(&rounded(&lit, PANE_RADIUS), &self.brush, 1.0, None);
+        self.brush.SetColor(&render::color(theme::ENGRAVE_DARK));
+        self.rt
+            .DrawRoundedRectangle(&rounded(&groove, PANE_RADIUS), &self.brush, 1.0, None);
         let lip = D2D_RECT_F {
             left: screen.left - 0.5,
             top: screen.top + 0.5,
@@ -737,17 +755,29 @@ impl GridTarget {
     unsafe fn header(&self, gpu: &Gpu, h: &Header) {
         let width = self.rt.GetSize().width;
         if h.lifted {
+            // Round at the top with the pane, square where it meets the
+            // glass.
+            let band = D2D_RECT_F {
+                left: 0.0,
+                top: 0.0,
+                right: width,
+                bottom: HEADER_H,
+            };
+            self.rt
+                .PushAxisAlignedClip(&band, D2D1_ANTIALIAS_MODE_ALIASED);
             self.brush
                 .SetColor(&render::color(theme::WORKING.with_alpha(0.22)));
-            self.rt.FillRectangle(
-                &D2D_RECT_F {
-                    left: 0.0,
-                    top: 0.0,
-                    right: width,
-                    bottom: HEADER_H,
-                },
+            self.rt.FillRoundedRectangle(
+                &rounded(
+                    &D2D_RECT_F {
+                        bottom: HEADER_H + PANE_RADIUS,
+                        ..band
+                    },
+                    PANE_RADIUS,
+                ),
                 &self.brush,
             );
+            self.rt.PopAxisAlignedClip();
         }
         let (lx, ly) = (BEZEL + 6.0, HEADER_H / 2.0);
         let dot = |r: f32, c: Color| {

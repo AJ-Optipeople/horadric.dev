@@ -1101,9 +1101,18 @@ matching its cluster's mark, context rings at 38 % and 82 %. After the first
 look proved too light and its borders too bright, the darker pass was
 checked the same way beside the installed build.
 
-Not done: panes are still square child windows; the glass inside them is
-what is rounded. The tray menu and the stage's title bar were left here and
-are drawn now, see "No Windows chrome" below.
+Panes are rounded too, not only the glass inside them. A pane is still a
+square child window, but a groove cut round it with corners of the glass's
+radius plus the bezel shows its edge, and outside the groove its plate runs
+on into the stage's, so the corners read as round. No window region: a
+region's edge is aliased, and the plate at the corners is the same either
+way. The drop target and a lifted header are rounded with it. Checked on
+screen with `cmd.exe` panes on a dark glass and on a light one (a program
+setting the background by OSC 11): the corners run parallel to the
+glass's, and nothing clips the text. The drop and lift highlights were not
+seen, since scripted mouse input did not reach the stage. The tray menu and
+the stage's title bar were left here and are drawn now, see "No Windows
+chrome" below.
 
 ### No Windows chrome
 
