@@ -64,6 +64,8 @@ mod agents;
 #[cfg(windows)]
 pub mod app;
 #[cfg(windows)]
+mod appear;
+#[cfg(windows)]
 mod ask;
 #[cfg(windows)]
 pub mod autostart;

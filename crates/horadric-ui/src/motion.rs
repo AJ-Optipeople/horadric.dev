@@ -73,6 +73,13 @@ pub fn ease_out(t: f32) -> f32 {
     1.0 - (1.0 - t).powi(3)
 }
 
+/// A popup arriving `elapsed` into an arrival of `length`: how opaque it
+/// is, and how much of its rise into place is still to go, both 0 to 1.
+pub fn arrive(elapsed: Duration, length: Duration) -> (f32, f32) {
+    let t = ease_out(progress(elapsed, length));
+    (t, 1.0 - t)
+}
+
 /// Soft at both ends.
 pub fn ease_in_out(t: f32) -> f32 {
     let t = t.clamp(0.0, 1.0);
@@ -182,6 +189,15 @@ mod tests {
         }
         // Out is ahead of linear the whole way.
         assert!(ease_out(0.25) > 0.25);
+    }
+
+    #[test]
+    fn an_arrival_starts_clear_and_low_and_ends_solid_in_place() {
+        assert_eq!(arrive(ms(0), ms(100)), (0.0, 1.0));
+        let (alpha, lift) = arrive(ms(30), ms(100));
+        assert!(alpha > 0.3 && lift < 0.7, "most of the way early");
+        assert_eq!(arrive(ms(100), ms(100)), (1.0, 0.0));
+        assert_eq!(arrive(ms(900), ms(100)), (1.0, 0.0));
     }
 
     #[test]

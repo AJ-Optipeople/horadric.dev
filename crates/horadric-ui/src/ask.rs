@@ -42,6 +42,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WS_EX_TOPMOST, WS_POPUP,
 };
 
+use crate::appear;
 use crate::backdrop;
 use crate::clipboard;
 use crate::field::{self, Field};
@@ -314,6 +315,7 @@ impl<'a> Popup<'a> {
                 std::mem::size_of::<DWM_WINDOW_CORNER_PREFERENCE>() as u32,
             );
             backdrop::border(hwnd, None);
+            appear::begin(hwnd, appear::DIALOG, (appear::RISE * s).round() as i32);
             let _ = ShowWindow(hwnd, SW_SHOW);
             let _ = SetForegroundWindow(hwnd);
             SetCapture(hwnd);
@@ -831,6 +833,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         let cs = &*(lparam.0 as *const CREATESTRUCTW);
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, cs.lpCreateParams as isize);
         return DefWindowProcW(hwnd, msg, wparam, lparam);
+    }
+    if msg == WM_TIMER && wparam.0 == appear::TIMER {
+        appear::tick(hwnd);
+        return LRESULT(0);
     }
     let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const Popup;
     if ptr.is_null() {
