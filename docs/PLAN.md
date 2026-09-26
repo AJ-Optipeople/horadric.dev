@@ -1014,6 +1014,57 @@ and a terminal is a screen set into the panel.
   project menu, the End sessions dialog, and panes of five `cmd.exe`
   sessions travelling to their cells (logged, since the stage was behind
   the installed one).
+- **Life in the tiles** (`anim.rs`, `motion.rs`, pure and tested). Asked
+  for the same day as "more fun or cool animations", and worked as the
+  Animations section of the task list. All of it holds still with
+  Windows' animations off, and none of it asks for a frame at rest.
+  - *A finished turn lands*: its key jumps and bounces once, and a loot
+    beam of the lamp's green shoots up over the tiles above and fades in
+    a second ("Loot drops" in IDEAS.md, without the sound).
+  - *Waiting quickens*: the breath goes from 1.8 s to 1.4, 1.1 and 0.9 s
+    at 1, 5 and 15 minutes, counted across the steps so it never jumps.
+  - *Every phase change eases* the key's depth, presence and lamp from the
+    old phase's to the new over 450 ms (`Stance`), so a resumed tile rises
+    out of its pause and its lamp warms up.
+  - *Ending powers down*: the lamp squeezes to a white line and a dot and
+    goes out like a picture tube. A tile that leaves stays a moment as a
+    ghost (`Leaving`), sinking and fading while the ones below slide up
+    over it. Not for the last tile in a cluster: the cluster shrinks at
+    once and its bottom row covers the ghost.
+  - *Subagents are sparks* circling the working lamp, one for each seen
+    in the turn within the last 30 s. Hooks fired inside a subagent carry
+    its `agent_id`, so no hook had to be added to anyone's settings; no
+    hook says a subagent ended, hence the 30 s (`Session::subagents`).
+  - *The icon turns over* like a card when the tool changes, 280 ms.
+  - *The activity trace scrolls*: slices stand still on the clock and the
+    bars drift left as the newest fills, the oldest fading
+    (`Session::trace`).
+  - *The context bar fills like a liquid*, rising to each reading with
+    the last segment lit only as far as the level reaches, and a glint
+    runs along it on a working session past 75 %.
+  - *A finished task* keeps its row a moment: a green check, a strike
+    through the title, then the row folds and the rows below close up
+    (`Finishing`).
+  - *A taken task throws a light* from its row to the lamp of the new
+    session that took it, once, when a session less than 3 s old turns
+    out to hold an item (`Handoffs`).
+  - *A busy project glows*: its accent washes deeper from the cluster's
+    top and breathes over 4 s while any of its sessions works.
+  - *A new project's cluster* rises 14 DIPs into its column and fades in
+    over 300 ms, through `appear`. The windows there at start stand at
+    once.
+  - *A dragged cluster gets room*: the others in the column under the
+    cursor glide apart for it, laid out as the drop would lay them but
+    saved only on the drop. Only within a column already there with
+    others in it, since a new or emptied column moves the columns under
+    the cursor.
+
+  Checked on screen with a dev instance and fake sessions posted to its
+  port, captured by `PrintWindow` since the desktop was in use: the beam,
+  the power down and the ghost, three sparks, the icon turning, the
+  context bar rising to 88 %, a struck task folding, the light from a
+  taken row. A new cluster's arrival was read back from its window's
+  alpha and position.
 - **Type.** Project names in Segoe UI Variable Display, session names
   semibold, ages with tabular digits so they do not shuffle each second,
   FILES and RECENT letter spaced like legends printed on the plate.
