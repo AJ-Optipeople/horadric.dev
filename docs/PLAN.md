@@ -394,7 +394,7 @@ a dev instance:
   already live in the installed Horadric.
 - No autostart offer and no switch for it in the tray. The first dev run
   used to point the `Run` key at `target\debug\horadricw.exe`.
-- A red tray icon and "Horadric dev" in the tooltip.
+- A red topped tray icon and "Horadric dev" in the tooltip.
 - `install`, `uninstall` and the hook and Explorer installers refuse to run.
 
 The hook URL is fixed at install time, so a `claude` in a dev terminal

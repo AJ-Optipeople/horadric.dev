@@ -67,7 +67,7 @@ Usage:
 Environment:
   HORADRIC_PORT                  Port to listen on (default 43117, or 43118 with HORADRIC_DEV)
   HORADRIC_DEV                   Run beside the installed Horadric: own port, own state in
-                               %APPDATA%\\Horadric-dev, no autostart, red tray icon, and
+                               %APPDATA%\\Horadric-dev, no autostart, red topped tray icon, and
                                install, hooks and explorer changes are refused
   HORADRIC_AGENT                 Program a Horadric terminal runs (default claude.exe)
   HORADRIC_DEBUG                 Log window positions and paint times
