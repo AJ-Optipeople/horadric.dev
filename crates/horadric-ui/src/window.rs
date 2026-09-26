@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
-use horadric_core::tasks::Mark;
+use horadric_core::tasks::{Mark, Mode};
 use horadric_core::{Defaults, Registry, Session, Usage};
 use windows::core::{w, Result, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
@@ -706,7 +706,7 @@ impl Cluster {
                 total: items.len(),
                 scroll: t.scroll,
                 summary: b.map_or_else(|| "empty".to_string(), Board::summary),
-                mode: b.map(|b| b.mode).unwrap_or_default().label(),
+                mode: b.map_or_else(|| Mode::default().label().into(), Board::mode_key),
                 collapsed: t.collapsed,
             }
         });

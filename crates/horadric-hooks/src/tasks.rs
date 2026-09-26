@@ -95,6 +95,13 @@ pub fn set_mode(project: &Path, mode: Mode) -> io::Result<()> {
     write(&path, &tasks::with_mode(&old, mode))
 }
 
+/// How many items the runner holds at once, each in a worktree of its own.
+pub fn set_parallel(project: &Path, n: usize) -> io::Result<()> {
+    let path = config_file(project);
+    let old = read_text(&path);
+    write(&path, &tasks::with_parallel(&old, n))
+}
+
 /// Reads the list, lets `change` rewrite it and writes the result back.
 /// Read and written in one go, so an edit made in an editor a moment
 /// before is not lost. False when `change` found nothing to change.

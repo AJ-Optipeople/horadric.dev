@@ -345,9 +345,25 @@ pub fn mode(config: &str) -> Mode {
         .unwrap_or_default()
 }
 
-/// `config` with the mode set, everything else in it kept. A file that is
-/// not a JSON object is started afresh rather than lost in part.
+/// `config` with the mode set, everything else in it kept.
 pub fn with_mode(config: &str, mode: Mode) -> String {
+    with_setting(config, "mode", Value::String(mode.name().into()))
+}
+
+/// `config` with how many items the runner holds at once, everything
+/// else in it kept. One takes the key out, since one is what no key means.
+pub fn with_parallel(config: &str, n: usize) -> String {
+    let n = n.clamp(1, MOST_PARALLEL);
+    if n == 1 {
+        return with_setting(config, "parallel", Value::Null);
+    }
+    with_setting(config, "parallel", Value::from(n))
+}
+
+/// `config` with one key under `"tasks"` set, or taken out for null. A
+/// file that is not a JSON object is started afresh rather than lost in
+/// part.
+fn with_setting(config: &str, key: &str, value: Value) -> String {
     let mut root = match serde_json::from_str::<Value>(config) {
         Ok(Value::Object(m)) => m,
         _ => Map::new(),
@@ -359,7 +375,11 @@ pub fn with_mode(config: &str, mode: Mode) -> String {
         *tasks = Value::Object(Map::new());
     }
     if let Some(t) = tasks.as_object_mut() {
-        t.insert("mode".into(), Value::String(mode.name().into()));
+        if value.is_null() {
+            t.remove(key);
+        } else {
+            t.insert(key.into(), value);
+        }
     }
     let mut out = serde_json::to_string_pretty(&Value::Object(root)).unwrap_or_default();
     out.push('\n');
@@ -823,6 +843,19 @@ mod tests {
         // Setting the mode keeps it.
         let out = with_mode("{\"tasks\":{\"parallel\":3}}", Mode::Auto);
         assert_eq!(parallel(&out), 3);
+    }
+
+    #[test]
+    fn parallel_is_written_beside_the_mode_and_one_takes_it_out() {
+        let out = with_parallel("{\"tasks\":{\"mode\":\"auto\"},\"hosts\":[\"vps\"]}", 3);
+        assert_eq!(parallel(&out), 3);
+        assert_eq!(mode(&out), Mode::Auto);
+        assert!(out.contains("vps"));
+        let back = with_parallel(&out, 1);
+        assert_eq!(parallel(&back), 1);
+        assert!(!back.contains("parallel"));
+        assert_eq!(mode(&back), Mode::Auto);
+        assert_eq!(parallel(&with_parallel("not json", 50)), MOST_PARALLEL);
     }
 
     #[test]

@@ -108,7 +108,7 @@ impl Default for Metrics {
             task_row_h: 26.0,
             task_rows: 8,
             task_foot: 6.0,
-            mode_w: 64.0,
+            mode_w: 72.0,
             mark_w: 24.0,
             mark_h: 20.0,
             limit_row_h: 44.0,

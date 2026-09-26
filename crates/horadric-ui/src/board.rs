@@ -44,6 +44,16 @@ impl Board {
             (d, t) => format!("{d} of {t} done"),
         }
     }
+
+    /// What the mode key in the header says: the mode, and how many items
+    /// run at once where the runner acts on it.
+    pub fn mode_key(&self) -> String {
+        if self.parallel > 1 && self.mode.runs() {
+            format!("{} \u{d7}{}", self.mode.label(), self.parallel)
+        } else {
+            self.mode.label().into()
+        }
+    }
 }
 
 /// How an item reads on its row.
@@ -203,6 +213,17 @@ mod tests {
         assert_eq!(board("- [x] A\n").summary(), "all done");
         assert_eq!(board("- [ ] A\n- [ ] B\n").summary(), "2 to do");
         assert_eq!(board("").summary(), "empty");
+    }
+
+    #[test]
+    fn the_mode_key_says_how_many_run_at_once_when_the_runner_runs() {
+        let mut b = board("- [ ] A\n");
+        b.parallel = 3;
+        assert_eq!(b.mode_key(), "Manual");
+        b.mode = Mode::Auto;
+        assert_eq!(b.mode_key(), "Auto \u{d7}3");
+        b.parallel = 1;
+        assert_eq!(b.mode_key(), "Auto");
     }
 
     #[test]
