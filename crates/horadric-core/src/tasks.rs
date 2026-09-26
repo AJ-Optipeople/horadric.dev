@@ -17,6 +17,8 @@
 
 use serde_json::{Map, Value};
 
+use crate::tombs;
+
 /// Where the list lives, from the project folder.
 pub const TASKS_FILE: &str = ".horadric/tasks.md";
 
@@ -235,6 +237,17 @@ pub fn set_held(text: &str, holder: &str, mark: Mark, reason: Option<&str>) -> O
     replace_line(text, task.line, &line)
 }
 
+/// Hands the item held by the tombs `batch` to the one tomb that won,
+/// `winner`, and marks it done: the human picking is the review. None when
+/// no item not done is held by the batch.
+pub fn pick(text: &str, batch: &str, winner: &str) -> Option<String> {
+    let task = parse(text)
+        .into_iter()
+        .find(|t| t.holder.as_deref() == Some(batch) && t.mark != Mark::Done)?;
+    let line = item_line(Mark::Done, &task.title, Some(winner), None);
+    replace_line(text, task.line, &line)
+}
+
 /// Gives the open item on `line` titled `title` to `holder`. None when that
 /// line no longer holds that open item, because the file changed under us.
 pub fn take(text: &str, line: usize, title: &str, holder: &str) -> Option<String> {
@@ -408,13 +421,15 @@ pub fn next(tasks: &[Task], mode: Mode, parallel: usize, holder: impl Fn(&str) -
         return Next::Off;
     }
     let of = |t: &Task| t.holder.as_deref().map_or(Holder::Gone, &holder);
-    let in_hand: Vec<Holder> = tasks
+    let in_hand: Vec<(Holder, usize)> = tasks
         .iter()
         .filter(|t| matches!(t.mark, Mark::Working | Mark::Review))
-        .map(of)
-        .filter(|h| *h != Holder::Gone)
+        .map(|t| (of(t), t.holder.as_deref().map_or(1, tombs::weight)))
+        .filter(|(h, _)| *h != Holder::Gone)
         .collect();
-    if in_hand.contains(&Holder::Paused) || in_hand.len() >= parallel.max(1) {
+    // An item in tombs takes a place for each of its sessions.
+    let places: usize = in_hand.iter().map(|(_, w)| w).sum();
+    if in_hand.iter().any(|(h, _)| *h == Holder::Paused) || places >= parallel.max(1) {
         return Next::Wait;
     }
     for (i, t) in tasks.iter().enumerate() {
@@ -627,6 +642,40 @@ mod tests {
         // Notes stay under it.
         assert_eq!(t.notes.len(), 2);
         assert_eq!(set_held(SAMPLE, "nobody", Mark::Done, None), None);
+    }
+
+    #[test]
+    fn picking_a_tomb_hands_it_the_item_as_done() {
+        let text = "- [/] Fix it @fix-1.x3
+  A note.
+- [ ] Next
+";
+        let out = pick(text, "fix-1.x3", "fix-1.x3.2").unwrap();
+        assert_eq!(
+            out,
+            "- [x] Fix it @fix-1.x3.2
+  A note.
+- [ ] Next
+"
+        );
+        assert_eq!(pick(&out, "fix-1.x3", "fix-1.x3.1"), None);
+    }
+
+    #[test]
+    fn an_item_in_tombs_takes_a_place_for_each_tomb() {
+        let list = parse(
+            "- [/] A @a-1.x3
+- [ ] B
+",
+        );
+        assert_eq!(next(&list, Mode::Auto, 3, |_| Holder::Live), Next::Wait);
+        assert_eq!(next(&list, Mode::Auto, 4, |_| Holder::Live), Next::Start(1));
+        let list = parse(
+            "- [/] A @a-1
+- [ ] B
+",
+        );
+        assert_eq!(next(&list, Mode::Auto, 2, |_| Holder::Live), Next::Start(1));
     }
 
     #[test]

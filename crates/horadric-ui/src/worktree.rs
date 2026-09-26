@@ -127,12 +127,27 @@ pub fn remove(w: Worktree) {
 /// tree went but its branch stayed, since it has commits the main tree
 /// lacks: a branch worth offering to merge.
 pub fn remove_then(w: Worktree, kept: impl FnOnce(Worktree) + Send + 'static) {
+    remove_with(w, false, kept);
+}
+
+/// Removes a worktree and its branch with whatever is in them. Only for a
+/// tomb the human did not pick, whose work is thrown away on purpose.
+pub fn discard(w: Worktree) {
+    remove_with(w, true, |_| ());
+}
+
+fn remove_with(w: Worktree, force: bool, kept: impl FnOnce(Worktree) + Send + 'static) {
     std::thread::spawn(move || {
         let main = Path::new(&w.main);
         let mut result = Ok(String::new());
+        let remove: &[&str] = if force {
+            &["worktree", "remove", "--force", &w.path]
+        } else {
+            &["worktree", "remove", &w.path]
+        };
         for attempt in 0..REMOVE_TRIES {
             std::thread::sleep(Duration::from_secs(1 + attempt as u64));
-            result = git(main, &["worktree", "remove", &w.path]);
+            result = git(main, remove);
             if result.is_ok() || !Path::new(&w.path).exists() {
                 break;
             }
@@ -141,7 +156,8 @@ pub fn remove_then(w: Worktree, kept: impl FnOnce(Worktree) + Send + 'static) {
             eprintln!("horadric: kept the worktree {}: {e}", w.path);
             return;
         }
-        if let Err(e) = git(main, &["branch", "-d", &w.branch]) {
+        let delete = if force { "-D" } else { "-d" };
+        if let Err(e) = git(main, &["branch", delete, &w.branch]) {
             eprintln!("horadric: kept the branch {}: {e}", w.branch);
             kept(w);
         }

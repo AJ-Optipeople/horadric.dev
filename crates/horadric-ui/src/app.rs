@@ -1088,6 +1088,7 @@ fn tile_menu(id: &str) {
     const END: usize = 2;
     const RENAME: usize = 3;
     const STASH: usize = 4;
+    const PICK: usize = 5;
     let Some((kind, shell)) = with_app(|app| app.tile_kind(id)).flatten() else {
         return;
     };
@@ -1138,6 +1139,10 @@ fn tile_menu(id: &str) {
         items.insert(0, changes_menu(w, diff.as_ref()));
         items.insert(1, Item::Separator);
     }
+    if with_app(|app| app.can_pick(id)) == Some(true) {
+        items.insert(0, Item::action(PICK, "Pick this tomb\u{2026}"));
+        items.insert(1, Item::Separator);
+    }
     let picked = menu::popup(&items);
     if let (Some(i), Some((w, diff))) = (picked, &tree) {
         let file = diff.as_ref().and_then(|d| match i {
@@ -1167,6 +1172,7 @@ fn tile_menu(id: &str) {
             with_app(|app| app.end(id));
         }
         Some(RENAME) => rename_session(id),
+        Some(PICK) => runner::tomb::ask_pick(id),
         Some(STASH) if confirm_stash(id) => {
             with_app(|app| app.stash(id));
         }
@@ -1983,7 +1989,10 @@ impl App {
                             }
                         }
                         Command::Reload(r) => self.begin_reload(r),
-                        Command::Tasks(_) => {
+                        Command::Tasks(t) => {
+                            if let Some(tomb) = &t.tomb {
+                                self.tomb_reported(tomb, t.why.as_deref());
+                            }
                             self.refresh_boards(true);
                             self.run_tasks();
                         }

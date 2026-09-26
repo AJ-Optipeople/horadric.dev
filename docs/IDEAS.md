@@ -60,6 +60,8 @@ Seven tombs and only one is real. Start the same task in several sessions
 at once, each in its own worktree, and pick the winner; the others fade out
 and their worktrees are cleaned up.
 
+Built: see "Tal Rasha's tombs" in [PLAN.md](PLAN.md).
+
 ## Visual
 
 ### Item rarity colours

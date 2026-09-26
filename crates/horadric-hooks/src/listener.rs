@@ -82,21 +82,29 @@ impl Reload {
     }
 }
 
-/// `horadric task` changed the task list of the project in this folder.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// `horadric task` changed the task list of the project in this folder,
+/// or a tomb reported on its item, which leaves the list as it is.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TasksChanged {
     pub dir: String,
+    /// The tomb that reported, done or blocked.
+    pub tomb: Option<String>,
+    /// Why the tomb is blocked, none when it is done.
+    pub why: Option<String>,
 }
 
 impl TasksChanged {
     pub fn to_json(&self) -> String {
-        json!({ "dir": self.dir }).to_string()
+        json!({ "dir": self.dir, "tomb": self.tomb, "why": self.why }).to_string()
     }
 
     pub fn from_json(body: &[u8]) -> Option<Self> {
         let v: Value = serde_json::from_slice(body).ok()?;
+        let text = |k: &str| v.get(k).and_then(Value::as_str).map(str::to_string);
         Some(TasksChanged {
             dir: v.get("dir")?.as_str()?.to_string(),
+            tomb: text("tomb"),
+            why: text("why"),
         })
     }
 }
@@ -480,6 +488,8 @@ mod tests {
         let (port, rx) = start_with_new();
         let want = TasksChanged {
             dir: "C:/dev/app".into(),
+            tomb: Some("fix-1.x3.2".into()),
+            why: None,
         };
         let json = want.to_json();
         let reply = post_to(port, TASKS_PATH, "X-Horadric-Command: new\r\n", &json);
@@ -490,6 +500,12 @@ mod tests {
             rx.recv_timeout(Duration::from_secs(2)).unwrap(),
             Command::Tasks(want)
         );
+    }
+
+    #[test]
+    fn a_task_list_change_from_an_older_build_has_no_tomb() {
+        let t = TasksChanged::from_json(br#"{"dir":"C:/dev/app"}"#).unwrap();
+        assert_eq!((t.tomb, t.why), (None, None));
     }
 
     #[test]

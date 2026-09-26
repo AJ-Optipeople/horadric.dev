@@ -1,8 +1,9 @@
 //! What a project's tasks tile shows: its list as last read from disk, and
 //! how each item reads on a row, given how the session holding it is doing.
 
+use horadric_core::registry::Registry;
 use horadric_core::tasks::{Mark, Mode, Task};
-use horadric_core::Phase;
+use horadric_core::{tombs, Phase};
 
 use crate::theme::{self, Color};
 
@@ -14,6 +15,9 @@ pub struct Board {
     /// How many items the runner may hold at once, each in a worktree of
     /// its own. One when the project keeps a shared tree.
     pub parallel: usize,
+    /// Each new session gets a worktree of its own, so an item can run in
+    /// tombs.
+    pub own_trees: bool,
 }
 
 impl Board {
@@ -57,6 +61,55 @@ pub enum RowState {
     Gone,
     Review,
     Blocked,
+    /// Its tombs are at it.
+    Tombs,
+    /// Every tomb still there says it is done: the human picks one.
+    Pick,
+}
+
+/// How `task` reads, from the sessions in `r`: its holder's phase, or,
+/// for an item in tombs, what its tombs are doing between them. A stashed
+/// tomb counts as paused.
+pub fn state_in(task: &Task, r: &Registry) -> RowState {
+    let holder = task.holder.as_deref();
+    match holder.filter(|h| task.mark == Mark::Working && tombs::count(h).is_some()) {
+        Some(batch) => {
+            let of_batch = |id: &str| tombs::of(id).is_some_and(|(b, _)| b == batch);
+            let found: Vec<(Phase, bool)> = r
+                .all()
+                .filter(|s| of_batch(&s.id))
+                .map(|s| (s.phase.clone(), s.loot.finished))
+                .chain(
+                    r.stashed()
+                        .iter()
+                        .filter(|s| of_batch(&s.id))
+                        .map(|s| (Phase::Paused, s.loot.finished)),
+                )
+                .collect();
+            tombs_row(&found)
+        }
+        None => row_state(task, holder.and_then(|h| r.get(h)).map(|s| &s.phase)),
+    }
+}
+
+/// How an item in tombs reads, from each tomb's phase and whether it said
+/// it is done.
+pub fn tombs_row(tombs: &[(Phase, bool)]) -> RowState {
+    let there: Vec<&(Phase, bool)> = tombs.iter().filter(|(p, _)| *p != Phase::Ended).collect();
+    if there.is_empty() {
+        RowState::Gone
+    } else if there.iter().any(|(p, _)| *p == Phase::Paused) {
+        RowState::Paused
+    } else if there.iter().all(|(_, done)| *done) {
+        RowState::Pick
+    } else if there
+        .iter()
+        .any(|(p, done)| !done && matches!(p, Phase::Waiting(_) | Phase::Done))
+    {
+        RowState::Asks
+    } else {
+        RowState::Tombs
+    }
 }
 
 /// How `task` reads, given the phase of the session that holds it, none
@@ -86,6 +139,8 @@ impl RowState {
             RowState::Gone => "session gone",
             RowState::Review => "review",
             RowState::Blocked => "blocked",
+            RowState::Tombs => "tombs",
+            RowState::Pick => "pick one",
         }
     }
 
@@ -99,6 +154,8 @@ impl RowState {
             RowState::Gone => '\u{E711}',
             RowState::Review => '\u{E73E}',
             RowState::Blocked => '\u{E7BA}',
+            RowState::Tombs => '\u{E716}',
+            RowState::Pick => '\u{E734}',
         }
     }
 
@@ -107,8 +164,8 @@ impl RowState {
     pub fn color(self) -> Color {
         match self {
             RowState::Open => theme::TEXT_DIM,
-            RowState::Working => theme::WORKING,
-            RowState::Asks | RowState::Review => theme::WAITING,
+            RowState::Working | RowState::Tombs => theme::WORKING,
+            RowState::Asks | RowState::Review | RowState::Pick => theme::WAITING,
             RowState::Blocked => theme::ERROR,
             RowState::Paused | RowState::Gone => theme::IDLE,
         }
@@ -118,7 +175,7 @@ impl RowState {
     pub fn needs_you(self) -> bool {
         matches!(
             self,
-            RowState::Asks | RowState::Review | RowState::Blocked | RowState::Gone
+            RowState::Asks | RowState::Review | RowState::Blocked | RowState::Gone | RowState::Pick
         )
     }
 }
@@ -134,6 +191,7 @@ mod tests {
             mode: Mode::Manual,
             tasks: parse(text),
             parallel: 1,
+            own_trees: false,
         }
     }
 
@@ -168,5 +226,41 @@ mod tests {
         assert_eq!(row_state(&t[2], None), RowState::Open);
         assert!(RowState::Review.needs_you() && !RowState::Working.needs_you());
         assert_eq!(RowState::Open.label(), "");
+    }
+
+    #[test]
+    fn tombs_read_as_they_are_doing_between_them() {
+        let working = (Phase::Working, false);
+        let finished = (Phase::Done, true);
+        let asks = (Phase::Waiting(WaitReason::Permission), false);
+        let ended = (Phase::Ended, false);
+        assert_eq!(
+            tombs_row(&[working.clone(), finished.clone()]),
+            RowState::Tombs
+        );
+        assert_eq!(tombs_row(&[finished.clone(), asks]), RowState::Asks);
+        // A turn that ended without a report asks too.
+        assert_eq!(tombs_row(&[(Phase::Done, false)]), RowState::Asks);
+        assert_eq!(
+            tombs_row(&[finished.clone(), finished.clone()]),
+            RowState::Pick
+        );
+        // A tomb the human ended does not count.
+        assert_eq!(tombs_row(&[finished, ended.clone()]), RowState::Pick);
+        assert_eq!(tombs_row(&[ended]), RowState::Gone);
+        assert_eq!(tombs_row(&[]), RowState::Gone);
+        assert_eq!(
+            tombs_row(&[(Phase::Paused, true), working]),
+            RowState::Paused
+        );
+        assert!(RowState::Pick.needs_you() && !RowState::Tombs.needs_you());
+    }
+
+    #[test]
+    fn with_no_sessions_every_held_item_is_gone() {
+        let r = Registry::default();
+        let t = parse("- [/] A @a-1\n- [/] B @b-1.x3\n");
+        assert_eq!(state_in(&t[0], &r), RowState::Gone);
+        assert_eq!(state_in(&t[1], &r), RowState::Gone);
     }
 }

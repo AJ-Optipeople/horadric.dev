@@ -10,6 +10,7 @@
 use std::path::{Path, PathBuf};
 
 use horadric_core::tasks::{self, Mark, TASKS_FILE};
+use horadric_core::tombs;
 use horadric_hooks::listener::TasksChanged;
 use horadric_hooks::{
     client, tasks as file, COMMAND_HEADER, OWNER_ENV, SESSION_ENV, TASKS_ENV, TASKS_PATH,
@@ -48,6 +49,9 @@ pub fn run(args: &[String]) -> Result<(), String> {
 /// The agent's item is done, or blocked with `why`.
 fn report(cwd: &Path, why: Option<&str>) -> Result<(), String> {
     let id = session().ok_or("this is not a Horadric session, so there is no item to report on")?;
+    if let Some((batch, _)) = tombs::of(&id) {
+        return report_tomb(cwd, &id, batch, why);
+    }
     let project = held(cwd, &id).ok_or(format!(
         "no {TASKS_FILE} above here has an item held by {id}"
     ))?;
@@ -66,6 +70,27 @@ fn report(cwd: &Path, why: Option<&str>) -> Result<(), String> {
         (Some(_), _) => println!("Marked blocked. Say what you need, then wait for the human."),
         (None, Mark::Done) => println!("Marked done. The next item starts once this turn ends."),
         _ => println!("Marked for review. The human looks next; stop here."),
+    }
+    Ok(())
+}
+
+/// A tomb's report leaves the list alone, since the item is the batch's
+/// until the human picks. Only the app keeps it, so it has to hear.
+fn report_tomb(cwd: &Path, id: &str, batch: &str, why: Option<&str>) -> Result<(), String> {
+    let project = held(cwd, batch).ok_or(format!(
+        "no {TASKS_FILE} above here has an item held by {batch}"
+    ))?;
+    let heard = post_app(&TasksChanged {
+        dir: project.to_string_lossy().into_owned(),
+        tomb: Some(id.to_string()),
+        why: why.map(str::to_string),
+    });
+    if heard != Some(200) {
+        return Err("Horadric did not hear the report. Tell the human you are finished.".into());
+    }
+    match why {
+        Some(_) => println!("Told the human you are blocked. Say what you need, then wait."),
+        None => println!("Marked done. The human compares the tombs and picks one; stop here."),
     }
     Ok(())
 }
@@ -120,13 +145,23 @@ fn session() -> Option<String> {
 /// to read the list again. It would notice by itself within a second, so a
 /// Horadric that is not listening is no error.
 fn tell_app(project: &Path) {
+    post_app(&TasksChanged {
+        dir: PathBuf::from(project).to_string_lossy().into_owned(),
+        ..TasksChanged::default()
+    });
+}
+
+/// Posts to the Horadric that owns this session, and says what it answered.
+fn post_app(body: &TasksChanged) -> Option<u16> {
     let port = std::env::var(OWNER_ENV)
         .ok()
         .and_then(|p| p.parse().ok())
         .unwrap_or_else(horadric_hooks::port);
-    let body = TasksChanged {
-        dir: PathBuf::from(project).to_string_lossy().into_owned(),
-    }
-    .to_json();
-    let _ = client::post(port, TASKS_PATH, &[(COMMAND_HEADER, "tasks")], &body);
+    client::post(
+        port,
+        TASKS_PATH,
+        &[(COMMAND_HEADER, "tasks")],
+        &body.to_json(),
+    )
+    .ok()
 }

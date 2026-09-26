@@ -30,7 +30,7 @@ use horadric_core::journal::{self, Commit, Entry, What};
 use horadric_core::tasks::{self, Holder, Mark, Mode, Next, Task, TASKS_FILE};
 use horadric_core::usage::format_until;
 use horadric_core::worktree::{self, Worktree};
-use horadric_core::{fleet, ssh, Phase, WaitReason};
+use horadric_core::{fleet, ssh, tombs, Phase, WaitReason};
 use horadric_hooks::tasks as file;
 
 use super::{post, unix_now, with_app, App, WM_HORADRIC_KEPT, WM_HORADRIC_TASK_MENU};
@@ -40,6 +40,9 @@ use crate::menu::{self, Item};
 use crate::toast::Kind;
 use crate::window::{folder_key, project_key, project_name};
 use crate::{ask, store, watch};
+
+#[path = "tomb.rs"]
+pub(super) mod tomb;
 
 /// The least time between two sessions the runner starts in one project.
 const START_GAP: Duration = Duration::from_secs(10);
@@ -72,6 +75,9 @@ pub(super) struct State {
     ran: HashSet<String>,
     /// When the runner last started a session, by project.
     started: HashMap<String, Instant>,
+    /// The tombs started of each item in tombs, by batch, so one the human
+    /// ended is not started again.
+    tombs: HashMap<String, HashSet<usize>>,
     /// Sessions holding an item that a usage limit stopped mid turn.
     refused: HashMap<String, Refused>,
     /// Menus and dialogs waiting for the app's window to show them.
@@ -137,6 +143,7 @@ fn read_board(dir: &Path) -> Board {
         mode: file::mode(dir),
         tasks: tasks::parse(&file::read(dir)),
         parallel: if own_trees { file::parallel(dir) } else { 1 },
+        own_trees,
     }
 }
 
@@ -287,6 +294,9 @@ impl App {
     /// A stashed session holds its item as a paused one does: kept for
     /// later, and only a click brings it back.
     fn holder(&self, id: &str) -> Holder {
+        if tombs::count(id).is_some() {
+            return self.batch_holder(id);
+        }
         let stashed = self.shared.registry.lock().is_ok_and(|r| r.is_stashed(id));
         match self.phase_of(id) {
             None if stashed => Holder::Paused,
@@ -316,7 +326,7 @@ impl App {
             .borrow()
             .values()
             .flat_map(|b| &b.tasks)
-            .any(|t| t.mark.held() && t.holder.as_deref() == Some(id));
+            .any(|t| t.mark.held() && t.holder.as_deref().is_some_and(|h| tombs::holds(h, id)));
         let batch = horadric_pty::is_batch(program);
         let mut system = Vec::new();
         let own_tree = self
@@ -330,6 +340,9 @@ impl App {
                 .as_ref()
                 .map(|_| format!("{}/{TASKS_FILE}", folder_key(&cwd.to_string_lossy())));
             system.push(tasks::system_prompt(&horadric_command(), list.as_deref()));
+            if let Some((batch, n)) = tombs::of(id) {
+                system.push(tombs::system_prompt(n, tombs::weight(batch)));
+            }
         }
         system.extend(own_tree.as_ref().map(worktree::system_prompt));
         // The config may be kept out of git, so a worktree reads its
@@ -430,8 +443,10 @@ impl App {
     }
 
     fn row_state(&self, task: &Task) -> RowState {
-        let phase = task.holder.as_deref().and_then(|h| self.phase_of(h));
-        board::row_state(task, phase.as_ref())
+        match self.shared.registry.lock() {
+            Ok(r) => board::state_in(task, &r),
+            Err(_) => board::row_state(task, None),
+        }
     }
 
     /// A row clicked: an open item starts, one whose session is gone
@@ -444,8 +459,8 @@ impl App {
             RowState::Open => self.take_task(key, line, title, true).map(drop),
             RowState::Gone => self.start_again(key, line, title),
             _ => {
-                if let Some(h) = &task.holder {
-                    self.reveal(h, false);
+                if let Some(h) = task.holder.as_deref().and_then(|h| self.shown_for(h)) {
+                    self.reveal(&h, false);
                 }
                 Ok(())
             }
@@ -455,9 +470,25 @@ impl App {
         }
     }
 
+    /// The session a row shows: its holder, or an item in tombs' first.
+    fn shown_for(&self, holder: &str) -> Option<String> {
+        match tombs::count(holder) {
+            Some(_) => self.tombs_of(holder).into_iter().next(),
+            None => Some(holder.to_string()),
+        }
+    }
+
+    /// Starts an item whose session is gone again, in as many tombs as it
+    /// had.
     fn start_again(&mut self, key: &str, line: usize, title: &str) -> Result<(), String> {
+        let tombs = self
+            .task_at(key, line, title)
+            .and_then(|t| tombs::count(t.holder.as_deref()?));
         self.set_task(key, line, title, Mark::Open);
-        self.take_task(key, line, title, true).map(drop)
+        match tombs {
+            Some(n) => self.take_tombs(key, line, title, n),
+            None => self.take_task(key, line, title, true).map(drop),
+        }
     }
 
     /// Sets an item's mark in the file and looks again.
@@ -477,7 +508,15 @@ impl App {
     fn put_back(&mut self, key: &str, line: usize, title: &str) {
         let holder = self.task_at(key, line, title).and_then(|t| t.holder);
         if let Some(h) = holder {
-            self.end(&h);
+            match tombs::count(&h) {
+                Some(_) => {
+                    for id in self.tombs_of(&h) {
+                        self.end(&id);
+                    }
+                    self.tasks.tombs.remove(&h);
+                }
+                None => self.end(&h),
+            }
         }
         self.set_task(key, line, title, Mark::Open);
     }
@@ -558,7 +597,9 @@ impl App {
             self.nudge(b);
             said.extend(self.worth_saying(key, b));
             if held.is_none() {
-                self.start_next(key, b);
+                if !self.start_tombs(key, b) {
+                    self.start_next(key, b);
+                }
             } else if b.mode.runs() {
                 waiting |= matches!(
                     tasks::next(&b.tasks, b.mode, b.parallel, |id| self.holder(id)),
@@ -612,6 +653,10 @@ impl App {
             .flat_map(|(_, b)| &b.tasks)
             .filter(|t| t.mark == Mark::Working)
             .filter_map(|t| t.holder.clone())
+            .flat_map(|h| match tombs::count(&h) {
+                Some(_) => self.tombs_of(&h),
+                None => vec![h],
+            })
             .collect();
         let stopped: HashMap<String, SystemTime> = {
             let Ok(r) = self.shared.registry.lock() else {
@@ -699,20 +744,41 @@ impl App {
         if !b.mode.runs() {
             return;
         }
-        for t in b.tasks.iter().filter(|t| t.mark == Mark::Working) {
-            let Some(h) = t.holder.as_deref() else {
-                continue;
+        let holders: Vec<String> = b
+            .tasks
+            .iter()
+            .filter(|t| t.mark == Mark::Working)
+            .filter_map(|t| t.holder.clone())
+            .collect();
+        for holder in holders {
+            // Each tomb is asked for itself, until it said it is done.
+            let ids = match tombs::count(&holder) {
+                Some(_) => self.tombs_of(&holder),
+                None => vec![holder],
             };
-            if self.tasks.nudged.contains_key(h) || self.phase_of(h) != Some(Phase::Done) {
-                continue;
+            for h in ids {
+                if self.tasks.nudged.contains_key(&h)
+                    || self.phase_of(&h) != Some(Phase::Done)
+                    || self.reported(&h)
+                {
+                    continue;
+                }
+                let Some(c) = self.consoles.get(&h).filter(|c| c.exit_code().is_none()) else {
+                    continue;
+                };
+                c.write(tasks::nudge(&horadric_command()).into_bytes());
+                self.tasks.enters.push((h.clone(), Instant::now()));
+                self.tasks.nudged.insert(h, SystemTime::now());
             }
-            let Some(c) = self.consoles.get(h).filter(|c| c.exit_code().is_none()) else {
-                continue;
-            };
-            c.write(tasks::nudge(&horadric_command()).into_bytes());
-            self.tasks.enters.push((h.to_string(), Instant::now()));
-            self.tasks.nudged.insert(h.to_string(), SystemTime::now());
         }
+    }
+
+    /// A tomb that already said it is done.
+    fn reported(&self, id: &str) -> bool {
+        self.shared
+            .registry
+            .lock()
+            .is_ok_and(|r| r.get(id).is_some_and(|s| s.loot.finished))
     }
 
     /// The session was nudged and stopped again after that without a
@@ -737,6 +803,15 @@ impl App {
                 continue;
             };
             match t.mark {
+                Mark::Working if tombs::count(h).is_some() => {
+                    if self.ready_to_pick(h) {
+                        out.push((
+                            format!("pick:{h}"),
+                            format!("Tombs finished: {}", t.title),
+                            "Pick the one to keep from a tomb's menu.".to_string(),
+                        ));
+                    }
+                }
                 Mark::Review => out.push((
                     format!("review:{h}"),
                     "Ready for review".to_string(),
@@ -1037,9 +1112,19 @@ fn item_menu(key: &str, line: usize, title: &str) {
     const DONE: usize = 4;
     const BACK: usize = 5;
     const EDIT: usize = 6;
-    let Some((state, holder)) = with_app(|app| {
+    // Beyond the ids of `tombs::MOST` tombs.
+    const TOMBS: usize = 100;
+    const PICK: usize = 200;
+    let Some((state, holder, own_trees, pickable)) = with_app(|app| {
         let t = app.task_at(key, line, title)?;
-        Some((app.row_state(&t), t.holder))
+        let own_trees = app
+            .shared
+            .boards
+            .borrow()
+            .get(key)
+            .is_some_and(|b| b.own_trees);
+        let pickable = t.holder.as_deref().and_then(|h| app.pickable(h));
+        Some((app.row_state(&t), t.holder, own_trees, pickable))
     })
     .flatten() else {
         return;
@@ -1050,10 +1135,28 @@ fn item_menu(key: &str, line: usize, title: &str) {
         RowState::Gone => items.push(Item::action(START, "Start again")),
         _ => items.push(Item::action(SHOW, "Show session")),
     }
-    match state {
-        RowState::Review => items.push(Item::action(APPROVE, "Approve")),
-        RowState::Open => {}
-        _ => items.push(Item::action(DONE, "Mark done")),
+    if state == RowState::Open && own_trees {
+        let counts = (tombs::LEAST..=tombs::MOST)
+            .map(|n| Item::action(TOMBS + n, format!("{n} tombs")))
+            .collect();
+        items.push(Item::Submenu(
+            "Start in tombs, pick the best".into(),
+            counts,
+        ));
+    }
+    match (&pickable, state) {
+        (Some(tombs), _) if !tombs.is_empty() => {
+            let each = tombs
+                .iter()
+                .enumerate()
+                .map(|(i, (_, name))| Item::action(PICK + i, name.clone()))
+                .collect();
+            items.push(Item::Submenu("Pick the one to keep".into(), each));
+        }
+        // Done without a pick would leave its tombs running.
+        (Some(_), _) | (None, RowState::Open) => {}
+        (None, RowState::Review) => items.push(Item::action(APPROVE, "Approve")),
+        (None, _) => items.push(Item::action(DONE, "Mark done")),
     }
     if holder.is_some() {
         items.push(Item::action(BACK, "Put back in the list"));
@@ -1062,11 +1165,22 @@ fn item_menu(key: &str, line: usize, title: &str) {
     items.push(Item::action(EDIT, "Edit the list"));
     // Outside the app's borrow: the menu's loop dispatches its messages.
     let picked = menu::popup(&items);
+    if let Some(i) = picked.filter(|i| *i >= PICK) {
+        if let Some((id, _)) = pickable.as_ref().and_then(|p| p.get(i - PICK)) {
+            tomb::ask_pick(id);
+        }
+        return;
+    }
     with_app(|app| match picked {
         Some(START) => app.task_clicked(key, line, title),
+        Some(n) if n > TOMBS && n < PICK => {
+            if let Err(e) = app.take_tombs(key, line, title, n - TOMBS) {
+                eprintln!("horadric: cannot start the tombs: {e}");
+            }
+        }
         Some(SHOW) => {
-            if let Some(h) = &holder {
-                app.reveal(h, false);
+            if let Some(h) = holder.as_deref().and_then(|h| app.shown_for(h)) {
+                app.reveal(&h, false);
             }
         }
         Some(APPROVE | DONE) => app.set_task(key, line, title, Mark::Done),

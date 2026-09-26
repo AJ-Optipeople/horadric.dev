@@ -451,9 +451,9 @@ impl Cluster {
             return Some(Vec::new());
         };
         let registry = self.shared.registry.lock().ok();
-        let phase = |t: &horadric_core::tasks::Task| {
-            let r = registry.as_ref()?;
-            Some(r.get(t.holder.as_deref()?)?.phase.clone())
+        let state = |t: &horadric_core::tasks::Task| match &registry {
+            Some(r) => board::state_in(t, r),
+            None => board::row_state(t, None),
         };
         let mut items: Vec<Item> = b
             .shown()
@@ -463,7 +463,7 @@ impl Cluster {
                 Item {
                     line: t.line,
                     title: t.title.clone(),
-                    state: board::row_state(t, phase(t).as_ref()),
+                    state: state(t),
                     finish: None,
                     holder: t.holder.clone(),
                 }

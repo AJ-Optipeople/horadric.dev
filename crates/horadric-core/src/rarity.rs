@@ -46,6 +46,10 @@ pub struct Loot {
     /// Started by the runner as one of several items held at once.
     #[serde(default)]
     pub batch: bool,
+    /// Its agent said its item is done. Kept for a tomb, whose item stays
+    /// open until the human picks one of the tombs.
+    #[serde(default)]
+    pub finished: bool,
 }
 
 /// The tools that write files. A shell command may too, which the

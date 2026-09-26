@@ -18,6 +18,7 @@ pub mod session;
 pub mod ssh;
 pub mod tasks;
 pub mod title;
+pub mod tombs;
 pub mod usage;
 pub mod worktree;
 
