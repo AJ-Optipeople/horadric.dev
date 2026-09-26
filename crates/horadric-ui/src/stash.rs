@@ -30,7 +30,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, HWND_NOTOPMOST, HWND_TOPMOST, IDC_ARROW, MA_NOACTIVATE,
     SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_SHOWNOACTIVATE, WM_CAPTURECHANGED,
     WM_DPICHANGED, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE,
-    WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_RBUTTONUP, WM_SIZE, WNDCLASSW,
+    WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_RBUTTONUP, WM_SIZE, WM_TIMER, WNDCLASSW,
     WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
 };
 
@@ -38,7 +38,7 @@ use crate::app::{self, Input};
 use crate::layout::{self, StashLayout};
 use crate::render::{StashLook, StashScene, Target};
 use crate::window::Shared;
-use crate::{backdrop, columns};
+use crate::{appear, backdrop, columns};
 
 pub(crate) const CLASS: PCWSTR = w!("HoradricStash");
 const DRAG_THRESHOLD: i32 = 4;
@@ -423,6 +423,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         let cs = &*(lparam.0 as *const CREATESTRUCTW);
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, cs.lpCreateParams as isize);
         return DefWindowProcW(hwnd, msg, wparam, lparam);
+    }
+    if msg == WM_TIMER && wparam.0 == appear::TIMER {
+        appear::tick(hwnd);
+        return LRESULT(0);
     }
     let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const StashWindow;
     if ptr.is_null() {
