@@ -21,6 +21,7 @@ use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use windows::core::{w, Result, BOOL, HSTRING, PCWSTR};
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
@@ -38,18 +39,18 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetCursorPos,
     GetForegroundWindow, GetSystemMetrics, GetWindowLongPtrW, GetWindowRect, IsIconic, IsZoomed,
-    LoadCursorW, LoadIconW, RegisterClassW, SetCursor, SetForegroundWindow, SetWindowLongPtrW,
-    SetWindowPos, SetWindowTextW, ShowWindow, CREATESTRUCTW, CW_USEDEFAULT, GWLP_USERDATA,
-    HTCAPTION, HTCLIENT, HTCLOSE, HTMAXBUTTON, HTMINBUTTON, HTTOP, HTTOPLEFT, HTTOPRIGHT,
-    IDC_ARROW, IDC_SIZEALL, NCCALCSIZE_PARAMS, SC_KEYMENU, SM_CXMINTRACK, SM_CXPADDEDBORDER,
-    SM_CYFRAME, SM_CYMINTRACK, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-    SWP_NOZORDER, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOWNOACTIVATE, SW_SHOWNORMAL,
-    WINDOW_EX_STYLE, WMSZ_BOTTOM, WMSZ_BOTTOMLEFT, WMSZ_BOTTOMRIGHT, WMSZ_LEFT, WMSZ_RIGHT,
-    WMSZ_TOP, WMSZ_TOPLEFT, WMSZ_TOPRIGHT, WM_CAPTURECHANGED, WM_CLOSE, WM_DPICHANGED,
+    KillTimer, LoadCursorW, LoadIconW, RegisterClassW, SetCursor, SetForegroundWindow, SetTimer,
+    SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow, CREATESTRUCTW, CW_USEDEFAULT,
+    GWLP_USERDATA, HTCAPTION, HTCLIENT, HTCLOSE, HTMAXBUTTON, HTMINBUTTON, HTTOP, HTTOPLEFT,
+    HTTOPRIGHT, IDC_ARROW, IDC_SIZEALL, NCCALCSIZE_PARAMS, SC_KEYMENU, SM_CXMINTRACK,
+    SM_CXPADDEDBORDER, SM_CYFRAME, SM_CYMINTRACK, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
+    SWP_NOSIZE, SWP_NOZORDER, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOWNOACTIVATE,
+    SW_SHOWNORMAL, WINDOW_EX_STYLE, WMSZ_BOTTOM, WMSZ_BOTTOMLEFT, WMSZ_BOTTOMRIGHT, WMSZ_LEFT,
+    WMSZ_RIGHT, WMSZ_TOP, WMSZ_TOPLEFT, WMSZ_TOPRIGHT, WM_CAPTURECHANGED, WM_CLOSE, WM_DPICHANGED,
     WM_ENTERSIZEMOVE, WM_ERASEBKGND, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOVING, WM_NCACTIVATE,
     WM_NCCALCSIZE, WM_NCCREATE, WM_NCDESTROY, WM_NCHITTEST, WM_NCLBUTTONDBLCLK, WM_NCLBUTTONDOWN,
     WM_NCLBUTTONUP, WM_NCMOUSEMOVE, WM_NCRBUTTONUP, WM_PAINT, WM_SETFOCUS, WM_SIZE, WM_SIZING,
-    WM_SYSCOMMAND, WNDCLASSW, WS_CLIPCHILDREN, WS_OVERLAPPEDWINDOW,
+    WM_SYSCOMMAND, WM_TIMER, WNDCLASSW, WS_CLIPCHILDREN, WS_OVERLAPPEDWINDOW,
 };
 
 /// Not in the `windows` crate's WindowsAndMessaging.
@@ -59,6 +60,7 @@ use crate::app::{self, Input};
 use crate::backdrop;
 use crate::caption::Caption;
 use crate::console::Console;
+use crate::glide::Glides;
 use crate::layout::CaptionHit;
 use crate::menu::{self, Item};
 use crate::pane::{self, Pane, DIRS, WM_PANE_FOCUS, WM_PANE_GRAB, WM_PANE_MOVE, WM_PANE_ZOOM};
@@ -71,6 +73,8 @@ pub(crate) const CLASS: PCWSTR = w!("HoradricTerminal");
 const PANE_GAP_DIP: f32 = 8.0;
 /// The seam cut round the stage's faceplate, in from its edge, in DIPs.
 const SEAM_DIP: f32 = 4.0;
+/// Runs while a pane glides to its new place in the grid.
+const GLIDE_TIMER: usize = 1;
 /// How far a header has to move before a press becomes a drag.
 const DRAG_THRESHOLD: i32 = 4;
 
@@ -124,6 +128,10 @@ pub struct TerminalWindow {
     /// The mouse is being followed over the caption, for the leave that
     /// puts its keys out.
     tracking: Cell<bool>,
+    /// Panes on their way to a new place in the grid, by window.
+    glides: RefCell<Glides>,
+    /// When the glides last moved on, while they move.
+    glided: Cell<Option<Instant>>,
 }
 
 pub fn register_class() -> Result<()> {
@@ -170,6 +178,8 @@ impl TerminalWindow {
             grab: Cell::new(None),
             caption: RefCell::new(None),
             tracking: Cell::new(false),
+            glides: RefCell::default(),
+            glided: Cell::new(None),
         });
         unsafe {
             let instance = GetModuleHandleW(None)?;
@@ -239,7 +249,14 @@ impl TerminalWindow {
                     new.push(p);
                 }
                 None => match Pane::create(Rc::clone(&self.shared), console, label, self.hwnd) {
-                    Ok(p) => new.push(p),
+                    Ok(p) => {
+                        // A session opening on a stage already showing
+                        // its project fades in where it lands.
+                        if !before.is_empty() {
+                            p.reveal();
+                        }
+                        new.push(p);
+                    }
                     Err(e) => eprintln!("horadric: cannot open a pane: {e}"),
                 },
             }
@@ -247,6 +264,7 @@ impl TerminalWindow {
         let changed = new.iter().map(|p| p.serial()).ne(before);
         *self.panes.borrow_mut() = new;
         for p in old {
+            self.glides.borrow_mut().forget(p.hwnd.0 as isize);
             p.destroy();
         }
         let switched = *self.project.borrow() != key;
@@ -278,8 +296,9 @@ impl TerminalWindow {
         if !keep {
             *self.active.borrow_mut() = self.panes.borrow().first().map(|p| p.session().into());
         }
+        // A new set glides nowhere: its panes all start out fresh.
         if changed {
-            self.layout();
+            self.layout_with(!switched);
         }
         // A pane that had the keyboard may be gone.
         if self.is_foreground() && !self.pane_has_focus() {
@@ -304,8 +323,16 @@ impl TerminalWindow {
     }
 
     /// Puts each pane in its place in the grid, or, zoomed, the one with
-    /// the keyboard over all of it.
+    /// the keyboard over all of it, at once.
     fn layout(&self) {
+        self.layout_with(false);
+    }
+
+    /// Lays the panes out, gliding each on screen to its new place when
+    /// `glide`. A pane takes its new size at once, since a terminal that
+    /// changes size every frame redraws its agent's screen every frame.
+    fn layout_with(&self, glide: bool) {
+        let glide = glide && crate::backdrop::animations_on();
         let mut r = RECT::default();
         unsafe {
             let _ = GetClientRect(self.hwnd, &mut r);
@@ -333,7 +360,16 @@ impl TerminalWindow {
                 } else {
                     *cell
                 };
-                p.set_rect(rect);
+                p.set_size(rect[2] - rect[0], rect[3] - rect[1]);
+                let at = self.child_at(p.hwnd);
+                let to = (rect[0], rect[1]);
+                let jump = self
+                    .glides
+                    .borrow_mut()
+                    .aim(p.hwnd.0 as isize, at, to, glide);
+                if let Some((x, y)) = jump {
+                    p.move_to(x, y);
+                }
                 rects.push(rect);
             } else {
                 // Out of reach of a drop, which finds panes by place.
@@ -343,6 +379,61 @@ impl TerminalWindow {
         }
         *self.rects.borrow_mut() = rects;
         *self.grid.borrow_mut() = grid;
+        if self.glides.borrow().moving() && self.glided.get().is_none() {
+            self.glided.set(Some(Instant::now()));
+            unsafe {
+                SetTimer(
+                    Some(self.hwnd),
+                    GLIDE_TIMER,
+                    crate::motion::FRAME_FAST.as_millis() as u32,
+                    None,
+                );
+            }
+        }
+    }
+
+    /// Where a pane's top left corner is in the stage's client area.
+    fn child_at(&self, child: HWND) -> (i32, i32) {
+        let mut r = RECT::default();
+        unsafe {
+            let _ = GetWindowRect(child, &mut r);
+        }
+        let mut p = POINT {
+            x: r.left,
+            y: r.top,
+        };
+        unsafe {
+            let _ = ScreenToClient(self.hwnd, &mut p);
+        }
+        (p.x, p.y)
+    }
+
+    /// Moves every gliding pane on a frame. Once they are all in place
+    /// the timer stops and each paints again, for the faceplate's light
+    /// to run across it from where it now sits.
+    fn glide(&self) {
+        let now = Instant::now();
+        let dt = self.glided.get().map_or(Duration::ZERO, |t| now - t);
+        self.glided.set(Some(now));
+        let moves = self
+            .glides
+            .borrow_mut()
+            .step(dt, |id| self.child_at(HWND(id as *mut c_void)));
+        let panes = self.panes.borrow();
+        for (id, (x, y)) in moves {
+            if let Some(p) = panes.iter().find(|p| p.hwnd.0 as isize == id) {
+                p.move_to(x, y);
+            }
+        }
+        if !self.glides.borrow().moving() {
+            self.glided.set(None);
+            unsafe {
+                let _ = KillTimer(Some(self.hwnd), GLIDE_TIMER);
+            }
+            for p in panes.iter() {
+                p.invalidate();
+            }
+        }
     }
 
     /// Zooms the pane with this serial in, giving it the keyboard, or the
@@ -357,7 +448,7 @@ impl TerminalWindow {
         let Some(id) = id else { return };
         *self.active.borrow_mut() = Some(id);
         self.zoomed.set(!self.zoomed.get());
-        self.layout();
+        self.layout_with(true);
         self.focus_active();
         self.spotlight();
         self.refresh_title();
@@ -937,6 +1028,10 @@ impl TerminalWindow {
 
     fn handle(&self, msg: u32, wparam: WPARAM, lparam: LPARAM) -> Option<LRESULT> {
         match msg {
+            WM_TIMER if wparam.0 == GLIDE_TIMER => {
+                self.glide();
+                Some(LRESULT(0))
+            }
             // The client runs up to the top of the frame, over where the
             // title bar was: the caption is drawn there instead. Maximised,
             // the frame hangs past the screen's edge, so the client starts
@@ -1028,7 +1123,11 @@ impl TerminalWindow {
                 Some(unsafe { DefWindowProcW(self.hwnd, msg, wparam, LPARAM(-1)) })
             }
             WM_SIZE => {
-                self.layout();
+                // A new session wobbles the stage's size as it shows, which
+                // would stop its panes mid glide. An edge dragged by hand
+                // starts with none under way, and places them at once.
+                let gliding = self.glides.borrow().moving();
+                self.layout_with(gliding);
                 // The faceplate's light runs top to bottom of the whole
                 // window, so a new height moves all of it.
                 unsafe {
