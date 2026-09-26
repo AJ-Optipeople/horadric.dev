@@ -17,6 +17,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CreateIconIndirect, DestroyIcon, GetSystemMetrics, HICON, ICONINFO, SM_CXSMICON,
 };
 
+use horadric_core::experience;
+
 use crate::menu::{self, Item};
 use crate::screens::{self, Screen};
 use crate::{icon, recent};
@@ -138,7 +140,8 @@ pub const HISTORY: usize = 1000;
 /// `screens` are offered when there is more than one, with the one named
 /// `shown` checked. `update` is a newer release's version, when a check
 /// found one. `fonts` are the families the terminals can be drawn in,
-/// with `font` checked.
+/// with `font` checked. `xp` is the experience counted from git, None
+/// until the first count is back.
 #[allow(clippy::too_many_arguments)]
 pub fn menu(
     recent_projects: &[String],
@@ -153,6 +156,7 @@ pub fn menu(
     update: Option<&str>,
     fonts: &[String],
     font: &str,
+    xp: Option<u64>,
 ) -> Option<Choice> {
     const NEW: usize = 1;
     const QUIT: usize = 2;
@@ -171,7 +175,13 @@ pub fn menu(
     const SCREEN: usize = 50;
     const RECENT: usize = 100;
     const FONT: usize = 200;
-    let mut items = vec![Item::action(NEW, "New session\u{2026}"), Item::Separator];
+    let mut items = Vec::new();
+    if let Some(xp) = xp {
+        items.push(Item::Disabled(experience::label(xp)));
+        items.push(Item::Separator);
+    }
+    items.push(Item::action(NEW, "New session\u{2026}"));
+    items.push(Item::Separator);
     if recent_projects.is_empty() {
         items.push(Item::Disabled("No recent projects".into()));
     }

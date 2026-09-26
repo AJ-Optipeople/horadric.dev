@@ -8,6 +8,7 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use horadric_core::diff::{self, Diff};
+use horadric_core::experience;
 use horadric_core::journal::{self, Commit};
 use horadric_core::worktree::{self, Place, Ports, Worktree};
 use horadric_hooks::tasks as file;
@@ -240,6 +241,23 @@ pub fn commits_since(dir: &Path, since: u64) -> Vec<Commit> {
     )
     .map(|log| journal::commits(&log))
     .unwrap_or_default()
+}
+
+/// The hashes of the commits on what the main tree of `dir` has checked
+/// out whose author is the one git would name for a commit made there now.
+/// Merges are left out: they add nothing a commit of their own did not.
+pub fn mine(dir: &Path) -> Vec<String> {
+    let Ok(email) = git(dir, &["config", "user.email"]) else {
+        return Vec::new();
+    };
+    let format = format!("--format={}", experience::LOG_FORMAT);
+    git(dir, &["log", "--no-merges", &format, "HEAD"])
+        .map(|log| {
+            experience::mine(&log, email.trim())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Removes the linked worktrees of the repository `dir` is in that are

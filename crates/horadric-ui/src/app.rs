@@ -40,6 +40,7 @@ use std::os::windows::io::AsRawHandle;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -593,8 +594,11 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             looked: Arc::new(Mutex::new(None)),
             downloading: false,
             downloaded: Arc::new(Mutex::new(None)),
+            experience: Arc::new(Mutex::new(None)),
+            counting_xp: Arc::new(AtomicBool::new(false)),
         };
         app.reconcile(false);
+        app.count_experience();
         app.attach_hosts();
         app.carry_on(&carry, on_stage.as_deref());
         // Written before anything resumed can crash it, so that crash is
@@ -891,7 +895,9 @@ fn with_app<R>(f: impl FnOnce(&mut App) -> R) -> Option<R> {
 }
 
 fn tray_menu(hwnd: HWND) {
-    let (recent, hotkeys, notify, sounds, terminal, update) = with_app(|app| {
+    let (recent, hotkeys, notify, sounds, terminal, update, xp) = with_app(|app| {
+        let xp = app.experience.lock().ok().and_then(|e| *e);
+        app.count_experience();
         (
             app.recent.clone(),
             [app.hotkey, app.listen_key],
@@ -899,6 +905,7 @@ fn tray_menu(hwnd: HWND) {
             app.sounds,
             !app.consoles.is_empty(),
             app.update.as_ref().map(|m| m.version.clone()),
+            xp,
         )
     })
     .unwrap_or_default();
@@ -938,6 +945,7 @@ fn tray_menu(hwnd: HWND) {
         update.as_deref(),
         &fonts,
         &font,
+        xp,
     );
     match menu {
         Some(Choice::ToggleNotify) => {
@@ -2006,6 +2014,11 @@ struct App {
     /// A download back from its thread: the `horadric.exe` it put in
     /// place, verified, or why it failed.
     downloaded: Arc<Mutex<Option<Result<PathBuf, String>>>>,
+    /// Your commits that landed in the recent projects, as last counted.
+    /// None until the first count is back.
+    experience: Arc<Mutex<Option<u64>>>,
+    /// A count of `experience` is on its thread.
+    counting_xp: Arc<AtomicBool>,
 }
 
 /// What an update check found: a newer release, none, or why it failed.
@@ -2544,6 +2557,29 @@ impl App {
                 }
             });
         }
+    }
+
+    /// Counts `experience` again on a thread, from git in every recent
+    /// project, so opening the tray menu never waits on git. The menu shows
+    /// the count before, which is at most one menu behind.
+    fn count_experience(&self) {
+        if self.counting_xp.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let projects: Vec<PathBuf> = self.recent.iter().map(PathBuf::from).collect();
+        let (experience, counting) = (Arc::clone(&self.experience), Arc::clone(&self.counting_xp));
+        thread::spawn(move || {
+            let hashes: Vec<String> = projects
+                .iter()
+                .filter(|p| p.is_dir())
+                .flat_map(|p| worktree::mine(p))
+                .collect();
+            let xp = horadric_core::experience::total(hashes.iter().map(String::as_str));
+            if let Ok(mut e) = experience.lock() {
+                *e = Some(xp);
+            }
+            counting.store(false, Ordering::SeqCst);
+        });
     }
 
     /// Looks for a newer release on a thread. `asked` when the tray asked,
