@@ -36,7 +36,7 @@ use windows::Win32::Foundation::HWND;
 use super::{post, unix_now, with_app, App, WM_HORADRIC_KEPT, WM_HORADRIC_TASK_MENU};
 use crate::app::Run;
 use crate::board::{self, Board, RowState};
-use crate::tray::{self, Item};
+use crate::menu::{self, Item};
 use crate::window::{folder_key, project_key, project_name};
 use crate::{ask, picker, watch};
 
@@ -860,8 +860,8 @@ pub(super) fn ask_for(app: &mut App, menu: Menu) {
 /// Shows the menu or dialog the app queued.
 pub(super) fn show_menu(hwnd: HWND, menu: Menu) {
     match menu {
-        Menu::Item(key, line, title) => item_menu(hwnd, &key, line, &title),
-        Menu::Mode(key) => mode_menu(hwnd, &key),
+        Menu::Item(key, line, title) => item_menu(&key, line, &title),
+        Menu::Mode(key) => mode_menu(&key),
         Menu::Add(key) => {
             let question = ask::Ask {
                 title: "New task",
@@ -910,7 +910,7 @@ fn merge_failed(git: &str) -> String {
     format!("{why} The merge was undone and the branch kept.")
 }
 
-fn item_menu(hwnd: HWND, key: &str, line: usize, title: &str) {
+fn item_menu(key: &str, line: usize, title: &str) {
     const START: usize = 1;
     const SHOW: usize = 2;
     const APPROVE: usize = 3;
@@ -941,7 +941,7 @@ fn item_menu(hwnd: HWND, key: &str, line: usize, title: &str) {
     items.push(Item::Separator);
     items.push(Item::action(EDIT, "Edit the list"));
     // Outside the app's borrow: the menu's loop dispatches its messages.
-    let picked = tray::popup(hwnd, &items);
+    let picked = menu::popup(&items);
     with_app(|app| match picked {
         Some(START) => app.task_clicked(key, line, title),
         Some(SHOW) => {
@@ -956,7 +956,7 @@ fn item_menu(hwnd: HWND, key: &str, line: usize, title: &str) {
     });
 }
 
-fn mode_menu(hwnd: HWND, key: &str) {
+fn mode_menu(key: &str) {
     const EDIT: usize = 10;
     let Some(current) = with_app(|app| app.shared.boards.borrow().get(key).map(|b| b.mode)) else {
         return;
@@ -973,7 +973,7 @@ fn mode_menu(hwnd: HWND, key: &str) {
         .collect();
     items.push(Item::Separator);
     items.push(Item::action(EDIT, "Edit the list"));
-    let picked = tray::popup(hwnd, &items);
+    let picked = menu::popup(&items);
     with_app(|app| match picked {
         Some(EDIT) => app.edit_list(key),
         Some(i) => {

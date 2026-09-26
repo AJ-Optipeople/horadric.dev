@@ -60,8 +60,8 @@ use crate::anim::Look;
 use crate::board::RowState;
 use crate::files::{Row, Tree};
 use crate::layout::{
-    self, AskLayout, Button, ClusterLayout, DropdownLayout, FilesLayout, Hit, Metrics, Rect,
-    SettingRow, StartHit, StartLayout, TasksLayout, UsageHit, UsageLayout, KNOB_R,
+    self, AskLayout, Button, ClusterLayout, DropdownLayout, FilesLayout, Hit, MenuLayout, Metrics,
+    Rect, SettingRow, StartHit, StartLayout, TasksLayout, UsageHit, UsageLayout, KNOB_R,
 };
 use crate::motion::{self, BREATH, ORBIT};
 use crate::theme::{self, Color};
@@ -306,6 +306,30 @@ pub struct DropdownScene<'a> {
     pub pressed: Option<usize>,
 }
 
+/// Everything one frame of a menu needs.
+pub struct MenuScene<'a> {
+    pub layout: &'a MenuLayout,
+    pub lines: &'a [MenuLook<'a>],
+    pub hot: Option<usize>,
+    /// How far the lines are scrolled up, when they do not all fit.
+    pub scroll: f32,
+}
+
+/// One line of a menu as it is drawn. A separator has no label.
+pub struct MenuLook<'a> {
+    pub label: &'a str,
+    /// Right aligned beside the label, fainter: a shortcut, a place.
+    pub detail: &'a str,
+    pub detail_w: f32,
+    pub separator: bool,
+    pub checked: bool,
+    pub enabled: bool,
+    /// Opens more lines beside it.
+    pub sub: bool,
+    /// Its lines are open beside it now.
+    pub open: bool,
+}
+
 /// Everything one frame of the input the app asks with needs.
 pub struct AskScene<'a> {
     pub layout: &'a AskLayout,
@@ -513,6 +537,15 @@ impl Target {
         unsafe {
             self.rt.BeginDraw();
             self.painter(&self.rt).dropdown(gpu, m, scene);
+            self.rt.EndDraw(None, None)
+        }
+    }
+
+    /// Draws a menu. `Err` means the target must be recreated.
+    pub fn draw_menu(&self, gpu: &Gpu, m: &Metrics, scene: &MenuScene) -> Result<()> {
+        unsafe {
+            self.rt.BeginDraw();
+            self.painter(&self.rt).menu(gpu, m, scene);
             self.rt.EndDraw(None, None)
         }
     }
@@ -752,6 +785,75 @@ impl Painter<'_> {
             let text = Rect::new(r.x + pad + 14.0, r.y, r.w - 2.0 * pad - 14.0, r.h);
             self.text(&gpu.small, ink, label, text);
         }
+    }
+
+    /// A menu, on a plate of its own like a setting's list: each line lit
+    /// under the mouse, a lamp beside a checked one, a chevron on one that
+    /// opens more, and grooves between the groups.
+    unsafe fn menu(&self, gpu: &Gpu, m: &Metrics, scene: &MenuScene) {
+        let l = scene.layout;
+        self.plate(m, l.size);
+        let v = l.view;
+        self.rt
+            .PushAxisAlignedClip(&rect(&v), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+        for (i, (r, line)) in l.lines.iter().zip(scene.lines).enumerate() {
+            let r = Rect::new(r.x, r.y - scene.scroll, r.w, r.h);
+            if r.bottom() < v.y || r.y > v.bottom() {
+                continue;
+            }
+            if line.separator {
+                let y = (r.y + r.h / 2.0).floor();
+                self.groove(r.x + 10.0, r.right() - 10.0, y);
+                continue;
+            }
+            let lit = line.enabled && (scene.hot == Some(i) || line.open);
+            if lit {
+                self.fill_rounded(&r.inset(1.0), 7.0, theme::HOVER_FILL);
+            }
+            let ink = if !line.enabled {
+                theme::LEGEND.fade(0.7)
+            } else if lit {
+                theme::TEXT
+            } else {
+                theme::TEXT_DIM.mix(theme::TEXT, 0.35)
+            };
+            let cy = r.y + r.h / 2.0;
+            if line.checked {
+                self.led(r.x + layout::MENU_TEXT_X / 2.0, cy, theme::TEXT);
+            }
+            let right = r.right() - layout::MENU_ARROW_W;
+            let text = Rect::new(
+                r.x + layout::MENU_TEXT_X,
+                r.y,
+                right - r.x - layout::MENU_TEXT_X,
+                r.h,
+            );
+            // A label too long for the menu gives way to its detail.
+            let room = if line.detail.is_empty() {
+                text.w
+            } else {
+                text.w - line.detail_w - 16.0
+            };
+            self.text(
+                &gpu.small,
+                ink,
+                line.label,
+                Rect::new(text.x, text.y, room, text.h),
+            );
+            if !line.detail.is_empty() {
+                let faint = if line.enabled {
+                    theme::LEGEND
+                } else {
+                    theme::LEGEND.fade(0.6)
+                };
+                self.text(&gpu.small_right, faint, line.detail, text);
+            }
+            if line.sub {
+                let at = Rect::new(right, r.y, layout::MENU_ARROW_W, r.h);
+                self.icon(&gpu.icon_small, ink, '\u{E76C}', at);
+            }
+        }
+        self.rt.PopAxisAlignedClip();
     }
 
     /// The input: its title and what it asks on the plate, each field a

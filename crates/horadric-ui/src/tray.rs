@@ -3,26 +3,21 @@
 //! and quits the app.
 
 use std::ffi::c_void;
-use std::sync::Once;
 
-use windows::core::{w, HSTRING, PCSTR};
-use windows::Win32::Foundation::{HWND, POINT};
+use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Gdi::{
     CreateBitmap, CreateDIBSection, DeleteObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
     DIB_RGB_COLORS,
 };
-use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 use windows::Win32::UI::Shell::{
     Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_USER, NIM_ADD, NIM_DELETE,
     NIM_MODIFY, NOTIFYICONDATAW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreateIconIndirect, CreatePopupMenu, DestroyIcon, DestroyMenu, GetCursorPos,
-    GetSystemMetrics, PostMessageW, SetForegroundWindow, TrackPopupMenu, HICON, HMENU, ICONINFO,
-    MF_CHECKED, MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING, SM_CXSMICON, TPM_RETURNCMD,
-    TPM_RIGHTBUTTON, WM_NULL,
+    CreateIconIndirect, DestroyIcon, GetSystemMetrics, HICON, ICONINFO, SM_CXSMICON,
 };
 
+use crate::menu::{self, Item};
 use crate::screens::{self, Screen};
 use crate::{icon, recent};
 
@@ -150,120 +145,6 @@ impl Drop for Tray {
     }
 }
 
-/// One line of a popup menu.
-pub enum Item {
-    Action {
-        id: usize,
-        label: String,
-        checked: bool,
-    },
-    Disabled(String),
-    Separator,
-    /// A line that opens more lines beside it.
-    Submenu(String, Vec<Item>),
-}
-
-impl Item {
-    pub fn action(id: usize, label: impl Into<String>) -> Item {
-        Item::Action {
-            id,
-            label: label.into(),
-            checked: false,
-        }
-    }
-}
-
-/// Shows a menu at the cursor and returns the id picked. Runs a modal loop,
-/// so the caller must not hold anything the message handlers need.
-pub fn popup(hwnd: HWND, items: &[Item]) -> Option<usize> {
-    static DARK: Once = Once::new();
-    DARK.call_once(dark_menus);
-    unsafe {
-        let menu = CreatePopupMenu().ok()?;
-        fill(menu, items);
-
-        let mut at = POINT::default();
-        let _ = GetCursorPos(&mut at);
-        // Without the foreground the menu never closes on a click elsewhere,
-        // and without the WM_NULL after, it closes on the next one. Both are
-        // documented Windows behaviour.
-        let _ = SetForegroundWindow(hwnd);
-        let picked = TrackPopupMenu(
-            menu,
-            TPM_RETURNCMD | TPM_RIGHTBUTTON,
-            at.x,
-            at.y,
-            None,
-            hwnd,
-            None,
-        )
-        .0 as usize;
-        let _ = PostMessageW(Some(hwnd), WM_NULL, Default::default(), Default::default());
-        let _ = DestroyMenu(menu);
-        (picked != 0).then_some(picked)
-    }
-}
-
-unsafe fn fill(menu: HMENU, items: &[Item]) {
-    for item in items {
-        let _ = match item {
-            Item::Action { id, label, checked } => {
-                let flags = if *checked {
-                    MF_STRING | MF_CHECKED
-                } else {
-                    MF_STRING
-                };
-                AppendMenuW(menu, flags, *id, &HSTRING::from(label.as_str()))
-            }
-            Item::Disabled(label) => AppendMenuW(
-                menu,
-                MF_STRING | MF_GRAYED,
-                0,
-                &HSTRING::from(label.as_str()),
-            ),
-            Item::Separator => AppendMenuW(menu, MF_SEPARATOR, 0, None),
-            // Destroying the menu destroys the ones attached to it.
-            Item::Submenu(label, items) => match CreatePopupMenu() {
-                Ok(sub) => {
-                    fill(sub, items);
-                    AppendMenuW(
-                        menu,
-                        MF_STRING | MF_POPUP,
-                        sub.0 as usize,
-                        &HSTRING::from(label.as_str()),
-                    )
-                }
-                Err(e) => Err(e),
-            },
-        };
-    }
-}
-
-/// Draws every popup menu of the process dark, the way Explorer's are, to
-/// match the tiles. Windows only offers this through uxtheme exports that
-/// have no name, just an ordinal, stable since Windows 10 1903. Where they
-/// are missing the menus stay light, which is fine.
-fn dark_menus() {
-    const SET_PREFERRED_APP_MODE: usize = 135;
-    const FLUSH_MENU_THEMES: usize = 136;
-    const FORCE_DARK: i32 = 2;
-    unsafe {
-        let Ok(uxtheme) = LoadLibraryW(w!("uxtheme.dll")) else {
-            return;
-        };
-        let ordinal = |n: usize| GetProcAddress(uxtheme, PCSTR(n as *const u8));
-        let (Some(set_mode), Some(flush)) =
-            (ordinal(SET_PREFERRED_APP_MODE), ordinal(FLUSH_MENU_THEMES))
-        else {
-            return;
-        };
-        let set_mode: unsafe extern "system" fn(i32) -> i32 = std::mem::transmute(set_mode);
-        let flush: unsafe extern "system" fn() = std::mem::transmute(flush);
-        set_mode(FORCE_DARK);
-        flush();
-    }
-}
-
 /// Where the History menu's ids start, one span of them per recent project.
 pub const HISTORY: usize = 1000;
 
@@ -277,7 +158,6 @@ pub const HISTORY: usize = 1000;
 /// with `font` checked.
 #[allow(clippy::too_many_arguments)]
 pub fn menu(
-    hwnd: HWND,
     recent_projects: &[String],
     history: Vec<Vec<Item>>,
     autostart: Option<bool>,
@@ -309,10 +189,10 @@ pub fn menu(
     if recent_projects.is_empty() {
         items.push(Item::Disabled("No recent projects".into()));
     }
-    // A tab right aligns the rest; an ampersand would underline.
+    // A tab right aligns the rest.
     let label = |path: &str| {
         let (name, place) = recent::label(path);
-        format!("{}\t{}", name.replace('&', "&&"), place.replace('&', "&&"))
+        format!("{name}\t{place}")
     };
     for (i, path) in recent_projects.iter().enumerate() {
         items.push(Item::action(RECENT + i, label(path)));
@@ -364,7 +244,7 @@ pub fn menu(
             .enumerate()
             .map(|(i, name)| Item::Action {
                 id: FONT + i,
-                label: name.replace('&', "&&"),
+                label: name.clone(),
                 checked: name.eq_ignore_ascii_case(font),
             })
             .collect();
@@ -390,7 +270,7 @@ pub fn menu(
     items.push(Item::action(END_ALL, "End all sessions"));
     items.push(Item::action(QUIT, "Quit Horadric"));
 
-    match popup(hwnd, &items)? {
+    match menu::popup(&items)? {
         NEW => Some(Choice::New),
         QUIT => Some(Choice::Quit),
         AUTOSTART => Some(Choice::ToggleAutostart),

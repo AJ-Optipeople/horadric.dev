@@ -12,8 +12,7 @@ pub fn label(title: &str, ago: Duration) -> String {
     if title.chars().count() > LONGEST {
         text = format!("{}…", text.trim_end());
     }
-    // A lone ampersand in a menu underlines the next letter instead.
-    format!("{}\t{}", text.replace('&', "&&"), ago_text(ago))
+    format!("{}\t{}", text, ago_text(ago))
 }
 
 /// Menu ids a history list takes after its first, one per conversation.
@@ -98,10 +97,10 @@ mod tests {
     }
 
     #[test]
-    fn labels_escape_ampersands_and_cut_long_titles() {
+    fn labels_keep_ampersands_and_cut_long_titles() {
         assert_eq!(
             label("Fix R&D build", Duration::from_secs(0)),
-            "Fix R&&D build\tnow"
+            "Fix R&D build\tnow"
         );
         let long = "word ".repeat(20);
         let l = label(&long, Duration::from_secs(0));

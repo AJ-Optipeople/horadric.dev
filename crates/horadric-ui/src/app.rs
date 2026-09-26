@@ -89,11 +89,12 @@ use crate::dropdown::{self, Dropdown};
 use crate::glyphs::{self, Font};
 use crate::keys::{self, FontStep};
 use crate::layout::{self, Metrics};
+use crate::menu::{self, Item};
 use crate::render::Gpu;
 use crate::screens::{self, Screen};
 use crate::start::{self, StartWindow};
 use crate::terminal::{self, Place, TerminalWindow};
-use crate::tray::{self, Choice, Item, Tray};
+use crate::tray::{self, Choice, Tray};
 use crate::usage::{self, UsageWindow};
 use crate::window::{self, folder_key, project_key, project_name, Cluster, Shared};
 use crate::{
@@ -301,6 +302,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
     usage::register_class()?;
     dropdown::register_class()?;
     ask::register_class()?;
+    menu::register_class()?;
     start::register_class()?;
     terminal::register_class()?;
     let notify = create_app_window()?;
@@ -429,6 +431,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
         defaults: RefCell::new(saved.defaults.clone()),
         boards: RefCell::new(HashMap::new()),
     });
+    menu::init(Rc::clone(&shared));
     // From the hosts' copy, since a session that outlives this app keeps
     // running the status line from wherever it pointed.
     let status_settings = store::write_status_settings(&console::host_program());
@@ -654,13 +657,13 @@ unsafe extern "system" fn app_proc(
         }
         WM_HORADRIC_TILE_MENU => {
             if let Some(id) = with_app(|app| app.menu_for.take()).flatten() {
-                tile_menu(hwnd, &id);
+                tile_menu(&id);
             }
             return LRESULT(0);
         }
         WM_HORADRIC_RECENT_MENU => {
             if let Some(dir) = with_app(|app| app.recent_menu_for.take()).flatten() {
-                recent_menu(hwnd, dir);
+                recent_menu(dir);
             }
             return LRESULT(0);
         }
@@ -770,7 +773,6 @@ fn tray_menu(hwnd: HWND) {
     })
     .unwrap_or_default();
     let menu = tray::menu(
-        hwnd,
         &projects,
         lines,
         autostart,
@@ -929,7 +931,7 @@ enum TileKind {
     Background,
 }
 
-fn tile_menu(hwnd: HWND, id: &str) {
+fn tile_menu(id: &str) {
     const OPEN: usize = 1;
     const END: usize = 2;
     const RENAME: usize = 3;
@@ -976,7 +978,7 @@ fn tile_menu(hwnd: HWND, id: &str) {
         items.insert(0, changes_menu(w, diff.as_ref()));
         items.insert(1, Item::Separator);
     }
-    let picked = tray::popup(hwnd, &items);
+    let picked = menu::popup(&items);
     if let (Some(i), Some((w, diff))) = (picked, &tree) {
         let file = diff.as_ref().and_then(|d| match i {
             _ if (UNCOMMITTED..COMMITTED).contains(&i) => d.uncommitted.get(i - UNCOMMITTED),
@@ -1040,7 +1042,7 @@ fn changes_menu(w: &Worktree, diff: Option<&Diff>) -> Item {
     list(&mut items, &d.uncommitted, UNCOMMITTED);
     items.extend([
         Item::Separator,
-        Item::Disabled(format!("Committed on {}", w.branch.replace('&', "&&"))),
+        Item::Disabled(format!("Committed on {}", w.branch)),
     ]);
     list(&mut items, &d.committed, COMMITTED);
     items.extend([
@@ -1216,7 +1218,7 @@ fn project_menu(hwnd: HWND, key: &str) {
         Item::Separator,
         Item::action(END_ALL, "End all sessions"),
     ]);
-    let picked = tray::popup(hwnd, &items);
+    let picked = menu::popup(&items);
     match (picked, &dir) {
         (Some(i), Some(dir)) if (SUGGEST..SUGGEST_END).contains(&i) => {
             return add_host(dir, &suggested[i - SUGGEST]);
@@ -1311,13 +1313,13 @@ fn history_items(past: &[Past], first: usize) -> Vec<Item> {
 
 /// A recent project right clicked in the start window, which has no
 /// cluster and so no project menu: a new session, or an old one back.
-fn recent_menu(hwnd: HWND, dir: PathBuf) {
+fn recent_menu(dir: PathBuf) {
     const ADD: usize = 1;
     const PAST: usize = 100;
     let past = with_app(|app| app.history(&dir)).unwrap_or_default();
     let mut items = vec![Item::action(ADD, "New session"), Item::Separator];
     items.extend(history_items(&past, PAST));
-    match tray::popup(hwnd, &items) {
+    match menu::popup(&items) {
         Some(ADD) => start_logged(dir),
         Some(i) => {
             if let Some(pick) = history::pick(i, PAST) {

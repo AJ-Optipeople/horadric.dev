@@ -78,6 +78,8 @@ mod dropdown;
 #[cfg(windows)]
 mod glyphs;
 #[cfg(windows)]
+mod menu;
+#[cfg(windows)]
 mod net;
 #[cfg(windows)]
 mod pane;

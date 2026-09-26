@@ -680,6 +680,148 @@ pub fn dropdown_hit(l: &DropdownLayout, x: f32, y: f32) -> Option<usize> {
     l.items.iter().position(|r| r.contains(x, y))
 }
 
+/// One line of a menu, as far as laying it out goes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum MenuLine {
+    /// A row whose label is `label` wide and whose right aligned detail
+    /// (a shortcut, a place, an age) is `detail` wide, 0 for none. `sub`
+    /// when it opens more lines beside it.
+    Row {
+        label: f32,
+        detail: f32,
+        sub: bool,
+    },
+    Separator,
+}
+
+/// The geometry of a menu: one rect per line, in the order given, over
+/// content `content_h` tall. When that is taller than the window, the
+/// lines scroll inside [`MenuLayout::view`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct MenuLayout {
+    pub size: (f32, f32),
+    pub lines: Vec<Rect>,
+    /// Where the lines show, inside the plate's edge.
+    pub view: Rect,
+    pub content_h: f32,
+}
+
+/// From a row's left edge to its label: room for the lamp of a checked
+/// line.
+pub const MENU_TEXT_X: f32 = 26.0;
+/// From a row's right edge to where its detail ends, room for the
+/// chevron of a line that opens more.
+pub const MENU_ARROW_W: f32 = 26.0;
+const MENU_DETAIL_GAP: f32 = 32.0;
+const MENU_MIN_W: f32 = 200.0;
+const MENU_MAX_W: f32 = 520.0;
+
+/// Lays out a menu of `lines`, no taller than `max_h` DIPs.
+pub fn menu(m: &Metrics, lines: &[MenuLine], max_h: f32) -> MenuLayout {
+    let pad = m.menu_pad;
+    let (mut label, mut detail) = (0.0f32, 0.0f32);
+    for l in lines {
+        if let MenuLine::Row {
+            label: a,
+            detail: b,
+            ..
+        } = *l
+        {
+            label = label.max(a);
+            detail = detail.max(b);
+        }
+    }
+    let detail = if detail > 0.0 {
+        MENU_DETAIL_GAP + detail
+    } else {
+        0.0
+    };
+    let row_w = (MENU_TEXT_X + label.ceil() + detail.ceil() + MENU_ARROW_W)
+        .clamp(MENU_MIN_W - 2.0 * pad, MENU_MAX_W - 2.0 * pad);
+    let mut y = 0.0;
+    let mut rects = Vec::with_capacity(lines.len());
+    for l in lines {
+        let h = match l {
+            MenuLine::Row { .. } => m.menu_row_h,
+            MenuLine::Separator => m.menu_apart,
+        };
+        rects.push(Rect::new(pad, pad + y, row_w, h));
+        y += h;
+    }
+    let view_h = y.min((max_h - 2.0 * pad).max(m.menu_row_h));
+    MenuLayout {
+        size: (row_w + 2.0 * pad, view_h + 2.0 * pad),
+        lines: rects,
+        view: Rect::new(pad, pad, row_w, view_h),
+        content_h: y,
+    }
+}
+
+/// The line under a point, with the lines scrolled `scroll` up. None off
+/// the lines, in the plate's edge or past the view.
+pub fn menu_hit(l: &MenuLayout, scroll: f32, x: f32, y: f32) -> Option<usize> {
+    if !l.view.contains(x, y) {
+        return None;
+    }
+    l.lines.iter().position(|r| r.contains(x, y + scroll))
+}
+
+/// The next line the keyboard can land on from `from`, down or up, round
+/// the ends. From nowhere, down is the first and up the last. None when no
+/// line can be picked.
+pub fn menu_step(pickable: &[bool], from: Option<usize>, down: bool) -> Option<usize> {
+    let n = pickable.len();
+    if n == 0 {
+        return None;
+    }
+    let start = match (from, down) {
+        (Some(i), _) => i,
+        (None, true) => n - 1,
+        (None, false) => 0,
+    };
+    (1..=n)
+        .map(|k| {
+            if down {
+                (start + k) % n
+            } else {
+                (start + n - k % n) % n
+            }
+        })
+        .find(|&i| pickable[i])
+}
+
+/// Where a menu `size` goes when opened at `at`, all in screen pixels: its
+/// top left corner there, or flipped to the left or above when there is no
+/// room, as a right click menu opens, and never off the work area.
+pub fn menu_place(at: (i32, i32), size: (i32, i32), work: [i32; 4]) -> (i32, i32) {
+    let [wl, wt, wr, wb] = work;
+    let (w, h) = size;
+    let x = if at.0 + w <= wr { at.0 } else { at.0 - w };
+    let y = if at.1 + h <= wb { at.1 } else { at.1 - h };
+    (x.min(wr - w).max(wl), y.min(wb - h).max(wt))
+}
+
+/// Where a submenu `size` goes beside `parent`, the menu it opens from,
+/// with its first line level with `row_top`: to the right, overlapping the
+/// parent's edge by `overlap`, or to the left when there is no room.
+pub fn submenu_place(
+    parent: [i32; 4],
+    row_top: i32,
+    size: (i32, i32),
+    overlap: i32,
+    work: [i32; 4],
+) -> (i32, i32) {
+    let [left, _, right, _] = parent;
+    let [wl, wt, wr, wb] = work;
+    let (w, h) = size;
+    let x = if right - overlap + w <= wr {
+        right - overlap
+    } else {
+        left + overlap - w
+    };
+    (x.min(wr - w).max(wl), row_top.min(wb - h).max(wt))
+}
+
 /// The geometry of the input the app asks with: its title, what it asks,
 /// the field, the notes when it takes them, and a line saying which keys
 /// do what.
@@ -1150,6 +1292,95 @@ mod tests {
     use super::*;
 
     const SCALES: [bool; 3] = [false, true, false];
+
+    fn row(label: f32, detail: f32) -> MenuLine {
+        MenuLine::Row {
+            label,
+            detail,
+            sub: false,
+        }
+    }
+
+    #[test]
+    fn a_menu_stacks_rows_and_thinner_separators() {
+        let m = Metrics::default();
+        let l = menu(
+            &m,
+            &[row(80.0, 0.0), MenuLine::Separator, row(60.0, 0.0)],
+            1000.0,
+        );
+        assert_eq!(l.lines[0].y, m.menu_pad);
+        assert_eq!(l.lines[1].h, m.menu_apart);
+        assert_eq!(l.lines[2].y, l.lines[1].bottom());
+        assert_eq!(l.size.1, l.lines[2].bottom() + m.menu_pad);
+        assert_eq!(l.content_h, l.view.h);
+        assert_eq!(
+            menu_hit(&l, 0.0, l.lines[2].x + 1.0, l.lines[2].y + 1.0),
+            Some(2)
+        );
+        assert_eq!(menu_hit(&l, 0.0, 1.0, 1.0), None);
+    }
+
+    #[test]
+    fn a_menu_is_as_wide_as_its_longest_label_and_detail_within_bounds() {
+        let m = Metrics::default();
+        let narrow = menu(&m, &[row(10.0, 0.0)], 1000.0);
+        assert_eq!(narrow.size.0, MENU_MIN_W);
+        let wide = menu(&m, &[row(250.0, 0.0), row(100.0, 60.0)], 1000.0);
+        assert_eq!(
+            wide.size.0,
+            2.0 * m.menu_pad + MENU_TEXT_X + 250.0 + MENU_DETAIL_GAP + 60.0 + MENU_ARROW_W
+        );
+        let huge = menu(&m, &[row(2000.0, 0.0)], 1000.0);
+        assert_eq!(huge.size.0, MENU_MAX_W);
+    }
+
+    #[test]
+    fn a_menu_taller_than_the_screen_scrolls() {
+        let m = Metrics::default();
+        let lines = vec![row(50.0, 0.0); 40];
+        let l = menu(&m, &lines, 300.0);
+        assert_eq!(l.size.1, 300.0);
+        assert!(l.content_h > l.view.h);
+        let last = l.lines[39];
+        let scroll = l.content_h - l.view.h;
+        assert_eq!(
+            menu_hit(&l, scroll, last.x + 1.0, last.y - scroll + 1.0),
+            Some(39)
+        );
+        assert_eq!(menu_hit(&l, 0.0, last.x + 1.0, l.view.bottom() + 1.0), None);
+    }
+
+    #[test]
+    fn the_keyboard_skips_what_cannot_be_picked() {
+        let p = [false, true, false, true];
+        assert_eq!(menu_step(&p, None, true), Some(1));
+        assert_eq!(menu_step(&p, None, false), Some(3));
+        assert_eq!(menu_step(&p, Some(1), true), Some(3));
+        assert_eq!(menu_step(&p, Some(3), true), Some(1));
+        assert_eq!(menu_step(&p, Some(1), false), Some(3));
+        assert_eq!(menu_step(&[false, false], None, true), None);
+        assert_eq!(menu_step(&[true], Some(0), true), Some(0));
+    }
+
+    #[test]
+    fn a_menu_opens_at_the_mouse_and_flips_at_the_edges() {
+        let work = [0, 0, 1000, 800];
+        assert_eq!(menu_place((100, 100), (200, 300), work), (100, 100));
+        assert_eq!(menu_place((900, 100), (200, 300), work), (700, 100));
+        assert_eq!(menu_place((100, 790), (200, 300), work), (100, 490));
+        assert_eq!(menu_place((100, 100), (200, 900), work), (100, 0));
+    }
+
+    #[test]
+    fn a_submenu_opens_beside_its_parent() {
+        let work = [0, 0, 1000, 800];
+        let parent = [100, 50, 300, 400];
+        assert_eq!(submenu_place(parent, 80, (200, 100), 4, work), (296, 80));
+        let right = [700, 50, 900, 400];
+        assert_eq!(submenu_place(right, 80, (200, 100), 4, work), (504, 80));
+        assert_eq!(submenu_place(parent, 750, (200, 100), 4, work), (296, 700));
+    }
 
     #[test]
     fn usage_window_holds_limits_then_settings() {
