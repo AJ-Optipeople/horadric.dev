@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::diff::Diff;
 use crate::event::HookEvent;
 use crate::rarity::{self, Loot, Rarity};
+use crate::runeword::Runeword;
 use crate::title::Title;
 use crate::usage::Status;
 use crate::worktree::Worktree;
@@ -116,6 +117,10 @@ pub struct Session {
     /// What it changed, tested and landed, for the colour of its name.
     #[serde(default)]
     pub loot: Loot,
+    /// The runeword it was given, and how far it has got. Saved, so a
+    /// restart goes on with it.
+    #[serde(default)]
+    pub runeword: Option<Runeword>,
     pub phase: Phase,
     /// The turn it finished has not been looked at yet: unidentified, as
     /// Diablo drops an item until you identify it. Set when a turn ends,
@@ -176,6 +181,7 @@ impl Session {
             background: None,
             diff: None,
             loot: Loot::default(),
+            runeword: None,
             phase: Phase::Idle,
             unseen: false,
             since: now,

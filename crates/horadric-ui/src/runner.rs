@@ -41,6 +41,8 @@ use crate::toast::Kind;
 use crate::window::{folder_key, project_key, project_name};
 use crate::{ask, store, watch};
 
+#[path = "runeword.rs"]
+pub(super) mod runeword;
 #[path = "tomb.rs"]
 pub(super) mod tomb;
 #[path = "transmute.rs"]
@@ -568,6 +570,7 @@ impl App {
         }
         self.refresh_boards(false);
         self.run_tasks();
+        self.tick_runewords();
     }
 
     /// One look by the runner at every project's list.
@@ -962,8 +965,8 @@ impl App {
             .collect()
     }
 
-    /// Merges a finished branch and says how it went.
-    pub(super) fn merge(&mut self, m: &Merge) {
+    /// Merges a finished branch and says how it went. True when it merged.
+    pub(super) fn merge(&mut self, m: &Merge) -> bool {
         let into = crate::worktree::checked_out(&m.main).unwrap_or_else(|| "main".into());
         match crate::worktree::merge(&m.main, &m.branch) {
             Ok(()) => {
@@ -982,7 +985,8 @@ impl App {
                     Kind::Done,
                     &format!("Merged {}", m.branch),
                     &format!("{} is in {into}.", tasks::one_line(&m.title)),
-                )
+                );
+                true
             }
             Err(e) => {
                 eprintln!("horadric: cannot merge {}: {e}", m.branch);
@@ -991,6 +995,7 @@ impl App {
                     &format!("Cannot merge {}", m.branch),
                     &merge_failed(&e),
                 );
+                false
             }
         }
     }

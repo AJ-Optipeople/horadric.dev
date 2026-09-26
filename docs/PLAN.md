@@ -1797,9 +1797,9 @@ it, and a recipe that runs on what it holds. Dragging tiles together says
     recipe would cut its work short. `cube::hint` says what is missing or
     in the way instead: "beta is mid turn", "gamma changed nothing to
     review", "alpha has no branch of its own", "Main takes one session".
-- **Runewords may join later.** A recipe is one action on what is combined
-  at once; a runeword would be a sequence over time. Whether they are one
-  system is decided with Runewords, which builds on this.
+- **Runewords are the same system.** A recipe casts one action on what is
+  combined at once; a runeword casts several on one session over time. See
+  "Runewords" below.
 - **Dropping.** A tile lifted in a cluster (the reorder lift) and let go
   over the cube goes in instead of moving. A lone tile drags its window,
   so the window let go over the cube puts its session in and glides back.
@@ -1859,6 +1859,73 @@ dropped in, Close all three posted, and a `PrintWindow` of the cube every
 110 ms. The keys swirled in inside the window, the burst and "Closed and
 journaled" followed, and the cube went once it had played. Not checked:
 Review and Merge, whose `main` rune swirls in too.
+
+
+### Runewords
+
+"Runewords" in [IDEAS.md](IDEAS.md). A named sequence of actions a session
+is given, one per turn: "Test, review, merge" tells it to test, has a
+reviewer read its work and tells it to answer, then merges its branch.
+
+- **One system with the recipes.** The actions are runes, and the cube and
+  runewords are two ways to cast them: the cube casts one on what it holds
+  at once, a runeword casts several on one session over time. Review and
+  merge are the same actions in both (`App::start_reviewer`,
+  `App::merge_session`, `cube::diff_of`). A second system with its own
+  review and merge would drift from the first. What the cube matches stays
+  as it was: recipes are about what is combined, which a sequence on one
+  session is not.
+- **The runes** (`horadric_core::runeword::Rune`): **test** tells the
+  session to run the tests, fix what fails and commit; **review** starts a
+  reviewer on the session's diff that writes its review to
+  `%APPDATA%\Horadric\reviews\<session>-<n>.md`, and once the reviewer's
+  turn ends tells the session to read the file, fix what it agrees with and
+  commit, then ends the reviewer; **merge** merges the branch of its own
+  worktree as the cube does, and passes on a session in the shared tree,
+  whose commits are already there. Any other word in a config's runeword is
+  said to the session as it is. The review goes through a file because the
+  hooks carry only a reviewer's first line, and the file outlives the
+  reviewer for the human to read.
+- **The next step is pure** (`runeword::act`, tested): a rune is cast only
+  on a session at rest (done or idle, not waiting on the human, not
+  paused); a rune told to the session is done when a turn that ended after
+  the telling ends; a review is answered once the reviewer's turn ends.
+  The session ending, the reviewer ending first, a reviewer that cannot
+  start or a merge that fails stops the runeword with a notification
+  naming the rune. The last rune done says "<name> is complete".
+- **Telling** is the runner's nudge: the line typed to the session and its
+  Enter 400 ms after, so the agent takes it as typed. The app looks once a
+  second, in the runner's tick.
+- **Given from the tile menu**: "Runeword" opens the project's runewords,
+  and a session with one offers "Stop <name> (<rune> n/m)" in its place.
+  Stopping leaves a reviewer it started running on its own. Every project
+  offers "Test, merge", "Test, review, merge" and "Review, merge", after
+  its own in `.horadric/config.json`, which replace a built in one with
+  the same runes:
+
+  ```json
+  { "runewords": { "Ship": ["test", "Update the changelog", "merge"] } }
+  ```
+
+- **The tile** shows the rune being cast before its last line, in the
+  cube's gold: "review 2/3", or "rune 2/3" where the word does not fit.
+- **Saved** on the session in `state.json`, step and all, so a reload or a
+  restart goes on where it was.
+
+Tested on screen with a dev instance on its own port, `APPDATA` and
+`LOCALAPPDATA`, `cmd.exe` as the agent, a session in a worktree of a
+scratch repository and fake hook events for its turns. The screen was in
+use, and a tile menu opens at the real cursor, where the human's clicks
+landed on it twice and ended the session; so the runewords were written
+into `state.json` with the dev UI stopped, which tested the save as well.
+"Tidy" (`"echo tidy said"`, merge) typed its line into the terminal, and
+the turn's end merged the branch into main and said "Tidy is complete".
+Review then an `echo`: the tile read "review 1/2" in gold, a "Review:
+beta" tile started, and its turn's end typed the answer prompt naming the
+review file into beta and ended the reviewer; beta's next turn end cast
+the `echo`, and the one after completed it. The menu's Runeword submenu
+was seen but not picked from. Not tested: the test rune with a real
+`claude`, a real reviewer writing its file, and a merge that conflicts.
 
 ## Next
 

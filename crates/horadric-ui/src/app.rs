@@ -1109,6 +1109,7 @@ fn tile_menu(id: &str) {
     const RENAME: usize = 3;
     const STASH: usize = 4;
     const PICK: usize = 5;
+    const STOP_RUNEWORD: usize = 6;
     let Some((kind, shell)) = with_app(|app| app.tile_kind(id)).flatten() else {
         return;
     };
@@ -1118,6 +1119,7 @@ fn tile_menu(id: &str) {
         Some(false) => Item::action(STASH, "Stash"),
         _ => Item::Disabled("Stash is full".into()),
     };
+    let restful = matches!(kind, TileKind::Live | TileKind::Paused);
     let items = match (kind, shell) {
         (TileKind::Live, false) => vec![
             Item::action(OPEN, "Show terminal"),
@@ -1153,8 +1155,37 @@ fn tile_menu(id: &str) {
             Item::action(END, "End session"),
         ],
     };
-    let tree = with_app(|app| app.diff_of(id)).flatten();
     let mut items = items;
+    let runewords = with_app(|app| app.runewords_of(id)).flatten();
+    let offered = match &runewords {
+        Some((offered, _)) if restful => offered.clone(),
+        _ => Vec::new(),
+    };
+    if let Some((_, word)) = &runewords {
+        let entry = match word {
+            Some(w) => Some(Item::action(
+                STOP_RUNEWORD,
+                format!("Stop {} ({})", w.name, w.progress()),
+            )),
+            None if !offered.is_empty() => Some(Item::Submenu(
+                "Runeword".into(),
+                offered
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (name, _))| Item::action(RUNEWORD + i, name.clone()))
+                    .collect(),
+            )),
+            None => None,
+        };
+        // With the other things done to the session, above ending it.
+        if let (Some(entry), Some(at)) = (
+            entry,
+            items.iter().rposition(|i| matches!(i, Item::Separator)),
+        ) {
+            items.insert(at, entry);
+        }
+    }
+    let tree = with_app(|app| app.diff_of(id)).flatten();
     if let Some((w, diff)) = &tree {
         items.insert(0, changes_menu(w, diff.as_ref()));
         items.insert(1, Item::Separator);
@@ -1193,6 +1224,13 @@ fn tile_menu(id: &str) {
         }
         Some(RENAME) => rename_session(id),
         Some(PICK) => runner::tomb::ask_pick(id),
+        Some(STOP_RUNEWORD) => {
+            with_app(|app| app.stop_runeword(id));
+        }
+        Some(i) if (RUNEWORD..RUNEWORD + offered.len()).contains(&i) => {
+            let (name, runes) = offered[i - RUNEWORD].clone();
+            with_app(|app| app.give_runeword(id, &name, runes));
+        }
         Some(STASH) if confirm_stash(id) => {
             with_app(|app| app.stash(id));
         }
@@ -1258,6 +1296,8 @@ fn stash_menu(id: &str) {
 const UNCOMMITTED: usize = 100;
 const COMMITTED: usize = 400;
 const COMMITTED_END: usize = 700;
+/// Where the runewords a session can be given start in its tile menu.
+const RUNEWORD: usize = 800;
 const CODE: usize = 700;
 /// The most files a half of the changes lists. A menu taller than the
 /// screen scrolls by the pixel, which is no way to look at a change.
@@ -1509,7 +1549,9 @@ fn project_menu(key: &str) {
         Some(END_ALL) => app.end_all(Some(key)),
         Some(SHELL) => app.open_shell(key),
         Some(i) if (SSH..PAST).contains(&i) => app.open_ssh(key, &listed[i - SSH], None),
-        Some(i) if (MERGE..MERGE_END).contains(&i) => app.merge(&merges[i - MERGE]),
+        Some(i) if (MERGE..MERGE_END).contains(&i) => {
+            app.merge(&merges[i - MERGE]);
+        }
         Some(CODE) => {
             if let Some(dir) = app.project_dir(key) {
                 watch::open_in_code(&dir);

@@ -40,6 +40,18 @@ fn ingredient(s: &Session) -> Ingredient {
     }
 }
 
+/// A session as a reviewer is told of it.
+pub(in crate::app) fn subject(s: &Session) -> Subject {
+    Subject {
+        name: s.label().to_string(),
+        dir: s
+            .worktree
+            .as_ref()
+            .map_or_else(|| s.cwd.clone(), |w| w.path.clone()),
+        branch: s.worktree.as_ref().map(|w| w.branch.clone()),
+    }
+}
+
 fn look(s: &Session) -> StashLook {
     let key = project_key(s);
     StashLook {
@@ -160,14 +172,7 @@ impl App {
         match recipe {
             Recipe::Review => self.review(&sessions[0], &sessions[1]),
             Recipe::Merge => {
-                let s = &sessions[0];
-                if let Some(w) = &s.worktree {
-                    self.merge(&Merge {
-                        main: PathBuf::from(&w.main),
-                        branch: w.branch.clone(),
-                        title: s.label().to_string(),
-                    });
-                }
+                self.merge_session(&sessions[0]);
             }
             Recipe::Close => {
                 for s in &sessions {
@@ -181,32 +186,13 @@ impl App {
     /// Starts a session in the first one's main tree that reviews both
     /// diffs, and shows it on the stage.
     fn review(&mut self, a: &Session, b: &Session) {
-        let subject = |s: &Session| Subject {
-            name: s.label().to_string(),
-            dir: s
-                .worktree
-                .as_ref()
-                .map_or_else(|| s.cwd.clone(), |w| w.path.clone()),
-            branch: s.worktree.as_ref().map(|w| w.branch.clone()),
-        };
-        let main = a
-            .worktree
-            .as_ref()
-            .map(|w| PathBuf::from(&w.main))
-            .or_else(|| self.project_dir(&project_key(a)))
-            .unwrap_or_else(|| PathBuf::from(&a.cwd));
+        let main = self.main_tree(a);
         let base = crate::worktree::checked_out(&main).unwrap_or_else(|| "main".into());
         let prompt = cube::review_prompt(&subject(a), &subject(b), &base);
         let name = format!("Review: {} + {}", a.label(), b.label());
-        let id = self.unique_id("review");
-        self.tasks.prompts.insert(id.clone(), prompt);
-        if let Err(e) = self.launch(&id, &name, main, Vec::new(), Run::Agent, false) {
-            self.tasks.prompts.remove(&id);
-            eprintln!("horadric: cannot start the reviewer: {e}");
-            self.toasts
-                .show(Kind::Failed, "Cannot start the reviewer", &e);
+        let Some(id) = self.start_reviewer(&name, main, prompt) else {
             return;
-        }
+        };
         if let Some(key) = self.project_of(&id) {
             if self.fill_stage(&key, true) {
                 if let Some(stage) = &self.stage {
@@ -214,6 +200,47 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Merges the branch of a session's own worktree, the merge rune in the
+    /// cube and in a runeword. None when it has no branch of its own.
+    pub(in crate::app) fn merge_session(&mut self, s: &Session) -> Option<bool> {
+        let w = s.worktree.as_ref()?;
+        Some(self.merge(&Merge {
+            main: PathBuf::from(&w.main),
+            branch: w.branch.clone(),
+            title: s.label().to_string(),
+        }))
+    }
+
+    /// The main working tree of a session's repository, where a reviewer
+    /// of its work starts.
+    pub(in crate::app) fn main_tree(&self, s: &Session) -> PathBuf {
+        s.worktree
+            .as_ref()
+            .map(|w| PathBuf::from(&w.main))
+            .or_else(|| self.project_dir(&project_key(s)))
+            .unwrap_or_else(|| PathBuf::from(&s.cwd))
+    }
+
+    /// Starts a reviewer named `name` in `main`, told `prompt`. Its id, or
+    /// None when it could not start, which a notification says.
+    pub(in crate::app) fn start_reviewer(
+        &mut self,
+        name: &str,
+        main: PathBuf,
+        prompt: String,
+    ) -> Option<String> {
+        let id = self.unique_id("review");
+        self.tasks.prompts.insert(id.clone(), prompt);
+        if let Err(e) = self.launch(&id, name, main, Vec::new(), Run::Agent, false) {
+            self.tasks.prompts.remove(&id);
+            eprintln!("horadric: cannot start the reviewer: {e}");
+            self.toasts
+                .show(Kind::Failed, "Cannot start the reviewer", &e);
+            return None;
+        }
+        Some(id)
     }
 
     /// Ends a session and keeps the one line it leaves in the journal, for

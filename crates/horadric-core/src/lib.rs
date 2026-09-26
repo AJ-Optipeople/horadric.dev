@@ -14,6 +14,7 @@ pub mod journal;
 pub mod rarity;
 pub mod registry;
 pub mod release;
+pub mod runeword;
 pub mod saved;
 pub mod session;
 pub mod ssh;

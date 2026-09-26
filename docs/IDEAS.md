@@ -107,6 +107,8 @@ order make a runeword. Like the recipes, but over time instead of at once:
 "test, review, merge" as one named sequence a session can be given. See
 Transmute above; the two may be one system.
 
+Built, as one system with the recipes: see "Runewords" in [PLAN.md](PLAN.md).
+
 ### Quests
 
 The task list could become a quest log. Rename Tasks to Quests, and make

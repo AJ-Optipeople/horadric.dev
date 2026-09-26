@@ -2687,6 +2687,20 @@ impl Painter<'_> {
             );
             bottom.w -= trace_w + gap;
         }
+        // A runeword's rune in the cube's gold, before what it last said.
+        if let Some(w) = &s.runeword {
+            let room = bottom.w * 0.6;
+            let fits = |word: String| {
+                let word_w = self.measure(gpu, &gpu.small, &word);
+                (word_w + gap < room).then_some((word, word_w))
+            };
+            if let Some((word, word_w)) = fits(w.progress()).or_else(|| fits(w.progress_short())) {
+                let gold = theme::rarity_color(Rarity::Unique).fade(presence);
+                self.text(&gpu.small, gold, &word, bottom);
+                bottom.x += word_w + gap;
+                bottom.w -= word_w + gap;
+            }
+        }
         self.text(&gpu.small, theme::TEXT_DIM.fade(presence), last, bottom);
         if let Some(mark) = mark {
             self.browser_mark(&mark, scene.button(Hit::Browser(i)));

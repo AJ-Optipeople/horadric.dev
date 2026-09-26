@@ -8,6 +8,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use horadric_core::fleet::{self, Device};
+use horadric_core::runeword::{self, Offered};
 use horadric_core::tasks::{self, Mode, CONFIG_FILE, TASKS_FILE};
 use horadric_core::{ssh, worktree};
 
@@ -69,6 +70,11 @@ pub fn ssh_config_hosts() -> Vec<String> {
     };
     let path = Path::new(&home).join(".ssh").join("config");
     ssh::config_hosts(&read_text(&path))
+}
+
+/// The runewords the project offers, its config's own first.
+pub fn runewords(project: &Path) -> Offered {
+    runeword::offered(&read_text(&config_file(project)))
 }
 
 /// What the project's config says about worktrees.

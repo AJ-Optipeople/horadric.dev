@@ -101,24 +101,26 @@ pub struct Subject {
 /// `base` is what the main tree has checked out, which a branch is read
 /// against.
 pub fn review_prompt(a: &Subject, b: &Subject, base: &str) -> String {
-    let diff = |s: &Subject| match &s.branch {
+    format!(
+        "Review the work of two sessions. {} {} Read both diffs. For each, say what it does,          what is wrong or risky with file and line, and what is missing. If they do the same          thing, say which is better and why. Do not change any files.",
+        diff_of(a, base),
+        diff_of(b, base)
+    )
+}
+
+/// Where a session's diff is and how to read it: a branch against `base`
+/// and what it has not committed, or the shared tree against its HEAD.
+pub fn diff_of(s: &Subject, base: &str) -> String {
+    match &s.branch {
         Some(br) => format!(
-            "\"{}\" on the branch {br} in {}: its commits are `git -C \"{}\" diff {base}...{br}` \
-             and what it has not committed is `git -C \"{}\" diff HEAD`.",
+            "\"{}\" on the branch {br} in {}: its commits are `git -C \"{}\" diff {base}...{br}`              and what it has not committed is `git -C \"{}\" diff HEAD`.",
             s.name, s.dir, s.dir, s.dir
         ),
         None => format!(
             "\"{}\" in {}: `git -C \"{}\" diff HEAD`.",
             s.name, s.dir, s.dir
         ),
-    };
-    format!(
-        "Review the work of two sessions. {} {} Read both diffs. For each, say what it does, \
-         what is wrong or risky with file and line, and what is missing. If they do the same \
-         thing, say which is better and why. Do not change any files.",
-        diff(a),
-        diff(b)
-    )
+    }
 }
 
 /// How long a closed session's line may be.

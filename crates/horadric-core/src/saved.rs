@@ -12,6 +12,7 @@ use std::time::SystemTime;
 use serde::{Deserialize, Serialize};
 
 use crate::rarity::Loot;
+use crate::runeword::Runeword;
 use crate::session::{Phase, Session};
 use crate::title::Title;
 use crate::usage::{Defaults, Usage};
@@ -186,6 +187,9 @@ pub struct SavedSession {
     /// What it changed, tested and landed, see [`Session::loot`].
     #[serde(default, skip_serializing_if = "is_default")]
     pub loot: Loot,
+    /// The runeword it was given, see [`Session::runeword`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runeword: Option<Runeword>,
 }
 
 fn is_default(loot: &Loot) -> bool {
@@ -209,6 +213,7 @@ impl SavedSession {
             ssh: s.ssh.clone(),
             worktree: s.worktree.clone(),
             loot: s.loot.clone(),
+            runeword: s.runeword.clone(),
         }
     }
 
@@ -224,6 +229,7 @@ impl SavedSession {
         s.ssh = self.ssh.clone();
         s.worktree = self.worktree.clone();
         s.loot = self.loot.clone();
+        s.runeword = self.runeword.clone();
         s.phase = Phase::Paused;
         s.since = now;
         s
@@ -302,6 +308,7 @@ mod tests {
             ssh: None,
             worktree: None,
             loot: Loot::default(),
+            runeword: None,
         }
     }
 
