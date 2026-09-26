@@ -1938,8 +1938,33 @@ Review then an `echo`: the tile read "review 1/2" in gold, a "Review:
 beta" tile started, and its turn's end typed the answer prompt naming the
 review file into beta and ended the reviewer; beta's next turn end cast
 the `echo`, and the one after completed it. The menu's Runeword submenu
-was seen but not picked from. Not tested: the test rune with a real
-`claude`, a real reviewer writing its file, and a merge that conflicts.
+was seen but not picked from.
+
+Then with a real `claude` (Haiku for the session, the default model for
+the reviewer), in a scratch repository whose one test failed and whose
+`main` got a commit on the same line after the worktree was made. "Test,
+review, merge": the test rune was typed, the session fixed the line and
+committed, and its turn's end started "Review: rune". The reviewer ran the
+test, found with `git merge-tree` that the branch conflicts with `main`,
+wrote a full review to `reviews\rune-68476-2.md` and changed nothing else;
+its turn's end told the session to answer and ended it. The session
+rebased on `main`, resolved the conflict, committed, and the merge rune
+landed it: "Merged rune", then "Test, review, merge is complete". A second
+session was given a said rune that changed the same line as a fresh
+commit on `main`, then merge: the merge stopped on the conflict, was
+aborted (no `MERGE_HEAD`, `main` clean), the branch was kept, and the
+notifications said "Cannot merge howdy" with git's `CONFLICT` line and
+"Howdy stopped". What it showed:
+
+- In Claude Code's default permission mode the session asks before it
+  reads the review, since the file is outside its worktree. The reviewer
+  did not ask to write it only because it started in auto mode.
+- A told rune whose turn the human cuts short (No to a permission, or
+  Esc) sends no `Stop`, so the runeword waits and counts the human's next
+  finished turn as the rune done.
+- A `state.json` that does not parse (a said rune written by hand as a
+  bare string instead of `{"say": ...}`) loses every session, and the
+  next save overwrites it.
 
 ### Experience
 
