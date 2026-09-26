@@ -43,6 +43,7 @@ pub mod field;
 pub mod files;
 pub mod find;
 pub mod frame;
+pub mod glide;
 pub mod highlight;
 pub mod history;
 pub mod icon;

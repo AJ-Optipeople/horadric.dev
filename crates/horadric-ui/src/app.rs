@@ -74,12 +74,12 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::Shell::NIN_BALLOONUSERCLICK;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, KillTimer, PostMessageW,
-    PostQuitMessage, RegisterClassW, RegisterWindowMessageW, SetTimer, SystemParametersInfoW,
-    TranslateMessage, MONITORINFOF_PRIMARY, MSG, SPI_GETWORKAREA, SPI_SETWORKAREA,
-    SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WM_APP, WM_DISPLAYCHANGE, WM_HOTKEY, WM_LBUTTONUP,
-    WM_QUERYENDSESSION, WM_QUIT, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_TIMER, WNDCLASSW,
-    WS_EX_TOOLWINDOW, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, GetWindowRect, KillTimer,
+    PostMessageW, PostQuitMessage, RegisterClassW, RegisterWindowMessageW, SetTimer, SetWindowPos,
+    SystemParametersInfoW, TranslateMessage, MONITORINFOF_PRIMARY, MSG, SPI_GETWORKAREA,
+    SPI_SETWORKAREA, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
+    WM_APP, WM_DISPLAYCHANGE, WM_HOTKEY, WM_LBUTTONUP, WM_QUERYENDSESSION, WM_QUIT, WM_RBUTTONUP,
+    WM_SETTINGCHANGE, WM_TIMER, WNDCLASSW, WS_EX_TOOLWINDOW, WS_POPUP,
 };
 
 use crate::agents;
@@ -88,6 +88,7 @@ use crate::columns::{self, Columns};
 use crate::console::{self, Console, Launch};
 use crate::dialog::{self, Dialog, Tone};
 use crate::dropdown::{self, Dropdown};
+use crate::glide::Glides;
 use crate::glyphs::{self, Font};
 use crate::keys::{self, FontStep};
 use crate::layout::{self, Metrics};
@@ -156,6 +157,8 @@ const TICK_TIMER: usize = 1;
 /// Fires once, a moment after a screen change, to lay the tiles out again
 /// once Windows has finished moving windows off a screen that went away.
 const SCREEN_TIMER: usize = 2;
+/// Runs while a window glides to its place in the columns.
+const GLIDE_TIMER: usize = 3;
 const ENDED_LINGER: Duration = Duration::from_secs(20);
 /// A crash this long after resuming sessions after a crash is a crash of
 /// its own, not the same one again, so the next start resumes once more.
@@ -476,6 +479,8 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             notify,
             tray: Tray::add(notify, WM_HORADRIC_TRAY),
             toasts,
+            glides: RefCell::default(),
+            glided: Cell::new(None),
             paused: saved
                 .sessions
                 .iter()
@@ -1531,6 +1536,10 @@ struct App {
     tray: Tray,
     /// Says what needs saying, over the tray.
     toasts: Toasts,
+    /// Windows on their way to their place in the columns.
+    glides: RefCell<Glides>,
+    /// When the glides last moved on, while they move.
+    glided: Cell<Option<Instant>>,
     /// Sessions with no process that a click resumes: restored from disk,
     /// or left behind by a crash.
     paused: HashMap<String, SavedSession>,
@@ -1672,6 +1681,7 @@ impl App {
                 }
             }
             WM_HOTKEY if wparam as i32 == HOTKEY_NEXT => self.next_waiting(),
+            WM_TIMER if wparam == GLIDE_TIMER => self.glide(),
             WM_TIMER if wparam == SCREEN_TIMER => {
                 unsafe {
                     let _ = KillTimer(Some(self.notify), SCREEN_TIMER);
@@ -3616,6 +3626,7 @@ impl App {
                 i += 1;
             } else {
                 let c = self.clusters.remove(i);
+                self.glides.borrow_mut().forget(c.hwnd.0 as isize);
                 c.destroy();
             }
         }
@@ -3962,6 +3973,11 @@ impl App {
     /// column gets the one with the most room, or a new one when none has
     /// enough and another fits. See `columns`.
     fn arrange(&mut self) {
+        self.arrange_with(crate::backdrop::animations_on());
+    }
+
+    /// Lays the tiles out, gliding the windows that move when `animate`.
+    fn arrange_with(&mut self, animate: bool) {
         let Some(g) = self.grid() else {
             return;
         };
@@ -4011,7 +4027,7 @@ impl App {
             let (filled, room) = columns::fill(&items, g.top, g.height, g.gap, g.min_files, scroll);
             scrolls.push((*model, scroll.clamp(0, room)));
             for (t, f) in tiles.iter().zip(filled) {
-                t.place(x, f);
+                t.place(x, f, &mut self.glides.borrow_mut(), animate);
             }
         }
         if shown.is_empty() {
@@ -4022,12 +4038,60 @@ impl App {
                         y: g.top,
                         files: None,
                     },
+                    &mut self.glides.borrow_mut(),
+                    animate,
                 );
             }
         }
         for (model, scroll) in scrolls {
             self.columns.cols[model].scroll = scroll;
         }
+        if self.glides.borrow().moving() && self.glided.get().is_none() {
+            self.glided.set(Some(Instant::now()));
+            unsafe {
+                SetTimer(
+                    Some(self.notify),
+                    GLIDE_TIMER,
+                    crate::motion::FRAME_FAST.as_millis() as u32,
+                    None,
+                );
+            }
+        }
+    }
+
+    /// Moves every gliding window on a frame, and stops the timer once
+    /// they are all in place.
+    fn glide(&mut self) {
+        let now = Instant::now();
+        let dt = self.glided.get().map_or(Duration::ZERO, |t| now - t);
+        self.glided.set(Some(now));
+        let mut glides = self.glides.borrow_mut();
+        let moves = glides.step(dt, |id| window_at(HWND(id as *mut c_void)));
+        unsafe {
+            for (id, (x, y)) in moves {
+                let _ = SetWindowPos(
+                    HWND(id as *mut c_void),
+                    None,
+                    x,
+                    y,
+                    0,
+                    0,
+                    SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOSIZE,
+                );
+            }
+            if !glides.moving() {
+                self.glided.set(None);
+                let _ = KillTimer(Some(self.notify), GLIDE_TIMER);
+            }
+        }
+    }
+
+    /// Where a window that stands in the columns is, or is gliding to.
+    fn resting(&self, t: &Tile) -> (i32, i32) {
+        self.glides
+            .borrow()
+            .target(t.hwnd().0 as isize)
+            .unwrap_or_else(|| window_at(t.hwnd()))
     }
 
     /// A window let go of after a drag takes the place in the columns under
@@ -4053,7 +4117,10 @@ impl App {
                 let keys: Vec<String> = keys.iter().filter(|k| *k != key).cloned().collect();
                 self.column_windows(&keys, false)
                     .iter()
-                    .map(Tile::span)
+                    .map(|t| {
+                        let y = self.resting(t).1;
+                        (y, y + t.height())
+                    })
                     .collect()
             })
             .unwrap_or_default();
@@ -4099,7 +4166,7 @@ impl App {
     /// work area, and a stage left off every screen or over the tiles docks
     /// beside them again.
     fn screen_changed(&mut self) {
-        self.arrange();
+        self.arrange_with(false);
         self.stage_rect = self.stage_rect.filter(|r| on_screen(r[0], r[1]));
         let Some(stage) = &self.stage else {
             return;
@@ -4169,40 +4236,58 @@ impl Tile<'_> {
         }
     }
 
-    /// Its top and bottom on screen.
-    fn span(&self) -> (i32, i32) {
-        let ((_, y), (_, h)) = match self {
-            Tile::Usage(u) => (u.position(), u.size_px()),
-            Tile::Start(s) => (s.position(), s.size_px()),
-            Tile::Cluster(c) => (c.position(), c.size_px()),
-        };
-        (y, y + h)
+    fn hwnd(&self) -> HWND {
+        match self {
+            Tile::Usage(u) => u.hwnd,
+            Tile::Start(s) => s.hwnd,
+            Tile::Cluster(c) => c.hwnd,
+        }
     }
 
-    /// Moves it to its place in the column at `x`, a cluster's files tile
-    /// sized first.
-    fn place(&self, x: i32, f: columns::Filled) {
+    fn height(&self) -> i32 {
+        match self {
+            Tile::Usage(u) => u.size_px().1,
+            Tile::Start(s) => s.size_px().1,
+            Tile::Cluster(c) => c.size_px().1,
+        }
+    }
+
+    /// Sends it to its place in the column at `x`, a cluster's files tile
+    /// sized first. A window already on screen glides there.
+    fn place(&self, x: i32, f: columns::Filled, glides: &mut Glides, animate: bool) {
+        if let Tile::Cluster(c) = self {
+            c.set_files_room(f.files);
+        }
+        let hwnd = self.hwnd();
+        let Some((x, y)) = glides.aim(hwnd.0 as isize, window_at(hwnd), (x, f.y), animate) else {
+            return;
+        };
         // A window that was created off screen has never painted. Moving
         // it into view does not always ask it to, hence the invalidate.
         match self {
-            Tile::Usage(u) if u.position() != (x, f.y) => {
-                u.move_to(x, f.y);
+            Tile::Usage(u) => {
+                u.move_to(x, y);
                 u.invalidate();
             }
-            Tile::Start(s) if s.position() != (x, f.y) => {
-                s.move_to(x, f.y);
+            Tile::Start(s) => {
+                s.move_to(x, y);
                 s.invalidate();
             }
             Tile::Cluster(c) => {
-                c.set_files_room(f.files);
-                if c.position() != (x, f.y) {
-                    c.move_to(x, f.y);
-                    c.invalidate();
-                }
+                c.move_to(x, y);
+                c.invalidate();
             }
-            _ => {}
         }
     }
+}
+
+/// A window's top left corner on screen.
+fn window_at(hwnd: HWND) -> (i32, i32) {
+    let mut r = RECT::default();
+    unsafe {
+        let _ = GetWindowRect(hwnd, &mut r);
+    }
+    (r.left, r.top)
 }
 
 fn unix_now() -> u64 {
