@@ -45,7 +45,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use crate::backdrop;
 use crate::clipboard;
 use crate::field::{self, Field};
-use crate::layout::{self, AskLayout, Rect};
+use crate::layout::{self, AskLayout, Button, Rect};
 use crate::render::{self, AskScene, FieldLook, Target};
 use crate::window::Shared;
 
@@ -72,12 +72,39 @@ pub struct Ask<'a> {
     pub verb: &'a str,
     /// Ask for notes under it too, as a new task takes.
     pub notes: bool,
+    /// Offer what the answer could be as it is typed, as a folder does.
+    pub pick: Option<&'a Pick<'a>>,
 }
 
-/// What was answered. `notes` is empty unless asked for.
+/// A question whose answer is picked from suggestions that follow what is
+/// typed. The initial text is left unselected with the caret at its end,
+/// since it is a start to go on from rather than a value to replace.
+pub struct Pick<'a> {
+    /// What the text could become, up to [`LIST_ROWS`].
+    pub suggest: &'a dyn Fn(&str) -> Vec<Suggestion>,
+    /// Why an answer cannot be taken, or None when it can.
+    pub check: &'a dyn Fn(&str) -> Option<String>,
+    /// Offer a Browse key, which answers with [`Answer::browse`] set.
+    pub browse: bool,
+}
+
+pub struct Suggestion {
+    pub label: String,
+    /// Right aligned and fainter, where it is.
+    pub detail: String,
+    /// What picking it answers, or fills in for Tab.
+    pub value: String,
+}
+
+/// How many suggestions show at once.
+pub const LIST_ROWS: usize = 6;
+
+/// What was answered. `notes` is empty unless asked for. With `browse`,
+/// the Browse key was pressed instead and `text` is what was typed.
 pub struct Answer {
     pub text: String,
     pub notes: String,
+    pub browse: bool,
 }
 
 pub fn register_class() -> Result<()> {
@@ -123,14 +150,18 @@ pub fn ask(shared: Rc<Shared>, beside: Option<HWND>, a: &Ask) -> Option<Answer> 
     unsafe {
         let _ = DestroyWindow(popup.hwnd.get());
     }
+    let browse = popup.browsing.get();
+    let chosen = popup.chosen.take();
     let mut fields = popup.fields.take().into_iter();
+    let typed = fields.next().map(|f| f.text).unwrap_or_default();
     answered.then(|| Answer {
-        text: fields.next().map(|f| f.text).unwrap_or_default(),
+        text: chosen.unwrap_or(typed),
         notes: fields.next().map(|f| f.text).unwrap_or_default(),
+        browse,
     })
 }
 
-struct Popup {
+struct Popup<'a> {
     hwnd: Cell<HWND>,
     shared: Rc<Shared>,
     target: RefCell<Option<Target>>,
@@ -154,10 +185,22 @@ struct Popup {
     before: HWND,
     /// Some once closed, true when answered.
     outcome: Cell<Option<bool>>,
+    pick: Option<&'a Pick<'a>>,
+    /// What the field could be, as last suggested.
+    list: RefCell<Vec<Suggestion>>,
+    /// The suggestion Enter takes, lit by the arrows or the mouse.
+    picked: Cell<Option<usize>>,
+    /// Why the answer was not taken, said in place of the hint.
+    refusal: RefCell<Option<String>>,
+    browse_look: Cell<Button>,
+    /// Answered with the Browse key.
+    browsing: Cell<bool>,
+    /// Answered with a suggestion's value rather than the text.
+    chosen: RefCell<Option<String>>,
 }
 
-impl Popup {
-    fn open(shared: Rc<Shared>, beside: Option<HWND>, a: &Ask) -> Result<Box<Self>> {
+impl<'a> Popup<'a> {
+    fn open(shared: Rc<Shared>, beside: Option<HWND>, a: &Ask<'a>) -> Result<Box<Self>> {
         let beside = beside.filter(|h| unsafe { IsWindowVisible(*h) }.as_bool());
         let dpi = match beside {
             Some(h) => unsafe { GetDpiForWindow(h) },
@@ -166,9 +209,15 @@ impl Popup {
         .max(96);
         let s = dpi as f32 / 96.0;
         let gpu = &shared.gpu;
-        let prompt = render::wrapped(gpu, &gpu.small, a.prompt, layout::ask_text_w())?;
-        let layout = layout::ask(render::text_size(&prompt).1.ceil(), a.notes);
-        let mut fields = vec![Field::new(a.initial, false, MAX_LEN)];
+        let rows = if a.pick.is_some() { LIST_ROWS } else { 0 };
+        let browse = a.pick.is_some_and(|p| p.browse);
+        let prompt = render::wrapped(gpu, &gpu.small, a.prompt, layout::ask_text_w(rows))?;
+        let layout = layout::ask(render::text_size(&prompt).1.ceil(), a.notes, rows, browse);
+        let mut first = Field::new(a.initial, false, MAX_LEN);
+        if a.pick.is_some() {
+            first.end(true, false);
+        }
+        let mut fields = vec![first];
         if a.notes {
             fields.push(Field::new("", true, MAX_NOTES));
         }
@@ -177,6 +226,8 @@ impl Popup {
                 "Enter to {}, Shift+Enter for a new line, Esc to cancel",
                 a.verb
             )
+        } else if a.pick.is_some() {
+            format!("Enter to {}, Tab to fill in, Esc to cancel", a.verb)
         } else {
             format!("Enter to {}, Esc to cancel", a.verb)
         };
@@ -227,7 +278,15 @@ impl Popup {
             high: Cell::new(None),
             before: unsafe { GetForegroundWindow() },
             outcome: Cell::new(None),
+            pick: a.pick,
+            list: RefCell::new(Vec::new()),
+            picked: Cell::new(None),
+            refusal: RefCell::new(None),
+            browse_look: Cell::new(Button::Idle),
+            browsing: Cell::new(false),
+            chosen: RefCell::new(None),
         });
+        popup.suggest();
         let title: Vec<u16> = a.title.encode_utf16().chain([0]).collect();
         unsafe {
             // Born where it shows and at its size: a window that starts
@@ -339,13 +398,23 @@ impl Popup {
                 focused,
             });
         }
+        let list = self.list.borrow();
+        let rows: Vec<(&str, &str)> = list
+            .iter()
+            .map(|s| (s.label.as_str(), s.detail.as_str()))
+            .collect();
+        let refusal = self.refusal.borrow();
         let scene = AskScene {
             layout: &self.layout,
             title: &self.title,
             prompt: &self.prompt,
             notes_label: "NOTES FOR THE AGENT",
-            hint: &self.hint,
+            hint: refusal.as_deref().unwrap_or(&self.hint),
+            refused: refusal.is_some(),
             fields: looks,
+            list: &rows,
+            picked: self.picked.get(),
+            browse: self.browse_look.get(),
         };
         let result = slot
             .as_ref()
@@ -393,10 +462,94 @@ impl Popup {
 
     fn edit(&self, f: impl FnOnce(&mut Field)) {
         let i = self.focus.get();
-        if let Some(field) = self.fields.borrow_mut().get_mut(i) {
-            f(field);
+        let retyped = {
+            let mut fields = self.fields.borrow_mut();
+            fields.get_mut(i).is_some_and(|field| {
+                let before = field.text.clone();
+                f(field);
+                field.text != before
+            })
+        };
+        if retyped && i == 0 {
+            self.refusal.replace(None);
+            self.suggest();
         }
         self.changed();
+    }
+
+    /// What the text could become now, with nothing picked.
+    fn suggest(&self) {
+        let Some(pick) = self.pick else { return };
+        let text = self.fields.borrow()[0].text.clone();
+        let mut list = (pick.suggest)(&text);
+        list.truncate(LIST_ROWS);
+        self.list.replace(list);
+        self.picked.set(None);
+        self.invalidate();
+    }
+
+    /// The arrows move through the suggestions.
+    fn move_pick(&self, down: bool) {
+        let n = self.list.borrow().len();
+        if n == 0 {
+            return;
+        }
+        let next = match (self.picked.get(), down) {
+            (None, true) => 0,
+            (None, false) => n - 1,
+            (Some(i), true) => (i + 1) % n,
+            (Some(i), false) => (i + n - 1) % n,
+        };
+        self.picked.set(Some(next));
+        self.invalidate();
+    }
+
+    /// Tab: the text becomes the picked suggestion, or the only one, with
+    /// a separator after it so its own folders are suggested next.
+    fn fill_in(&self) {
+        let value = {
+            let list = self.list.borrow();
+            match (self.picked.get(), list.len()) {
+                (Some(i), _) => list.get(i).map(|s| s.value.clone()),
+                (None, 1) => Some(list[0].value.clone()),
+                _ => None,
+            }
+        };
+        if let Some(v) = value {
+            let filled = format!("{}\\", v.trim_end_matches(['\\', '/']));
+            self.edit(|f| {
+                f.select_all();
+                f.insert(&filled);
+            });
+        }
+    }
+
+    /// Enter, or a click on a suggestion: takes `value`, or else the
+    /// picked suggestion, or else the text, if the check lets it.
+    fn answer(&self, value: Option<String>) {
+        let Some(pick) = self.pick else {
+            return self.close(true);
+        };
+        let value = value.or_else(|| {
+            let list = self.list.borrow();
+            self.picked
+                .get()
+                .and_then(|i| list.get(i))
+                .map(|s| s.value.clone())
+        });
+        let text = value
+            .clone()
+            .unwrap_or_else(|| self.fields.borrow()[0].text.clone());
+        match (pick.check)(&text) {
+            Some(why) => {
+                self.refusal.replace(Some(why));
+                self.invalidate();
+            }
+            None => {
+                self.chosen.replace(value);
+                self.close(true);
+            }
+        }
     }
 
     /// Up or down a line of the notes, or to either end of one line.
@@ -437,10 +590,14 @@ impl Popup {
         let down = |k: VIRTUAL_KEY| unsafe { GetKeyState(k.0 as i32) } < 0;
         let (ctrl, shift) = (down(VK_CONTROL), down(VK_SHIFT));
         let multiline = self.fields.borrow()[self.focus.get()].multiline;
+        let picking = self.pick.is_some();
         match VIRTUAL_KEY(vk) {
             VK_ESCAPE => self.close(false),
             VK_RETURN if multiline && shift => self.edit(|f| f.insert("\n")),
-            VK_RETURN => self.close(true),
+            VK_RETURN => self.answer(None),
+            VK_TAB if picking => self.fill_in(),
+            VK_UP if picking => self.move_pick(false),
+            VK_DOWN if picking => self.move_pick(true),
             VK_TAB => {
                 let n = self.fields.borrow().len();
                 if n > 1 {
@@ -553,6 +710,20 @@ impl Popup {
                 if self.dragging.get() {
                     let at = self.offset_at(self.focus.get(), p);
                     self.edit(|f| f.set_caret(at, true));
+                } else if let Some(row) = layout::ask_list_hit(&self.layout, p.0, p.1) {
+                    if row < self.list.borrow().len() && self.picked.replace(Some(row)) != Some(row)
+                    {
+                        self.invalidate();
+                    }
+                }
+                let on_browse = self.layout.browse.is_some_and(|b| b.contains(p.0, p.1));
+                let look = match (self.browse_look.get(), on_browse) {
+                    (Button::Pressed, _) => Button::Pressed,
+                    (_, true) => Button::Hover,
+                    (_, false) => Button::Idle,
+                };
+                if self.browse_look.replace(look) != look {
+                    self.invalidate();
                 }
                 Some(LRESULT(0))
             }
@@ -560,6 +731,18 @@ impl Popup {
                 let p = self.point(lparam);
                 if !self.inside(p) {
                     self.close(false);
+                    return Some(LRESULT(0));
+                }
+                if self.layout.browse.is_some_and(|b| b.contains(p.0, p.1)) {
+                    self.browse_look.set(Button::Pressed);
+                    self.invalidate();
+                    return Some(LRESULT(0));
+                }
+                if let Some(row) = layout::ask_list_hit(&self.layout, p.0, p.1) {
+                    let value = self.list.borrow().get(row).map(|s| s.value.clone());
+                    if value.is_some() {
+                        self.answer(value);
+                    }
                     return Some(LRESULT(0));
                 }
                 if let Some(i) = layout::ask_hit(&self.layout, p.0, p.1) {
@@ -577,6 +760,16 @@ impl Popup {
             }
             WM_LBUTTONUP => {
                 self.dragging.set(false);
+                if self.browse_look.get() == Button::Pressed {
+                    let p = self.point(lparam);
+                    if self.layout.browse.is_some_and(|b| b.contains(p.0, p.1)) {
+                        self.browsing.set(true);
+                        self.close(true);
+                    } else {
+                        self.browse_look.set(Button::Idle);
+                        self.invalidate();
+                    }
+                }
                 Some(LRESULT(0))
             }
             WM_RBUTTONDOWN | WM_MBUTTONDOWN => {

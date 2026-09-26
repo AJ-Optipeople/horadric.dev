@@ -834,21 +834,40 @@ pub struct AskLayout {
     /// The notes' label and their field, for a new task.
     pub notes_label: Option<Rect>,
     pub notes: Option<Rect>,
+    /// What the field could be, one row each, when it offers some.
+    pub list: Vec<Rect>,
     pub hint: Rect,
+    /// A key at the end of the hint's line that browses instead.
+    pub browse: Option<Rect>,
 }
 
 /// How wide the input is, in DIPs: a task's title fits without scrolling.
 pub const ASK_W: f32 = 400.0;
+/// Wider for picking from a list, as a path runs long.
+const ASK_LIST_W: f32 = 540.0;
+pub const ASK_ROW_H: f32 = 28.0;
+const ASK_BROWSE_W: f32 = 92.0;
 /// Between the window's edge and what is in it.
 const ASK_PAD: f32 = 20.0;
 const ASK_FIELD_H: f32 = 34.0;
 /// Five lines of notes.
 const ASK_NOTES_H: f32 = 108.0;
 
+/// How wide an input is, wider with a list to pick from.
+fn ask_w(list: usize) -> f32 {
+    if list > 0 {
+        ASK_LIST_W
+    } else {
+        ASK_W
+    }
+}
+
 /// Lays out an input whose prompt wraps to `prompt_h` DIPs at
-/// [`ask_text_w`] wide.
-pub fn ask(prompt_h: f32, notes: bool) -> AskLayout {
-    let w = ASK_W - 2.0 * ASK_PAD;
+/// [`ask_text_w`] wide, with room for `list` rows under the field to pick
+/// from and a Browse key when `browse`.
+pub fn ask(prompt_h: f32, notes: bool, list: usize, browse: bool) -> AskLayout {
+    let full = ask_w(list);
+    let w = full - 2.0 * ASK_PAD;
     let title = Rect::new(ASK_PAD, 16.0, w, 24.0);
     let prompt = Rect::new(ASK_PAD, title.bottom() + 2.0, w, prompt_h);
     let field = Rect::new(ASK_PAD, prompt.bottom() + 10.0, w, ASK_FIELD_H);
@@ -859,16 +878,40 @@ pub fn ask(prompt_h: f32, notes: bool) -> AskLayout {
     } else {
         (None, None, field.bottom())
     };
-    let hint = Rect::new(ASK_PAD, below + 8.0, w, 20.0);
+    let list: Vec<Rect> = (0..list)
+        .map(|i| Rect::new(ASK_PAD, below + 6.0 + i as f32 * ASK_ROW_H, w, ASK_ROW_H))
+        .collect();
+    let below = list.last().map_or(below, |r| r.bottom());
+    let (hint_w, browse) = if browse {
+        let b = Rect::new(
+            full - ASK_PAD - ASK_BROWSE_W,
+            below + 10.0,
+            ASK_BROWSE_W,
+            28.0,
+        );
+        (w - ASK_BROWSE_W - 10.0, Some(b))
+    } else {
+        (w, None)
+    };
+    let hint_y = browse.map_or(below + 8.0, |b| b.y + 4.0);
+    let hint = Rect::new(ASK_PAD, hint_y, hint_w, 20.0);
+    let bottom = browse.map_or(hint.bottom(), |b| b.bottom().max(hint.bottom()));
     AskLayout {
-        size: (ASK_W, hint.bottom() + 12.0),
+        size: (full, bottom + 12.0),
         title,
         prompt,
         field,
         notes_label,
         notes,
+        list,
         hint,
+        browse,
     }
+}
+
+/// The row of the list under a point.
+pub fn ask_list_hit(l: &AskLayout, x: f32, y: f32) -> Option<usize> {
+    l.list.iter().position(|r| r.contains(x, y))
 }
 
 /// Where a field's text goes inside its well.
@@ -881,9 +924,9 @@ pub fn ask_inner(field: &Rect) -> Rect {
     )
 }
 
-/// How wide the prompt wraps.
-pub fn ask_text_w() -> f32 {
-    ASK_W - 2.0 * ASK_PAD
+/// How wide the prompt wraps, with `list` rows to pick from.
+pub fn ask_text_w(list: usize) -> f32 {
+    ask_w(list) - 2.0 * ASK_PAD
 }
 
 /// Which field a point is in: 0 the first, 1 the notes.
@@ -1618,13 +1661,14 @@ mod tests {
 
     #[test]
     fn an_input_stacks_its_parts_and_its_notes_only_when_asked() {
-        let l = ask(18.0, false);
+        let l = ask(18.0, false, 0, false);
         assert!(l.notes.is_none() && l.notes_label.is_none());
+        assert!(l.list.is_empty() && l.browse.is_none());
         assert!(l.prompt.y >= l.title.bottom());
         assert!(l.field.y >= l.prompt.bottom());
         assert!(l.hint.y >= l.field.bottom());
         assert!(l.hint.bottom() <= l.size.1);
-        let t = ask(36.0, true);
+        let t = ask(36.0, true, 0, false);
         let notes = t.notes.unwrap();
         assert!(t.notes_label.unwrap().bottom() <= notes.y);
         assert!(notes.y >= t.field.bottom() && t.hint.y >= notes.bottom());
@@ -1633,6 +1677,25 @@ mod tests {
         assert_eq!(ask_hit(&t, notes.x + 1.0, notes.bottom() - 1.0), Some(1));
         assert_eq!(ask_hit(&t, t.hint.x + 1.0, t.hint.y + 1.0), None);
         assert_eq!(ask_hit(&l, 1.0, 1.0), None);
+    }
+
+    #[test]
+    fn a_picker_lists_rows_under_its_field_and_browses_beside_the_hint() {
+        let l = ask(18.0, false, 3, true);
+        assert_eq!(l.list.len(), 3);
+        assert!(l.list[0].y >= l.field.bottom());
+        assert_eq!(l.list[1].y, l.list[0].bottom());
+        let b = l.browse.unwrap();
+        assert!(b.y >= l.list[2].bottom());
+        assert!(l.hint.right() < b.x);
+        assert_eq!(b.right(), l.size.0 - ASK_PAD);
+        assert!(l.size.0 > ASK_W && l.size.1 > b.bottom());
+        assert_eq!(
+            ask_list_hit(&l, l.list[2].x + 1.0, l.list[2].y + 1.0),
+            Some(2)
+        );
+        assert_eq!(ask_list_hit(&l, b.x + 1.0, b.y + 1.0), None);
+        assert_eq!(ask_text_w(3), l.field.w);
     }
 
     #[test]

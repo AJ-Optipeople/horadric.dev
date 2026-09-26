@@ -876,6 +876,7 @@ pub(super) fn show_menu(menu: Menu) {
                 placeholder: "A title for the list",
                 verb: "add it",
                 notes: true,
+                pick: None,
             };
             if let Some(a) = super::ask_beside(Some(&key), &question) {
                 with_app(|app| app.add_task(&key, &a.text, &a.notes));

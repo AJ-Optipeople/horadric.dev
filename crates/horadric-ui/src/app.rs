@@ -100,8 +100,8 @@ use crate::tray::{self, Choice, Tray};
 use crate::usage::{self, UsageWindow};
 use crate::window::{self, folder_key, project_key, project_name, Cluster, Shared};
 use crate::{
-    ask, autostart, browsers, history, inbox, picker, recent, shell, snapping, store, update,
-    watch, worktree,
+    ask, autostart, browsers, history, inbox, paths, picker, recent, shell, snapping, store,
+    update, watch, worktree,
 };
 
 #[path = "runner.rs"]
@@ -1092,6 +1092,7 @@ fn rename_session(id: &str) {
         placeholder: "Claude's own title",
         verb: "rename",
         notes: false,
+        pick: None,
     };
     if let Some(a) = ask_beside(Some(&key), &question) {
         with_app(|app| app.rename(id, &a.text));
@@ -1293,6 +1294,7 @@ fn ask_host(key: &str, dir: &Path) {
         placeholder: "user@address",
         verb: "add it",
         notes: false,
+        pick: None,
     };
     if let Some(a) = ask_beside(Some(key), &question) {
         let host = a.text.trim();
@@ -1398,9 +1400,79 @@ fn end_question(project: Option<&str>, live: usize, working: usize) -> Option<St
 }
 
 fn pick_and_start(hwnd: HWND, start: Option<PathBuf>) {
-    if let Some(dir) = picker::pick_folder(hwnd, start.as_deref()) {
+    if let Some(dir) = pick_folder(hwnd, start) {
         start_logged(dir);
     }
+}
+
+/// Asks where to start a session: a path typed with its folders offered
+/// as it goes, the recent projects while it is empty, and Explorer's
+/// picker behind Browse for a folder easier found by looking. Browse
+/// starts in what was typed if it is a folder, else in `start`.
+fn pick_folder(hwnd: HWND, start: Option<PathBuf>) -> Option<PathBuf> {
+    let (shared, recent) = with_app(|app| (Rc::clone(&app.shared), app.recent.clone()))?;
+    let home = std::env::var("USERPROFILE").ok();
+    let suggest = |text: &str| {
+        paths::offers(text, &recent, home.as_deref(), folders_in, ask::LIST_ROWS)
+            .into_iter()
+            .map(|o| ask::Suggestion {
+                label: o.label,
+                detail: o.detail,
+                value: o.value,
+            })
+            .collect()
+    };
+    let check = |text: &str| {
+        let dir = paths::expand(text.trim(), home.as_deref());
+        if dir.is_empty() {
+            Some("Type a folder, or pick one from the list".to_string())
+        } else if !Path::new(&dir).is_dir() {
+            Some(format!("There is no folder {dir}"))
+        } else {
+            None
+        }
+    };
+    let pick = ask::Pick {
+        suggest: &suggest,
+        check: &check,
+        browse: true,
+    };
+    let question = ask::Ask {
+        title: "Start a session",
+        prompt: "In which folder? Type a path, or pick a recent project.",
+        initial: "",
+        placeholder: "C:\\path\\to\\project",
+        verb: "start",
+        notes: false,
+        pick: Some(&pick),
+    };
+    let a = ask::ask(shared, None, &question)?;
+    let typed = PathBuf::from(paths::expand(a.text.trim(), home.as_deref()));
+    if a.browse {
+        let from = Some(typed).filter(|p| p.is_dir()).or(start);
+        return picker::pick_folder(hwnd, from.as_deref());
+    }
+    Some(typed)
+}
+
+/// The folders in `dir` by name, for the picker, leaving out those Windows
+/// hides.
+fn folders_in(dir: &str) -> Vec<String> {
+    use std::os::windows::fs::MetadataExt;
+    const HIDDEN: u32 = 0x2;
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = entries
+        .flatten()
+        .filter(|e| {
+            e.metadata()
+                .is_ok_and(|m| m.is_dir() && m.file_attributes() & HIDDEN == 0)
+        })
+        .filter_map(|e| e.file_name().into_string().ok())
+        .collect();
+    names.sort_by_key(|n| n.to_lowercase());
+    names
 }
 
 fn start_logged(dir: PathBuf) {

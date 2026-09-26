@@ -371,7 +371,15 @@ pub struct AskScene<'a> {
     pub prompt: &'a IDWriteTextLayout,
     pub notes_label: &'a str,
     pub hint: &'a str,
+    /// The hint says why the answer cannot be taken.
+    pub refused: bool,
     pub fields: Vec<FieldLook<'a>>,
+    /// What the field could be, a label and a fainter detail each, and
+    /// the one Enter takes.
+    pub list: &'a [(&'a str, &'a str)],
+    pub picked: Option<usize>,
+    /// The Browse key's look, when it has one.
+    pub browse: Button,
 }
 
 /// One field of the input. Everything in it is in DIPs from the top left
@@ -979,7 +987,40 @@ impl Painter<'_> {
         for f in &scene.fields {
             self.input(gpu, f);
         }
-        self.text(&gpu.small, theme::LEGEND, scene.hint, l.hint);
+        for (i, (r, (label, detail))) in l.list.iter().zip(scene.list).enumerate() {
+            let lit = scene.picked == Some(i);
+            if lit {
+                self.fill_rounded(&r.inset(1.0), 7.0, theme::HOVER_FILL);
+            }
+            let ink = if lit { theme::TEXT } else { theme::TEXT_DIM };
+            let glyph = Rect::new(r.x + 4.0, r.y, 22.0, r.h);
+            self.icon(&gpu.icon_small, ink, '\u{E8B7}', glyph);
+            let text = Rect::new(r.x + 32.0, r.y, r.w - 32.0 - 10.0, r.h);
+            self.text(&gpu.small, ink, label, text);
+            if !detail.is_empty() {
+                self.text(&gpu.small_right, theme::LEGEND, detail, text);
+            }
+        }
+        let hint = if scene.refused {
+            theme::ERROR.mix(theme::TEXT, 0.2)
+        } else {
+            theme::LEGEND
+        };
+        self.text(&gpu.small, hint, scene.hint, l.hint);
+        if let Some(b) = l.browse {
+            let depth = match scene.browse {
+                Button::Idle => 0.5,
+                Button::Hover => 0.8,
+                Button::Pressed => 0.2,
+            };
+            self.key(gpu, &b, 8.0, theme::SURFACE, depth, 1.0);
+            let ink = if scene.browse == Button::Hover {
+                theme::TEXT
+            } else {
+                theme::TEXT_DIM
+            };
+            self.text(&gpu.small_centre, ink, "Browse\u{2026}", b);
+        }
     }
 
     unsafe fn input(&self, gpu: &Gpu, f: &FieldLook) {
