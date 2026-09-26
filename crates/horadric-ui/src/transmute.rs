@@ -52,7 +52,8 @@ fn look(s: &Session) -> StashLook {
 
 impl App {
     /// Makes the cube window match what the cube holds: there while an
-    /// agent session has a tile or the cube holds anything, under the stash
+    /// agent session has a tile, the cube holds anything or a transmute is
+    /// still playing, under the stash
     /// or the usage window when it first comes. True when it came or went,
     /// so the columns are laid out again.
     pub(in crate::app) fn sync_cube(&mut self) -> bool {
@@ -69,7 +70,8 @@ impl App {
                 recipe: cube::recipe(&ingredients, self.cube_main).map(|r| r.name().to_string()),
                 hint: cube::hint(&ingredients, self.cube_main),
             };
-            (contents, r.all().any(fits) || !held.is_empty())
+            let playing = self.cube_window.as_ref().is_some_and(|w| w.transmuting());
+            (contents, r.all().any(fits) || !held.is_empty() || playing)
         };
         if !wanted {
             self.cube_main = false;
@@ -150,6 +152,9 @@ impl App {
         let Some(recipe) = cube::recipe(&ingredients, self.cube_main) else {
             return;
         };
+        if let Some(w) = &self.cube_window {
+            w.transmute(recipe.outcome());
+        }
         self.cube.clear();
         self.cube_main = false;
         match recipe {

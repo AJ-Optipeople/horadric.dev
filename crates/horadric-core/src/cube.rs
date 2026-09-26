@@ -46,6 +46,15 @@ impl Recipe {
             Recipe::Close => "Close all three",
         }
     }
+
+    /// What comes out of the cube once it has run.
+    pub fn outcome(self) -> &'static str {
+        match self {
+            Recipe::Review => "A reviewer starts",
+            Recipe::Merge => "Merged into main",
+            Recipe::Close => "Closed and journaled",
+        }
+    }
 }
 
 /// The recipe what the cube holds makes, if any.
@@ -131,6 +140,18 @@ pub fn summary(last_line: &str) -> String {
 mod tests {
     use super::*;
     use crate::session::WaitReason;
+
+    #[test]
+    fn each_recipe_says_what_came_of_it() {
+        let all = [Recipe::Review, Recipe::Merge, Recipe::Close];
+        for r in all {
+            assert!(!r.outcome().is_empty());
+        }
+        assert_eq!(Recipe::Merge.outcome(), "Merged into main");
+        let mut seen: Vec<&str> = all.iter().map(|r| r.outcome()).collect();
+        seen.dedup();
+        assert_eq!(seen.len(), all.len());
+    }
 
     fn done(name: &str, changed: bool, branch: Option<&str>) -> Ingredient {
         Ingredient {

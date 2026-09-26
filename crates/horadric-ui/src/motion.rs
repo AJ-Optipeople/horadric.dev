@@ -113,6 +113,73 @@ pub fn beam(elapsed: Duration) -> (f32, f32) {
     (ease_out((t * 3.0).min(1.0)), 1.0 - ease_in_out(t))
 }
 
+/// The cube transmuting: what it held swirls in, then what the recipe
+/// made comes out in a burst of light.
+pub const TRANSMUTE: Duration = Duration::from_millis(1500);
+/// Of [`TRANSMUTE`], how much the swirl takes before the burst.
+pub const SWIRL_SHARE: f32 = 0.55;
+
+/// One frame of a transmute.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Transmuting {
+    /// How far the contents have swirled in, 0 to 1, or None once they are
+    /// all inside.
+    pub swirl: Option<f32>,
+    /// How far the lid stands off, 0 to 1.
+    pub lid: f32,
+    /// The burst: how far it has spread and how bright it still is, both
+    /// 0 to 1. Dark while the swirl runs.
+    pub burst: (f32, f32),
+    /// The whole of it has played.
+    pub done: bool,
+}
+
+/// The transmute `elapsed` after it began. The lid lifts at once, drops as
+/// the last of the contents falls in, and the burst comes off the closed
+/// lid.
+pub fn transmuting(elapsed: Duration) -> Transmuting {
+    let t = progress(elapsed, TRANSMUTE);
+    if t < SWIRL_SHARE {
+        let s = t / SWIRL_SHARE;
+        // Up in the first fifth, held, then down over the last tenth.
+        let lid = ease_out((s * 5.0).min(1.0)) * ((1.0 - s) * 10.0).min(1.0);
+        return Transmuting {
+            swirl: Some(s),
+            lid,
+            burst: (0.0, 0.0),
+            done: false,
+        };
+    }
+    let b = (t - SWIRL_SHARE) / (1.0 - SWIRL_SHARE);
+    Transmuting {
+        swirl: None,
+        lid: 0.0,
+        burst: (ease_out((b * 2.0).min(1.0)), 1.0 - ease_in_out(b)),
+        done: t >= 1.0,
+    }
+}
+
+/// How flat the swirl is: its circle seen from above one corner, as the
+/// cube is drawn, and low enough to stay inside the cube's window.
+const SWIRL_FLAT: f32 = 0.3;
+
+/// Where a thing swirling from `from` into `to` stands `t` of the way in,
+/// and how large it is, 1 where it began. It goes half a turn over the top
+/// of `to` on a flattened circle, slow at first and falling in faster, as
+/// into a whirlpool.
+pub fn swirl(from: (f32, f32), to: (f32, f32), t: f32) -> (f32, f32, f32) {
+    let t = t.clamp(0.0, 1.0);
+    let u = t * t;
+    let (dx, dy) = (from.0 - to.0, (from.1 - to.1) / SWIRL_FLAT);
+    let radius = (dx * dx + dy * dy).sqrt() * (1.0 - u);
+    let angle = dy.atan2(dx) - u * PI;
+    (
+        to.0 + radius * angle.cos(),
+        to.1 + radius * angle.sin() * SWIRL_FLAT,
+        1.0 - 0.85 * u,
+    )
+}
+
 /// A waiting session's breath quickens the longer it waits: from these
 /// times on, one breath every this long. A calm pulse at the end, never a
 /// flash.
@@ -246,6 +313,47 @@ mod tests {
         assert_eq!(progress(ms(50), ms(100)), 0.5);
         assert_eq!(progress(ms(500), ms(100)), 1.0);
         assert_eq!(progress(ms(5), Duration::ZERO), 1.0);
+    }
+
+    #[test]
+    fn a_swirl_starts_where_it_was_and_ends_in_the_middle() {
+        let (from, to) = ((100.0, 20.0), (10.0, 10.0));
+        let (x, y, k) = swirl(from, to, 0.0);
+        assert!((x - 100.0).abs() < 1e-3 && (y - 20.0).abs() < 1e-3);
+        assert_eq!(k, 1.0);
+        let (x, y, k) = swirl(from, to, 1.0);
+        assert!((x - 10.0).abs() < 1e-3 && (y - 10.0).abs() < 1e-3);
+        assert!(k < 0.2);
+        // Closer round the flattened circle the whole way in, and over
+        // the top of the middle rather than under it.
+        let gap = |t: f32| {
+            let (x, y, _) = swirl(from, to, t);
+            ((x - to.0).powi(2) + ((y - to.1) / SWIRL_FLAT).powi(2)).sqrt()
+        };
+        assert!(swirl(from, to, 0.7).1 < to.1);
+        let mut last = gap(0.0);
+        for i in 1..=10 {
+            let now = gap(i as f32 / 10.0);
+            assert!(now < last);
+            last = now;
+        }
+    }
+
+    #[test]
+    fn a_transmute_swirls_then_bursts_then_rests() {
+        let start = transmuting(ms(0));
+        assert_eq!(start.swirl, Some(0.0));
+        assert_eq!(start.burst, (0.0, 0.0));
+        let lifted = transmuting(TRANSMUTE.mul_f32(SWIRL_SHARE * 0.5));
+        assert!((lifted.lid - 1.0).abs() < 1e-3);
+        let burst = transmuting(TRANSMUTE.mul_f32(SWIRL_SHARE + 0.1));
+        assert_eq!(burst.swirl, None);
+        assert_eq!(burst.lid, 0.0);
+        assert!(burst.burst.0 > 0.0 && burst.burst.1 > 0.5);
+        assert!(!burst.done);
+        let end = transmuting(TRANSMUTE);
+        assert!(end.done);
+        assert!(end.burst.1.abs() < 1e-6);
     }
 
     #[test]

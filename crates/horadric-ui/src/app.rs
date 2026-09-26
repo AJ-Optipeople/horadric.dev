@@ -300,6 +300,9 @@ pub(crate) enum Input {
     CubeMain,
     /// The cube's button: run the recipe.
     Transmute,
+    /// The cube's transmute has played, so it may go if nothing is left
+    /// for it to hold.
+    CubeSettled,
 }
 
 thread_local! {
@@ -4469,6 +4472,7 @@ impl App {
                     relayout |= self.sync_cube();
                 }
                 Input::Transmute => self.transmute(),
+                Input::CubeSettled => relayout |= self.sync_cube(),
                 Input::StashMenu(id) => {
                     self.stash_menu_for = Some(id);
                     post(self.notify.0 as isize, WM_HORADRIC_STASH_MENU, 0);

@@ -8,6 +8,7 @@
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::rc::Rc;
+use std::time::Instant;
 
 use windows::core::{w, Result, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
@@ -23,17 +24,19 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetCursorPos, GetWindowLongPtrW, GetWindowRect,
-    IsWindow, LoadCursorW, PostMessageW, RegisterClassW, SetWindowLongPtrW, SetWindowPos,
-    ShowWindow, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, HWND_NOTOPMOST, HWND_TOPMOST,
-    IDC_ARROW, MA_NOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+    IsWindow, KillTimer, LoadCursorW, PostMessageW, RegisterClassW, SetTimer, SetWindowLongPtrW,
+    SetWindowPos, ShowWindow, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, HWND_NOTOPMOST,
+    HWND_TOPMOST, IDC_ARROW, MA_NOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
     SW_SHOWNOACTIVATE, WM_APP, WM_CAPTURECHANGED, WM_DPICHANGED, WM_ERASEBKGND, WM_LBUTTONDOWN,
     WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY,
-    WM_PAINT, WM_SIZE, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
+    WM_PAINT, WM_SIZE, WM_TIMER, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
 };
 
 use crate::app::{self, Input};
 use crate::layout::{self, CubeHit, CubeLayout};
-use crate::render::{CubeScene, StashLook, Target};
+use crate::motion::{self, FRAME_FAST};
+use crate::render::{CubeScene, Flying, StashLook, Target, TransmuteLook};
+use crate::theme;
 use crate::window::Shared;
 use crate::{backdrop, columns};
 
@@ -43,6 +46,9 @@ const DRAG_THRESHOLD: i32 = 4;
 const WM_MOUSELEAVE: u32 = 0x02A3;
 /// A tile is carried over the cube (wparam 1) or no longer is (0).
 const WM_CUBE_OVER: u32 = WM_APP + 22;
+/// The frames of a transmute. Only while one plays: at rest the cube
+/// paints when what it shows changes and not otherwise.
+const TRANSMUTE_TIMER: usize = 1;
 
 /// What the cube shows, set by the app.
 #[derive(Default)]
@@ -65,6 +71,14 @@ pub struct CubeWindow {
     hot: Cell<CubeHit>,
     pressed: Cell<Option<CubeHit>>,
     tracking: Cell<bool>,
+    transmute: RefCell<Option<Transmute>>,
+}
+
+/// A transmute playing: what went in, and what came of it.
+struct Transmute {
+    began: Instant,
+    flying: Vec<Flying>,
+    outcome: String,
 }
 
 struct Drag {
@@ -134,6 +148,7 @@ impl CubeWindow {
             hot: Cell::new(CubeHit::Nothing),
             pressed: Cell::new(None),
             tracking: Cell::new(false),
+            transmute: RefCell::new(None),
         });
         unsafe {
             let hwnd = CreateWindowExW(
@@ -238,6 +253,71 @@ impl CubeWindow {
         self.invalidate();
     }
 
+    /// Plays what the cube holds swirling into it and `outcome` coming
+    /// out. Called before the app empties it, so the slots still say what
+    /// went in. With Windows' animations off nothing plays.
+    pub fn transmute(&self, outcome: &str) {
+        if !backdrop::animations_on() {
+            return;
+        }
+        let c = self.contents.borrow();
+        let gold = theme::rarity_color(horadric_core::rarity::Rarity::Unique);
+        let mut flying: Vec<Flying> = c
+            .items
+            .iter()
+            .zip(&self.layout.slots)
+            .map(|((_, look), r)| Flying {
+                from: *r,
+                ink: look.ink,
+                accent: look.accent,
+            })
+            .collect();
+        if c.main {
+            flying.push(Flying {
+                from: self.layout.main,
+                ink: theme::TEXT,
+                accent: gold,
+            });
+        }
+        *self.transmute.borrow_mut() = Some(Transmute {
+            began: Instant::now(),
+            flying,
+            outcome: outcome.to_string(),
+        });
+        unsafe {
+            SetTimer(
+                Some(self.hwnd),
+                TRANSMUTE_TIMER,
+                FRAME_FAST.as_millis() as u32,
+                None,
+            );
+        }
+        self.invalidate();
+    }
+
+    /// A transmute is playing, so the cube stays though nothing is left
+    /// for it to hold.
+    pub fn transmuting(&self) -> bool {
+        self.transmute.borrow().is_some()
+    }
+
+    fn tick(&self) {
+        let done = self
+            .transmute
+            .borrow()
+            .as_ref()
+            .is_none_or(|t| motion::transmuting(t.began.elapsed()).done);
+        if done {
+            unsafe {
+                let _ = KillTimer(Some(self.hwnd), TRANSMUTE_TIMER);
+            }
+            if self.transmute.borrow_mut().take().is_some() {
+                app::push(Input::CubeSettled);
+            }
+        }
+        self.invalidate();
+    }
+
     fn fit(&self) {
         let (w, h) = self.size_px();
         unsafe {
@@ -269,6 +349,12 @@ impl CubeWindow {
         }
         let c = self.contents.borrow();
         let looks: Vec<&StashLook> = c.items.iter().map(|(_, l)| l).collect();
+        let playing = self.transmute.borrow();
+        let transmute = playing.as_ref().map(|t| TransmuteLook {
+            frame: motion::transmuting(t.began.elapsed()),
+            flying: &t.flying,
+            outcome: &t.outcome,
+        });
         let scene = CubeScene {
             layout: &self.layout,
             items: &looks,
@@ -276,6 +362,7 @@ impl CubeWindow {
             recipe: c.recipe.as_deref(),
             hint: &c.hint,
             open: self.open.get(),
+            transmute,
             hot: self.hot.get(),
             pressed: self.pressed.get(),
         };
@@ -351,6 +438,10 @@ impl CubeWindow {
                 Some(LRESULT(0))
             }
             WM_ERASEBKGND => Some(LRESULT(1)),
+            WM_TIMER if wparam.0 == TRANSMUTE_TIMER => {
+                self.tick();
+                Some(LRESULT(0))
+            }
             WM_MOUSEACTIVATE => Some(LRESULT(MA_NOACTIVATE as isize)),
             WM_CUBE_OVER => {
                 let open = wparam.0 != 0;
