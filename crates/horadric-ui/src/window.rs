@@ -53,7 +53,7 @@ use crate::glyphs::Font;
 use crate::layout::{self, ClusterLayout, Hit, Metrics};
 use crate::motion;
 pub use crate::project::{folder_key, project_key, project_name};
-use crate::render::{FilesScene, Gpu, Scene, Target, TaskRow, TasksScene};
+use crate::render::{FilesScene, Flight, Gpu, Scene, Target, TaskRow, TasksScene};
 use crate::theme;
 use crate::watch::{self, Slot, Watcher};
 
@@ -778,7 +778,7 @@ impl Cluster {
             _ => Vec::new(),
         };
         let ids: Vec<&str> = refs.iter().map(|s| s.id.as_str()).collect();
-        let flights: Vec<((f32, f32), (f32, f32), f32)> = self
+        let flights: Vec<Flight> = self
             .handoffs
             .borrow_mut()
             .step(now, &ids, &holders)
@@ -788,7 +788,11 @@ impl Cluster {
                 let i = ids.iter().position(|t| *t == id)?;
                 let r = layout.tiles.get(i)?;
                 let y = looks.get(i).map_or(r.y, |l| l.y);
-                Some((from, (r.x + 14.0, y + r.h / 2.0), p))
+                Some(Flight {
+                    from,
+                    to: (r.x + 14.0, y + r.h / 2.0),
+                    done: p,
+                })
             })
             .collect();
         let finishing = finishing || !flights.is_empty();

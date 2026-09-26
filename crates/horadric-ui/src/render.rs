@@ -241,7 +241,7 @@ pub struct Scene<'a> {
     pub ghosts: &'a [(Rect, Session, f32)],
     /// Lights flying from a task's row to the new tile that took it: from,
     /// to, and how far along.
-    pub flights: &'a [((f32, f32), (f32, f32), f32)],
+    pub flights: &'a [Flight],
     /// The tile being carried to a new place, drawn over the others.
     pub held: Option<usize>,
     /// This project is the one the stage shows.
@@ -268,6 +268,14 @@ impl Scene<'_> {
     fn button(&self, which: Hit) -> Button {
         layout::button(which, self.hot, self.pressed)
     }
+}
+
+/// A light on its way from a task's row to a tile's lamp.
+pub struct Flight {
+    pub from: (f32, f32),
+    pub to: (f32, f32),
+    /// How far along, 0 to 1.
+    pub done: f32,
 }
 
 /// What the files tile shows.
@@ -1360,7 +1368,8 @@ impl Painter<'_> {
     unsafe fn flights(&self, scene: &Scene) {
         let c = theme::WORKING;
         let white = Color::rgb(0xFFFFFF);
-        for &((fx, fy), (tx, ty), p) in scene.flights {
+        for f in scene.flights {
+            let ((fx, fy), (tx, ty), p) = (f.from, f.to, f.done);
             let at = |p: f32| {
                 let k = motion::ease_in_out(p.clamp(0.0, 1.0));
                 // A little arc out to the right, so it reads as thrown.
