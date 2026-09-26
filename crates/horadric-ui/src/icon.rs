@@ -1,11 +1,12 @@
-//! The Horadric icon, drawn in code: a blue square holding two dark tiles,
-//! one amber (waiting) and one green (done). No icon file to ship, and it is
+//! The Horadric icon, drawn in code: the Horadric cube, seen corner on,
+//! its three faces lit in the phase colours (working on top, waiting and
+//! done below) and set in a dark frame. No icon file to ship, and it is
 //! drawn at exactly the size the tray asks for.
 //!
 //! Self contained on purpose: the `horadric` build script includes this file
 //! to bake the same icon into the executables, so it can not reach the rest
-//! of the crate. The colours are the theme's. A dev instance frames it in
-//! the error red instead, so the two tray icons can not be mistaken.
+//! of the crate. The colours are the theme's. A dev instance lights the top
+//! face in the error red instead, so the two tray icons can not be mistaken.
 
 #[derive(Clone, Copy)]
 struct Color {
@@ -25,7 +26,7 @@ const fn rgb(hex: u32) -> Color {
 const WORKING: Color = rgb(0x3DB4FF);
 const WAITING: Color = rgb(0xFFB224);
 const DONE: Color = rgb(0x3DD68C);
-const WINDOW_BG: Color = rgb(0x0A0A0D);
+const WINDOW_BG: Color = rgb(0x141518);
 const ERROR: Color = rgb(0xFF5D66);
 
 /// Pixels, row by row from the top, as `0xAARRGGBB` with straight alpha,
@@ -39,55 +40,46 @@ pub fn dev_pixels(size: u32) -> Vec<u32> {
     draw(size, ERROR)
 }
 
-fn draw(size: u32, frame: Color) -> Vec<u32> {
+type Point = (f32, f32);
+
+fn draw(size: u32, top_color: Color) -> Vec<u32> {
     let u = size as f32 / 16.0;
-    let shapes: [(Shape, Color); 5] = [
-        (
-            Shape::Rounded {
-                x0: 0.5 * u,
-                y0: 0.5 * u,
-                x1: 15.5 * u,
-                y1: 15.5 * u,
-                r: 3.5 * u,
-            },
-            frame,
-        ),
-        (
-            Shape::Rounded {
-                x0: 2.5 * u,
-                y0: 3.0 * u,
-                x1: 13.5 * u,
-                y1: 7.5 * u,
-                r: 1.25 * u,
-            },
-            WINDOW_BG,
-        ),
-        (
-            Shape::Rounded {
-                x0: 2.5 * u,
-                y0: 8.5 * u,
-                x1: 13.5 * u,
-                y1: 13.0 * u,
-                r: 1.25 * u,
-            },
-            WINDOW_BG,
-        ),
-        (
-            Shape::Circle {
-                cx: 5.0 * u,
-                cy: 5.25 * u,
-                r: 1.4 * u,
-            },
-            WAITING,
-        ),
-        (
-            Shape::Circle {
-                cx: 5.0 * u,
-                cy: 10.75 * u,
-                r: 1.4 * u,
-            },
-            DONE,
-        ),
+    // An isometric cube on a 16 unit grid: edge `h`, centre `(cx, cy)`.
+    let (cx, cy, h) = (8.0 * u, 8.3 * u, 7.2 * u);
+    let s = h * 3f32.sqrt() / 2.0;
+    let top = [
+        (cx, cy - h),
+        (cx + s, cy - h / 2.0),
+        (cx, cy),
+        (cx - s, cy - h / 2.0),
+    ];
+    let left = [
+        (cx - s, cy - h / 2.0),
+        (cx, cy),
+        (cx, cy + h),
+        (cx - s, cy + h / 2.0),
+    ];
+    let right = [
+        (cx, cy),
+        (cx + s, cy - h / 2.0),
+        (cx + s, cy + h / 2.0),
+        (cx, cy + h),
+    ];
+    let outline = [
+        (cx, cy - h),
+        (cx + s, cy - h / 2.0),
+        (cx + s, cy + h / 2.0),
+        (cx, cy + h),
+        (cx - s, cy + h / 2.0),
+        (cx - s, cy - h / 2.0),
+    ];
+    // Each face shrunk towards its own centre leaves the dark frame showing
+    // between them, which is what keeps the cube a cube on a dark taskbar.
+    let shapes: [(Vec<Point>, Color); 4] = [
+        (outline.to_vec(), WINDOW_BG),
+        (shrink(&top, 0.78), top_color),
+        (shrink(&left, 0.74), WAITING),
+        (shrink(&right, 0.74), DONE),
     ];
 
     const SAMPLES: u32 = 4;
@@ -103,7 +95,7 @@ fn draw(size: u32, frame: Color) -> Vec<u32> {
                     let y = py as f32 + (sy as f32 + 0.5) / SAMPLES as f32;
                     let mut c = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
                     for (shape, color) in &shapes {
-                        if shape.contains(x, y) {
+                        if contains(shape, x, y) {
                             c = (color.r, color.g, color.b, 1.0);
                         }
                     }
@@ -127,65 +119,61 @@ fn draw(size: u32, frame: Color) -> Vec<u32> {
     out
 }
 
-enum Shape {
-    Rounded {
-        x0: f32,
-        y0: f32,
-        x1: f32,
-        y1: f32,
-        r: f32,
-    },
-    Circle {
-        cx: f32,
-        cy: f32,
-        r: f32,
-    },
+fn shrink(points: &[Point], k: f32) -> Vec<Point> {
+    let n = points.len() as f32;
+    let cx = points.iter().map(|p| p.0).sum::<f32>() / n;
+    let cy = points.iter().map(|p| p.1).sum::<f32>() / n;
+    points
+        .iter()
+        .map(|&(x, y)| (cx + (x - cx) * k, cy + (y - cy) * k))
+        .collect()
 }
 
-impl Shape {
-    fn contains(&self, x: f32, y: f32) -> bool {
-        match *self {
-            Shape::Rounded { x0, y0, x1, y1, r } => {
-                if x < x0 || x > x1 || y < y0 || y > y1 {
-                    return false;
-                }
-                // Only the corners are round: measure from the nearest
-                // corner circle's centre when inside its square.
-                let dx = (x0 + r - x).max(x - (x1 - r)).max(0.0);
-                let dy = (y0 + r - y).max(y - (y1 - r)).max(0.0);
-                dx * dx + dy * dy <= r * r
-            }
-            Shape::Circle { cx, cy, r } => (x - cx).powi(2) + (y - cy).powi(2) <= r * r,
+/// Even odd crossing test, enough for the convex faces drawn here.
+fn contains(polygon: &[Point], x: f32, y: f32) -> bool {
+    let mut inside = false;
+    for (i, &(x1, y1)) in polygon.iter().enumerate() {
+        let (x2, y2) = polygon[(i + 1) % polygon.len()];
+        if (y1 > y) != (y2 > y) && x < (x2 - x1) * (y - y1) / (y2 - y1) + x1 {
+            inside = !inside;
         }
     }
+    inside
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn corners_are_clear_and_the_middle_is_solid() {
-        let p = pixels(16);
-        assert_eq!(p.len(), 256);
-        assert_eq!(p[0] >> 24, 0, "rounded corner is transparent");
-        assert_eq!(p[8 * 16 + 1] >> 24, 255, "edge of the square is opaque");
-        // The top tile's dot is amber.
-        let dot = p[5 * 16 + 5];
-        assert_eq!(dot & 0xFFFFFF, 0xFFB224);
+    fn at(p: &[u32], size: u32, x: u32, y: u32) -> u32 {
+        p[(y * size + x) as usize]
     }
 
     #[test]
-    fn dev_icon_differs_only_in_the_frame() {
-        let (p, d) = (pixels(16), dev_pixels(16));
-        assert_eq!(p[8 * 16 + 1] & 0xFFFFFF, 0x3DB4FF);
-        assert_eq!(d[8 * 16 + 1] & 0xFFFFFF, 0xFF5D66);
-        assert_eq!(p[5 * 16 + 5], d[5 * 16 + 5], "the dots are the same");
+    fn faces_carry_the_phase_colours_and_corners_are_clear() {
+        let p = pixels(32);
+        assert_eq!(p.len(), 32 * 32);
+        assert_eq!(at(&p, 32, 0, 0) >> 24, 0, "corner is transparent");
+        assert_eq!(at(&p, 32, 16, 9) & 0xFFFFFF, 0x3DB4FF, "top is working");
+        assert_eq!(at(&p, 32, 10, 20) & 0xFFFFFF, 0xFFB224, "left is waiting");
+        assert_eq!(at(&p, 32, 22, 20) & 0xFFFFFF, 0x3DD68C, "right is done");
+        assert_eq!(
+            at(&p, 32, 16, 17) & 0xFFFFFF,
+            0x141518,
+            "frame between faces"
+        );
+    }
+
+    #[test]
+    fn dev_icon_differs_only_on_top() {
+        let (p, d) = (pixels(32), dev_pixels(32));
+        assert_eq!(at(&d, 32, 16, 9) & 0xFFFFFF, 0xFF5D66);
+        assert_eq!(at(&p, 32, 10, 20), at(&d, 32, 10, 20), "the sides match");
     }
 
     #[test]
     fn scales_to_any_size() {
-        assert_eq!(pixels(32).len(), 32 * 32);
+        assert_eq!(pixels(16).len(), 256);
         assert_eq!(pixels(20).len(), 400);
     }
 }
