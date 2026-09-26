@@ -93,6 +93,8 @@ const LAND_RISE: f32 = 3.0;
 const BEAM_H: f32 = 120.0;
 /// How far a tile whose session has gone sinks as it fades, in DIPs.
 const LEAVE_SINK: f32 = 8.0;
+/// One slow breath of a busy project's wash.
+const BUSY_BREATH: Duration = Duration::from_millis(4000);
 /// A glint's run along a nearly full context meter.
 const SHIMMER: Duration = Duration::from_millis(2600);
 /// More subagents than this still draw this many sparks.
@@ -1306,6 +1308,7 @@ impl Painter<'_> {
     /// fresh over the kept layer every frame.
     unsafe fn light(&self, m: &Metrics, scene: &Scene) {
         let radius = m.tile_radius;
+        self.busy_wash(scene);
         for (r, s, look) in tiles(scene) {
             let phase = &s.phase;
             let c = theme::phase_color(phase);
@@ -1389,6 +1392,25 @@ impl Painter<'_> {
                 self.glow_dot(tx, ty, 22.0, c, 0.6 * flare);
             }
         }
+    }
+
+    /// While any of its sessions works, the project's colour glows a little
+    /// deeper down from the top and breathes slowly, so a busy project
+    /// reads as busy from across the screen.
+    unsafe fn busy_wash(&self, scene: &Scene) {
+        if !scene.sessions.iter().any(|s| s.phase == Phase::Working) {
+            return;
+        }
+        let clock = scene
+            .now
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default();
+        let glow = 0.5 + 0.5 * motion::breathe(clock, BUSY_BREATH);
+        let (w, h) = scene.layout.size;
+        let depth = 110.0f32.min(h);
+        let a = scene.accent;
+        let stops = [(0.0, a.with_alpha(0.1)), (1.0, a.with_alpha(0.0))];
+        self.fill_rounded_gradient(&Rect::new(0.0, 0.0, w, depth), 0.0, &stops, glow);
     }
 
     /// The project's colour, washed faintly down from the top edge, so each
