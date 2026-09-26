@@ -506,6 +506,23 @@ pub struct StashLook {
     pub ink: Color,
 }
 
+/// Something the cube held, swirling into it as a recipe runs: where its
+/// slot was and the colours it wore there.
+#[derive(Clone)]
+pub struct Flying {
+    pub from: Rect,
+    pub ink: Color,
+    pub accent: Color,
+}
+
+/// A transmute under way, as one frame of the cube draws it.
+pub struct TransmuteLook<'a> {
+    pub frame: motion::Transmuting,
+    pub flying: &'a [Flying],
+    /// What came of it, written on the key once the burst comes.
+    pub outcome: &'a str,
+}
+
 /// Everything one frame of the cube needs.
 pub struct CubeScene<'a> {
     pub layout: &'a CubeLayout,
@@ -520,6 +537,7 @@ pub struct CubeScene<'a> {
     pub hint: &'a str,
     /// A tile is carried over it, so its lid lifts.
     pub open: bool,
+    pub transmute: Option<TransmuteLook<'a>>,
     pub hot: CubeHit,
     pub pressed: Option<CubeHit>,
 }
@@ -955,7 +973,13 @@ impl Painter<'_> {
         let l = scene.layout;
         self.plate(m, l.size);
         let gold = theme::rarity_color(Rarity::Unique);
-        self.cube_art(gpu, &l.cube, scene.open, scene.recipe.is_some(), gold);
+        let lift = match &scene.transmute {
+            Some(t) => t.frame.lid,
+            None if scene.open => 1.0,
+            None => 0.0,
+        };
+        let ready = scene.recipe.is_some() || scene.transmute.is_some();
+        self.cube_art(gpu, &l.cube, lift, ready, gold);
         let radius = m.tile_radius - 4.0;
         let depth = |b: Button| match b {
             Button::Hover => 0.9,
@@ -964,8 +988,16 @@ impl Painter<'_> {
         };
         let t = &l.transmute;
         let inner = Rect::new(t.x + 8.0, t.y, t.w - 16.0, t.h);
-        match scene.recipe {
-            Some(name) => {
+        match (&scene.transmute, scene.recipe) {
+            (Some(tr), _) => {
+                self.latched(gpu, t, radius, 0.5);
+                if tr.frame.swirl.is_none() {
+                    let lit = tr.frame.burst.1.max(0.35);
+                    let line = Rect::new(inner.x, inner.y, inner.w, inner.h);
+                    self.text(&gpu.small, gold.fade(lit), tr.outcome, line);
+                }
+            }
+            (None, Some(name)) => {
                 let b = layout::button(CubeHit::Transmute, scene.hot, scene.pressed);
                 self.key(gpu, t, radius, theme::SURFACE, depth(b), 1.0);
                 let half = inner.h / 2.0;
@@ -974,7 +1006,7 @@ impl Painter<'_> {
                 let below = Rect::new(inner.x, inner.y + half, inner.w, half - 4.0);
                 self.text(&gpu.small, gold, name, below);
             }
-            None => {
+            (None, None) => {
                 self.latched(gpu, t, radius, 0.5);
                 if let Some(lay) = self.layout(gpu, &gpu.small, scene.hint, inner) {
                     let _ = lay.SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
@@ -1015,12 +1047,57 @@ impl Painter<'_> {
             self.led(led_x, project.y + project.h / 2.0, item.accent);
             self.text(&gpu.small, theme::TEXT_DIM, &item.project, project);
         }
+        if let Some(tr) = &scene.transmute {
+            self.transmuting(&l.cube, tr, gold);
+        }
+    }
+
+    /// Over everything else: what the cube held swirling into its mouth,
+    /// each a small key trailing light, then the burst off its lid as the
+    /// recipe's work comes out.
+    unsafe fn transmuting(&self, cube: &Rect, tr: &TransmuteLook, gold: Color) {
+        let s = cube.w * 0.36;
+        let mouth = (cube.x + cube.w / 2.0, cube.y + cube.h / 2.0 + 3.0 - s * 0.5);
+        if let Some(t) = tr.frame.swirl {
+            for (i, f) in tr.flying.iter().enumerate() {
+                // Each a little behind the one before, so they fall in one
+                // after another rather than as a block.
+                let lag = i as f32 * 0.12;
+                let own = ((t - lag) / (1.0 - lag).max(0.01)).clamp(0.0, 1.0);
+                let from = (f.from.x + f.from.w / 2.0, f.from.y + f.from.h / 2.0);
+                let (x, y, k) = motion::swirl(from, mouth, own);
+                let fade = 1.0 - own.powi(3);
+                self.glow_dot(x, y, 10.0 + 14.0 * own, gold, 0.5 * own * fade);
+                let (w, h) = (f.from.w * k, f.from.h * k);
+                let r = Rect::new(x - w / 2.0, y - h / 2.0, w, h);
+                let radius = (6.0 * k).max(1.5);
+                self.fill_rounded(&r, radius, theme::SURFACE.mix(gold, 0.2 * own).fade(fade));
+                let bar = Rect::new(r.x + 3.0 * k, r.y + h * 0.3, (w - 6.0 * k) * 0.7, h * 0.14);
+                self.fill_rounded(&bar, bar.h / 2.0, f.ink.fade(fade));
+                self.led(r.x + 6.0 * k, r.y + h * 0.72, f.accent.fade(fade));
+            }
+            return;
+        }
+        let (spread, bright) = tr.frame.burst;
+        if bright <= 0.0 {
+            return;
+        }
+        self.glow_dot(mouth.0, mouth.1, s * (1.2 + 2.2 * spread), gold, bright);
+        // Sparks thrown off the lid, the gold of a unique drop.
+        for i in 0..8 {
+            let a = i as f32 * std::f32::consts::TAU / 8.0 + 0.3;
+            let d = s * (0.6 + 2.4 * spread);
+            let (x, y) = (mouth.0 + d * a.cos(), mouth.1 + d * a.sin() * 0.7);
+            self.glow_dot(x, y, 3.0 + 3.0 * (1.0 - spread), gold, bright);
+        }
     }
 
     /// The cube itself, seen from above one corner: a lid and two sides,
-    /// lit from above. Its lid lifts off with the light inside showing
-    /// while a tile is carried over it, and a recipe ready glows in it.
-    unsafe fn cube_art(&self, gpu: &Gpu, r: &Rect, open: bool, ready: bool, gold: Color) {
+    /// lit from above. Its lid stands `lift` off, 1 while a tile is carried
+    /// over it, with the light inside showing, and a recipe ready glows in
+    /// it.
+    unsafe fn cube_art(&self, gpu: &Gpu, r: &Rect, lift: f32, ready: bool, gold: Color) {
+        let open = lift > 0.0;
         let cx = r.x + r.w / 2.0;
         let s = r.w * 0.36;
         let (dx, dy) = (s * 0.866, s * 0.5);
@@ -1030,7 +1107,7 @@ impl Painter<'_> {
         let black = Color::rgb(0);
         let face = theme::SURFACE.mix(gold, 0.18);
         let pt = |x: f32, y: f32| Vector2 { X: x, Y: y };
-        let lift = if open { s * 0.45 } else { 0.0 };
+        let lift = s * 0.45 * lift.clamp(0.0, 1.0);
         let diamond = |up: f32| {
             [
                 pt(cx, top - dy - up),

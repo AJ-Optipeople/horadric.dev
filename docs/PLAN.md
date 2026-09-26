@@ -1822,6 +1822,20 @@ it, and a recipe that runs on what it holds. Dragging tiles together says
   as the stash does. The cube's runes light gold once a recipe is ready.
 - **Not saved.** What the cube holds is a hand of tiles on the way to a
   recipe; after a restart they stand in their clusters as before.
+- **The transmute animation.** Running a recipe plays it in the cube's
+  window (`CubeWindow::transmute`, called before the app empties the
+  cube): the lid lifts, each slot's key shrinks and swirls half a turn
+  over the top into the cube's mouth, one after another, trailing gold
+  light, and the lid drops. Then a burst of gold comes off it with sparks
+  thrown out, and the key says what came of it (`Recipe::outcome`: "A
+  reviewer starts", "Merged into main", "Closed and journaled"). The
+  curves are `motion::transmuting` and `motion::swirl` (tested), the
+  swirl flattened as the cube is seen from above one corner, which also
+  keeps it inside the window. 1.5 seconds on a timer of its own that runs
+  only while it plays, so the cube costs nothing at rest. The window
+  stays while it plays even when the recipe leaves nothing for it to
+  hold, and `Input::CubeSettled` lets it go after. With Windows'
+  animations off nothing plays.
 
 Tested on screen with a dev instance on its own port, `APPDATA` and
 `LOCALAPPDATA`, three sessions in worktrees of a scratch repository, and
@@ -1839,6 +1853,12 @@ journaled with no `ended` beside them. A lift let go while the cursor had
 moved off the cube reordered the tiles instead, as it should. Not tested:
 dropping a pane from the stage, dropping a lone tile's cluster, a full
 cube, and a real `claude` reviewing.
+
+The animation was checked the same way: three fake finished sessions
+dropped in, Close all three posted, and a `PrintWindow` of the cube every
+110 ms. The keys swirled in inside the window, the burst and "Closed and
+journaled" followed, and the cube went once it had played. Not checked:
+Review and Merge, whose `main` rune swirls in too.
 
 ## Next
 
