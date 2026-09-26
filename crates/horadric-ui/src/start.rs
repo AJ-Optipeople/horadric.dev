@@ -144,14 +144,6 @@ impl StartWindow {
         ((l.size.0 * s).round() as i32, (l.size.1 * s).round() as i32)
     }
 
-    pub fn position(&self) -> (i32, i32) {
-        let mut r = RECT::default();
-        unsafe {
-            let _ = GetWindowRect(self.hwnd, &mut r);
-        }
-        (r.left, r.top)
-    }
-
     pub fn move_to(&self, x: i32, y: i32) {
         unsafe {
             let _ = SetWindowPos(

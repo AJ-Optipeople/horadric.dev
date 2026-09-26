@@ -43,6 +43,7 @@ pub mod field;
 pub mod files;
 pub mod find;
 pub mod frame;
+pub mod glide;
 pub mod highlight;
 pub mod history;
 pub mod icon;
@@ -62,6 +63,8 @@ pub mod viewer;
 mod agents;
 #[cfg(windows)]
 pub mod app;
+#[cfg(windows)]
+mod appear;
 #[cfg(windows)]
 mod ask;
 #[cfg(windows)]

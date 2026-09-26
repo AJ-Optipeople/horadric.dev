@@ -35,10 +35,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
     RegisterClassW, SetForegroundWindow, SetWindowLongPtrW, ShowWindow, TranslateMessage,
     CREATESTRUCTW, GWLP_USERDATA, IDC_ARROW, MSG, SW_HIDE, SW_SHOW, WA_INACTIVE, WM_ACTIVATE,
     WM_CAPTURECHANGED, WM_CLOSE, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_RBUTTONDOWN, WNDCLASSW,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_RBUTTONDOWN, WM_TIMER,
+    WNDCLASSW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
+use crate::appear;
 use crate::backdrop;
 use crate::layout::{self, DialogLayout, Metrics};
 use crate::render::{self, DialogScene, Gpu, Target};
@@ -234,6 +235,7 @@ impl<'a> Popup<'a> {
                 std::mem::size_of::<DWM_WINDOW_CORNER_PREFERENCE>() as u32,
             );
             backdrop::border(hwnd, None);
+            appear::begin(hwnd, appear::DIALOG, (appear::RISE * s).round() as i32);
             let _ = ShowWindow(hwnd, SW_SHOW);
             let _ = SetForegroundWindow(hwnd);
             SetCapture(hwnd);
@@ -435,6 +437,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         let cs = &*(lparam.0 as *const CREATESTRUCTW);
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, cs.lpCreateParams as isize);
         return DefWindowProcW(hwnd, msg, wparam, lparam);
+    }
+    if msg == WM_TIMER && wparam.0 == appear::TIMER {
+        appear::tick(hwnd);
+        return LRESULT(0);
     }
     let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const Popup;
     if ptr.is_null() {

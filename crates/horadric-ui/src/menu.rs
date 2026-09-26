@@ -40,6 +40,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
+use crate::appear;
 use crate::backdrop;
 use crate::field;
 use crate::layout::{self, MenuLayout, MenuLine};
@@ -246,6 +247,7 @@ impl Menu {
         let hwnd = self.create(WS_EX_TOOLWINDOW | WS_EX_TOPMOST, (x, y), size)?;
         self.push(hwnd, items, text, layout, (x, y), size, s);
         unsafe {
+            appear::begin(hwnd, appear::MENU, 0);
             let _ = ShowWindow(hwnd, SW_SHOW);
             let _ = SetForegroundWindow(hwnd);
             SetCapture(hwnd);
@@ -287,6 +289,7 @@ impl Menu {
         let hwnd = self.create(ex, (x, y), size)?;
         self.push(hwnd, items, text, layout, (x, y), size, s);
         unsafe {
+            appear::begin(hwnd, appear::MENU, 0);
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         }
         self.invalidate(at);
@@ -804,6 +807,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         let cs = &*(lparam.0 as *const CREATESTRUCTW);
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, cs.lpCreateParams as isize);
         return DefWindowProcW(hwnd, msg, wparam, lparam);
+    }
+    if msg == WM_TIMER && wparam.0 == appear::TIMER {
+        appear::tick(hwnd);
+        return LRESULT(0);
     }
     let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const Menu;
     if ptr.is_null() {
