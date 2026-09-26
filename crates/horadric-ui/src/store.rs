@@ -29,8 +29,15 @@ pub fn load() -> SavedState {
     let Some(dir) = dir() else {
         return SavedState::default();
     };
-    match fs::read(dir.join("state.json")) {
-        Ok(bytes) => SavedState::from_json(&bytes),
+    let path = dir.join("state.json");
+    match fs::read(&path) {
+        Ok(bytes) => {
+            let (state, damaged) = SavedState::read(&bytes);
+            if damaged {
+                set_aside(&path);
+            }
+            state
+        }
         // Before the state file, recent projects had a file of their own.
         Err(_) => SavedState {
             recent: fs::read(dir.join("recent.json"))
@@ -40,6 +47,15 @@ pub fn load() -> SavedState {
             ..Default::default()
         },
     }
+}
+
+/// Keeps a state file that did not read whole as `state.json.bad-<secs>`,
+/// so the next save leaves what was lost where a human can get it back.
+fn set_aside(path: &Path) {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let _ = fs::copy(path, path.with_extension(format!("json.bad-{secs}")));
 }
 
 /// Writes the settings Horadric hands each `claude` it starts with

@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 
 use crate::rarity::Loot;
 use crate::runeword::Runeword;
@@ -141,14 +142,68 @@ impl SavedState {
         serde_json::to_string_pretty(&s).unwrap_or_default()
     }
 
-    /// A file from a newer Horadric, or a damaged one, reads as empty rather
-    /// than half understood.
+    /// [`SavedState::read`] without saying whether anything was lost.
     pub fn from_json(bytes: &[u8]) -> SavedState {
-        match serde_json::from_slice::<SavedState>(bytes) {
-            Ok(s) if s.version <= VERSION => s,
-            _ => SavedState::default(),
+        Self::read(bytes).0
+    }
+
+    /// The state, and whether the file was not read whole and should be
+    /// set aside before the next save overwrites it. One bad value drops
+    /// that value alone: a session written by hand with a typo must not
+    /// take every other session with it. A file that is not JSON at all,
+    /// or from a newer Horadric, reads as empty rather than half
+    /// understood.
+    pub fn read(bytes: &[u8]) -> (SavedState, bool) {
+        if let Ok(s) = serde_json::from_slice::<SavedState>(bytes) {
+            return if s.version <= VERSION {
+                (s, false)
+            } else {
+                (SavedState::default(), true)
+            };
+        }
+        let Ok(Value::Object(fields)) = serde_json::from_slice::<Value>(bytes) else {
+            return (SavedState::default(), true);
+        };
+        let kept: Map<String, Value> = fields
+            .into_iter()
+            .filter_map(|(key, value)| salvage(&key, value).map(|v| (key, v)))
+            .collect();
+        match serde_json::from_value::<SavedState>(Value::Object(kept)) {
+            Ok(s) if s.version <= VERSION => (s, true),
+            _ => (SavedState::default(), true),
         }
     }
+}
+
+/// The part of one field of the state that reads: all of it, or the items
+/// of a list or the entries of a map that read on their own.
+fn salvage(key: &str, value: Value) -> Option<Value> {
+    let reads = |v: &Value| {
+        serde_json::from_value::<SavedState>(Value::Object(Map::from_iter([(
+            key.to_string(),
+            v.clone(),
+        )])))
+        .is_ok()
+    };
+    if reads(&value) {
+        return Some(value);
+    }
+    let value = match value {
+        Value::Array(items) => Value::Array(
+            items
+                .into_iter()
+                .filter(|i| reads(&Value::Array(vec![i.clone()])))
+                .collect(),
+        ),
+        Value::Object(entries) => Value::Object(
+            entries
+                .into_iter()
+                .filter(|(k, v)| reads(&Value::Object(Map::from_iter([(k.clone(), v.clone())]))))
+                .collect(),
+        ),
+        _ => return None,
+    };
+    reads(&value).then_some(value)
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -424,7 +479,36 @@ mod tests {
     }
 
     #[test]
+    fn a_bad_session_drops_that_session_alone() {
+        let file = br#"{"version": 1, "recent": ["C:/app"], "quiet": true,
+            "sessions": [
+                {"id": "a", "name": "a", "cwd": "C:/p"},
+                {"id": "b", "name": "b", "cwd": "C:/p", "runeword": "not a runeword"},
+                {"id": "c", "name": "c", "cwd": "C:/p"}
+            ],
+            "grids": {"c:/p": ["a", "c"], "c:/q": 7},
+            "font_size": "big"}"#;
+        let (s, damaged) = SavedState::read(file);
+        assert!(damaged);
+        let ids: Vec<&str> = s.sessions.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, vec!["a", "c"]);
+        assert_eq!(s.recent, vec!["C:/app"]);
+        assert!(s.quiet);
+        assert_eq!(s.grids.keys().collect::<Vec<_>>(), vec!["c:/p"]);
+        assert_eq!(s.font_size, None);
+    }
+
+    #[test]
+    fn a_good_file_is_not_set_aside() {
+        let (_, damaged) = SavedState::read(SavedState::default().to_json().as_bytes());
+        assert!(!damaged);
+    }
+
+    #[test]
     fn unreadable_or_newer_files_read_as_empty() {
+        assert!(SavedState::read(b"not json").1);
+        assert!(SavedState::read(br#"{"version": 99}"#).1);
+        assert!(SavedState::read(br#"{"version": 99, "quiet": "no"}"#).1);
         assert_eq!(SavedState::from_json(b"not json"), SavedState::default());
         assert_eq!(
             SavedState::from_json(br#"{"version": 99, "recent": ["x"]}"#),

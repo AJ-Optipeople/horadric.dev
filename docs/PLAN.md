@@ -262,6 +262,11 @@ resumes one with `claude --resume <id>`, and every hook carries the id.
   whether a prompt was ever sent, the last line and the window position;
   the cluster positions; the recent projects; whether autostart was offered.
   Written from the one second tick when it changed, beside and renamed.
+- A file that does not read whole is copied aside as
+  `state.json.bad-<secs>` before the next save overwrites it, and only
+  what is bad is dropped: one session, one list item, one map entry, one
+  field. A file that is not JSON, or from a newer Horadric, is set aside
+  and reads as empty.
 - On start every saved session is a **paused** tile, a new phase. Clicking
   one runs `claude --resume <id>` with its original arguments in the same
   folder and window. Nothing starts until clicked, so forty saved sessions
@@ -1963,8 +1968,9 @@ notifications said "Cannot merge howdy" with git's `CONFLICT` line and
   Esc) sends no `Stop`, so the runeword waits and counts the human's next
   finished turn as the rune done.
 - A `state.json` that does not parse (a said rune written by hand as a
-  bare string instead of `{"say": ...}`) loses every session, and the
-  next save overwrites it.
+  bare string instead of `{"say": ...}`) lost every session, and the
+  next save overwrote it. Now the file is set aside and only that
+  session is dropped.
 
 ### Experience
 
