@@ -137,12 +137,18 @@ pub struct Session {
     /// [`ACTIVITY_SPAN`]. The tile draws it as a trace of the last minutes.
     #[serde(skip)]
     pub activity: Vec<SystemTime>,
+    /// The subagents heard from in this turn, by id, and when each was
+    /// last heard. For the sparks round the tile's lamp, so not saved.
+    #[serde(skip)]
+    pub agents: Vec<(String, SystemTime)>,
     /// When the last prompt went in. Anything typed into the terminal
     /// after it may still sit in the prompt box as a draft.
     #[serde(skip)]
     pub prompted_at: Option<SystemTime>,
 }
 
+/// A subagent not heard from this long has finished.
+pub const SUBAGENT_QUIET: Duration = Duration::from_secs(30);
 /// How far back a session remembers what it did.
 pub const ACTIVITY_SPAN: Duration = Duration::from_secs(10 * 60);
 /// A busy agent fires a few hooks a second. More than this in the span says
@@ -173,6 +179,7 @@ impl Session {
             status: None,
             tool: None,
             activity: Vec::new(),
+            agents: Vec::new(),
             prompted_at: None,
         }
     }
@@ -382,8 +389,17 @@ impl Session {
                     self.tool = Some(t.clone());
                 }
             }
-            "UserPromptSubmit" | "Stop" | "StopFailure" | "SessionEnd" => self.tool = None,
+            "UserPromptSubmit" | "Stop" | "StopFailure" | "SessionEnd" if !event.is_subagent() => {
+                self.tool = None;
+                self.agents.clear();
+            }
             _ => {}
+        }
+        if let Some(id) = event.agent_id.as_deref().filter(|id| !id.is_empty()) {
+            match self.agents.iter_mut().find(|(a, _)| a == id) {
+                Some(a) => a.1 = now,
+                None => self.agents.push((id.to_string(), now)),
+            }
         }
         if matches!(
             event.hook_event_name.as_str(),
@@ -413,6 +429,16 @@ impl Session {
             self.activity.remove(0);
         }
         self.activity.push(now);
+    }
+
+    /// How many subagents are at work: heard from within [`SUBAGENT_QUIET`]
+    /// in this turn. No hook says a subagent finished, so one that has been
+    /// quiet that long counts as done.
+    pub fn subagents(&self, now: SystemTime) -> usize {
+        self.agents
+            .iter()
+            .filter(|(_, t)| now.duration_since(*t).is_ok_and(|d| d < SUBAGENT_QUIET))
+            .count()
     }
 
     /// How much the agent did in each of `buckets` equal slices of the last
@@ -517,6 +543,35 @@ mod tests {
 
     fn now() -> SystemTime {
         SystemTime::now()
+    }
+
+    #[test]
+    fn subagents_are_counted_while_they_are_heard_from() {
+        let mut s = Session::new("t", "t", "C:/repo");
+        let t0 = now();
+        s.apply(&ev("UserPromptSubmit"), t0);
+        let sub = |id: &str| HookEvent {
+            agent_id: Some(id.into()),
+            tool_name: Some("Read".into()),
+            ..ev("PreToolUse")
+        };
+        s.apply(&sub("a1"), t0);
+        s.apply(&sub("a2"), t0);
+        s.apply(&sub("a1"), t0 + Duration::from_secs(20));
+        assert_eq!(s.subagents(t0 + Duration::from_secs(21)), 2);
+        // a2 went quiet: done.
+        assert_eq!(s.subagents(t0 + Duration::from_secs(40)), 1);
+        // A subagent's own stop does not end the turn's count.
+        s.apply(
+            &HookEvent {
+                agent_id: Some("a1".into()),
+                ..ev("Stop")
+            },
+            t0,
+        );
+        assert_eq!(s.subagents(t0 + Duration::from_secs(21)), 2);
+        s.apply(&ev("Stop"), t0 + Duration::from_secs(22));
+        assert_eq!(s.subagents(t0 + Duration::from_secs(22)), 0);
     }
 
     #[test]

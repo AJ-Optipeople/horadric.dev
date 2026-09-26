@@ -17,7 +17,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::mem::ManuallyDrop;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use horadric_core::diff::Diff;
 use horadric_core::usage::format_until;
@@ -93,6 +93,12 @@ const LAND_RISE: f32 = 3.0;
 const BEAM_H: f32 = 120.0;
 /// How far a tile whose session has gone sinks as it fades, in DIPs.
 const LEAVE_SINK: f32 = 8.0;
+/// More subagents than this still draw this many sparks.
+const MAX_SPARKS: usize = 5;
+/// How far out from the lamp's middle the sparks circle, in DIPs.
+const SPARK_REACH: f32 = 7.0;
+/// A spark going once round the lamp.
+const SPARK_ORBIT: Duration = Duration::from_millis(2400);
 
 /// How many shapes make one soft edge. Fewer shows as bands.
 const BLUR_STEPS: usize = 8;
@@ -1291,6 +1297,8 @@ impl Painter<'_> {
                 Phase::Working => {
                     let t = motion::cycle(look.phase_age, ORBIT);
                     self.scan(&lamp_rect(&r), c, t, look.enter);
+                    let n = s.subagents(scene.now).min(MAX_SPARKS);
+                    self.sparks(&lamp_rect(&r), c, n, look.phase_age, look.enter);
                 }
                 Phase::Waiting(_) => {
                     let breath = motion::waiting_breath(look.phase_age);
@@ -1553,6 +1561,24 @@ impl Painter<'_> {
         self.fill_rounded(r, round, theme::LAMP_OFF.mix(c, level));
         let hot = c.mix(Color::rgb(0xFFFFFF), 0.45).fade(level);
         self.fill_rounded(&r.inset(1.0), (round - 1.0).max(0.5), hot);
+    }
+
+    /// A spark for each subagent at work, circling the lamp, spaced evenly
+    /// round the loop so two read as two.
+    unsafe fn sparks(&self, r: &Rect, c: Color, n: usize, age: Duration, strength: f32) {
+        if n == 0 {
+            return;
+        }
+        let white = Color::rgb(0xFFFFFF);
+        let (cx, cy) = (r.x + r.w / 2.0, r.y + r.h / 2.0);
+        let (rx, ry) = (SPARK_REACH, r.h / 2.0 + 3.0);
+        let turn = motion::cycle(age, SPARK_ORBIT);
+        for k in 0..n {
+            let a = std::f32::consts::TAU * (turn + k as f32 / n as f32);
+            let (x, y) = (cx + rx * a.cos(), cy + ry * a.sin());
+            self.glow_dot(x, y, 5.0, c.mix(white, 0.4), 0.8 * strength);
+            self.glow_dot(x, y, 1.6, white, strength);
+        }
     }
 
     /// A lamp switched off like an old picture tube, `t` of the way
