@@ -10,8 +10,8 @@ use windows::Win32::Graphics::Gdi::{
     DIB_RGB_COLORS,
 };
 use windows::Win32::UI::Shell::{
-    Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_USER, NIM_ADD, NIM_DELETE,
-    NIM_MODIFY, NOTIFYICONDATAW,
+    Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY,
+    NOTIFYICONDATAW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateIconIndirect, DestroyIcon, GetSystemMetrics, HICON, ICONINFO, SM_CXSMICON,
@@ -94,28 +94,6 @@ impl Tray {
         self.tip = tip.to_string();
         unsafe {
             let _ = Shell_NotifyIconW(NIM_MODIFY, &self.data());
-        }
-    }
-
-    /// A notification from the icon, which Windows 11 shows as a toast and
-    /// keeps in the notification centre. A click on it comes back as a
-    /// `NIN_BALLOONUSERCLICK` callback. Do not disturb holds it back.
-    pub fn notify(&self, title: &str, text: &str) {
-        let mut d = NOTIFYICONDATAW {
-            uFlags: NIF_INFO,
-            dwInfoFlags: NIIF_USER,
-            hBalloonIcon: self.icon,
-            ..self.data()
-        };
-        for (slot, unit) in d.szInfoTitle.iter_mut().zip(title.encode_utf16().take(63)) {
-            *slot = unit;
-        }
-        for (slot, unit) in d.szInfo.iter_mut().zip(text.encode_utf16().take(255)) {
-            *slot = unit;
-        }
-        let shown = unsafe { Shell_NotifyIconW(NIM_MODIFY, &d) }.as_bool();
-        if !shown || std::env::var_os("HORADRIC_DEBUG").is_some() {
-            eprintln!("horadric: notification \"{title}\" accepted={shown}");
         }
     }
 

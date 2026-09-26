@@ -95,6 +95,7 @@ use crate::render::Gpu;
 use crate::screens::{self, Screen};
 use crate::start::{self, StartWindow};
 use crate::terminal::{self, Place, TerminalWindow};
+use crate::toast::{self, Kind, Toasts};
 use crate::tray::{self, Choice, Tray};
 use crate::usage::{self, UsageWindow};
 use crate::window::{self, folder_key, project_key, project_name, Cluster, Shared};
@@ -305,6 +306,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
     ask::register_class()?;
     menu::register_class()?;
     dialog::register_class()?;
+    toast::register_class()?;
     start::register_class()?;
     terminal::register_class()?;
     let notify = create_app_window()?;
@@ -434,6 +436,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
         boards: RefCell::new(HashMap::new()),
     });
     menu::init(Rc::clone(&shared));
+    let toasts = Toasts::new(Rc::clone(&shared), notify, WM_HORADRIC_TRAY);
     // From the hosts' copy, since a session that outlives this app keeps
     // running the status line from wherever it pointed.
     let status_settings = store::write_status_settings(&console::host_program());
@@ -470,6 +473,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             requests,
             notify,
             tray: Tray::add(notify, WM_HORADRIC_TRAY),
+            toasts,
             paused: saved
                 .sessions
                 .iter()
@@ -1451,6 +1455,8 @@ struct App {
     requests: Arc<Mutex<Vec<Command>>>,
     notify: HWND,
     tray: Tray,
+    /// Says what needs saying, over the tray.
+    toasts: Toasts,
     /// Sessions with no process that a click resumes: restored from disk,
     /// or left behind by a crash.
     paused: HashMap<String, SavedSession>,
@@ -2050,7 +2056,8 @@ impl App {
         self.last_check = Some(Instant::now());
         let Some(url) = update_url() else {
             if asked {
-                self.tray.notify(
+                self.toasts.show(
+                    Kind::Info,
                     "No updates to check",
                     "A dev instance checks HORADRIC_UPDATE_URL only, and it is not set.",
                 );
@@ -2083,7 +2090,8 @@ impl App {
             Ok(Some(m)) => {
                 eprintln!("horadric: Horadric {} is out", m.version);
                 if asked {
-                    self.tray.notify(
+                    self.toasts.show(
+                        Kind::Done,
                         &format!("Horadric {} is out", m.version),
                         &format!("Pick \"Update to {}\" in the tray menu.", m.version),
                     );
@@ -2093,7 +2101,8 @@ impl App {
             Ok(None) => {
                 self.update = None;
                 if asked {
-                    self.tray.notify(
+                    self.toasts.show(
+                        Kind::Done,
                         "Horadric is up to date",
                         &format!("{} is the newest release.", env!("CARGO_PKG_VERSION")),
                     );
@@ -2102,7 +2111,7 @@ impl App {
             Err(e) => {
                 eprintln!("horadric: update check failed: {e}");
                 if asked {
-                    self.tray.notify("Update check failed", &e);
+                    self.toasts.show(Kind::Failed, "Update check failed", &e);
                 }
             }
         }
@@ -2119,7 +2128,8 @@ impl App {
             return;
         }
         self.downloading = true;
-        self.tray.notify(
+        self.toasts.show(
+            Kind::Info,
             &format!("Updating to Horadric {}", manifest.version),
             "Downloading. The sessions carry on through the update.",
         );
@@ -2146,7 +2156,8 @@ impl App {
         match got {
             Ok(exe) if horadric_hooks::dev() => {
                 eprintln!("horadric: update downloaded to {}", exe.display());
-                self.tray.notify(
+                self.toasts.show(
+                    Kind::Done,
                     "Update downloaded",
                     "A dev instance does not install it. It is verified, in the updates folder.",
                 );
@@ -2163,7 +2174,7 @@ impl App {
             }
             Err(e) => {
                 eprintln!("horadric: update failed: {e}");
-                self.tray.notify("Update failed", &e);
+                self.toasts.show(Kind::Failed, "Update failed", &e);
             }
         }
     }
@@ -3087,7 +3098,7 @@ impl App {
         if let Some(a) = alert {
             self.alert_for = about;
             self.tasks.merge_for = None;
-            self.tray.notify(&a.title, &a.text);
+            self.toasts.show(Kind::Waiting, &a.title, &a.text);
         }
     }
 

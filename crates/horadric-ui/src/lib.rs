@@ -104,6 +104,8 @@ mod store;
 #[cfg(windows)]
 mod terminal;
 #[cfg(windows)]
+mod toast;
+#[cfg(windows)]
 mod tray;
 #[cfg(windows)]
 pub mod update;

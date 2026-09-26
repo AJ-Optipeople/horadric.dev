@@ -61,8 +61,8 @@ use crate::board::RowState;
 use crate::files::{Row, Tree};
 use crate::layout::{
     self, AskLayout, Button, ClusterLayout, DialogLayout, DropdownLayout, FilesLayout, Hit,
-    MenuLayout, Metrics, Rect, SettingRow, StartHit, StartLayout, TasksLayout, UsageHit,
-    UsageLayout, KNOB_R,
+    MenuLayout, Metrics, Rect, SettingRow, StartHit, StartLayout, TasksLayout, ToastLayout,
+    UsageHit, UsageLayout, KNOB_R,
 };
 use crate::motion::{self, BREATH, ORBIT};
 use crate::theme::{self, Color};
@@ -336,6 +336,18 @@ pub struct MenuLook<'a> {
     pub open: bool,
 }
 
+/// Everything one frame of a notification needs.
+pub struct ToastScene<'a> {
+    pub layout: &'a ToastLayout,
+    pub title: &'a str,
+    /// Wrapped to the layout's width by [`wrapped`], if there is any.
+    pub text: Option<&'a IDWriteTextLayout>,
+    pub tone: Color,
+    /// The mouse is on the toast, and on its cross.
+    pub hover: bool,
+    pub close_hot: bool,
+}
+
 /// Everything one frame of a dialog needs.
 pub struct DialogScene<'a> {
     pub layout: &'a DialogLayout,
@@ -567,6 +579,15 @@ impl Target {
         unsafe {
             self.rt.BeginDraw();
             self.painter(&self.rt).menu(gpu, m, scene);
+            self.rt.EndDraw(None, None)
+        }
+    }
+
+    /// Draws a notification. `Err` means the target must be recreated.
+    pub fn draw_toast(&self, gpu: &Gpu, m: &Metrics, scene: &ToastScene) -> Result<()> {
+        unsafe {
+            self.rt.BeginDraw();
+            self.painter(&self.rt).toast(gpu, m, scene);
             self.rt.EndDraw(None, None)
         }
     }
@@ -884,6 +905,33 @@ impl Painter<'_> {
             }
         }
         self.rt.PopAxisAlignedClip();
+    }
+
+    /// A notification: a lamp in its tone by the title, the text under it,
+    /// and a cross that shows while the mouse is on it.
+    unsafe fn toast(&self, gpu: &Gpu, m: &Metrics, scene: &ToastScene) {
+        let l = scene.layout;
+        self.plate(m, l.size);
+        self.led(l.lamp.0, l.lamp.1, scene.tone);
+        self.text(&gpu.name, theme::TEXT, scene.title, l.title);
+        if let Some(text) = scene.text {
+            self.rt
+                .PushAxisAlignedClip(&rect(&l.text), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+            self.draw_layout(text, theme::TEXT_DIM, l.text);
+            self.rt.PopAxisAlignedClip();
+        }
+        if scene.hover {
+            let b = if scene.close_hot {
+                Button::Hover
+            } else {
+                Button::Idle
+            };
+            let (fill, ink) = theme::button_look(b);
+            if let Some(fill) = fill {
+                self.fill_rounded(&l.close, 6.0, fill);
+            }
+            self.icon(&gpu.icon_small, ink, '\u{E711}', l.close);
+        }
     }
 
     /// A dialog: a lamp in its tone by the title, the text, and a key for

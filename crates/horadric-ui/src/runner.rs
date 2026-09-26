@@ -36,6 +36,7 @@ use super::{post, unix_now, with_app, App, WM_HORADRIC_KEPT, WM_HORADRIC_TASK_ME
 use crate::app::Run;
 use crate::board::{self, Board, RowState};
 use crate::menu::{self, Item};
+use crate::toast::Kind;
 use crate::window::{folder_key, project_key, project_name};
 use crate::{ask, watch};
 
@@ -720,8 +721,9 @@ impl App {
         if !self.quiet {
             match new.as_slice() {
                 [] => {}
-                [(_, title, text)] => self.tray.notify(title, text),
-                many => self.tray.notify(
+                [(_, title, text)] => self.toasts.show(Kind::Waiting, title, text),
+                many => self.toasts.show(
+                    Kind::Waiting,
                     &format!("{} task list items need you", many.len()),
                     &many
                         .iter()
@@ -792,7 +794,8 @@ impl App {
             let into = crate::worktree::checked_out(&main).unwrap_or_else(|| "main".into());
             if !self.quiet {
                 self.alert_for = None;
-                self.tray.notify(
+                self.toasts.show(
+                    Kind::Done,
                     &format!("Finished: {}", tasks::one_line(&title)),
                     &format!("Click to merge {branch} into {into}."),
                 );
@@ -826,14 +829,18 @@ impl App {
     pub(super) fn merge(&mut self, m: &Merge) {
         let into = crate::worktree::checked_out(&m.main).unwrap_or_else(|| "main".into());
         match crate::worktree::merge(&m.main, &m.branch) {
-            Ok(()) => self.tray.notify(
+            Ok(()) => self.toasts.show(
+                Kind::Done,
                 &format!("Merged {}", m.branch),
                 &format!("{} is in {into}.", tasks::one_line(&m.title)),
             ),
             Err(e) => {
                 eprintln!("horadric: cannot merge {}: {e}", m.branch);
-                self.tray
-                    .notify(&format!("Cannot merge {}", m.branch), &merge_failed(&e));
+                self.toasts.show(
+                    Kind::Failed,
+                    &format!("Cannot merge {}", m.branch),
+                    &merge_failed(&e),
+                );
             }
         }
     }

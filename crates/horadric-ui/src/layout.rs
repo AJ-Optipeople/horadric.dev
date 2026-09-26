@@ -968,6 +968,58 @@ pub fn dialog_place(size: (i32, i32), work: [i32; 4]) -> (i32, i32) {
     (x.max(wl), y.max(wt))
 }
 
+/// The geometry of a notification: a lamp and a title, the text under
+/// them, and a cross to dismiss it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToastLayout {
+    pub size: (f32, f32),
+    pub lamp: (f32, f32),
+    pub title: Rect,
+    pub text: Rect,
+    pub close: Rect,
+}
+
+pub const TOAST_W: f32 = 360.0;
+const TOAST_PAD: f32 = 18.0;
+/// Past this the text is cut, as a toast is a glance, not a letter.
+const TOAST_TEXT_MAX: f32 = 90.0;
+
+/// How wide a notification's text wraps.
+pub fn toast_text_w() -> f32 {
+    TOAST_W - 2.0 * TOAST_PAD
+}
+
+/// Lays out a notification whose text wraps to `text_h` DIPs, 0 for none.
+pub fn toast(text_h: f32) -> ToastLayout {
+    let w = toast_text_w();
+    let title = Rect::new(TOAST_PAD + 16.0, 16.0, w - 16.0 - 24.0, 22.0);
+    let text_h = text_h.min(TOAST_TEXT_MAX);
+    let text = Rect::new(TOAST_PAD, title.bottom() + 4.0, w, text_h);
+    let bottom = if text_h > 0.0 {
+        text.bottom()
+    } else {
+        title.bottom()
+    };
+    ToastLayout {
+        size: (TOAST_W, bottom + 16.0),
+        lamp: (TOAST_PAD + 4.0, title.y + title.h / 2.0),
+        title,
+        text,
+        close: Rect::new(TOAST_W - 10.0 - 26.0, 10.0, 26.0, 26.0),
+    }
+}
+
+/// Where a notification `size` goes: in the bottom right corner of the
+/// work area `work`, `margin` in from its edges, over the tray it comes
+/// from. All in screen pixels.
+pub fn toast_place(size: (i32, i32), work: [i32; 4], margin: i32) -> (i32, i32) {
+    let [wl, wt, wr, wb] = work;
+    (
+        (wr - margin - size.0).max(wl),
+        (wb - margin - size.1).max(wt),
+    )
+}
+
 /// Where a window `size` goes beside `owner`, both in screen pixels, with
 /// its top a little above `y`, the height it was asked from. Clusters
 /// stand at the right edge of the screen, so it goes to the left when there
@@ -1465,6 +1517,24 @@ mod tests {
             dialog_place((400, 200), [1000, 100, 2000, 800]),
             (1300, 300)
         );
+    }
+
+    #[test]
+    fn a_toast_grows_with_its_text_up_to_a_point() {
+        let bare = toast(0.0);
+        assert_eq!(bare.size.1, bare.title.bottom() + 16.0);
+        let some = toast(40.0);
+        assert_eq!(some.text.h, 40.0);
+        assert_eq!(some.size.1, some.text.bottom() + 16.0);
+        let long = toast(1000.0);
+        assert_eq!(long.text.h, TOAST_TEXT_MAX);
+        assert!(some.close.right() < some.size.0);
+        assert!(some.title.right() < some.close.x);
+    }
+
+    #[test]
+    fn a_toast_stands_in_the_bottom_right_corner() {
+        assert_eq!(toast_place((360, 100), [0, 0, 1920, 1040], 12), (1548, 928));
     }
 
     #[test]
