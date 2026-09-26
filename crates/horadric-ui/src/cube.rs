@@ -38,7 +38,7 @@ use crate::motion::{self};
 use crate::render::{CubeScene, Flying, StashLook, Target, TransmuteLook};
 use crate::theme;
 use crate::window::Shared;
-use crate::{backdrop, columns};
+use crate::{appear, backdrop, columns};
 
 pub(crate) const CLASS: PCWSTR = w!("HoradricCube");
 const DRAG_THRESHOLD: i32 = 4;
@@ -610,6 +610,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         let cs = &*(lparam.0 as *const CREATESTRUCTW);
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, cs.lpCreateParams as isize);
         return DefWindowProcW(hwnd, msg, wparam, lparam);
+    }
+    if msg == WM_TIMER && wparam.0 == appear::TIMER {
+        appear::tick(hwnd);
+        return LRESULT(0);
     }
     let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const CubeWindow;
     if ptr.is_null() {
