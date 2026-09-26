@@ -8,6 +8,7 @@
 pub mod background;
 pub mod diff;
 pub mod event;
+pub mod fleet;
 pub mod journal;
 pub mod registry;
 pub mod release;

@@ -87,6 +87,13 @@ pub struct Pick<'a> {
     pub check: &'a dyn Fn(&str) -> Option<String>,
     /// Offer a Browse key, which answers with [`Answer::browse`] set.
     pub browse: bool,
+    /// The icon on each suggestion.
+    pub glyph: char,
+    /// The suggestions are paths, and Tab adds a separator so a folder's
+    /// own are offered next. Otherwise they are names found by what is
+    /// typed, and the first is lit, so Enter takes the best match rather
+    /// than the few letters typed to find it.
+    pub paths: bool,
 }
 
 pub struct Suggestion {
@@ -416,6 +423,7 @@ impl<'a> Popup<'a> {
             fields: looks,
             list: &rows,
             picked: self.picked.get(),
+            glyph: self.pick.map_or('\u{E8B7}', |p| p.glyph),
             browse: self.browse_look.get(),
         };
         let result = slot
@@ -485,8 +493,9 @@ impl<'a> Popup<'a> {
         let text = self.fields.borrow()[0].text.clone();
         let mut list = (pick.suggest)(&text);
         list.truncate(LIST_ROWS);
+        let first = (!pick.paths && !list.is_empty()).then_some(0);
         self.list.replace(list);
-        self.picked.set(None);
+        self.picked.set(first);
         self.invalidate();
     }
 
@@ -517,8 +526,12 @@ impl<'a> Popup<'a> {
                 _ => None,
             }
         };
+        let paths = self.pick.is_some_and(|p| p.paths);
         if let Some(v) = value {
-            let filled = format!("{}\\", v.trim_end_matches(['\\', '/']));
+            let filled = match paths {
+                true => format!("{}\\", v.trim_end_matches(['\\', '/'])),
+                false => v,
+            };
             self.edit(|f| {
                 f.select_all();
                 f.insert(&filled);

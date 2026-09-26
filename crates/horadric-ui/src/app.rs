@@ -47,6 +47,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use horadric_core::background::Asked;
 use horadric_core::diff::{self as changes, Diff, FileDiff, Recount};
+use horadric_core::fleet::{self, Device};
 use horadric_core::journal::{self, Entry, What};
 use horadric_core::release::{self, Manifest};
 use horadric_core::ssh;
@@ -1235,6 +1236,10 @@ const BATCH: usize = 4;
 /// opens Claude Code's own picker for the rest.
 const HISTORY: usize = 10;
 
+/// How many hosts the project menu lists one by one. Past that they are
+/// found by name instead.
+const MENU_HOSTS: usize = 8;
+
 /// What a session's console runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Run {
@@ -1257,6 +1262,7 @@ fn project_menu(key: &str) {
     const EXPLORE: usize = 8;
     const OTHER_HOST: usize = 9;
     const WORKTREES: usize = 10;
+    const SSH_FIND: usize = 11;
     const SSH: usize = 20;
     const PAST: usize = 100;
     const SUGGEST: usize = 200;
@@ -1268,14 +1274,18 @@ fn project_menu(key: &str) {
         Some(d) => with_app(|app| app.history(d)).unwrap_or_default(),
         None => Vec::new(),
     };
-    let mut hosts = dir
+    let hosts = dir
         .as_deref()
         .map(horadric_hooks::tasks::hosts)
         .unwrap_or_default();
-    hosts.truncate(PAST - SSH);
+    let inventory = dir.as_deref().and_then(horadric_hooks::tasks::fleet);
+    // A fleet, or more hosts than a menu reads well, is found by name.
+    let finding = inventory.is_some() || hosts.len() > MENU_HOSTS;
+    let devices = fleet::with_hosts(&hosts, inventory.map(|(_, d)| d).unwrap_or_default());
+    let listed: &[String] = if finding { &[] } else { &hosts };
     let mut suggested = horadric_hooks::tasks::ssh_config_hosts();
     suggested.retain(|h| !hosts.contains(h));
-    suggested.truncate(SUGGEST_END - SUGGEST);
+    let offering = suggested.len() <= MENU_HOSTS;
     let mut merges = match &dir {
         Some(d) => with_app(|app| app.merges(d)).unwrap_or_default(),
         None => Vec::new(),
@@ -1289,11 +1299,14 @@ fn project_menu(key: &str) {
         Item::Separator,
         Item::action(SHELL, "New terminal\tCtrl+Shift+T"),
     ];
-    for (i, host) in hosts.iter().enumerate() {
+    for (i, host) in listed.iter().enumerate() {
         items.push(Item::action(SSH + i, format!("SSH to {host}")));
     }
+    if finding {
+        items.push(Item::action(SSH_FIND, "SSH to..."));
+    }
     if dir.is_some() {
-        items.push(if suggested.is_empty() {
+        items.push(if suggested.is_empty() || !offering {
             Item::action(OTHER_HOST, "Add host")
         } else {
             let mut offer: Vec<Item> = suggested
@@ -1349,7 +1362,10 @@ fn project_menu(key: &str) {
         (Some(i), Some(dir)) if (SUGGEST..SUGGEST_END).contains(&i) => {
             return add_host(dir, &suggested[i - SUGGEST]);
         }
-        (Some(OTHER_HOST), Some(dir)) => return ask_host(key, dir),
+        (Some(OTHER_HOST), Some(dir)) => {
+            return ask_host(key, dir, if offering { &[] } else { &suggested });
+        }
+        (Some(SSH_FIND), Some(_)) => return ssh_to(key, &hosts, &devices),
         (Some(WORKTREES), Some(dir)) => {
             let on = own_trees.unwrap_or(false);
             if let Err(e) = horadric_hooks::tasks::set_worktrees(dir, !on) {
@@ -1369,7 +1385,7 @@ fn project_menu(key: &str) {
         Some(START_OVER) => app.start_over(key, BATCH),
         Some(END_ALL) => app.end_all(Some(key)),
         Some(SHELL) => app.open_shell(key),
-        Some(i) if (SSH..PAST).contains(&i) => app.open_ssh(key, &hosts[i - SSH]),
+        Some(i) if (SSH..PAST).contains(&i) => app.open_ssh(key, &listed[i - SSH], None),
         Some(i) if (MERGE..MERGE_END).contains(&i) => app.merge(&merges[i - MERGE]),
         Some(CODE) => {
             if let Some(dir) = app.project_dir(key) {
@@ -1390,8 +1406,81 @@ fn project_menu(key: &str) {
     });
 }
 
-/// Asks for a host to add to the project, anything `ssh` takes.
-fn ask_host(key: &str, dir: &Path) {
+/// Asks which of the project's hosts and devices to open a terminal on,
+/// found as it is typed by name, group or address: a fleet is too many
+/// for a menu. A device from the inventory names its terminal, since "SSH
+/// 7" says nothing among dozens. Anything else `ssh` takes connects too.
+fn ssh_to(key: &str, hosts: &[String], devices: &[Device]) {
+    let suggest = |text: &str| {
+        fleet::find(devices, text, ask::LIST_ROWS)
+            .into_iter()
+            .map(|d| ask::Suggestion {
+                label: d.name.clone(),
+                detail: match &d.group {
+                    Some(g) => g.clone(),
+                    None if d.destination != d.name => d.destination.clone(),
+                    None => String::new(),
+                },
+                value: d.name.clone(),
+            })
+            .collect()
+    };
+    let check = |text: &str| ssh::refusal(text, devices.iter().any(|d| d.name == text.trim()));
+    let pick = ask::Pick {
+        suggest: &suggest,
+        check: &check,
+        browse: false,
+        glyph: crate::theme::SSH_ICON,
+        paths: false,
+    };
+    let prompt = format!(
+        "{} to pick from. Type part of a name, a group or an address.",
+        devices.len()
+    );
+    let question = ask::Ask {
+        title: "SSH to",
+        prompt: &prompt,
+        initial: "",
+        placeholder: "name, group or address",
+        verb: "connect",
+        notes: false,
+        pick: Some(&pick),
+    };
+    let Some(a) = ask_beside(Some(key), &question) else {
+        return;
+    };
+    let text = a.text.trim();
+    let device = devices.iter().find(|d| d.name == text);
+    with_app(|app| match device {
+        Some(d) if !hosts.contains(&d.name) => app.open_ssh(key, &d.destination, Some(&d.name)),
+        Some(d) => app.open_ssh(key, &d.destination, None),
+        None => app.open_ssh(key, text, None),
+    });
+}
+
+/// Asks for a host to add to the project, anything `ssh` takes. With
+/// `offer`, the `~/.ssh/config` names too many for a submenu, those are
+/// found as it is typed.
+fn ask_host(key: &str, dir: &Path, offer: &[String]) {
+    let names = fleet::with_hosts(offer, Vec::new());
+    let suggest = |text: &str| {
+        fleet::find(&names, text, ask::LIST_ROWS)
+            .into_iter()
+            .map(|d| ask::Suggestion {
+                label: d.name.clone(),
+                detail: String::new(),
+                value: d.name.clone(),
+            })
+            .collect()
+    };
+    let check = |text: &str| ssh::refusal(text, false);
+    let pick = ask::Pick {
+        suggest: &suggest,
+        check: &check,
+        browse: false,
+        glyph: crate::theme::SSH_ICON,
+        paths: false,
+    };
     let question = ask::Ask {
         title: "Add host",
         prompt: "Anything ssh takes: an alias from ~/.ssh/config, or user@address.",
@@ -1399,7 +1488,7 @@ fn ask_host(key: &str, dir: &Path) {
         placeholder: "user@address",
         verb: "add it",
         notes: false,
-        pick: None,
+        pick: (!offer.is_empty()).then_some(&pick),
     };
     if let Some(a) = ask_beside(Some(key), &question) {
         let host = a.text.trim();
@@ -1541,6 +1630,8 @@ fn pick_folder(hwnd: HWND, start: Option<PathBuf>) -> Option<PathBuf> {
         suggest: &suggest,
         check: &check,
         browse: true,
+        glyph: '\u{E8B7}',
+        paths: true,
     };
     let question = ask::Ask {
         title: "Start a session",
@@ -2536,8 +2627,9 @@ impl App {
     }
 
     /// Opens an SSH terminal on `host` in the project with this key, the
-    /// way [`App::open_shell`] opens a plain one.
-    fn open_ssh(&mut self, key: &str, host: &str) {
+    /// way [`App::open_shell`] opens a plain one. Without a `name` it is
+    /// numbered among the project's SSH terminals.
+    fn open_ssh(&mut self, key: &str, host: &str, name: Option<&str>) {
         let Some(dir) = self.project_dir(key) else {
             return;
         };
@@ -2553,7 +2645,8 @@ impl App {
             .unwrap_or(0);
         let id = self.unique_id("ssh");
         let run = Run::Ssh(host.to_string());
-        if let Err(e) = self.launch(&id, &ssh::name(n), dir, Vec::new(), run, false) {
+        let name = name.map_or_else(|| ssh::name(n), String::from);
+        if let Err(e) = self.launch(&id, &name, dir, Vec::new(), run, false) {
             eprintln!("horadric: cannot open ssh to {host}: {e}");
             return;
         }

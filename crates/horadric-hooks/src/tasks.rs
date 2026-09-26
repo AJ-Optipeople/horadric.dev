@@ -7,6 +7,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use horadric_core::fleet::{self, Device};
 use horadric_core::tasks::{self, Mode, CONFIG_FILE, TASKS_FILE};
 use horadric_core::{ssh, worktree};
 
@@ -38,6 +39,16 @@ pub fn parallel(project: &Path) -> usize {
 /// The project's SSH hosts, none without a config.
 pub fn hosts(project: &Path) -> Vec<String> {
     ssh::hosts(&read_text(&config_file(project)))
+}
+
+/// The project's inventory and the devices in it, None when its config
+/// names none. A path in the config is from the project's folder. A file
+/// that cannot be read is an empty fleet rather than none, so the agent is
+/// still told where it should be.
+pub fn fleet(project: &Path) -> Option<(PathBuf, Vec<Device>)> {
+    let path = project.join(fleet::inventory(&read_text(&config_file(project)))?);
+    let devices = fleet::parse(&read_text(&path));
+    Some((path, devices))
 }
 
 /// Adds `host` to the project's hosts. False when it was there already or
@@ -171,6 +182,26 @@ mod tests {
         assert!(!add_host(&dir, "myvps").unwrap());
         assert_eq!(hosts(&dir), vec!["myvps"]);
         assert_eq!(mode(&dir), Mode::Auto);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_fleet_is_read_from_the_inventory_the_config_names() {
+        let dir = scratch("fleet");
+        assert_eq!(fleet(&dir), None);
+        write(&config_file(&dir), "{\"inventory\":\"ops/devices.ini\"}").unwrap();
+        let (path, devices) = fleet(&dir).unwrap();
+        assert_eq!(path, dir.join("ops/devices.ini"));
+        assert!(devices.is_empty());
+        write(
+            &path,
+            "[gw]
+gw-1 ansible_host=10.0.0.1
+",
+        )
+        .unwrap();
+        let (_, devices) = fleet(&dir).unwrap();
+        assert_eq!(devices[0].destination, "10.0.0.1");
         fs::remove_dir_all(&dir).unwrap();
     }
 
