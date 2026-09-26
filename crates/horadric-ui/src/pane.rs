@@ -53,9 +53,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOWNA, WINDOW_EX_STYLE, WM_CAPTURECHANGED,
     WM_CHAR, WM_DEADCHAR, WM_DPICHANGED_AFTERPARENT, WM_DROPFILES, WM_ERASEBKGND,
     WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE,
-    WM_NCDESTROY, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SETFOCUS, WM_SIZE,
-    WM_SYSCHAR, WM_SYSDEADCHAR, WM_SYSKEYDOWN, WM_TIMER, WM_USER, WNDCLASSW, WS_CHILD,
+    WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL,
+    WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SETFOCUS,
+    WM_SIZE, WM_SYSCHAR, WM_SYSDEADCHAR, WM_SYSKEYDOWN, WM_TIMER, WM_USER, WNDCLASSW, WS_CHILD,
     WS_CLIPSIBLINGS, WS_VISIBLE,
 };
 
@@ -84,6 +84,10 @@ const BLINK_TIMER: usize = 3;
 /// over it at this strength.
 const DIMMED: f32 = 0.32;
 const WHEEL_LINES: i32 = 3;
+/// Wheel movement per column a file view scrolls sideways: six a notch.
+const WHEEL_COL: i32 = 20;
+/// Columns an arrow key scrolls a file view sideways.
+const ARROW_COLS: isize = 4;
 
 /// Sent to the stage when a pane gets the keyboard. `wparam` is its serial.
 pub const WM_PANE_FOCUS: u32 = WM_USER + 1;
@@ -138,6 +142,8 @@ pub struct Pane {
     high_surrogate: Cell<Option<u16>>,
     /// Wheel movement below one notch, from precision touchpads.
     wheel: Cell<i32>,
+    /// The same, sideways, for a file view.
+    hwheel: Cell<i32>,
     /// The project's colour, for the header of the pane with the keyboard.
     accent: Cell<Color>,
     /// How far the pane has stepped back, from 0 to 1, and whether it is
@@ -202,6 +208,7 @@ impl Pane {
             moved_to: Cell::new(None),
             high_surrogate: Cell::new(None),
             wheel: Cell::new(0),
+            hwheel: Cell::new(0),
             accent: Cell::new(theme::ACCENTS[0]),
             dim: Cell::new(0.0),
             dimmed: Cell::new(false),
@@ -857,6 +864,18 @@ impl Pane {
             VK_NEXT => Scroll::PageDown,
             VK_HOME if mods.ctrl => Scroll::Top,
             VK_END if mods.ctrl => Scroll::Bottom,
+            VK_LEFT | VK_RIGHT | VK_HOME | VK_END => {
+                let cols = match vk {
+                    VK_LEFT => -ARROW_COLS,
+                    VK_RIGHT => ARROW_COLS,
+                    VK_HOME => isize::MIN,
+                    _ => isize::MAX,
+                };
+                if self.console.scroll_sideways(cols) {
+                    self.invalidate();
+                }
+                return true;
+            }
             _ => return false,
         };
         if let Ok(mut s) = self.console.screen.lock() {
@@ -1241,7 +1260,13 @@ impl Pane {
     }
 
     fn on_wheel(&self, wparam: WPARAM, lparam: LPARAM) {
-        let delta = ((wparam.0 >> 16) & 0xffff) as i16 as i32 + self.wheel.get();
+        let raw = ((wparam.0 >> 16) & 0xffff) as i16 as i32;
+        if self.console.is_view() && Self::mods().shift {
+            // Down goes right, as Shift and the wheel do in an editor.
+            self.sideways(-raw);
+            return;
+        }
+        let delta = raw + self.wheel.get();
         let notches = delta / 120;
         self.wheel.set(delta % 120);
         if notches == 0 {
@@ -1293,6 +1318,17 @@ impl Pane {
             s.term.scroll_display(Scroll::Delta(lines));
         }
         self.invalidate();
+    }
+
+    /// Scrolls a file view sideways by wheel movement, right when positive,
+    /// keeping what is short of a column for the next.
+    fn sideways(&self, delta: i32) {
+        let delta = delta + self.hwheel.get();
+        self.hwheel.set(delta % WHEEL_COL);
+        let cols = delta / WHEEL_COL;
+        if cols != 0 && self.console.scroll_sideways(cols as isize) {
+            self.invalidate();
+        }
     }
 
     /// Tells the console the pane gained or lost the keyboard, for programs
@@ -1522,6 +1558,10 @@ impl Pane {
             }
             WM_MOUSEWHEEL => {
                 self.on_wheel(wparam, lparam);
+                Some(LRESULT(0))
+            }
+            WM_MOUSEHWHEEL if self.console.is_view() => {
+                self.sideways(((wparam.0 >> 16) & 0xffff) as i16 as i32);
                 Some(LRESULT(0))
             }
             WM_DROPFILES => {

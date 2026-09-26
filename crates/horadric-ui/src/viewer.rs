@@ -1,6 +1,6 @@
 //! A file shown read only in a pane, the way an editor shows it: line
-//! numbers in a gutter, colours from [`crate::highlight`], long lines
-//! wrapped under their text rather than under the numbers.
+//! numbers in a gutter, colours from [`crate::highlight`], long lines cut
+//! at the edge and scrolled sideways rather than wrapped.
 //!
 //! The pane is a terminal grid with no program behind it. This module turns
 //! the file into the escape sequences that paint that grid, and keeps the
@@ -13,9 +13,6 @@ const TAB: usize = 4;
 pub const MAX_LINES: usize = 10_000;
 /// A file bigger than this is not read at all.
 pub const MAX_BYTES: u64 = 4 * 1024 * 1024;
-/// Grid rows at most, however narrow the pane makes the wrapping. Each row
-/// costs a full width of cells.
-pub const MAX_ROWS: usize = 20_000;
 /// Enough room for text beside the gutter in a very narrow pane.
 const MIN_TEXT: usize = 8;
 
@@ -127,12 +124,14 @@ pub struct Span {
     pub style: Style,
 }
 
-/// One grid row: which line it shows, and which bytes of it.
+/// One grid row: which line it shows, and which bytes of it are on screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Row {
     pub line: usize,
     pub start: usize,
     pub end: usize,
+    /// Empty cells before `start`, where a wide character was cut in two.
+    pub skip: usize,
 }
 
 pub struct Rendered {
@@ -227,72 +226,83 @@ pub fn gutter(lines: usize) -> usize {
     lines.max(1).to_string().len().max(3) + 3
 }
 
-/// Lays the lines out for a grid `cols` wide. `spans` may cover fewer
-/// lines than there are, while highlighting is still running.
-/// `marks` may be empty, or shorter than the lines.
+/// Columns left for text beside the gutter in a grid `cols` wide.
+pub fn text_cols(lines: usize, cols: usize) -> usize {
+    cols.saturating_sub(gutter(lines)).max(MIN_TEXT)
+}
+
+/// Cells a piece of a line takes.
+pub fn cells_of(text: &str) -> usize {
+    text.chars().map(width).sum()
+}
+
+/// Cells the longest line takes, which bounds scrolling sideways.
+pub fn widest(lines: &[String]) -> usize {
+    lines.iter().map(|l| cells_of(l)).max().unwrap_or(0)
+}
+
+/// The first column to show so that cells `a..b` of a line are on screen,
+/// moving from `left` only when they are not, and then putting them in the
+/// middle. Never past the point where the longest line, `widest` cells,
+/// ends at the right edge.
+pub fn reveal(left: usize, avail: usize, widest: usize, a: usize, b: usize) -> usize {
+    let left = if a >= left && b <= left + avail {
+        left
+    } else if b - a >= avail {
+        a
+    } else {
+        a.saturating_sub((avail - (b - a)) / 2)
+    };
+    left.min(widest.saturating_sub(avail))
+}
+
+/// Lays the lines out for a grid `cols` wide, one row each, showing their
+/// cells from `left` on. Long lines are cut at the edge, not wrapped: code
+/// reads better with its indentation intact. `spans` may cover fewer lines
+/// than there are, while highlighting is still running. `marks` may be
+/// empty, or shorter than the lines.
 pub fn render(
     lines: &[String],
     spans: &[Vec<Span>],
     marks: &[Option<Mark>],
     cols: usize,
+    left: usize,
 ) -> Rendered {
     let gutter = gutter(lines.len());
-    let avail = cols.saturating_sub(gutter).max(MIN_TEXT);
+    let avail = text_cols(lines.len(), cols);
     let digits = gutter - 3;
     // No wrapping by the terminal, and no cursor: this is not a prompt.
     let mut bytes = b"\x1b[?7l\x1b[?25l".to_vec();
-    let mut rows = Vec::new();
-    'lines: for (n, line) in lines.iter().enumerate() {
+    let mut rows = Vec::with_capacity(lines.len());
+    for (n, line) in lines.iter().enumerate() {
         let mut styles = Styles::new(spans.get(n).map_or(&[][..], Vec::as_slice));
-        let mut start = 0;
-        loop {
-            if rows.len() == MAX_ROWS {
-                break 'lines;
-            }
-            let end = wrap(line, start, avail);
-            if !rows.is_empty() {
-                bytes.extend_from_slice(b"\r\n");
-            }
-            NUMBER.sgr(&mut bytes);
-            let number = if start == 0 {
-                format!(" {:>digits$}", n + 1)
-            } else {
-                " ".repeat(gutter - 2)
-            };
-            bytes.extend_from_slice(number.as_bytes());
-            let mark = marks.get(n).copied().flatten().filter(|m| match m {
-                Mark::DeletedBelow => end >= line.len(),
-                Mark::DeletedAbove => start == 0,
-                _ => true,
-            });
-            match mark {
-                Some(m) => {
-                    let (c, style) = m.glyph();
-                    style.sgr(&mut bytes);
-                    bytes.extend_from_slice(format!(" {c}").as_bytes());
-                }
-                None => bytes.extend_from_slice(b"  "),
-            }
-            let mut current = None;
-            for (i, c) in line[start..end].char_indices() {
-                let style = styles.at(start + i);
-                if current != Some(style) {
-                    style.sgr(&mut bytes);
-                    current = Some(style);
-                }
-                let mut buf = [0u8; 4];
-                bytes.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
-            }
-            rows.push(Row {
-                line: n,
-                start,
-                end,
-            });
-            if end >= line.len() {
-                break;
-            }
-            start = end;
+        let row = clip(line, n, left, avail);
+        if n > 0 {
+            bytes.extend_from_slice(b"\r\n");
         }
+        NUMBER.sgr(&mut bytes);
+        bytes.extend_from_slice(format!(" {:>digits$}", n + 1).as_bytes());
+        match marks.get(n).copied().flatten() {
+            Some(m) => {
+                let (c, style) = m.glyph();
+                style.sgr(&mut bytes);
+                bytes.extend_from_slice(format!(" {c}").as_bytes());
+            }
+            None => bytes.extend_from_slice(b"  "),
+        }
+        // Half of a wide character cut by the left edge shows as a space.
+        bytes.extend(std::iter::repeat_n(b' ', row.skip));
+        let mut current = None;
+        for (i, c) in line[row.start..row.end].char_indices() {
+            let style = styles.at(row.start + i);
+            if current != Some(style) {
+                style.sgr(&mut bytes);
+                current = Some(style);
+            }
+            let mut buf = [0u8; 4];
+            bytes.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+        }
+        rows.push(row);
     }
     Rendered {
         bytes,
@@ -301,23 +311,31 @@ pub fn render(
     }
 }
 
-/// Where the row starting at `start` ends, `avail` cells later: after the
-/// last space that fits, as an editor wraps words, or mid word when one
-/// word is wider than the row. At least one character, so a character
-/// wider than the space still moves on.
-fn wrap(line: &str, start: usize, avail: usize) -> usize {
+/// The bytes of line `n` that fit in `avail` cells from cell `left`, and
+/// the cells before the first of them that a wide character cut in two
+/// leaves empty.
+fn clip(line: &str, n: usize, left: usize, avail: usize) -> Row {
     let mut cells = 0;
-    let mut after_space = None;
-    for (i, c) in line[start..].char_indices() {
-        cells += width(c);
-        if cells > avail && i > 0 {
-            return after_space.unwrap_or(start + i);
+    let mut start = None;
+    let mut end = line.len();
+    for (i, c) in line.char_indices() {
+        let w = width(c);
+        if start.is_none() && cells >= left {
+            start = Some((i, cells - left));
         }
-        if c == ' ' {
-            after_space = Some(start + i + 1);
+        if start.is_some() && cells + w > left + avail {
+            end = i;
+            break;
         }
+        cells += w;
     }
-    line.len()
+    let (start, skip) = start.unwrap_or((line.len(), 0));
+    Row {
+        line: n,
+        start,
+        end: end.max(start),
+        skip,
+    }
 }
 
 /// Walks a line's spans in order, answering the style at a byte.
@@ -422,22 +440,32 @@ fn hits_in(text: &str, query: &str, exact: bool) -> Vec<(usize, usize)> {
         .collect()
 }
 
-/// The first and last cell a match covers, for selecting it.
-pub fn cells(lines: &[String], rows: &[Row], gutter: usize, hit: Hit) -> Option<(Cell, Cell)> {
+/// The first and last cell a match covers, for selecting it, with the
+/// line shown from cell `left`. None when it starts off screen.
+pub fn cells(
+    lines: &[String],
+    rows: &[Row],
+    gutter: usize,
+    left: usize,
+    hit: Hit,
+) -> Option<(Cell, Cell)> {
     let text = lines.get(hit.line)?;
-    let last = text[hit.start..hit.end].char_indices().last()?.0 + hit.start;
-    let cell = |byte: usize, after: bool| {
-        let row = rows.iter().position(|r| {
-            r.line == hit.line && r.start <= byte && (byte < r.end || r.end == text.len())
-        })?;
-        let r = rows[row];
-        let mut col = gutter + text[r.start..byte].chars().map(width).sum::<usize>();
-        if after {
-            col += text[byte..].chars().next().map_or(1, width) - 1;
-        }
-        Some(Cell { row, col })
-    };
-    Some((cell(hit.start, false)?, cell(last, true)?))
+    let row = rows.iter().position(|r| r.line == hit.line)?;
+    let (a, b) = span(text, hit.start, hit.end);
+    let col = |cell: usize| Some(gutter + cell.checked_sub(left)?);
+    Some((
+        Cell { row, col: col(a)? },
+        Cell {
+            row,
+            col: col(b.max(a + 1) - 1)?,
+        },
+    ))
+}
+
+/// The cells bytes `start..end` of a line cover.
+pub fn span(text: &str, start: usize, end: usize) -> (usize, usize) {
+    let a = cells_of(&text[..start]);
+    (a, a + cells_of(&text[start..end]))
 }
 
 /// A cell in the grid, as the selection names it.
@@ -448,18 +476,24 @@ pub struct Cell {
 }
 
 /// The text between two cells, both included, as it is in the file: no line
-/// numbers, and a wrapped line comes out whole.
+/// numbers. A selection that starts in the gutter takes its first line from
+/// the start, and one that ends past the text on screen takes its last line
+/// to the end, off screen parts included.
 pub fn copy(lines: &[String], rows: &[Row], gutter: usize, from: Cell, to: Cell) -> String {
     let last = rows.len().saturating_sub(1);
     let (Some(a), Some(b)) = (rows.get(from.row), rows.get(to.row.min(last))) else {
         return String::new();
     };
-    let start = byte_at(&lines[a.line], a, from.col.saturating_sub(gutter), false);
+    let start = if from.col < gutter {
+        0
+    } else {
+        byte_at(&lines[a.line], a, from.col - gutter, false)
+    };
     let end = if to.row >= rows.len() {
-        b.end
+        lines[b.line].len()
     } else if to.col < gutter {
         // Only numbers selected on the last row: none of its text.
-        b.start
+        0
     } else {
         byte_at(&lines[b.line], b, to.col - gutter, true)
     };
@@ -478,17 +512,23 @@ pub fn copy(lines: &[String], rows: &[Row], gutter: usize, from: Cell, to: Cell)
 }
 
 /// The byte where the character covering a cell of the row starts, or with
-/// `after`, where it ends.
+/// `after`, where it ends. Ending on the last character on screen, or past
+/// it, is the line's end, so a selection to the right edge takes what is
+/// off screen too.
 fn byte_at(line: &str, row: &Row, col: usize, after: bool) -> usize {
-    let mut cells = 0;
+    let mut cells = row.skip;
     for (i, c) in line[row.start..row.end].char_indices() {
         cells += width(c);
         if cells > col {
             let at = row.start + i;
-            return if after { at + c.len_utf8() } else { at };
+            if !after {
+                return at;
+            }
+            let end = at + c.len_utf8();
+            return if end == row.end { line.len() } else { end };
         }
     }
-    row.end
+    line.len()
 }
 
 #[cfg(test)]
@@ -552,53 +592,66 @@ mod tests {
         assert_eq!(gutter(1000), 7);
     }
 
+    fn row(line: usize, start: usize, end: usize, skip: usize) -> Row {
+        Row {
+            line,
+            start,
+            end,
+            skip,
+        }
+    }
+
     #[test]
-    fn numbers_sit_in_the_gutter_and_wraps_indent_under_the_text() {
-        let r = render(&s(&["abcdefghijkl", "", "xy"]), &[], &[], 6 + 8);
-        assert_eq!(
-            screen(&r),
-            s(&["   1  abcdefgh", "      ijkl", "   2  ", "   3  xy"])
-        );
+    fn numbers_sit_in_the_gutter_and_long_lines_are_cut() {
+        let r = render(&s(&["abcdefghijkl", "", "xy"]), &[], &[], 6 + 8, 0);
+        assert_eq!(screen(&r), s(&["   1  abcdefgh", "   2  ", "   3  xy"]));
         assert_eq!(
             r.rows,
-            vec![
-                Row {
-                    line: 0,
-                    start: 0,
-                    end: 8
-                },
-                Row {
-                    line: 0,
-                    start: 8,
-                    end: 12
-                },
-                Row {
-                    line: 1,
-                    start: 0,
-                    end: 0
-                },
-                Row {
-                    line: 2,
-                    start: 0,
-                    end: 2
-                },
-            ]
+            vec![row(0, 0, 8, 0), row(1, 0, 0, 0), row(2, 0, 2, 0)]
         );
     }
 
     #[test]
-    fn words_wrap_whole_unless_one_is_wider_than_the_row() {
-        let r = render(&s(&["ab cd efgh ijklmnopq"]), &[], &[], 6 + 8);
-        assert_eq!(
-            screen(&r),
-            s(&["   1  ab cd ", "      efgh ", "      ijklmnop", "      q"])
-        );
+    fn scrolled_sideways_the_numbers_stay() {
+        let r = render(&s(&["abcdefghijkl", "", "xy"]), &[], &[], 6 + 8, 5);
+        assert_eq!(screen(&r), s(&["   1  fghijkl", "   2  ", "   3  "]));
+        assert_eq!(r.rows[0], row(0, 5, 12, 0));
+        assert_eq!(r.rows[2], row(2, 2, 2, 0));
     }
 
     #[test]
-    fn a_wide_character_wraps_whole() {
-        let r = render(&s(&["abcdefg\u{4e00}z"]), &[], &[], 6 + 8);
-        assert_eq!(screen(&r), s(&["   1  abcdefg", "      \u{4e00}z"]));
+    fn a_wide_character_cut_by_an_edge_is_left_out() {
+        let l = s(&["abcdefg\u{4e00}z"]);
+        let r = render(&l, &[], &[], 6 + 8, 0);
+        assert_eq!(screen(&r), s(&["   1  abcdefg"]));
+        // Its right half at the left edge becomes a space.
+        let r = render(&l, &[], &[], 6 + 8, 8);
+        assert_eq!(screen(&r), s(&["   1   z"]));
+        assert_eq!(r.rows[0], row(0, 10, 11, 1));
+    }
+
+    #[test]
+    fn reveal_moves_only_to_show_what_is_off_screen() {
+        // Already shown.
+        assert_eq!(reveal(10, 20, 100, 12, 15), 10);
+        // Off to the right, and to the left: put in the middle.
+        assert_eq!(reveal(0, 20, 100, 40, 44), 32);
+        assert_eq!(reveal(50, 20, 100, 40, 44), 32);
+        // Near the start the middle would be before it.
+        assert_eq!(reveal(50, 20, 100, 3, 5), 0);
+        // Wider than the screen: its start at the edge.
+        assert_eq!(reveal(0, 20, 100, 40, 70), 40);
+        // Never past where the longest line ends at the right edge.
+        assert_eq!(reveal(0, 20, 50, 46, 50), 30);
+        assert_eq!(reveal(0, 20, 10, 0, 0), 0);
+    }
+
+    #[test]
+    fn the_widest_line_counts_cells() {
+        assert_eq!(widest(&s(&["ab", "\u{4e00}\u{4e00}x", ""])), 5);
+        assert_eq!(widest(&[]), 0);
+        assert_eq!(text_cols(9, 40), 34);
+        assert_eq!(text_cols(9, 3), MIN_TEXT);
     }
 
     #[test]
@@ -612,7 +665,7 @@ mod tests {
                 style: TEXT,
             },
         ]];
-        let r = render(&s(&["fn x"]), &spans, &[], 40);
+        let r = render(&s(&["fn x"]), &spans, &[], 40, 0);
         let text = String::from_utf8(r.bytes).unwrap();
         assert!(text.ends_with("\x1b[0;38;2;255;0;0mfn \x1b[0;38;2;212;212;212mx"));
     }
@@ -628,53 +681,52 @@ mod tests {
             }]],
             &[],
             40,
+            0,
         );
         let text = String::from_utf8(r.bytes).unwrap();
         assert!(text.ends_with("\x1b[0;38;2;212;212;212;1ma\x1b[0;38;2;212;212;212mb"));
     }
 
     #[test]
-    fn rows_stop_at_the_limit() {
-        let many = vec!["x".to_string(); MAX_ROWS + 10];
-        assert_eq!(render(&many, &[], &[], 40).rows.len(), MAX_ROWS);
-    }
-
-    #[test]
     fn row_of_finds_a_line_after_a_resize() {
-        let r = render(&s(&["abcdefghijkl", "", "xy"]), &[], &[], 6 + 8);
+        let r = render(&s(&["abcdefghijkl", "", "xy"]), &[], &[], 6 + 8, 0);
         assert_eq!(row_of(&r.rows, 0), 0);
-        assert_eq!(row_of(&r.rows, 1), 2);
-        assert_eq!(row_of(&r.rows, 2), 3);
-        assert_eq!(row_of(&r.rows, 99), 3);
+        assert_eq!(row_of(&r.rows, 2), 2);
+        assert_eq!(row_of(&r.rows, 99), 2);
     }
 
     #[test]
-    fn copy_leaves_the_numbers_and_joins_a_wrapped_line() {
+    fn copy_leaves_the_numbers_and_takes_what_is_off_screen_at_the_ends() {
         let l = s(&["abcdefghijkl", "", "xy"]);
-        let r = render(&l, &[], &[], 6 + 8);
+        let r = render(&l, &[], &[], 6 + 8, 2);
         let g = r.gutter;
         let c = |row, col| Cell { row, col };
         // From the gutter of the first row to the end of the last.
         assert_eq!(
-            copy(&l, &r.rows, g, c(0, 0), c(3, 20)),
+            copy(&l, &r.rows, g, c(0, 0), c(2, 20)),
             "abcdefghijkl\n\nxy"
         );
-        // Inside one wrapped line, across the wrap.
-        assert_eq!(copy(&l, &r.rows, g, c(0, g + 6), c(1, g + 1)), "ghij");
+        // Inside the part on screen.
+        assert_eq!(copy(&l, &r.rows, g, c(0, g + 1), c(0, g + 3)), "def");
+        // To the right edge: the rest of the line too.
+        assert_eq!(copy(&l, &r.rows, g, c(0, g + 6), c(0, g + 7)), "ijkl");
         // Only numbers on the last row.
-        assert_eq!(copy(&l, &r.rows, g, c(1, g + 2), c(3, 1)), "kl\n\n");
+        assert_eq!(copy(&l, &r.rows, g, c(0, g + 8), c(2, 1)), "\n\n");
         // Past the last row.
-        assert_eq!(copy(&l, &r.rows, g, c(3, 0), c(9, 0)), "xy");
+        assert_eq!(copy(&l, &r.rows, g, c(2, 0), c(9, 0)), "xy");
     }
 
     #[test]
     fn copy_takes_a_wide_character_whole() {
         let l = s(&["a\u{4e00}b"]);
-        let r = render(&l, &[], &[], 40);
+        let r = render(&l, &[], &[], 40, 0);
         let g = r.gutter;
         let c = |col| Cell { row: 0, col };
         assert_eq!(copy(&l, &r.rows, g, c(g + 2), c(g + 2)), "\u{4e00}");
         assert_eq!(copy(&l, &r.rows, g, c(g + 1), c(g + 3)), "\u{4e00}b");
+        // Cut by the left edge, its space copies nothing of it.
+        let r = render(&l, &[], &[], 40, 2);
+        assert_eq!(copy(&l, &r.rows, g, c(g), c(g + 1)), "b");
     }
 
     #[test]
@@ -702,22 +754,13 @@ mod tests {
     }
 
     #[test]
-    fn marks_sit_between_the_number_and_the_text() {
+    fn marks_sit_between_the_number_and_the_text_however_far_it_scrolls() {
         let l = s(&["abcdefghijkl", "x"]);
         let m = [Some(Mark::Modified), Some(Mark::DeletedBelow)];
-        let r = render(&l, &[], &m, 6 + 8);
-        assert_eq!(
-            screen(&r),
-            s(&[
-                "   1 \u{258e}abcdefgh",
-                "     \u{258e}ijkl",
-                "   2 \u{2581}x"
-            ])
-        );
-        // A removal marks only the last row of its line.
-        let m = [Some(Mark::DeletedBelow)];
-        let r = render(&l[..1], &[], &m, 6 + 8);
-        assert_eq!(screen(&r), s(&["   1  abcdefgh", "     \u{2581}ijkl"]));
+        let r = render(&l, &[], &m, 6 + 8, 0);
+        assert_eq!(screen(&r), s(&["   1 \u{258e}abcdefgh", "   2 \u{2581}x"]));
+        let r = render(&l, &[], &m, 6 + 8, 4);
+        assert_eq!(screen(&r), s(&["   1 \u{258e}efghijkl", "   2 \u{2581}"]));
     }
 
     #[test]
@@ -753,22 +796,25 @@ mod tests {
     }
 
     #[test]
-    fn a_match_maps_to_the_cells_it_covers_across_a_wrap() {
+    fn a_match_maps_to_the_cells_it_covers_on_screen() {
         let l = s(&["abcdefghijkl", "a\u{4e00}b"]);
-        let r = render(&l, &[], &[], 6 + 8);
+        let r = render(&l, &[], &[], 6 + 8, 0);
         let g = r.gutter;
         let c = |row, col| Cell { row, col };
-        let hit = Hit {
-            line: 0,
-            start: 6,
-            end: 10,
-        };
-        assert_eq!(cells(&l, &r.rows, g, hit), Some((c(0, g + 6), c(1, g + 1))));
-        let hit = Hit {
-            line: 1,
-            start: 1,
-            end: 4,
-        };
-        assert_eq!(cells(&l, &r.rows, g, hit), Some((c(2, g + 1), c(2, g + 2))));
+        let hit = |line, start, end| Hit { line, start, end };
+        assert_eq!(
+            cells(&l, &r.rows, g, 0, hit(0, 6, 10)),
+            Some((c(0, g + 6), c(0, g + 9)))
+        );
+        assert_eq!(
+            cells(&l, &r.rows, g, 0, hit(1, 1, 4)),
+            Some((c(1, g + 1), c(1, g + 2)))
+        );
+        // Scrolled, it moves left with the text; off screen it has none.
+        assert_eq!(
+            cells(&l, &r.rows, g, 4, hit(0, 6, 10)),
+            Some((c(0, g + 2), c(0, g + 5)))
+        );
+        assert_eq!(cells(&l, &r.rows, g, 7, hit(0, 6, 10)), None);
     }
 }

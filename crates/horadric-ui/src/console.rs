@@ -27,7 +27,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::{Dimensions, Scroll};
-use alacritty_terminal::index::{Column, Line, Point};
+use alacritty_terminal::index::{Column, Line, Point, Side};
+use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::{Config, Term};
 use alacritty_terminal::vte::ansi::{CursorShape, CursorStyle, Processor};
 use horadric_core::worktree::SETUP_ENV;
@@ -152,6 +153,10 @@ struct View {
     marks: Vec<Option<Mark>>,
     rows: Vec<Row>,
     gutter: usize,
+    /// The first cell of each line on screen, scrolled sideways.
+    left: usize,
+    /// Cells the longest line takes.
+    widest: usize,
     /// Counts reads, so colours for an older one are not applied to a newer.
     read: u64,
 }
@@ -493,6 +498,8 @@ impl Console {
                 marks: Vec::new(),
                 rows: Vec::new(),
                 gutter: 0,
+                left: 0,
+                widest: 0,
                 read: 0,
             })),
             screen: Mutex::new(Screen {
@@ -554,6 +561,7 @@ impl Console {
         if let Ok(mut v) = view.lock() {
             v.stamp = now;
             v.lines = Arc::clone(&lines);
+            v.widest = viewer::widest(&lines);
             v.spans = Vec::new();
         }
         self.lay_out();
@@ -611,13 +619,40 @@ impl Console {
         let Ok(mut s) = self.screen.lock() else {
             return;
         };
+        let left = v.left;
+        self.lay_out_in(&mut v, &mut s, left);
+    }
+
+    /// Lays the file out showing its lines from cell `left`.
+    fn lay_out_in(&self, v: &mut View, s: &mut Screen, left: usize) {
+        let history = s.term.grid().history_size();
         let top = {
-            let grid = s.term.grid();
-            let row = grid.history_size().saturating_sub(grid.display_offset());
+            let row = history.saturating_sub(s.term.grid().display_offset());
             v.rows.get(row).map_or(0, |r| r.line)
         };
+        // The selection, as lines and cells of them, so it stays on the
+        // same text when that moves: a search's match, scrolled sideways.
+        let kept = s
+            .term
+            .selection
+            .as_ref()
+            .and_then(|sel| sel.to_range(&s.term))
+            .map(|range| {
+                let at = |p: Point| {
+                    let row = (p.line.0 + history as i32).max(0) as usize;
+                    let line = v.rows.get(row).map_or(row, |r| r.line);
+                    (
+                        line,
+                        p.column.0 as isize - v.gutter as isize + v.left as isize,
+                    )
+                };
+                (at(range.start), at(range.end))
+            });
         let size = self.size();
-        let r = viewer::render(&v.lines, &v.spans, &v.marks, size.cols as usize);
+        let cols = size.cols as usize;
+        let avail = viewer::text_cols(v.lines.len(), cols);
+        v.left = left.min(v.widest.saturating_sub(avail));
+        let r = viewer::render(&v.lines, &v.spans, &v.marks, cols, v.left);
         let events = Events {
             remote: None,
             title: Arc::clone(&self.title),
@@ -630,35 +665,80 @@ impl Console {
         term.is_focused = s.term.is_focused;
         let mut parser = Processor::new();
         parser.advance(&mut term, &r.bytes);
-        let back = term
-            .grid()
-            .history_size()
-            .saturating_sub(viewer::row_of(&r.rows, top));
+        let history = term.grid().history_size();
+        let back = history.saturating_sub(viewer::row_of(&r.rows, top));
         term.scroll_display(Scroll::Delta(back as i32));
+        if let Some(((la, ca), (lb, cb))) = kept {
+            let col = |cell: isize| cell - v.left as isize + r.gutter as isize;
+            let (ca, cb) = (col(ca), col(cb));
+            let last = cols as isize - 1;
+            // A match on one line now wholly off to a side is not shown.
+            if la != lb || (cb >= r.gutter as isize && ca <= last) {
+                let point = |line: usize, col: isize| {
+                    let row = viewer::row_of(&r.rows, line) as i32 - history as i32;
+                    Point::new(Line(row), Column(col.clamp(0, last) as usize))
+                };
+                let mut sel = Selection::new(SelectionType::Simple, point(la, ca), Side::Left);
+                sel.update(point(lb, cb), Side::Right);
+                term.selection = Some(sel);
+            }
+        }
         s.term = term;
         s.parser = parser;
         v.rows = r.rows;
         v.gutter = r.gutter;
     }
 
+    /// Scrolls a view `cols` cells sideways, never past the start of its
+    /// lines or past where the longest one ends. True when it moved.
+    pub fn scroll_sideways(&self, cols: isize) -> bool {
+        let Some(view) = &self.view else {
+            return false;
+        };
+        let Ok(mut v) = view.lock() else {
+            return false;
+        };
+        let avail = viewer::text_cols(v.lines.len(), self.size().cols as usize);
+        let left = v
+            .left
+            .saturating_add_signed(cols)
+            .min(v.widest.saturating_sub(avail));
+        if left == v.left {
+            return false;
+        }
+        let Ok(mut s) = self.screen.lock() else {
+            return false;
+        };
+        self.lay_out_in(&mut v, &mut s, left);
+        true
+    }
+
     /// Where `query` is next in a view's file, from a line and byte or from
-    /// the top line on screen, and the grid cells to select for it.
+    /// the top line on screen, and the grid cells to select for it. Scrolls
+    /// sideways first when the match is off to a side.
     pub fn find(
         &self,
         query: &str,
         from: Option<(usize, usize)>,
         forward: bool,
     ) -> Option<(Hit, Point, Point)> {
-        let v = self.view.as_ref()?.lock().ok()?;
-        let s = self.screen.lock().ok()?;
-        let history = s.term.grid().history_size();
+        let mut v = self.view.as_ref()?.lock().ok()?;
+        let mut s = self.screen.lock().ok()?;
         let (line, byte) = from.unwrap_or_else(|| {
-            let top = history.saturating_sub(s.term.grid().display_offset());
+            let grid = s.term.grid();
+            let top = grid.history_size().saturating_sub(grid.display_offset());
             (v.rows.get(top).map_or(0, |r| r.line), 0)
         });
         let hit = viewer::find(&v.lines, query, line, byte, forward)?;
-        let (a, b) = viewer::cells(&v.lines, &v.rows, v.gutter, hit)?;
-        let point = |c: Cell| Point::new(Line(c.row as i32 - history as i32), Column(c.col));
+        let (a, b) = viewer::span(&v.lines[hit.line], hit.start, hit.end);
+        let avail = viewer::text_cols(v.lines.len(), self.size().cols as usize);
+        let left = viewer::reveal(v.left, avail, v.widest, a, b);
+        if left != v.left {
+            self.lay_out_in(&mut v, &mut s, left);
+        }
+        let (a, b) = viewer::cells(&v.lines, &v.rows, v.gutter, v.left, hit)?;
+        let history = s.term.grid().history_size() as i32;
+        let point = |c: Cell| Point::new(Line(c.row as i32 - history), Column(c.col));
         Some((hit, point(a), point(b)))
     }
 
