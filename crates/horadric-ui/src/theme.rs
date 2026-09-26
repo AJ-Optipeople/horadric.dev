@@ -9,7 +9,11 @@
 //! header. A project is an accent: the wash down its cluster, the edge of
 //! the stage showing it. So a project's colour is never mistaken for a
 //! session needing you.
+//!
+//! A third job, how a session ended, is the colour of its name and only
+//! that: Diablo's item colours, printed like a legend, never lit.
 
+use horadric_core::rarity::Rarity;
 use horadric_core::{Phase, Session, WaitReason};
 
 use crate::files::Change;
@@ -284,6 +288,20 @@ pub fn phase_fill(phase: &Phase) -> Color {
     }
 }
 
+/// The ink of a session's name for how it ended. Paler than the lamps and
+/// drawn as text, so a yellow name never reads as a waiting lamp, and each
+/// leans off its nearest phase colour: magic towards violet, rare towards
+/// lemon, set towards leaf.
+pub fn rarity_color(r: Rarity) -> Color {
+    match r {
+        Rarity::Normal => TEXT,
+        Rarity::Magic => Color::rgb(0x9A9CFF),
+        Rarity::Rare => Color::rgb(0xF2E27A),
+        Rarity::Set => Color::rgb(0x9BE06A),
+        Rarity::Unique => Color::rgb(0xCFAE72),
+    }
+}
+
 /// How much of a limit or a context window is used, in percent, as a
 /// colour: calm while there is room, amber getting close, red at the end.
 pub fn fullness_color(percent: f32) -> Color {
@@ -314,6 +332,33 @@ pub fn phase_verb(phase: &Phase) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn distance(a: Color, b: Color) -> f32 {
+        ((a.r - b.r).powi(2) + (a.g - b.g).powi(2) + (a.b - b.b).powi(2)).sqrt()
+    }
+
+    #[test]
+    fn rarities_stand_apart_from_each_other_and_from_the_lamps() {
+        let all = [
+            Rarity::Normal,
+            Rarity::Magic,
+            Rarity::Rare,
+            Rarity::Set,
+            Rarity::Unique,
+        ];
+        assert_eq!(rarity_color(Rarity::Normal), TEXT);
+        for (i, a) in all.iter().enumerate() {
+            for b in &all[i + 1..] {
+                assert!(
+                    distance(rarity_color(*a), rarity_color(*b)) > 0.2,
+                    "{a:?} {b:?}"
+                );
+            }
+            for lamp in [WORKING, WAITING, DONE, ERROR] {
+                assert!(distance(rarity_color(*a), lamp) > 0.2, "{a:?}");
+            }
+        }
+    }
 
     #[test]
     fn mix_ends_are_the_colours() {

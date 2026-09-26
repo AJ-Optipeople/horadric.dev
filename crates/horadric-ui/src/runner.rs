@@ -394,6 +394,18 @@ impl App {
             self.refresh_boards(true);
             return Err(e);
         }
+        if parallel {
+            if let Some(s) = self
+                .shared
+                .registry
+                .lock()
+                .ok()
+                .as_mut()
+                .and_then(|r| r.get_mut(&id))
+            {
+                s.loot.batch = true;
+            }
+        }
         if show && self.fill_stage(key, true) {
             if let Some(stage) = &self.stage {
                 stage.focus_session(&id);
@@ -874,6 +886,7 @@ impl App {
         let into = crate::worktree::checked_out(&m.main).unwrap_or_else(|| "main".into());
         match crate::worktree::merge(&m.main, &m.branch) {
             Ok(()) => {
+                self.landed(&m.main, &m.branch);
                 store::journal(&Entry {
                     at: unix_now(),
                     session: String::new(),
@@ -898,6 +911,34 @@ impl App {
                     &merge_failed(&e),
                 );
             }
+        }
+    }
+
+    /// Gilds every session that worked on `branch` of the repository at
+    /// `main`, now that it is merged.
+    fn landed(&mut self, main: &Path, branch: &str) {
+        let Ok(mut r) = self.shared.registry.lock() else {
+            return;
+        };
+        let project = folder_key(&main.to_string_lossy());
+        let ids: Vec<String> = r
+            .all()
+            .filter(|s| {
+                s.worktree
+                    .as_ref()
+                    .is_some_and(|w| w.branch == branch && folder_key(&w.main) == project)
+            })
+            .map(|s| s.id.clone())
+            .collect();
+        for id in ids {
+            if let Some(s) = r.get_mut(&id) {
+                s.loot.committed = true;
+                s.loot.landed = true;
+            }
+        }
+        drop(r);
+        for c in &self.clusters {
+            c.invalidate();
         }
     }
 

@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::diff::Diff;
 use crate::event::HookEvent;
+use crate::rarity::{self, Loot, Rarity};
 use crate::title::Title;
 use crate::usage::Status;
 use crate::worktree::Worktree;
@@ -112,6 +113,9 @@ pub struct Session {
     /// the agent does something, so it is not saved.
     #[serde(skip)]
     pub diff: Option<Diff>,
+    /// What it changed, tested and landed, for the colour of its name.
+    #[serde(default)]
+    pub loot: Loot,
     pub phase: Phase,
     /// The turn it finished has not been looked at yet: unidentified, as
     /// Diablo drops an item until you identify it. Set when a turn ends,
@@ -171,6 +175,7 @@ impl Session {
             worktree: None,
             background: None,
             diff: None,
+            loot: Loot::default(),
             phase: Phase::Idle,
             unseen: false,
             since: now,
@@ -210,6 +215,15 @@ impl Session {
     /// The human looked at it. True when that changed anything.
     pub fn identify(&mut self) -> bool {
         std::mem::take(&mut self.unseen)
+    }
+
+    /// How it ended so far, in item colours: what it changed, tested and
+    /// landed, its worktree's changes counting too.
+    pub fn rarity(&self) -> Rarity {
+        rarity::rarity(
+            &self.loot,
+            self.diff.as_ref().is_some_and(|d| !d.is_empty()),
+        )
     }
 
     /// How long the session has been in its current phase.
@@ -274,6 +288,7 @@ impl Session {
         // carry no new information about whether the human is needed.
         // A subagent's tools are still the agent at work.
         self.note(event, now);
+        self.loot.hear(event);
         if event.is_subagent() {
             return false;
         }

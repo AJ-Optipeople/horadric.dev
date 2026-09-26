@@ -2269,7 +2269,9 @@ impl Painter<'_> {
         };
         let age_w = self.measure(gpu, &gpu.small, &age).min(top.w * 0.55);
         let name_rect = Rect::new(top.x, top.y, top.w - age_w - 8.0, top.h);
-        self.text(&gpu.name, theme::TEXT.fade(presence), s.label(), name_rect);
+        // Its name says how it ended, in item colours, apart from the lamp.
+        let ink = theme::rarity_color(s.rarity()).fade(presence);
+        self.text(&gpu.name, ink, s.label(), name_rect);
         let age_c = match phase {
             Phase::Waiting(_) => c,
             _ => theme::TEXT_DIM,

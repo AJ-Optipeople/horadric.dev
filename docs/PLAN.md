@@ -1096,6 +1096,26 @@ and a terminal is a screen set into the panel.
   alpha and position. A real drag of one cluster up over another in its
   column: the other glided down while the button was held, and the drop
   landed in the gap.
+- **How it ended, in item colours** ("Item rarity colours" in
+  IDEAS.md; `rarity.rs`, `theme::rarity_color`, pure and tested). A
+  session's name is printed in Diablo's colours, the third job colour has
+  and only on the name, never lit: white changed nothing, blue changed
+  files, yellow changed files and the tests passed after the last change,
+  green one of a batch the runner held at once that changed something,
+  gold what it committed is in what the main tree has checked out. Gold
+  beats green, since landing is what a batch is for. All from the tool
+  hooks (`Session::loot`, saved): `Edit`, `Write` and friends change
+  files, and a shell command that runs a test suite or a `git commit` or
+  `git merge` is read from `tool_input.command`, its outcome from
+  `PostToolUse` or `PostToolUseFailure`. A worktree's diff counts as a
+  change too. Whether it landed is asked of git (`merge-base
+  --is-ancestor`) with the diff recount once it committed, and a merge
+  from the project menu gilds its sessions at once, since the sweep may
+  take the worktree before anyone asks. Each colour leans off its nearest
+  lamp and is paler, so a yellow name does not read as waiting. Checked on
+  screen with a dev instance and fake sessions in a scratch repository:
+  each colour, a worktree session turning gold when its branch was merged,
+  and green and gold coming back from the saved state on paused tiles.
 - **Type.** Project names in Segoe UI Variable Display, session names
   semibold, ages with tabular digits so they do not shuffle each second,
   FILES and RECENT letter spaced like legends printed on the plate.

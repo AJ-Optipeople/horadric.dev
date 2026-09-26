@@ -75,6 +75,8 @@ This has to live beside the phase lamps without being read as a phase. See
 "The look" in PLAN.md: phase is light, project is accent. Rarity would be a
 third job and needs its own place on the key, likely the name's colour.
 
+Built as the name's colour: see "The look" in [PLAN.md](PLAN.md).
+
 ### Loot drops
 
 When a session finishes, a beam of light rises from its tile, like an item

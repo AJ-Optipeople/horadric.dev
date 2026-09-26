@@ -1836,7 +1836,8 @@ type Looked = Result<Option<Manifest>, String>;
 
 /// A worktree's count back from its thread: the session's id, and what
 /// changed, None for a worktree that is gone.
-type Counted = (String, Option<Diff>);
+/// A session's worktree changes, and whether its work landed when asked.
+type Counted = (String, Option<Diff>, Option<bool>);
 
 /// A browser window a session opened.
 struct Browser {
@@ -2253,21 +2254,40 @@ impl App {
     /// Counts again what each session's worktree has changed, where the
     /// agent did something since the last count. On threads of their own,
     /// since each count starts git three times.
+    /// A session that committed is asked the same way whether its work
+    /// landed, worktree or not.
     fn recount(&mut self) {
-        let trees: Vec<(String, Worktree, Option<SystemTime>)> = match self.shared.registry.lock() {
-            Ok(r) => r
-                .all()
-                .filter_map(|s| {
-                    let w = s.worktree.clone()?;
-                    Some((s.id.clone(), w, s.activity.last().copied()))
-                })
-                .collect(),
+        type Due = (
+            String,
+            Option<Worktree>,
+            Option<PathBuf>,
+            Option<SystemTime>,
+        );
+        let trees: Vec<Due> = match self.shared.registry.lock() {
+            Ok(r) => {
+                r.all()
+                    .filter_map(|s| {
+                        let land = s.loot.may_land().then(|| {
+                            PathBuf::from(s.worktree.as_ref().map_or(&s.cwd, |w| &w.path))
+                        });
+                        if s.worktree.is_none() && land.is_none() {
+                            return None;
+                        }
+                        Some((
+                            s.id.clone(),
+                            s.worktree.clone(),
+                            land,
+                            s.activity.last().copied(),
+                        ))
+                    })
+                    .collect()
+            }
             Err(_) => return,
         };
         self.recounts
-            .retain(|id, _| trees.iter().any(|(t, _, _)| t == id));
+            .retain(|id, _| trees.iter().any(|(t, ..)| t == id));
         let now = Instant::now();
-        for (id, w, activity) in trees {
+        for (id, w, land, activity) in trees {
             let r = self.recounts.entry(id.clone()).or_default();
             r.heard(activity);
             if !r.start(now) {
@@ -2276,9 +2296,10 @@ impl App {
             let counted = Arc::clone(&self.counted);
             let notify = self.notify.0 as isize;
             std::thread::spawn(move || {
-                let diff = worktree::count(&w);
+                let diff = w.as_ref().and_then(worktree::count);
+                let landed = land.as_deref().and_then(worktree::landed);
                 if let Ok(mut c) = counted.lock() {
-                    c.push((id, diff));
+                    c.push((id, diff, landed));
                 }
                 post(notify, WM_HORADRIC_COUNTED, 0);
             });
@@ -2481,12 +2502,16 @@ impl App {
             return;
         }
         if let Ok(mut r) = self.shared.registry.lock() {
-            for (id, diff) in counts {
+            for (id, diff, landed) in counts {
                 if let Some(rc) = self.recounts.get_mut(&id) {
                     rc.done();
                 }
                 if let Some(s) = r.get_mut(&id) {
                     s.diff = diff;
+                    // A worktree swept after its merge can no longer say.
+                    if let Some(landed) = landed {
+                        s.loot.landed = landed;
+                    }
                 }
             }
         }

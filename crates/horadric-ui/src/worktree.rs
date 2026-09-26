@@ -182,6 +182,22 @@ pub fn merge(main: &Path, branch: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Whether what `dir` has checked out is in what its main tree has
+/// checked out, so the work done there landed. None when git cannot say:
+/// no repository, a bare one, or the main tree on no branch. The main tree
+/// is where the shared `.git` is, which a linked worktree also knows.
+pub fn landed(dir: &Path) -> Option<bool> {
+    let common = git(
+        dir,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )
+    .ok()?;
+    let main = Path::new(common.trim()).parent()?;
+    let branch = checked_out(main)?;
+    let head = format!("refs/heads/{branch}");
+    Some(git(dir, &["merge-base", "--is-ancestor", "HEAD", &head]).is_ok())
+}
+
 /// The commit checked out in `dir`.
 pub fn head(dir: &Path) -> Option<String> {
     git(dir, &["rev-parse", "HEAD"])

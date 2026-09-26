@@ -10,6 +10,7 @@ pub mod diff;
 pub mod event;
 pub mod fleet;
 pub mod journal;
+pub mod rarity;
 pub mod registry;
 pub mod release;
 pub mod saved;

@@ -4,6 +4,7 @@
 //! state and drop the rest, so a new field upstream never breaks parsing.
 
 use serde::Deserialize;
+use serde_json::Value;
 
 use crate::title::Title;
 use crate::usage::Status;
@@ -41,6 +42,10 @@ pub struct HookEvent {
     /// Tool events only.
     #[serde(default)]
     pub tool_name: Option<String>,
+    /// Tool events only: what the tool was given, such as a shell's
+    /// `command`. Kept whole, since each tool gives its own shape.
+    #[serde(default)]
+    pub tool_input: Option<Value>,
     /// `Stop` only: the final assistant text of the turn.
     #[serde(default)]
     pub last_assistant_message: Option<String>,

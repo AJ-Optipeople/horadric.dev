@@ -11,6 +11,7 @@ use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 
+use crate::rarity::Loot;
 use crate::session::{Phase, Session};
 use crate::title::Title;
 use crate::usage::{Defaults, Usage};
@@ -175,6 +176,13 @@ pub struct SavedSession {
     /// The session's own git worktree, which a resume goes back into.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<Worktree>,
+    /// What it changed, tested and landed, see [`Session::loot`].
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub loot: Loot,
+}
+
+fn is_default(loot: &Loot) -> bool {
+    *loot == Loot::default()
 }
 
 impl SavedSession {
@@ -193,6 +201,7 @@ impl SavedSession {
             shell: s.shell,
             ssh: s.ssh.clone(),
             worktree: s.worktree.clone(),
+            loot: s.loot.clone(),
         }
     }
 
@@ -207,6 +216,7 @@ impl SavedSession {
         s.shell = self.shell;
         s.ssh = self.ssh.clone();
         s.worktree = self.worktree.clone();
+        s.loot = self.loot.clone();
         s.phase = Phase::Paused;
         s.since = now;
         s
@@ -284,6 +294,7 @@ mod tests {
             shell: false,
             ssh: None,
             worktree: None,
+            loot: Loot::default(),
         }
     }
 
