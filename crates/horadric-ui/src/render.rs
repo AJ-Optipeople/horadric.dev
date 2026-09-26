@@ -2103,7 +2103,7 @@ impl Painter<'_> {
         // the session is due a `/compact` or a fresh start.
         let crowded = context.filter(|&c| c >= 75.0);
         let crowded_w = 58.0;
-        let activity = s.activity(scene.now, TRACE_BARS);
+        let (activity, scrolled) = s.trace(scene.now, TRACE_BARS);
         let trace_w = TRACE_BARS as f32 * (TRACE_BAR_W + TRACE_GAP) - TRACE_GAP;
         let busy = activity.iter().any(|&a| a > 0.0);
         let gap = 8.0;
@@ -2146,6 +2146,7 @@ impl Painter<'_> {
             let base = bottom.y + bottom.h / 2.0 + TRACE_H / 2.0;
             self.trace(
                 &activity,
+                scrolled,
                 bottom.right() - trace_w,
                 base,
                 trace_c.fade(presence),
@@ -2191,10 +2192,14 @@ impl Painter<'_> {
 
     /// Bars of how busy a session was over the last minutes, oldest on the
     /// left, standing on `base`. A slice with nothing in it is a dot, so
-    /// quiet reads as quiet rather than as missing.
-    unsafe fn trace(&self, activity: &[f32], x: f32, base: f32, c: Color) {
+    /// quiet reads as quiet rather than as missing. The bars drift left as
+    /// the newest slice fills, `scrolled` of a bar, and the oldest fades
+    /// as it goes.
+    unsafe fn trace(&self, activity: &[f32], scrolled: f32, x: f32, base: f32, c: Color) {
+        let step = TRACE_BAR_W + TRACE_GAP;
         for (i, &a) in activity.iter().enumerate() {
-            let bx = x + i as f32 * (TRACE_BAR_W + TRACE_GAP);
+            let bx = x + (i as f32 - scrolled) * step;
+            let c = if i == 0 { c.fade(1.0 - scrolled) } else { c };
             let h = if a > 0.0 {
                 2.0 + a * (TRACE_H - 2.0)
             } else {

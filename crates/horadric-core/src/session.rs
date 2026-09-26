@@ -467,6 +467,34 @@ impl Session {
         counts.iter().map(|&c| (c as f32 / max).sqrt()).collect()
     }
 
+    /// Like [`Session::activity`], but in slices that stand still on the
+    /// clock rather than on `now`, so the trace scrolls instead of its
+    /// bars changing under the eye. Returns the slices, the newest being
+    /// the one `now` is in, and how far into it `now` is, 0 to 1.
+    pub fn trace(&self, now: SystemTime, buckets: usize) -> (Vec<f32>, f32) {
+        if buckets == 0 {
+            return (Vec::new(), 0.0);
+        }
+        let width = ACTIVITY_SPAN.as_secs_f64() / buckets as f64;
+        let at = |t: SystemTime| {
+            t.duration_since(SystemTime::UNIX_EPOCH)
+                .map_or(0.0, |d| d.as_secs_f64() / width)
+        };
+        let now_at = at(now);
+        let newest = now_at.floor();
+        let mut counts = vec![0u32; buckets];
+        for t in &self.activity {
+            let slice = at(*t).floor().min(newest);
+            let back = newest - slice;
+            if back < buckets as f64 {
+                counts[buckets - 1 - back as usize] += 1;
+            }
+        }
+        let max = counts.iter().copied().max().unwrap_or(0).max(1) as f32;
+        let bars = counts.iter().map(|&c| (c as f32 / max).sqrt()).collect();
+        (bars, (now_at - newest) as f32)
+    }
+
     fn apply_notification(&mut self, event: &HookEvent) -> Option<Phase> {
         let kind = event.notification_type.as_deref().unwrap_or("");
         let next = match kind {
@@ -916,6 +944,23 @@ mod tests {
             .iter()
             .all(|&v| v == 0.0));
         assert!(s.activity(now, 0).is_empty());
+    }
+
+    #[test]
+    fn the_trace_stands_still_on_the_clock_and_says_how_far_it_scrolled() {
+        let mut s = Session::new("t", "t", "C:/repo");
+        // 20 slices of the ten minute span are 30 s each.
+        let base = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        s.activity = vec![base + Duration::from_secs(5)];
+        let (bars, into) = s.trace(base + Duration::from_secs(15), 20);
+        assert_eq!(bars.len(), 20);
+        assert_eq!(bars[19], 1.0);
+        assert!((into - 0.5).abs() < 1e-3);
+        // A slice later the same event has moved one bar left, not jumped.
+        let (bars, into) = s.trace(base + Duration::from_secs(45), 20);
+        assert_eq!((bars[18], bars[19]), (1.0, 0.0));
+        assert!((into - 0.5).abs() < 1e-3);
+        assert_eq!(s.trace(base, 0), (Vec::new(), 0.0));
     }
 
     #[test]
