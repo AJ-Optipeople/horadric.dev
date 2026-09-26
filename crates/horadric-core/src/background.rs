@@ -66,6 +66,13 @@ pub fn tile_id(short: &str) -> String {
     format!("bg-{short}")
 }
 
+/// Whether a Horadric id is a background session's tile, for what knows
+/// only the id, such as a line of the journal.
+pub fn is_tile(id: &str) -> bool {
+    id.strip_prefix("bg-")
+        .is_some_and(|short| !short.is_empty())
+}
+
 /// When each conversation no tile holds was last asked about. Every plain
 /// `claude` on the machine posts its hooks to Horadric, untagged, and
 /// asking `claude agents` on each would start a process a hook.
@@ -136,6 +143,9 @@ mod tests {
         let list = parse(LIST);
         let s = list[0].session();
         assert_eq!(s.id, "bg-8e613b8c");
+        assert!(is_tile(&s.id));
+        assert!(!is_tile("fix-login"));
+        assert!(!is_tile("bg-"));
         assert_eq!(s.name, "fix login");
         assert_eq!(s.background.as_deref(), Some("8e613b8c"));
         assert_eq!(s.claude_session_id.as_deref(), Some("8e613b8c-7dcf"));

@@ -1162,17 +1162,26 @@ pub enum CatchupRow {
 }
 
 /// The geometry of the catch-up: a title and what it covers, a cross, then
-/// the rows given, as many as fit in the height it may have, and a last
-/// line saying how many more there are.
+/// the rows from `first` on, as many as fit in the height it may have, and
+/// a last line saying how many more there are.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CatchupLayout {
     pub size: (f32, f32),
     pub title: Rect,
     pub sub: Rect,
     pub close: Rect,
+    /// The rows placed, the first of them the row `first`.
     pub rows: Vec<CatchupRow>,
-    /// Where "and so many more" goes, when not every row fits.
+    pub first: usize,
+    /// Where "and so many more" goes, when not every row shows.
     pub more: Option<Rect>,
+}
+
+impl CatchupLayout {
+    /// The rows after the last one placed.
+    pub fn below(&self, total: usize) -> std::ops::Range<usize> {
+        (self.first + self.rows.len()).min(total)..total
+    }
 }
 
 pub const CATCHUP_W: f32 = 440.0;
@@ -1182,9 +1191,11 @@ const CATCHUP_LINE_H: f32 = 30.0;
 const CATCHUP_DETAIL_H: f32 = 18.0;
 const CATCHUP_AGE_W: f32 = 64.0;
 
-/// Lays out the catch-up with `rows`, at most `max_h` DIPs tall. A heading
-/// never stands last without a line under it.
-pub fn catchup(rows: &[CatchupKind], max_h: f32) -> CatchupLayout {
+/// Lays out the catch-up with `rows` from `first` on, at most `max_h` DIPs
+/// tall. A heading never stands last without a line under it. When every
+/// row fits it is as tall as they need; when not, it takes all of `max_h`,
+/// whatever `first` is, so scrolling never changes its size.
+pub fn catchup(rows: &[CatchupKind], max_h: f32, first: usize) -> CatchupLayout {
     let pad = CATCHUP_PAD;
     let full = CATCHUP_W - 2.0 * pad;
     let title = Rect::new(pad, 14.0, full - 30.0, 24.0);
@@ -1195,17 +1206,23 @@ pub fn catchup(rows: &[CatchupKind], max_h: f32) -> CatchupLayout {
         CatchupKind::Line { detail: false } => CATCHUP_LINE_H,
         CatchupKind::Line { detail: true } => CATCHUP_LINE_H + CATCHUP_DETAIL_H,
     };
+    let bottom = pad - 6.0;
     let top = sub.bottom() + 6.0;
-    let room = max_h - pad;
+    let room = max_h - bottom;
+    let first = first.min(rows.len());
     let mut y = top;
     let mut placed = Vec::new();
-    for (i, k) in rows.iter().enumerate() {
+    for (i, k) in rows.iter().enumerate().skip(first) {
         let mut need = height(k);
         if *k == CatchupKind::Heading {
             need += rows.get(i + 1).map_or(0.0, height);
         }
         let last = i + 1 == rows.len();
-        let more = if last { 0.0 } else { CATCHUP_LINE_H };
+        let more = if last && first == 0 {
+            0.0
+        } else {
+            CATCHUP_LINE_H
+        };
         if y + need + more > room {
             break;
         }
@@ -1233,19 +1250,45 @@ pub fn catchup(rows: &[CatchupKind], max_h: f32) -> CatchupLayout {
         });
         y += h;
     }
-    let more = (placed.len() < rows.len()).then(|| {
-        let r = Rect::new(pad + 22.0, y, full - 22.0, CATCHUP_LINE_H);
-        y += CATCHUP_LINE_H;
-        r
-    });
+    let all = first == 0 && placed.len() == rows.len();
+    let (h, more) = if all {
+        (y + bottom, None)
+    } else {
+        let h = max_h.max(y + CATCHUP_LINE_H + bottom);
+        let r = Rect::new(
+            pad + 22.0,
+            h - bottom - CATCHUP_LINE_H,
+            full - 22.0,
+            CATCHUP_LINE_H,
+        );
+        (h, Some(r))
+    };
     CatchupLayout {
-        size: (CATCHUP_W, y + pad - 6.0),
+        size: (CATCHUP_W, h),
         title,
         sub,
         close,
         rows: placed,
+        first,
         more,
     }
+}
+
+/// Where `notches` of the wheel take the catch-up's first row from
+/// `first`, a row a notch as the tasks tile scrolls, down while rows are
+/// left under the last one showing and up to the top.
+pub fn catchup_scroll(rows: &[CatchupKind], max_h: f32, first: usize, notches: i32) -> usize {
+    let mut first = first.min(rows.len());
+    for _ in 0..notches.unsigned_abs() {
+        if notches > 0 {
+            first = first.saturating_sub(1);
+        } else if catchup(rows, max_h, first).below(rows.len()).is_empty() {
+            break;
+        } else {
+            first += 1;
+        }
+    }
+    first
 }
 
 /// The row under a point, if it is a line.
@@ -2594,7 +2637,7 @@ mod tests {
     fn the_catchup_places_every_row_that_fits() {
         use CatchupKind::*;
         let rows = [Heading, Line { detail: true }, Line { detail: false }];
-        let l = catchup(&rows, 1000.0);
+        let l = catchup(&rows, 1000.0, 0);
         assert_eq!(l.rows.len(), 3);
         assert!(l.more.is_none());
         let bottoms: Vec<f32> = l
@@ -2616,7 +2659,7 @@ mod tests {
         use CatchupKind::*;
         let mut rows = vec![Heading];
         rows.extend([Line { detail: false }; 40]);
-        let l = catchup(&rows, 400.0);
+        let l = catchup(&rows, 400.0, 0);
         assert!(l.rows.len() < rows.len());
         assert!(l.more.is_some());
         assert!(l.size.1 <= 400.0);
@@ -2625,7 +2668,7 @@ mod tests {
     #[test]
     fn a_catchup_heading_never_stands_last_alone() {
         use CatchupKind::*;
-        let one = catchup(&[Heading, Line { detail: false }], 1000.0);
+        let one = catchup(&[Heading, Line { detail: false }], 1000.0, 0);
         let h = one.size.1;
         let rows = [
             Heading,
@@ -2634,8 +2677,48 @@ mod tests {
             Line { detail: false },
         ];
         // Room for the first project and the second's heading, not its line.
-        let l = catchup(&rows, h + CATCHUP_HEADING_H + CATCHUP_LINE_H + 4.0);
+        let l = catchup(&rows, h + CATCHUP_HEADING_H + CATCHUP_LINE_H + 4.0, 0);
         assert!(matches!(l.rows.last(), Some(CatchupRow::Line { .. })));
+    }
+
+    #[test]
+    fn a_scrolled_catchup_keeps_its_size_and_starts_at_its_row() {
+        use CatchupKind::*;
+        let mut rows = vec![Heading];
+        rows.extend([Line { detail: false }; 40]);
+        let top = catchup(&rows, 400.0, 0);
+        let down = catchup(&rows, 400.0, 5);
+        assert_eq!(top.size, down.size);
+        assert_eq!(down.first, 5);
+        assert_eq!(
+            top.rows.len(),
+            down.rows.len() + 1,
+            "no heading to take room"
+        );
+        assert_eq!(down.below(rows.len()).start, 5 + down.rows.len());
+        assert_eq!(top.more.unwrap().bottom(), down.more.unwrap().bottom());
+    }
+
+    #[test]
+    fn the_catchup_scrolls_a_row_a_notch_and_stops_at_either_end() {
+        use CatchupKind::*;
+        let mut rows = vec![Heading];
+        rows.extend([Line { detail: false }; 20]);
+        assert_eq!(catchup_scroll(&rows, 400.0, 0, 1), 0, "already at the top");
+        assert_eq!(catchup_scroll(&rows, 400.0, 0, -3), 3);
+        assert_eq!(catchup_scroll(&rows, 400.0, 3, 2), 1);
+        let end = catchup_scroll(&rows, 400.0, 0, -100);
+        let l = catchup(&rows, 400.0, end);
+        assert!(l.below(rows.len()).is_empty(), "the last row shows");
+        assert!(!catchup(&rows, 400.0, end - 1).below(rows.len()).is_empty());
+        assert!(l.more.is_some(), "still says what is above");
+    }
+
+    #[test]
+    fn a_catchup_that_fits_never_scrolls() {
+        use CatchupKind::*;
+        let rows = [Heading, Line { detail: false }];
+        assert_eq!(catchup_scroll(&rows, 1000.0, 0, -5), 0);
     }
 
     #[test]

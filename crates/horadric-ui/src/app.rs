@@ -4053,6 +4053,7 @@ impl App {
                 age: String::new(),
                 section: None,
                 session: String::new(),
+                background: false,
             });
         }
         let clock = catchup::clock(local_secs(), now, since);

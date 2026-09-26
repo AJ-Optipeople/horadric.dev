@@ -82,6 +82,8 @@ const TILE_TEXT_X: f32 = 56.0;
 const NAME_INSET: f32 = INNER_PAD;
 /// Between the edge of a key, screen or section and the text in it.
 const INNER_PAD: f32 = 14.0;
+/// The room a background session's mark takes after a catch-up line.
+const MARK_W: f32 = 18.0;
 /// The activity trace at the bottom right of a tile.
 const TRACE_BARS: usize = 20;
 const TRACE_BAR_W: f32 = 1.6;
@@ -422,6 +424,8 @@ pub struct CatchupLook<'a> {
     pub age: &'a str,
     /// The lamp's colour, None for a line that asks nothing of you.
     pub tone: Option<Color>,
+    /// A background session's line, marked after its text.
+    pub background: bool,
 }
 
 /// Everything one frame of a dialog needs.
@@ -1157,6 +1161,17 @@ impl Painter<'_> {
                         theme::TEXT
                     } else {
                         theme::TEXT_DIM.mix(theme::TEXT, 0.35)
+                    };
+                    let text = if look.background {
+                        let room = Rect::new(text.x, text.y, text.w - MARK_W, text.h);
+                        // The mark goes right after the words, not at the
+                        // far end of the room they may have.
+                        let fits = self.measure(gpu, &gpu.name, look.text).min(room.w);
+                        let mark = Rect::new(text.x + fits + 2.0, text.y, MARK_W, text.h);
+                        self.icon(&gpu.icon_small, theme::LEGEND, theme::BACKGROUND_ICON, mark);
+                        room
+                    } else {
+                        text
                     };
                     self.text(&gpu.name, ink, look.text, text);
                     if let Some(d) = detail {

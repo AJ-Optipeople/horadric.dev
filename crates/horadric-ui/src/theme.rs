@@ -157,6 +157,10 @@ pub const SHELL_ICON: char = '\u{E756}';
 /// An SSH terminal's tile: a terminal on another machine.
 pub const SSH_ICON: char = '\u{E968}';
 
+/// A background session's mark: Claude Code's daemon holds it, not a
+/// terminal of ours.
+pub const BACKGROUND_ICON: char = '\u{E753}';
+
 /// The Segoe Fluent Icons glyph for a session: the tool it is in while it
 /// works, otherwise what its phase is.
 /// The glyph on a session's tile: what its agent is doing, or what kind

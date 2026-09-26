@@ -1465,7 +1465,7 @@ went done with its reply; a click attached in a pane, which showed the
 conversation; ending the attach closed the pane and kept the tile;
 `claude stop` ended the tile. The tile menu's entries were not clicked,
 the installed column stood over the dev one. A background tile looks like
-any other; a mark of its own would help.
+any other; its catch-up line has a mark of its own (see below).
 
 ### Identify
 
@@ -1589,8 +1589,18 @@ after 15 minutes or an unlock, clicking a line, and the tray item.
   the line had the two and the panel said "2 commits: Test the gizmo ·
   Add the gizmo". Commits on main meanwhile were rightly not its.
 
-Not done yet: a mark of its own for a background session's lines, and
-scrolling past "and N more".
+- **A background session's line** carries a small cloud after its words
+  (`theme::BACKGROUND_ICON`), known by its `bg-` id
+  (`background::is_tile`), since Claude Code's daemon holds it and a click
+  attaches rather than shows a pane of ours.
+- **The wheel scrolls** a panel that did not fit, a row a notch as the
+  tasks tile does (`layout::catchup_scroll`, tested): down while rows are
+  left under the last one showing, up to the top. A panel that does not
+  fit takes all the height it may have, so scrolling never resizes it.
+  The last line counts what is under it, and at the bottom what is
+  above. Checked with a dev instance and a journal of 39 lines: the cloud
+  on both background lines, ten notches down stopped with the last line
+  showing and "1 more above", four up came back to the top.
 
 ## Next
 

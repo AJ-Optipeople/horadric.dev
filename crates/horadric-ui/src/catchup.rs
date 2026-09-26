@@ -4,14 +4,16 @@
 //!
 //! It takes the focus like a setting's list, so Esc and a click anywhere
 //! else dismiss it, and whatever had the focus gets it back. A click on a
-//! line shows that session the way a tile click does. Opening it marks
-//! nothing read: identifying is still looking.
+//! line shows that session the way a tile click does, and the wheel
+//! scrolls what did not fit. Opening it marks nothing read: identifying is
+//! still looking.
 
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::rc::Rc;
 use std::time::Duration;
 
+use horadric_core::background;
 use horadric_core::journal::{Group, Section};
 use horadric_core::usage::format_until;
 use windows::core::{w, Result, PCWSTR};
@@ -21,7 +23,7 @@ use windows::Win32::Graphics::Dwm::{
     DWM_WINDOW_CORNER_PREFERENCE,
 };
 use windows::Win32::Graphics::Gdi::{
-    GetMonitorInfoW, InvalidateRect, MonitorFromPoint, ValidateRect, MONITORINFO,
+    GetMonitorInfoW, InvalidateRect, MonitorFromPoint, ScreenToClient, ValidateRect, MONITORINFO,
     MONITOR_DEFAULTTOPRIMARY,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -34,7 +36,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     IsWindow, KillTimer, LoadCursorW, RegisterClassW, SetForegroundWindow, SetTimer,
     SetWindowLongPtrW, ShowWindow, CREATESTRUCTW, GWLP_USERDATA, IDC_ARROW, SW_HIDE, SW_SHOW,
     WA_INACTIVE, WM_ACTIVATE, WM_CAPTURECHANGED, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_NCCREATE, WM_NCDESTROY, WM_PAINT,
+    WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY, WM_PAINT,
     WM_RBUTTONDOWN, WM_TIMER, WNDCLASSW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
@@ -126,6 +128,8 @@ pub struct Row {
     pub section: Option<Section>,
     /// The session a click shows, empty for none.
     pub session: String,
+    /// The session is a background one, which no terminal of ours holds.
+    pub background: bool,
 }
 
 /// The rows for `groups`: each project's name, then its lines.
@@ -143,6 +147,7 @@ pub fn rows(groups: &[Group], now: u64, name: impl Fn(&str) -> String) -> Vec<Ro
             age: String::new(),
             section: None,
             session: String::new(),
+            background: false,
         });
         for l in &g.lines {
             out.push(Row {
@@ -154,10 +159,21 @@ pub fn rows(groups: &[Group], now: u64, name: impl Fn(&str) -> String) -> Vec<Ro
                 age: horadric_core::format_age(Duration::from_secs(now.saturating_sub(l.at))),
                 section: Some(l.section),
                 session: l.session.clone(),
+                background: background::is_tile(&l.session),
             });
         }
     }
     out
+}
+
+/// What the last line says about the lines that do not show: how many
+/// are under it while any are, else how many are above.
+pub fn more(above: usize, below: usize) -> String {
+    if below > 0 || above == 0 {
+        format!("and {below} more")
+    } else {
+        format!("{above} more above")
+    }
 }
 
 fn tone(section: Option<Section>) -> Option<Color> {
@@ -188,11 +204,14 @@ pub struct Catchup {
     pub hwnd: HWND,
     shared: Rc<Shared>,
     target: RefCell<Option<Target>>,
-    layout: CatchupLayout,
+    layout: RefCell<CatchupLayout>,
+    /// The height it may have, in DIPs, which a scroll lays out in again.
+    max_h: f32,
+    kinds: Vec<CatchupKind>,
     scale: f32,
     sub: String,
     rows: Vec<Row>,
-    more: String,
+    more: RefCell<String>,
     hot: Cell<Option<usize>>,
     close_hot: Cell<bool>,
     pressed: Cell<Option<usize>>,
@@ -215,11 +234,8 @@ impl Catchup {
         let work = work_area(monitor);
         let max_h = (work[3] - work[1]) as f32 / s - 2.0 * MARGIN;
         let kinds: Vec<CatchupKind> = rows.iter().map(|r| r.kind).collect();
-        let layout = layout::catchup(&kinds, max_h);
-        let hidden = rows[layout.rows.len()..]
-            .iter()
-            .filter(|r| r.kind != CatchupKind::Heading)
-            .count();
+        let layout = layout::catchup(&kinds, max_h, 0);
+        let more = more_of(&rows, &layout);
         let size = (
             (layout.size.0 * s).round() as i32,
             (layout.size.1 * s).round() as i32,
@@ -230,11 +246,13 @@ impl Catchup {
             hwnd: HWND::default(),
             shared,
             target: RefCell::new(None),
-            layout,
+            layout: RefCell::new(layout),
+            max_h,
+            kinds,
             scale: s,
             sub,
             rows,
-            more: format!("and {hidden} more"),
+            more: RefCell::new(more),
             hot: Cell::new(None),
             close_hot: Cell::new(false),
             pressed: Cell::new(None),
@@ -295,10 +313,8 @@ impl Catchup {
         let mut slot = self.target.borrow_mut();
         if slot.is_none() {
             let s = self.scale;
-            let (w, h) = (
-                (self.layout.size.0 * s).round() as u32,
-                (self.layout.size.1 * s).round() as u32,
-            );
+            let size = self.layout.borrow().size;
+            let (w, h) = ((size.0 * s).round() as u32, (size.1 * s).round() as u32);
             match Target::new(&self.shared.gpu, self.hwnd, w, h, (s * 96.0).round() as u32) {
                 Ok(t) => *slot = Some(t),
                 Err(e) => {
@@ -307,22 +323,24 @@ impl Catchup {
                 }
             }
         }
-        let looks: Vec<CatchupLook> = self
-            .rows
+        let layout = self.layout.borrow();
+        let more = self.more.borrow();
+        let looks: Vec<CatchupLook> = self.rows[layout.first..]
             .iter()
             .map(|r| CatchupLook {
                 text: &r.text,
                 detail: &r.detail,
                 age: &r.age,
                 tone: tone(r.section),
+                background: r.background,
             })
             .collect();
         let scene = CatchupScene {
-            layout: &self.layout,
+            layout: &layout,
             title: TITLE,
             sub: &self.sub,
             rows: &looks,
-            more: &self.more,
+            more: &more,
             hot: self.hot.get(),
             close_hot: self.close_hot.get(),
         };
@@ -341,21 +359,49 @@ impl Catchup {
         (x, y)
     }
 
-    /// The line under a point, only one a click can show.
+    /// The line under a point, as an index into all the rows, only one a
+    /// click can show.
     fn hit(&self, lparam: LPARAM) -> Option<usize> {
         let (x, y) = self.point(lparam);
-        layout::catchup_hit(&self.layout, x, y)
+        let l = self.layout.borrow();
+        layout::catchup_hit(&l, x, y)
+            .map(|i| l.first + i)
             .filter(|&i| self.rows.get(i).is_some_and(|r| !r.session.is_empty()))
     }
 
     fn on_close(&self, lparam: LPARAM) -> bool {
         let (x, y) = self.point(lparam);
-        self.layout.close.contains(x, y)
+        self.layout.borrow().close.contains(x, y)
+    }
+
+    /// The wheel moves the rows a notch at a time, the size staying.
+    fn wheel(&self, wparam: WPARAM, lparam: LPARAM) {
+        let notches = ((wparam.0 >> 16) & 0xffff) as i16 as i32 / 120;
+        let first = self.layout.borrow().first;
+        let to = layout::catchup_scroll(&self.kinds, self.max_h, first, notches);
+        if to == first {
+            return;
+        }
+        let l = layout::catchup(&self.kinds, self.max_h, to);
+        *self.more.borrow_mut() = more_of(&self.rows, &l);
+        *self.layout.borrow_mut() = l;
+        self.pressed.set(None);
+        // Screen coordinates, unlike every other mouse message.
+        let mut p = POINT {
+            x: (lparam.0 & 0xffff) as i16 as i32,
+            y: ((lparam.0 >> 16) & 0xffff) as i16 as i32,
+        };
+        unsafe {
+            let _ = ScreenToClient(self.hwnd, &mut p);
+        }
+        let client = LPARAM(((p.y as u16 as isize) << 16) | p.x as u16 as isize);
+        self.hot.set(self.hit(client));
+        self.invalidate();
     }
 
     fn inside(&self, lparam: LPARAM) -> bool {
         let (x, y) = self.point(lparam);
-        let (w, h) = self.layout.size;
+        let (w, h) = self.layout.borrow().size;
         x >= 0.0 && y >= 0.0 && x < w && y < h
     }
 
@@ -429,6 +475,10 @@ impl Catchup {
                 }
                 Some(LRESULT(0))
             }
+            WM_MOUSEWHEEL => {
+                self.wheel(wparam, lparam);
+                Some(LRESULT(0))
+            }
             WM_KEYDOWN => {
                 if wparam.0 as u16 == VK_ESCAPE.0 {
                     self.close(None);
@@ -464,6 +514,19 @@ impl Catchup {
             _ => None,
         }
     }
+}
+
+/// What the last line says for `layout` over `rows`, counting lines only.
+fn more_of(rows: &[Row], layout: &CatchupLayout) -> String {
+    let lines = |rows: &[Row]| {
+        rows.iter()
+            .filter(|r| r.kind != CatchupKind::Heading)
+            .count()
+    };
+    more(
+        lines(&rows[..layout.first.min(rows.len())]),
+        lines(&rows[layout.below(rows.len())]),
+    )
 }
 
 /// The work area of `monitor`, as left, top, right, bottom.
@@ -576,6 +639,31 @@ mod tests {
         assert_eq!(rows[3].text, "Account");
         assert_eq!(rows[1].age, "1 min");
         assert_eq!(rows[2].session, "b");
+        assert!(!rows[2].background);
+    }
+
+    #[test]
+    fn a_background_session_line_is_marked() {
+        let groups = [Group {
+            project: "c:/code/app".into(),
+            lines: vec![Line {
+                section: Section::Unread,
+                at: 40,
+                session: "bg-8e613b8c".to_string(),
+                text: "fix login".to_string(),
+                detail: String::new(),
+            }],
+        }];
+        let rows = rows(&groups, 100, |k| k.to_string());
+        assert!(rows[1].background);
+        assert!(!rows[0].background, "not the heading");
+    }
+
+    #[test]
+    fn the_last_line_counts_what_is_under_it_then_what_is_above() {
+        assert_eq!(more(0, 4), "and 4 more");
+        assert_eq!(more(3, 4), "and 4 more");
+        assert_eq!(more(7, 0), "7 more above");
     }
 
     #[test]
