@@ -1910,8 +1910,19 @@ reviewer read its work and tells it to answer, then merges its branch.
   paused); a rune told to the session is done when a turn that ended after
   the telling ends; a review is answered once the reviewer's turn ends.
   The session ending, the reviewer ending first, a reviewer that cannot
-  start or a merge that fails stops the runeword with a notification
-  naming the rune. The last rune done says "<name> is complete".
+  start, a merge that fails or the human taking over stops the runeword
+  with a notification naming the rune.
+- **The human taking over stops it.** A turn cut short (Esc, or No to a
+  permission) sends no `Stop`, so the next turn to end is one the human
+  asked for. The runeword notes when the told prompt went in, and a
+  prompt after it, the human's, stops it: "you took over from it". It
+  does not wait and count the human's turn as the rune, which would take
+  "test" as done and merge untested work, and it does not tell the rune
+  again, over the top of whatever the human cut it short to do. The
+  human gives it again when ready. A turn cut short and never followed
+  by a prompt leaves the runeword waiting, gold on the tile, with Stop
+  in the menu. After a restart the app has heard no prompt yet, so a
+  prompt it missed while down goes unnoticed. The last rune done says "<name> is complete".
 - **Telling** is the runner's nudge: the line typed to the session and its
   Enter 400 ms after, so the agent takes it as typed. The app looks once a
   second, in the runner's tick.
@@ -1965,8 +1976,9 @@ notifications said "Cannot merge howdy" with git's `CONFLICT` line and
   reads the review, since the file is outside its worktree. The reviewer
   did not ask to write it only because it started in auto mode.
 - A told rune whose turn the human cuts short (No to a permission, or
-  Esc) sends no `Stop`, so the runeword waits and counts the human's next
-  finished turn as the rune done.
+  Esc) sends no `Stop`, so the runeword waited and counted the human's
+  next finished turn as the rune done. Now the human's prompt stops it,
+  see above.
 - A `state.json` that does not parse (a said rune written by hand as a
   bare string instead of `{"say": ...}`) lost every session, and the
   next save overwrote it. Now the file is set aside and only that

@@ -77,7 +77,12 @@ pub enum Step {
     /// Waiting for the session to be at rest, to cast the rune.
     Due,
     /// Told the session at `at`; the rune is done when that turn ends.
-    Told { at: SystemTime },
+    /// `heard` is when its prompt went in, so a later one is the human's.
+    Told {
+        at: SystemTime,
+        #[serde(default)]
+        heard: Option<SystemTime>,
+    },
     /// A reviewer started at `at` writes its review to `file`.
     Reviewing {
         reviewer: String,
@@ -189,6 +194,8 @@ pub struct Seen {
     pub phase: Phase,
     /// When its phase began.
     pub since: SystemTime,
+    /// When its last prompt went in, if one did since the app started.
+    pub prompted: Option<SystemTime>,
 }
 
 impl Seen {
@@ -205,6 +212,8 @@ pub enum Act {
     Wait,
     /// Cast this rune now.
     Cast(Rune),
+    /// The told prompt went in at this time.
+    Heard(SystemTime),
     /// The rune is done: on to the next.
     Next,
     /// The review is written: tell the session to answer it.
@@ -233,7 +242,19 @@ pub fn act(word: &Runeword, session: &Seen, reviewer: Option<&Seen>) -> Act {
             }
             Some(_) => Act::Wait,
         },
-        Step::Told { at } if session.finished_after(*at) => Act::Next,
+        // A turn the human cuts short (Esc, or No to a permission) sends
+        // no Stop, so the next turn to end would be one the human asked
+        // for. A prompt after the told one says the human took over, and
+        // the runeword stops rather than count that turn as the rune or
+        // tell the rune again over what the human is doing.
+        Step::Told { heard: Some(h), .. } if session.prompted.is_some_and(|p| p > *h) => {
+            Act::Stop("you took over from it".into())
+        }
+        Step::Told { at, .. } if session.finished_after(*at) => Act::Next,
+        Step::Told { at, heard: None } => match session.prompted {
+            Some(p) if p > *at => Act::Heard(p),
+            _ => Act::Wait,
+        },
         Step::Told { .. } => Act::Wait,
         Step::Reviewing { at, .. } => match reviewer {
             None => Act::Stop("the reviewer ended before it wrote its review".into()),
@@ -286,6 +307,7 @@ mod tests {
         Seen {
             phase,
             since: t(since),
+            prompted: None,
         }
     }
 
@@ -367,11 +389,67 @@ mod tests {
     #[test]
     fn a_told_rune_is_done_when_a_later_turn_ends() {
         let mut w = word(&[Rune::Test, Rune::Merge]);
-        w.step = Step::Told { at: t(10) };
+        w.step = Step::Told {
+            at: t(10),
+            heard: None,
+        };
         // The turn it was told in has not ended yet.
         assert_eq!(act(&w, &seen(Phase::Done, 5), None), Act::Wait);
         assert_eq!(act(&w, &seen(Phase::Working, 11), None), Act::Wait);
         assert_eq!(act(&w, &seen(Phase::Done, 20), None), Act::Next);
+    }
+
+    #[test]
+    fn a_prompt_after_the_told_one_stops_the_runeword() {
+        let mut w = word(&[Rune::Test, Rune::Merge]);
+        w.step = Step::Told {
+            at: t(10),
+            heard: None,
+        };
+        let working = |prompted: u64| Seen {
+            prompted: Some(t(prompted)),
+            ..seen(Phase::Working, prompted)
+        };
+        // A prompt from before the telling is not the told one.
+        assert_eq!(act(&w, &working(8), None), Act::Wait);
+        assert_eq!(act(&w, &working(11), None), Act::Heard(t(11)));
+        w.step = Step::Told {
+            at: t(10),
+            heard: Some(t(11)),
+        };
+        assert_eq!(act(&w, &working(11), None), Act::Wait);
+        // The human cut the turn short and asked for something else.
+        assert_eq!(
+            act(&w, &working(40), None),
+            Act::Stop("you took over from it".into())
+        );
+        // Even once that turn has ended.
+        let done = Seen {
+            prompted: Some(t(40)),
+            ..seen(Phase::Done, 50)
+        };
+        assert!(matches!(act(&w, &done, None), Act::Stop(_)));
+        // The told turn ending is the rune done, heard or not.
+        let own = Seen {
+            prompted: Some(t(11)),
+            ..seen(Phase::Done, 30)
+        };
+        assert_eq!(act(&w, &own, None), Act::Next);
+    }
+
+    #[test]
+    fn a_told_step_saved_before_heard_existed_still_reads() {
+        let w: Step = serde_json::from_str(
+            r#"{"told":{"at":{"secs_since_epoch":10,"nanos_since_epoch":0}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            w,
+            Step::Told {
+                at: t(10),
+                heard: None
+            }
+        );
     }
 
     #[test]

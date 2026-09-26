@@ -19,6 +19,7 @@ fn seen(s: &Session) -> Seen {
     Seen {
         phase: s.phase.clone(),
         since: s.since,
+        prompted: s.prompted_at,
     }
 }
 
@@ -94,6 +95,11 @@ impl App {
             match act {
                 Act::Wait => {}
                 Act::Cast(rune) => self.cast(&s, &w, rune),
+                Act::Heard(p) => self.change_runeword(&s.id, |w| {
+                    if let Step::Told { heard, .. } = &mut w.step {
+                        *heard = Some(p);
+                    }
+                }),
                 Act::Next => self.change_runeword(&s.id, Runeword::advance),
                 Act::Answer => {
                     let Step::Reviewing { reviewer, file, .. } = &w.step else {
@@ -104,6 +110,7 @@ impl App {
                         self.change_runeword(&s.id, |w| {
                             w.step = Step::Told {
                                 at: SystemTime::now(),
+                                heard: None,
                             }
                         });
                         // Its review is in the file, which is all it was for.
@@ -132,6 +139,7 @@ impl App {
             app.change_runeword(&s.id, |w| {
                 w.step = Step::Told {
                     at: SystemTime::now(),
+                    heard: None,
                 }
             })
         };
