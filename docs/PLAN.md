@@ -995,6 +995,22 @@ and a terminal is a screen set into the panel.
   the background, and panes fade in when the stage switches project.
   Windows' animation setting (`SPI_GETCLIENTAREAANIMATION`) off holds all of
   it still.
+- **Nothing jumps** (`glide.rs`, pure and tested; `appear.rs`). Asked for
+  on 2026-09-26 as the small niceties that make the app feel good to use.
+  A cluster glides to its place in the columns: let go of after a drag,
+  pushed down by one above that grew, turned by the wheel. Its first
+  place, one from off screen and a screen change still jump. On the stage
+  a new session's pane fades in, and the others glide to their new cells,
+  as do swapped and zoomed panes; a pane takes its new size at once, since
+  a terminal resized every frame redraws its agent every frame, and an
+  edge dragged by hand places them at once. A glide stops when something
+  else moves the window, so a drag takes hold of a gliding cluster. Menus
+  fade in over 90 ms, dialogs and the picker over 160 ms while rising 8
+  DIPs into place, by `WS_EX_LAYERED` alpha as the toasts do. Checked on
+  screen with a dev instance: the clusters below a growing one, a
+  project menu, the End sessions dialog, and panes of five `cmd.exe`
+  sessions travelling to their cells (logged, since the stage was behind
+  the installed one).
 - **Type.** Project names in Segoe UI Variable Display, session names
   semibold, ages with tabular digits so they do not shuffle each second,
   FILES and RECENT letter spaced like legends printed on the plate.
