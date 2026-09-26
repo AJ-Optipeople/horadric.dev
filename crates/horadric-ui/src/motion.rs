@@ -24,6 +24,9 @@ pub const FLIP: Duration = Duration::from_millis(280);
 pub const TASK_DONE: Duration = Duration::from_millis(900);
 /// Of [`TASK_DONE`], how much the strike takes before the row folds.
 pub const STRIKE_SHARE: f32 = 0.6;
+/// A light flying from a task's row to the tile of the session that took
+/// it.
+pub const HANDOFF: Duration = Duration::from_millis(700);
 /// Hover fades in and out this fast. Fast enough to feel instant, slow
 /// enough to not flicker as the cursor crosses a column of tiles.
 pub const HOVER: Duration = Duration::from_millis(120);

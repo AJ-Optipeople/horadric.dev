@@ -124,6 +124,8 @@ pub struct Cluster {
     finishing: RefCell<anim::Finishing>,
     /// A finished row has folded away since the last layout.
     refit_due: Cell<bool>,
+    /// Lights flying from a task's row to the session that took it.
+    handoffs: RefCell<anim::Handoffs>,
     /// Tiles whose sessions have gone, fading out where they were.
     leaving: RefCell<anim::Leaving<(layout::Rect, Session)>>,
     /// The frame interval the animation timer runs at, if it runs.
@@ -200,6 +202,8 @@ struct Item {
     state: RowState,
     /// Done a moment ago and on its way out of the tile, this far.
     finish: Option<f32>,
+    /// The session that has it.
+    holder: Option<String>,
 }
 
 struct Drag {
@@ -278,6 +282,7 @@ impl Cluster {
             tiles: RefCell::new(anim::Tiles::default()),
             leaving: RefCell::new(anim::Leaving::default()),
             finishing: RefCell::new(anim::Finishing::default()),
+            handoffs: RefCell::new(anim::Handoffs::default()),
             refit_due: Cell::new(false),
             frames: Cell::new(None),
             dirty: Cell::new(true),
@@ -459,6 +464,7 @@ impl Cluster {
                     title: t.title.clone(),
                     state: board::row_state(t, phase(t).as_ref()),
                     finish: None,
+                    holder: t.holder.clone(),
                 }
             })
             .collect();
@@ -482,6 +488,7 @@ impl Cluster {
                 title,
                 state: RowState::Open,
                 finish: Some(p),
+                holder: None,
             };
             items.insert(at.min(items.len()), item);
         }
@@ -750,6 +757,41 @@ impl Cluster {
         let finishing = items
             .as_ref()
             .is_some_and(|items| items.iter().any(|i| i.finish.is_some()));
+        // Where each held item's row is, or the tile's header for one
+        // scrolled out of view.
+        let holders: Vec<(String, (f32, f32))> = match (&items, &layout.tasks) {
+            (Some(items), Some(tl)) => {
+                let scroll = self.tasks.borrow().scroll;
+                items
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, it)| {
+                        let r = i
+                            .checked_sub(scroll)
+                            .and_then(|k| tl.rows.get(k))
+                            .unwrap_or(&tl.header);
+                        let at = (r.x + 16.0, r.y + r.h / 2.0);
+                        it.holder.clone().map(|h| (h, at))
+                    })
+                    .collect()
+            }
+            _ => Vec::new(),
+        };
+        let ids: Vec<&str> = refs.iter().map(|s| s.id.as_str()).collect();
+        let flights: Vec<((f32, f32), (f32, f32), f32)> = self
+            .handoffs
+            .borrow_mut()
+            .step(now, &ids, &holders)
+            .into_iter()
+            .filter(|_| ambient)
+            .filter_map(|(id, from, p)| {
+                let i = ids.iter().position(|t| *t == id)?;
+                let r = layout.tiles.get(i)?;
+                let y = looks.get(i).map_or(r.y, |l| l.y);
+                Some((from, (r.x + 14.0, y + r.h / 2.0), p))
+            })
+            .collect();
+        let finishing = finishing || !flights.is_empty();
         let rebuild = self.dirty.replace(false) || moving || !ghosts.is_empty() || finishing;
         let scene = Scene {
             layout: &layout,
@@ -758,6 +800,7 @@ impl Cluster {
             sessions: &refs,
             looks: &looks,
             ghosts: &ghosts,
+            flights: &flights,
             held,
             on_stage,
             selected,

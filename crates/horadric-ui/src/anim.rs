@@ -348,6 +348,58 @@ impl Finishing {
     }
 }
 
+/// Lights flying from a task's row to the tile of the session that just
+/// took it, so you see which new session is doing which item.
+#[derive(Default)]
+pub struct Handoffs {
+    born: HashMap<String, Instant>,
+    flown: std::collections::HashSet<String>,
+    flights: Vec<(String, (f32, f32), Instant)>,
+    started: bool,
+}
+
+/// A session holding an item this long after its tile appeared took an
+/// item already there, rather than being started for it.
+const HANDOFF_YOUNG: Duration = Duration::from_secs(3);
+
+impl Handoffs {
+    /// Takes the tiles shown now and the sessions holding an item, each
+    /// with where its row is. Returns the lights in flight: to which tile,
+    /// from where, and how far along, 0 to 1.
+    pub fn step(
+        &mut self,
+        now: Instant,
+        tiles: &[&str],
+        holders: &[(String, (f32, f32))],
+    ) -> Vec<(String, (f32, f32), f32)> {
+        let first = !self.started;
+        self.started = true;
+        self.born.retain(|id, _| tiles.contains(&id.as_str()));
+        for id in tiles {
+            let at = if first { now - HANDOFF_YOUNG } else { now };
+            self.born.entry(id.to_string()).or_insert(at);
+        }
+        for (id, from) in holders {
+            let young = self
+                .born
+                .get(id)
+                .is_some_and(|b| now.duration_since(*b) < HANDOFF_YOUNG);
+            if young && self.flown.insert(id.clone()) {
+                self.flights.push((id.clone(), *from, now));
+            }
+        }
+        self.flights
+            .retain(|(_, _, at)| now.duration_since(*at) < motion::HANDOFF);
+        self.flights
+            .iter()
+            .map(|(id, from, at)| {
+                let p = motion::progress(now.duration_since(*at), motion::HANDOFF);
+                (id.clone(), *from, p)
+            })
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -591,6 +643,36 @@ mod tests {
         f.step(now, vec!["a".into(), "b".into()], |_| false);
         let (going, _) = f.step(now + ms(16), vec!["a".into()], |_| false);
         assert!(going.is_empty());
+    }
+
+    #[test]
+    fn a_new_session_taking_an_item_gets_a_light_from_its_row() {
+        let mut h = Handoffs::default();
+        let now = Instant::now();
+        let row = vec![("s2".to_string(), (10.0, 300.0))];
+        assert!(h.step(now, &["s1"], &[]).is_empty());
+        // Its tile first, then the list says it holds the item.
+        assert!(h.step(now + ms(16), &["s1", "s2"], &[]).is_empty());
+        let f = h.step(now + ms(500), &["s1", "s2"], &row);
+        assert_eq!(f, vec![("s2".to_string(), (10.0, 300.0), 0.0)]);
+        // Once only.
+        let later = now + ms(500) + motion::HANDOFF;
+        assert!(h.step(later, &["s1", "s2"], &row).is_empty());
+        assert!(h.step(later + ms(16), &["s1", "s2"], &row).is_empty());
+    }
+
+    #[test]
+    fn a_session_there_before_gets_no_light() {
+        let mut h = Handoffs::default();
+        let now = Instant::now();
+        let row = vec![("s1".to_string(), (0.0, 0.0))];
+        assert!(h.step(now, &["s1"], &row).is_empty(), "on the first frame");
+        let mut h = Handoffs::default();
+        h.step(now, &[], &[]);
+        h.step(now + ms(16), &["s1"], &[]);
+        assert!(h
+            .step(now + HANDOFF_YOUNG + ms(20), &["s1"], &row)
+            .is_empty());
     }
 
     #[test]

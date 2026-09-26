@@ -239,6 +239,9 @@ pub struct Scene<'a> {
     /// Tiles whose sessions have gone: where each was, what it showed,
     /// and how far through leaving it is.
     pub ghosts: &'a [(Rect, Session, f32)],
+    /// Lights flying from a task's row to the new tile that took it: from,
+    /// to, and how far along.
+    pub flights: &'a [((f32, f32), (f32, f32), f32)],
     /// The tile being carried to a new place, drawn over the others.
     pub held: Option<usize>,
     /// This project is the one the stage shows.
@@ -727,6 +730,7 @@ impl Painter<'_> {
             }
         }
         self.beams(scene);
+        self.flights(scene);
         if let Some(add) = &scene.layout.add {
             self.add(gpu, m, add, scene.button(Hit::Add), '\u{E710}');
         }
@@ -1348,6 +1352,33 @@ impl Painter<'_> {
             }
             let white = Color::rgb(0xFFFFFF);
             self.glow_dot(x, base, 16.0, c.mix(white, 0.3), 0.6 * strength);
+        }
+    }
+
+    /// A light leaving a task's row for the lamp of the session that took
+    /// it, a short tail behind it, flaring as it lands.
+    unsafe fn flights(&self, scene: &Scene) {
+        let c = theme::WORKING;
+        let white = Color::rgb(0xFFFFFF);
+        for &((fx, fy), (tx, ty), p) in scene.flights {
+            let at = |p: f32| {
+                let k = motion::ease_in_out(p.clamp(0.0, 1.0));
+                // A little arc out to the right, so it reads as thrown.
+                let bow = (std::f32::consts::PI * k).sin() * 24.0;
+                (fx + (tx - fx) * k + bow, fy + (ty - fy) * k)
+            };
+            for tail in (1..6).rev() {
+                let (x, y) = at(p - tail as f32 * 0.035);
+                let fade = 1.0 - tail as f32 / 6.0;
+                self.glow_dot(x, y, 5.0, c, 0.5 * fade);
+            }
+            let (x, y) = at(p);
+            self.glow_dot(x, y, 9.0, c.mix(white, 0.3), 0.9);
+            self.glow_dot(x, y, 2.0, white, 1.0);
+            if p > 0.8 {
+                let flare = 1.0 - (p - 0.8) / 0.2;
+                self.glow_dot(tx, ty, 22.0, c, 0.6 * flare);
+            }
         }
     }
 
