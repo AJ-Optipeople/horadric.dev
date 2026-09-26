@@ -680,6 +680,11 @@ impl Cluster {
                     hot: is_held || (pressed.is_none() && hot == Hit::Tile(i)),
                     held: is_held,
                     icon: theme::tile_icon(s),
+                    context: s
+                        .status
+                        .as_ref()
+                        .and_then(|st| st.context)
+                        .map(|c| c / 100.0),
                 }
             })
             .collect();

@@ -16,6 +16,8 @@ use crate::theme;
 
 /// How fast a tile slides to a new place: half the way every this long.
 const SLIDE: Duration = Duration::from_millis(60);
+/// How fast a context bar finds a new level: half the way every this long.
+const FILL: Duration = Duration::from_millis(150);
 /// How far below its place a new tile starts, in DIPs.
 const RISE: f32 = 10.0;
 
@@ -30,6 +32,8 @@ pub struct TileIn<'a> {
     pub held: bool,
     /// The glyph its tile shows, for turning it over when it changes.
     pub icon: char,
+    /// How full its context is, 0 to 1, when its status line said.
+    pub context: Option<f32>,
 }
 
 /// How one tile draws this frame.
@@ -55,6 +59,11 @@ pub struct Look {
     pub flip: f32,
     /// The icon it is turning over from.
     pub was_icon: char,
+    /// How full its context bar stands, rising and falling to the level
+    /// the status line gave like a liquid finding its level.
+    pub context: f32,
+    /// The level it is on its way to.
+    pub context_to: f32,
 }
 
 /// How a phase stands a key, from `theme`: how far off the plate, how
@@ -95,6 +104,7 @@ impl Look {
             || self.arrival > 0.0
             || self.settle > 0.0
             || self.flip > 0.0
+            || self.context != self.context_to
             || (self.hover > 0.0 && self.hover < 1.0)
             || self.y != y
     }
@@ -111,6 +121,8 @@ impl Look {
             was: Stance::of(&Phase::Idle),
             flip: 0.0,
             was_icon: ' ',
+            context: 0.0,
+            context_to: 0.0,
         }
     }
 }
@@ -121,6 +133,7 @@ struct State {
     icon: char,
     was_icon: char,
     flipped: Instant,
+    context: f32,
     changed: Instant,
     born: Instant,
     y: f32,
@@ -159,6 +172,9 @@ impl Tiles {
                         icon: t.icon,
                         was_icon: t.icon,
                         flipped: long_ago,
+                        // Already there on the first frame; a new session's
+                        // first reading fills up from empty.
+                        context: if first { t.context.unwrap_or(0.0) } else { 0.0 },
                         changed: long_ago,
                         born,
                         y,
@@ -180,6 +196,11 @@ impl Tiles {
                 } else {
                     motion::approach(s.y, t.y, dt, SLIDE)
                 };
+                let level = t.context.unwrap_or(0.0);
+                s.context = motion::approach(s.context, level, dt, FILL);
+                if (s.context - level).abs() < 0.002 {
+                    s.context = level;
+                }
                 s.hover = motion::fade(s.hover, if t.hot { 1.0 } else { 0.0 }, dt, HOVER);
                 let since = now.duration_since(s.changed);
                 Look {
@@ -192,6 +213,8 @@ impl Tiles {
                     was: Stance::of(&s.was),
                     flip: 1.0 - motion::progress(now.duration_since(s.flipped), FLIP),
                     was_icon: s.was_icon,
+                    context: s.context,
+                    context_to: level,
                 }
             })
             .collect()
@@ -282,6 +305,7 @@ mod tests {
             hot,
             held: false,
             icon: 'a',
+            context: None,
         }
     }
 
@@ -369,6 +393,27 @@ mod tests {
             ..tile("a", &Phase::Working, 0.0, false)
         };
         assert_eq!(t.step(now + ms(10) + FLIP, &[edit])[0].flip, 0.0);
+    }
+
+    #[test]
+    fn a_context_bar_rises_to_its_level() {
+        let mut t = Tiles::default();
+        let now = Instant::now();
+        let at = |c| TileIn {
+            context: c,
+            ..tile("a", &Phase::Working, 0.0, false)
+        };
+        assert_eq!(
+            t.step(now, &[at(Some(0.4))])[0].context,
+            0.4,
+            "there already"
+        );
+        let l = t.step(now + FILL, &[at(Some(0.8))]);
+        assert!((l[0].context - 0.6).abs() < 1e-3, "half way");
+        assert!(l[0].moving(0.0));
+        let l = t.step(now + FILL * 20, &[at(Some(0.8))]);
+        assert_eq!(l[0].context, 0.8);
+        assert!(!l[0].moving(0.0));
     }
 
     #[test]

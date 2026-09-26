@@ -93,6 +93,8 @@ const LAND_RISE: f32 = 3.0;
 const BEAM_H: f32 = 120.0;
 /// How far a tile whose session has gone sinks as it fades, in DIPs.
 const LEAVE_SINK: f32 = 8.0;
+/// A glint's run along a nearly full context meter.
+const SHIMMER: Duration = Duration::from_millis(2600);
 /// More subagents than this still draw this many sparks.
 const MAX_SPARKS: usize = 5;
 /// How far out from the lamp's middle the sparks circle, in DIPs.
@@ -1297,6 +1299,13 @@ impl Painter<'_> {
                 Phase::Working => {
                     let t = motion::cycle(look.phase_age, ORBIT);
                     self.scan(&lamp_rect(&r), c, t, look.enter);
+                    let context = s.status.as_ref().and_then(|st| st.context);
+                    if let Some(c) = context.filter(|&c| c >= 75.0) {
+                        let (ix, iy) = icon_centre(&r);
+                        let track = Rect::new(ix - 10.0, iy + 14.0, 20.0, 3.0);
+                        let t = motion::cycle(look.phase_age, SHIMMER);
+                        self.shimmer(&track, look.context, t, theme::fullness_color(c));
+                    }
                     let n = s.subagents(scene.now).min(MAX_SPARKS);
                     self.sparks(&lamp_rect(&r), c, n, look.phase_age, look.enter);
                 }
@@ -1636,6 +1645,36 @@ impl Painter<'_> {
             let c = if i < lit { c } else { theme::LAMP_OFF };
             self.fill_rounded(&seg, 1.0, c);
         }
+    }
+
+    /// A meter that fills like a liquid: `fraction` of the way along, the
+    /// segment it has reached only as far lit as the level is into it.
+    unsafe fn tank(&self, r: &Rect, fraction: f32, c: Color, segments: usize) {
+        let gap = 1.0;
+        let w = (r.w - gap * (segments as f32 - 1.0)) / segments as f32;
+        let level = fraction.clamp(0.0, 1.0) * segments as f32;
+        for i in 0..segments {
+            let seg = Rect::new(r.x + i as f32 * (w + gap), r.y, w, r.h);
+            self.fill_rounded(&seg, 1.0, theme::LAMP_OFF);
+            let full = (level - i as f32).clamp(0.0, 1.0);
+            if full > 0.0 {
+                let lit = Rect::new(seg.x, seg.y, seg.w * full, seg.h);
+                self.fill_rounded(&lit, 1.0, c);
+            }
+        }
+    }
+
+    /// A glint running along the lit part of a context meter that is
+    /// nearly full, `t` of the way through its run.
+    unsafe fn shimmer(&self, r: &Rect, fraction: f32, t: f32, c: Color) {
+        let lit = r.w * fraction.clamp(0.0, 1.0);
+        if lit <= 0.0 {
+            return;
+        }
+        let white = Color::rgb(0xFFFFFF);
+        let x = r.x + lit * motion::ease_in_out(t);
+        let fade = (std::f32::consts::PI * t).sin();
+        self.glow_dot(x, r.y + r.h / 2.0, 5.0, c.mix(white, 0.5), 0.7 * fade);
     }
 
     /// `r`'s shadow, moved by `(dx, dy)` and blurred `blur` wide: the same
@@ -2017,7 +2056,8 @@ impl Painter<'_> {
                 theme::TEXT_DIM.with_alpha(0.7)
             };
             let track = Rect::new(ix - 10.0, iy + 14.0, 20.0, 3.0);
-            self.meter(&track, c / 100.0, ink.fade(presence), 5);
+            let level = if ambient { look.context } else { c / 100.0 };
+            self.tank(&track, level, ink.fade(presence), 5);
         }
         // A new tool turns the icon over like a card: the old one folds
         // away edge on, and the new one opens out.
