@@ -1945,6 +1945,17 @@ session gets a worktree of its own, and its tile shows what it changed.
   `cmd.exe` the whole time (two items and one plain session). Not checked
   on screen: that `HORADRIC_TASKS` reaches the agent's shell, which goes
   the same way as the ports.
+- **Choosing how many at once.** The mode menu lists "One at a time" and
+  2 to 4 at once below the modes, the current one checked, and writes
+  `parallel` into the config beside the mode (one takes the key out). A
+  project without a worktree per session shows one greyed line saying
+  why instead. Where the runner runs, the mode key says the number too,
+  "Review ×3". Asked for because the setting lived only in the config
+  and the user never found it. Tested on screen with a dev instance and
+  `HORADRIC_AGENT=cmd.exe`: review mode with `parallel` 3 started three
+  items 10 s apart, each in its own worktree, and the key read "Review
+  ×3". The menu itself was not clicked, since a synthetic click opens it
+  behind other windows.
 - **Merging a finished item.** When a session ends and `git branch -d`
   refuses its branch, the app hears of it, and if the branch is a done
   item's (its title's slug, or that with 2, 3 and on after it:

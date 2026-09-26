@@ -537,6 +537,20 @@ impl App {
         self.run_tasks();
     }
 
+    fn set_parallel(&mut self, key: &str, n: usize) {
+        let Some(dir) = self.project_dir(key) else {
+            return;
+        };
+        if let Err(e) = file::set_parallel(&dir, n) {
+            eprintln!(
+                "horadric: cannot write {}: {e}",
+                file::config_file(&dir).display()
+            );
+        }
+        self.refresh_boards(true);
+        self.run_tasks();
+    }
+
     fn add_task(&mut self, key: &str, title: &str, notes: &str) {
         let title = tasks::one_line(title);
         let Some(dir) = self.project_dir(key).filter(|_| !title.is_empty()) else {
@@ -1192,26 +1206,45 @@ fn item_menu(key: &str, line: usize, title: &str) {
     });
 }
 
+/// How many at once the mode menu offers. The config takes up to
+/// `tasks::MOST_PARALLEL`.
+const AT_ONCE: [usize; 4] = [1, 2, 3, 4];
+
 fn mode_menu(key: &str) {
     const EDIT: usize = 10;
-    let Some(current) = with_app(|app| app.shared.boards.borrow().get(key).map(|b| b.mode)) else {
+    // Plus how many, so each choice of `AT_ONCE` has an id of its own.
+    const PARALLEL: usize = 20;
+    let Some(board) = with_app(|app| app.shared.boards.borrow().get(key).cloned()) else {
         return;
     };
-    let current = current.unwrap_or_default();
+    let board = board.unwrap_or_default();
     let mut items: Vec<Item> = Mode::ALL
         .iter()
         .enumerate()
         .map(|(i, m)| Item::Action {
             id: i + 1,
             label: m.explain().to_string(),
-            checked: *m == current,
+            checked: *m == board.mode,
         })
         .collect();
+    items.push(Item::Separator);
+    if board.own_trees {
+        items.extend(AT_ONCE.iter().map(|&n| Item::Action {
+            id: PARALLEL + n,
+            label: at_once(n),
+            checked: n == board.parallel.max(1),
+        }));
+    } else {
+        items.push(Item::Disabled(
+            "One at a time: several need a worktree each".into(),
+        ));
+    }
     items.push(Item::Separator);
     items.push(Item::action(EDIT, "Edit the list"));
     let picked = menu::popup(&items);
     with_app(|app| match picked {
         Some(EDIT) => app.edit_list(key),
+        Some(i) if i > PARALLEL => app.set_parallel(key, i - PARALLEL),
         Some(i) => {
             if let Some(m) = Mode::ALL.get(i - 1) {
                 app.set_mode(key, *m);
@@ -1219,6 +1252,14 @@ fn mode_menu(key: &str) {
         }
         None => {}
     });
+}
+
+/// A line of the mode menu that says how many items run side by side.
+fn at_once(n: usize) -> String {
+    match n {
+        1 => "One at a time".into(),
+        n => format!("{n} at once, each in its own worktree"),
+    }
 }
 
 #[cfg(test)]
@@ -1235,6 +1276,13 @@ mod tests {
             command_for(r"C:\Program Files\Horadric\horadric.exe"),
             "\"C:/Program Files/Horadric/horadric.exe\""
         );
+    }
+
+    #[test]
+    fn the_menu_says_how_many_run_at_once() {
+        assert_eq!(at_once(1), "One at a time");
+        assert_eq!(at_once(3), "3 at once, each in its own worktree");
+        assert!(AT_ONCE.iter().all(|&n| n <= tasks::MOST_PARALLEL));
     }
 
     #[test]

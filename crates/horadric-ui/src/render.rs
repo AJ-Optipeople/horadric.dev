@@ -302,7 +302,7 @@ pub struct TasksScene {
     pub scroll: usize,
     /// What the header says about the whole list.
     pub summary: String,
-    pub mode: &'static str,
+    pub mode: String,
     pub collapsed: bool,
 }
 
@@ -2790,13 +2790,13 @@ impl Painter<'_> {
         let mode = scene.button(Hit::TasksMode);
         let (fill, ink) = theme::button_look(mode);
         self.fill_rounded(&l.mode, 5.0, fill.unwrap_or(theme::SURFACE.with_alpha(0.6)));
-        let word_w = self.measure(gpu, &gpu.chip, t.mode);
+        let word_w = self.measure(gpu, &gpu.chip, &t.mode);
         let (caret_gap, caret_w) = (3.0, 10.0);
         let x = l.mode.x + (l.mode.w - word_w - caret_gap - caret_w) / 2.0;
         self.text(
             &gpu.chip,
             ink,
-            t.mode,
+            &t.mode,
             Rect::new(x, l.mode.y, word_w + 1.0, l.mode.h),
         );
         self.icon(
