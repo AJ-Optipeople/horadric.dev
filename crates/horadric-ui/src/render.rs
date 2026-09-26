@@ -64,7 +64,7 @@ use crate::layout::{
     DropdownLayout, FilesLayout, Hit, MenuLayout, Metrics, Rect, SettingRow, StartHit, StartLayout,
     TasksLayout, ToastLayout, UsageHit, UsageLayout, KNOB_R,
 };
-use crate::motion::{self, BREATH, ORBIT};
+use crate::motion::{self, ORBIT};
 use crate::theme::{self, Color};
 
 const FONT: PCWSTR = w!("Segoe UI Variable Text");
@@ -1276,7 +1276,7 @@ impl Painter<'_> {
                     self.scan(&lamp_rect(&r), c, t, look.enter);
                 }
                 Phase::Waiting(_) => {
-                    let breath = motion::breathe(look.phase_age, BREATH);
+                    let breath = motion::waiting_breath(look.phase_age);
                     self.halo(&r, radius, c, (0.3 + 0.4 * breath) * look.enter);
                     let level = (0.55 + 0.45 * breath) * look.enter;
                     self.lamp(&lamp_rect(&r), c, level);

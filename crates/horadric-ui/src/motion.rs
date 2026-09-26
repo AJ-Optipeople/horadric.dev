@@ -99,6 +99,34 @@ pub fn beam(elapsed: Duration) -> (f32, f32) {
     (ease_out((t * 3.0).min(1.0)), 1.0 - ease_in_out(t))
 }
 
+/// A waiting session's breath quickens the longer it waits: from these
+/// times on, one breath every this long. A calm pulse at the end, never a
+/// flash.
+const URGENCY: [(Duration, Duration); 4] = [
+    (Duration::ZERO, BREATH),
+    (Duration::from_secs(60), Duration::from_millis(1400)),
+    (Duration::from_secs(5 * 60), Duration::from_millis(1100)),
+    (Duration::from_secs(15 * 60), Duration::from_millis(900)),
+];
+
+/// The breath of a session that has waited `elapsed`, 0 at rest and 1 at
+/// its fullest, quickening at each step of [`URGENCY`]. The breaths are
+/// counted across the steps, so a step never jumps the light.
+pub fn waiting_breath(elapsed: Duration) -> f32 {
+    let mut breaths = 0.0f64;
+    for (i, &(from, period)) in URGENCY.iter().enumerate() {
+        if elapsed <= from {
+            break;
+        }
+        let until = URGENCY
+            .get(i + 1)
+            .map_or(elapsed, |&(next, _)| next.min(elapsed));
+        breaths += (until - from).as_secs_f64() / period.as_secs_f64();
+    }
+    let t = breaths.fract() as f32;
+    (1.0 - (2.0 * PI * t).cos()) / 2.0
+}
+
 /// A popup arriving `elapsed` into an arrival of `length`: how opaque it
 /// is, and how much of its rise into place is still to go, both 0 to 1.
 pub fn arrive(elapsed: Duration, length: Duration) -> (f32, f32) {
@@ -245,6 +273,32 @@ mod tests {
         let (h, a) = beam(BEAM / 3);
         assert!((h - 1.0).abs() < 1e-6 && a > 0.5);
         assert_eq!(beam(BEAM).1, 0.0);
+    }
+
+    #[test]
+    fn waiting_breathes_calmly_at_first_like_any_breath() {
+        for at in [0, 450, 900, 1300] {
+            let d = ms(at);
+            assert!((waiting_breath(d) - breathe(d, BREATH)).abs() < 1e-4);
+        }
+    }
+
+    #[test]
+    fn waiting_breathes_faster_later_without_a_jump() {
+        // Across a step the light moves no more than a frame's worth.
+        for &(step, _) in &URGENCY[1..] {
+            let before = waiting_breath(step - ms(1));
+            let after = waiting_breath(step + ms(1));
+            assert!((before - after).abs() < 0.02, "{step:?}");
+        }
+        // Past the last step one breath is 900 ms: a full breath and back.
+        let late = Duration::from_secs(3600);
+        let a = waiting_breath(late);
+        let b = waiting_breath(late + ms(900));
+        assert!((a - b).abs() < 1e-3);
+        // Half a breath on, the light is at the other end of its swing.
+        let half = waiting_breath(late + ms(450));
+        assert!((half - (1.0 - a)).abs() < 1e-3);
     }
 
     #[test]
