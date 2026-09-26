@@ -24,9 +24,9 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetCursorPos, GetWindowLongPtrW, GetWindowRect,
-    IsWindow, KillTimer, LoadCursorW, PostMessageW, RegisterClassW, SetTimer, SetWindowLongPtrW,
-    SetWindowPos, ShowWindow, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, HWND_NOTOPMOST,
-    HWND_TOPMOST, IDC_ARROW, MA_NOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+    IsWindow, LoadCursorW, PostMessageW, RegisterClassW, SetWindowLongPtrW, SetWindowPos,
+    ShowWindow, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, HWND_NOTOPMOST, HWND_TOPMOST,
+    IDC_ARROW, MA_NOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
     SW_SHOWNOACTIVATE, WM_APP, WM_CAPTURECHANGED, WM_DPICHANGED, WM_ERASEBKGND, WM_LBUTTONDOWN,
     WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY,
     WM_PAINT, WM_SIZE, WM_TIMER, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
@@ -34,11 +34,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use crate::app::{self, Input};
 use crate::layout::{self, CubeHit, CubeLayout};
-use crate::motion::{self, FRAME_FAST};
+use crate::motion::{self};
 use crate::render::{CubeScene, Flying, StashLook, Target, TransmuteLook};
 use crate::theme;
 use crate::window::Shared;
-use crate::{backdrop, columns};
+use crate::{appear, backdrop, columns};
 
 pub(crate) const CLASS: PCWSTR = w!("HoradricCube");
 const DRAG_THRESHOLD: i32 = 4;
@@ -327,14 +327,7 @@ impl CubeWindow {
             outcome: outcome.to_string(),
             portal,
         });
-        unsafe {
-            SetTimer(
-                Some(self.hwnd),
-                TRANSMUTE_TIMER,
-                FRAME_FAST.as_millis() as u32,
-                None,
-            );
-        }
+        crate::vsync::start(self.hwnd, TRANSMUTE_TIMER);
         self.invalidate();
     }
 
@@ -345,15 +338,14 @@ impl CubeWindow {
     }
 
     fn tick(&self) {
+        crate::vsync::took(self.hwnd, TRANSMUTE_TIMER);
         let done = self
             .transmute
             .borrow()
             .as_ref()
             .is_none_or(|t| t.frame().done);
         if done {
-            unsafe {
-                let _ = KillTimer(Some(self.hwnd), TRANSMUTE_TIMER);
-            }
+            crate::vsync::stop(self.hwnd, TRANSMUTE_TIMER);
             if self.transmute.borrow_mut().take().is_some() {
                 app::push(Input::CubeSettled);
             }
@@ -618,6 +610,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         let cs = &*(lparam.0 as *const CREATESTRUCTW);
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, cs.lpCreateParams as isize);
         return DefWindowProcW(hwnd, msg, wparam, lparam);
+    }
+    if msg == WM_TIMER && wparam.0 == appear::TIMER {
+        appear::tick(hwnd);
+        return LRESULT(0);
     }
     let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const CubeWindow;
     if ptr.is_null() {

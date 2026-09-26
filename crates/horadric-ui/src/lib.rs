@@ -127,6 +127,8 @@ pub mod update;
 #[cfg(windows)]
 mod usage;
 #[cfg(windows)]
+mod vsync;
+#[cfg(windows)]
 mod watch;
 #[cfg(windows)]
 mod window;

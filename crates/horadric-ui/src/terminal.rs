@@ -39,14 +39,14 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetCursorPos,
     GetForegroundWindow, GetSystemMetrics, GetWindowLongPtrW, GetWindowRect, IsIconic, IsZoomed,
-    KillTimer, LoadCursorW, LoadIconW, RegisterClassW, SetCursor, SetForegroundWindow, SetTimer,
-    SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow, CREATESTRUCTW, CW_USEDEFAULT,
-    GWLP_USERDATA, HTCAPTION, HTCLIENT, HTCLOSE, HTMAXBUTTON, HTMINBUTTON, HTTOP, HTTOPLEFT,
-    HTTOPRIGHT, IDC_ARROW, IDC_SIZEALL, NCCALCSIZE_PARAMS, SC_KEYMENU, SM_CXMINTRACK,
-    SM_CXPADDEDBORDER, SM_CYFRAME, SM_CYMINTRACK, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
-    SWP_NOSIZE, SWP_NOZORDER, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOWNOACTIVATE,
-    SW_SHOWNORMAL, WINDOW_EX_STYLE, WMSZ_BOTTOM, WMSZ_BOTTOMLEFT, WMSZ_BOTTOMRIGHT, WMSZ_LEFT,
-    WMSZ_RIGHT, WMSZ_TOP, WMSZ_TOPLEFT, WMSZ_TOPRIGHT, WM_CAPTURECHANGED, WM_CLOSE, WM_DPICHANGED,
+    LoadCursorW, LoadIconW, RegisterClassW, SetCursor, SetForegroundWindow, SetWindowLongPtrW,
+    SetWindowPos, SetWindowTextW, ShowWindow, CREATESTRUCTW, CW_USEDEFAULT, GWLP_USERDATA,
+    HTCAPTION, HTCLIENT, HTCLOSE, HTMAXBUTTON, HTMINBUTTON, HTTOP, HTTOPLEFT, HTTOPRIGHT,
+    IDC_ARROW, IDC_SIZEALL, NCCALCSIZE_PARAMS, SC_KEYMENU, SM_CXMINTRACK, SM_CXPADDEDBORDER,
+    SM_CYFRAME, SM_CYMINTRACK, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    SWP_NOZORDER, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOWNOACTIVATE, SW_SHOWNORMAL,
+    WINDOW_EX_STYLE, WMSZ_BOTTOM, WMSZ_BOTTOMLEFT, WMSZ_BOTTOMRIGHT, WMSZ_LEFT, WMSZ_RIGHT,
+    WMSZ_TOP, WMSZ_TOPLEFT, WMSZ_TOPRIGHT, WM_CAPTURECHANGED, WM_CLOSE, WM_DPICHANGED,
     WM_ENTERSIZEMOVE, WM_ERASEBKGND, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOVING, WM_NCACTIVATE,
     WM_NCCALCSIZE, WM_NCCREATE, WM_NCDESTROY, WM_NCHITTEST, WM_NCLBUTTONDBLCLK, WM_NCLBUTTONDOWN,
     WM_NCLBUTTONUP, WM_NCMOUSEMOVE, WM_NCRBUTTONUP, WM_PAINT, WM_SETFOCUS, WM_SIZE, WM_SIZING,
@@ -382,14 +382,7 @@ impl TerminalWindow {
         *self.grid.borrow_mut() = grid;
         if self.glides.borrow().moving() && self.glided.get().is_none() {
             self.glided.set(Some(Instant::now()));
-            unsafe {
-                SetTimer(
-                    Some(self.hwnd),
-                    GLIDE_TIMER,
-                    crate::motion::FRAME_FAST.as_millis() as u32,
-                    None,
-                );
-            }
+            crate::vsync::start(self.hwnd, GLIDE_TIMER);
         }
     }
 
@@ -428,9 +421,7 @@ impl TerminalWindow {
         }
         if !self.glides.borrow().moving() {
             self.glided.set(None);
-            unsafe {
-                let _ = KillTimer(Some(self.hwnd), GLIDE_TIMER);
-            }
+            crate::vsync::stop(self.hwnd, GLIDE_TIMER);
             for p in panes.iter() {
                 p.invalidate();
             }
@@ -1038,6 +1029,7 @@ impl TerminalWindow {
     fn handle(&self, msg: u32, wparam: WPARAM, lparam: LPARAM) -> Option<LRESULT> {
         match msg {
             WM_TIMER if wparam.0 == GLIDE_TIMER => {
+                crate::vsync::took(self.hwnd, GLIDE_TIMER);
                 self.glide();
                 Some(LRESULT(0))
             }

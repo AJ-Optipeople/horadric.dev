@@ -11,6 +11,7 @@
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::rc::Rc;
+use std::time::Instant;
 
 use windows::core::{w, Result, PCWSTR};
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, WPARAM};
@@ -28,12 +29,11 @@ use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::Input::KeyboardAndMouse::{TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT};
 use windows::Win32::UI::Shell::{SHQueryUserNotificationState, NIN_BALLOONUSERCLICK};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GetWindowLongPtrW, KillTimer, LoadCursorW,
-    PostMessageW, RegisterClassW, SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW,
-    ShowWindow, CREATESTRUCTW, GWLP_USERDATA, IDC_HAND, LWA_ALPHA, MA_NOACTIVATE, SW_HIDE,
-    SW_SHOWNOACTIVATE, WM_ERASEBKGND, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_NCCREATE,
-    WM_NCDESTROY, WM_PAINT, WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GetWindowLongPtrW, LoadCursorW, PostMessageW,
+    RegisterClassW, SetLayeredWindowAttributes, SetWindowLongPtrW, ShowWindow, CREATESTRUCTW,
+    GWLP_USERDATA, IDC_HAND, LWA_ALPHA, MA_NOACTIVATE, SW_HIDE, SW_SHOWNOACTIVATE, WM_ERASEBKGND,
+    WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_TIMER,
+    WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
 use crate::backdrop;
@@ -53,7 +53,6 @@ const LIFE_MS: u32 = 7000;
 const FADE_IN_MS: f32 = 140.0;
 const FADE_OUT_MS: f32 = 220.0;
 const FRAME: usize = 1;
-const FRAME_MS: u32 = 15;
 /// Between the toast and the edges of the work area, in DIPs.
 const MARGIN: f32 = 12.0;
 
@@ -176,6 +175,8 @@ struct Toast {
     alpha: Cell<f32>,
     /// Milliseconds left standing.
     left: Cell<f32>,
+    /// When the last frame came, for how far the next one moves.
+    ticked: Cell<Instant>,
 }
 
 impl Toast {
@@ -219,6 +220,7 @@ impl Toast {
             hover: Cell::new(false),
             close_hot: Cell::new(false),
             fade: Cell::new(Fade::In),
+            ticked: Cell::new(Instant::now()),
             alpha: Cell::new(0.0),
             left: Cell::new(LIFE_MS as f32),
         });
@@ -251,7 +253,7 @@ impl Toast {
             backdrop::border(hwnd, None);
             let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 0, LWA_ALPHA);
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-            SetTimer(Some(hwnd), FRAME, FRAME_MS, None);
+            crate::vsync::start(hwnd, FRAME);
         }
         Ok(toast)
     }
@@ -278,7 +280,10 @@ impl Toast {
 
     /// One frame of the fade, and the clock while it stands.
     fn tick(&self) {
-        let dt = FRAME_MS as f32;
+        crate::vsync::took(self.hwnd.get(), FRAME);
+        let now = Instant::now();
+        // Capped, so a frame held up by a slow paint does not skip the fade.
+        let dt = (now.duration_since(self.ticked.replace(now)).as_secs_f32() * 1000.0).min(50.0);
         match self.fade.get() {
             Fade::In => {
                 self.set_alpha(self.alpha.get() + dt / FADE_IN_MS);
@@ -313,7 +318,7 @@ impl Toast {
         self.fade.set(Fade::Gone);
         let hwnd = self.hwnd.get();
         unsafe {
-            let _ = KillTimer(Some(hwnd), FRAME);
+            crate::vsync::stop(hwnd, FRAME);
             let _ = ShowWindow(hwnd, SW_HIDE);
         }
     }

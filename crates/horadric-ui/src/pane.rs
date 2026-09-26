@@ -376,17 +376,10 @@ impl Pane {
         }
         let busy = dim != target || reveal > 0.0;
         if busy != self.animating.replace(busy) {
-            unsafe {
-                if busy {
-                    SetTimer(
-                        Some(self.hwnd),
-                        ANIM_TIMER,
-                        motion::FRAME_FAST.as_millis() as u32,
-                        None,
-                    );
-                } else {
-                    let _ = KillTimer(Some(self.hwnd), ANIM_TIMER);
-                }
+            if busy {
+                crate::vsync::start(self.hwnd, ANIM_TIMER);
+            } else {
+                crate::vsync::stop(self.hwnd, ANIM_TIMER);
             }
         }
         (motion::ease_in_out(dim) * DIMMED).max(reveal)
@@ -1516,6 +1509,7 @@ impl Pane {
                 Some(LRESULT(0))
             }
             WM_TIMER if wparam.0 == ANIM_TIMER => {
+                crate::vsync::took(self.hwnd, ANIM_TIMER);
                 self.invalidate();
                 Some(LRESULT(0))
             }

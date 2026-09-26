@@ -11,13 +11,12 @@ use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{COLORREF, HWND, RECT};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetWindowLongPtrW, GetWindowRect, KillTimer, SetLayeredWindowAttributes, SetTimer,
-    SetWindowLongPtrW, SetWindowPos, GWL_EXSTYLE, LWA_ALPHA, SWP_NOACTIVATE, SWP_NOSIZE,
-    SWP_NOZORDER, WS_EX_LAYERED,
+    GetWindowLongPtrW, GetWindowRect, SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos,
+    GWL_EXSTYLE, LWA_ALPHA, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, WS_EX_LAYERED,
 };
 
 use crate::backdrop;
-use crate::motion::{self, FRAME_FAST};
+use crate::motion::{self};
 
 /// The timer id a window passes to [`tick`]. Far from the small ids the
 /// windows number their own timers with.
@@ -70,7 +69,7 @@ pub fn begin(hwnd: HWND, length: Duration, rise: i32) {
                 SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOSIZE,
             );
         }
-        SetTimer(Some(hwnd), TIMER, FRAME_FAST.as_millis() as u32, None);
+        crate::vsync::start(hwnd, TIMER);
     }
     let now = Instant::now();
     ARRIVING.with(|a| {
@@ -91,6 +90,7 @@ pub fn begin(hwnd: HWND, length: Duration, rise: i32) {
 
 /// One frame of `hwnd`'s arrival, the last one stopping the timer.
 pub fn tick(hwnd: HWND) {
+    crate::vsync::took(hwnd, TIMER);
     let step = ARRIVING.with(|a| {
         let a = a.borrow();
         a.get(&(hwnd.0 as isize)).map(|w| {
@@ -100,9 +100,7 @@ pub fn tick(hwnd: HWND) {
         })
     });
     let Some((alpha, x, y, rises, done)) = step else {
-        unsafe {
-            let _ = KillTimer(Some(hwnd), TIMER);
-        }
+        crate::vsync::stop(hwnd, TIMER);
         return;
     };
     unsafe {
@@ -120,7 +118,7 @@ pub fn tick(hwnd: HWND) {
             );
         }
         if done {
-            let _ = KillTimer(Some(hwnd), TIMER);
+            crate::vsync::stop(hwnd, TIMER);
         }
     }
     if done {

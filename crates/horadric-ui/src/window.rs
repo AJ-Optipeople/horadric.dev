@@ -959,14 +959,17 @@ impl Cluster {
         if self.frames.replace(every) == every {
             return;
         }
+        // Fast frames beat with the display. The slow ones, a light going
+        // round or a breath, are cheaper on a timer and look no different.
+        crate::vsync::stop(self.hwnd, ANIM_TIMER);
         unsafe {
+            let _ = KillTimer(Some(self.hwnd), ANIM_TIMER);
             match every {
+                Some(d) if d <= motion::FRAME_FAST => crate::vsync::start(self.hwnd, ANIM_TIMER),
                 Some(d) => {
                     SetTimer(Some(self.hwnd), ANIM_TIMER, d.as_millis() as u32, None);
                 }
-                None => {
-                    let _ = KillTimer(Some(self.hwnd), ANIM_TIMER);
-                }
+                None => {}
             }
         }
     }
@@ -985,6 +988,7 @@ impl Cluster {
             // light of a cluster under another window, so it waits there,
             // and moves on within a frame of coming back into view.
             WM_TIMER if wparam.0 == ANIM_TIMER => {
+                crate::vsync::took(self.hwnd, ANIM_TIMER);
                 if !out_of_sight(self.hwnd) {
                     unsafe {
                         let _ = InvalidateRect(Some(self.hwnd), None, false);

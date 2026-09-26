@@ -625,6 +625,10 @@ pub fn hwnd_target(
                 width: width_px.max(1),
                 height: height_px.max(1),
             },
+            // Every window paints on the one UI thread. Waiting for the
+            // vertical blank in each EndDraw would cost a whole frame per
+            // window that moves. The vsync clock paces paints instead, and
+            // DWM composes them, so nothing tears.
             presentOptions: D2D1_PRESENT_OPTIONS_IMMEDIATELY,
         };
         let rt = gpu.d2d.CreateHwndRenderTarget(&props, &hwnd_props)?;
