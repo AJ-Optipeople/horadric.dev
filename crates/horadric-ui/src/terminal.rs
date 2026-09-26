@@ -30,24 +30,37 @@ use windows::Win32::Graphics::Gdi::{
     ScreenToClient, GRADIENT_FILL_RECT_V, GRADIENT_RECT, PAINTSTRUCT, TRIVERTEX,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::HiDpi::GetDpiForWindow;
-use windows::Win32::UI::Input::KeyboardAndMouse::{GetFocus, ReleaseCapture, SetCapture};
+use windows::Win32::UI::HiDpi::{GetDpiForWindow, GetSystemMetricsForDpi};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    GetFocus, ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TME_NONCLIENT,
+    TRACKMOUSEEVENT,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetCursorPos,
     GetForegroundWindow, GetSystemMetrics, GetWindowLongPtrW, GetWindowRect, IsIconic, IsZoomed,
     LoadCursorW, LoadIconW, RegisterClassW, SetCursor, SetForegroundWindow, SetWindowLongPtrW,
     SetWindowPos, SetWindowTextW, ShowWindow, CREATESTRUCTW, CW_USEDEFAULT, GWLP_USERDATA,
-    IDC_ARROW, IDC_SIZEALL, SM_CXMINTRACK, SM_CYMINTRACK, SWP_NOACTIVATE, SWP_NOZORDER, SW_RESTORE,
-    SW_SHOWNOACTIVATE, SW_SHOWNORMAL, WINDOW_EX_STYLE, WMSZ_BOTTOM, WMSZ_BOTTOMLEFT,
-    WMSZ_BOTTOMRIGHT, WMSZ_LEFT, WMSZ_RIGHT, WMSZ_TOP, WMSZ_TOPLEFT, WMSZ_TOPRIGHT,
-    WM_CAPTURECHANGED, WM_CLOSE, WM_DPICHANGED, WM_ENTERSIZEMOVE, WM_ERASEBKGND, WM_LBUTTONUP,
-    WM_MOUSEMOVE, WM_MOVING, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_SETFOCUS, WM_SIZE, WM_SIZING,
-    WNDCLASSW, WS_CLIPCHILDREN, WS_OVERLAPPEDWINDOW,
+    HTCAPTION, HTCLIENT, HTCLOSE, HTMAXBUTTON, HTMINBUTTON, HTTOP, HTTOPLEFT, HTTOPRIGHT,
+    IDC_ARROW, IDC_SIZEALL, NCCALCSIZE_PARAMS, SC_KEYMENU, SM_CXMINTRACK, SM_CXPADDEDBORDER,
+    SM_CYFRAME, SM_CYMINTRACK, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    SWP_NOZORDER, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOWNOACTIVATE, SW_SHOWNORMAL,
+    WINDOW_EX_STYLE, WMSZ_BOTTOM, WMSZ_BOTTOMLEFT, WMSZ_BOTTOMRIGHT, WMSZ_LEFT, WMSZ_RIGHT,
+    WMSZ_TOP, WMSZ_TOPLEFT, WMSZ_TOPRIGHT, WM_CAPTURECHANGED, WM_CLOSE, WM_DPICHANGED,
+    WM_ENTERSIZEMOVE, WM_ERASEBKGND, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOVING, WM_NCACTIVATE,
+    WM_NCCALCSIZE, WM_NCCREATE, WM_NCDESTROY, WM_NCHITTEST, WM_NCLBUTTONDBLCLK, WM_NCLBUTTONDOWN,
+    WM_NCLBUTTONUP, WM_NCMOUSEMOVE, WM_NCRBUTTONUP, WM_PAINT, WM_SETFOCUS, WM_SIZE, WM_SIZING,
+    WM_SYSCOMMAND, WNDCLASSW, WS_CLIPCHILDREN, WS_OVERLAPPEDWINDOW,
 };
+
+/// Not in the `windows` crate's WindowsAndMessaging.
+const WM_NCMOUSELEAVE: u32 = 0x02A2;
 
 use crate::app::{self, Input};
 use crate::backdrop;
+use crate::caption::Caption;
 use crate::console::Console;
+use crate::layout::CaptionHit;
+use crate::menu::{self, Item};
 use crate::pane::{self, Pane, DIRS, WM_PANE_FOCUS, WM_PANE_GRAB, WM_PANE_MOVE, WM_PANE_ZOOM};
 use crate::window::Shared;
 use crate::{layout, snapping, theme};
@@ -105,6 +118,12 @@ pub struct TerminalWindow {
     /// How far the cursor is from each edge, from the first message of a
     /// move or resize until it ends.
     grab: Cell<Option<[i32; 4]>>,
+    /// Drawn in place of the Windows title bar. None only while the window
+    /// is being made.
+    caption: RefCell<Option<Box<Caption>>>,
+    /// The mouse is being followed over the caption, for the leave that
+    /// puts its keys out.
+    tracking: Cell<bool>,
 }
 
 pub fn register_class() -> Result<()> {
@@ -149,6 +168,8 @@ impl TerminalWindow {
             drag: Cell::new(None),
             others: RefCell::new(Vec::new()),
             grab: Cell::new(None),
+            caption: RefCell::new(None),
+            tracking: Cell::new(false),
         });
         unsafe {
             let instance = GetModuleHandleW(None)?;
@@ -175,9 +196,21 @@ impl TerminalWindow {
                 &dark as *const _ as *const c_void,
                 std::mem::size_of::<BOOL>() as u32,
             );
-            // The title bar in the clay, so the stage and its gaps read as
-            // one surface the panes are sunk into.
-            backdrop::caption(hwnd, theme::WINDOW_BG, theme::TEXT);
+            match Caption::create(Rc::clone(&win.shared), hwnd, SEAM_DIP) {
+                Ok(c) => *win.caption.borrow_mut() = Some(c),
+                Err(e) => eprintln!("horadric: cannot draw the stage's caption: {e}"),
+            }
+            // The frame is worked out again without Windows' title bar, now
+            // that there is a caption to take its place.
+            let _ = SetWindowPos(
+                hwnd,
+                None,
+                0,
+                0,
+                0,
+                0,
+                SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+            );
 
             match place {
                 Place::Rect(r) => win.set_rect(r),
@@ -228,6 +261,9 @@ impl TerminalWindow {
         // mark, sunk most of the way into the clay so it tints the edge
         // rather than outlining the window.
         backdrop::border(self.hwnd, Some(theme::WINDOW_BG.mix(accent, 0.35)));
+        if let Some(c) = self.caption.borrow().as_ref() {
+            c.set_accent(accent);
+        }
         for p in self.panes.borrow().iter() {
             p.set_accent(accent);
             if switched {
@@ -276,7 +312,12 @@ impl TerminalWindow {
         }
         let panes = self.panes.borrow();
         let gap = (PANE_GAP_DIP * self.dpi() as f32 / 96.0).round() as i32;
-        let area = (gap, gap, r.right - gap, r.bottom - gap);
+        let top = self.caption_h();
+        if let Some(c) = self.caption.borrow().as_ref() {
+            c.place(r.right, top, r.bottom);
+            c.set_maximized(unsafe { IsZoomed(self.hwnd) }.as_bool());
+        }
+        let area = (gap, top, r.right - gap, r.bottom - gap);
         let grid = layout::grid(panes.len(), area, gap);
         let many = panes.len() > 1;
         let zoomed = many && self.zoomed.get();
@@ -427,7 +468,9 @@ impl TerminalWindow {
     pub fn refresh_title(&self) {
         let project = self.project_name.borrow().clone();
         let active = self.active.borrow().clone();
-        let title = {
+        // The caption shows the project, then the session and what its
+        // agent says it is doing.
+        let (title, detail) = {
             let panes = self.panes.borrow();
             match panes
                 .iter()
@@ -442,18 +485,32 @@ impl TerminalWindow {
                         .and_then(|r| r.get(p.session()).map(|s| s.label().to_string()))
                         .unwrap_or_else(|| p.name());
                     let label = format!("{name}, {project}");
-                    let title = match p.console().title() {
-                        Some(t) if !t.trim().is_empty() => format!("{} \u{00B7} {label}", t.trim()),
-                        _ => label,
+                    let doing = p
+                        .console()
+                        .title()
+                        .map(|t| t.trim().to_string())
+                        .filter(|t| !t.is_empty());
+                    let (title, detail) = match doing {
+                        Some(t) => (
+                            format!("{t} \u{00B7} {label}"),
+                            format!("{name} \u{00B7} {t}"),
+                        ),
+                        None => (label, name),
                     };
                     match p.console().exit_code() {
-                        Some(code) => format!("{title} (exited {code})"),
-                        None => title,
+                        Some(code) => (
+                            format!("{title} (exited {code})"),
+                            format!("{detail} (exited {code})"),
+                        ),
+                        None => (title, detail),
                     }
                 }
-                None => project,
+                None => (project.clone(), String::new()),
             }
         };
+        if let Some(c) = self.caption.borrow().as_ref() {
+            c.set_text(&project, &detail);
+        }
         if *self.title.borrow() != title {
             unsafe {
                 let _ = SetWindowTextW(self.hwnd, &HSTRING::from(title.as_str()));
@@ -591,6 +648,119 @@ impl TerminalWindow {
 
     pub fn dpi(&self) -> u32 {
         unsafe { GetDpiForWindow(self.hwnd) }.max(96)
+    }
+
+    /// How tall the caption is, in pixels.
+    fn caption_h(&self) -> i32 {
+        (layout::CAPTION_H * self.dpi() as f32 / 96.0).round() as i32
+    }
+
+    /// How thick the sizing frame is, in pixels: the band along the top
+    /// that resizes, and how far a maximised window hangs past the screen.
+    fn frame_y(&self) -> i32 {
+        let dpi = self.dpi();
+        unsafe {
+            GetSystemMetricsForDpi(SM_CYFRAME, dpi) + GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi)
+        }
+    }
+
+    /// What a hit test in the client area lands on, with the caption in
+    /// place of Windows' title bar. `p` is in client pixels.
+    fn hit_test(&self, p: POINT) -> u32 {
+        let band = if unsafe { IsZoomed(self.hwnd) }.as_bool() {
+            0
+        } else {
+            self.frame_y()
+        };
+        if p.y < band {
+            let mut r = RECT::default();
+            unsafe {
+                let _ = GetClientRect(self.hwnd, &mut r);
+            }
+            return if p.x < band * 2 {
+                HTTOPLEFT
+            } else if p.x >= r.right - band * 2 {
+                HTTOPRIGHT
+            } else {
+                HTTOP
+            };
+        }
+        let hit = self.caption.borrow().as_ref().and_then(|c| c.hit(p.x, p.y));
+        match hit {
+            Some(CaptionHit::Min) => HTMINBUTTON,
+            Some(CaptionHit::Max) => HTMAXBUTTON,
+            Some(CaptionHit::Close) => HTCLOSE,
+            Some(CaptionHit::Bar) => HTCAPTION,
+            None => HTCLIENT,
+        }
+    }
+
+    fn with_caption(&self, f: impl FnOnce(&Caption)) {
+        if let Some(c) = self.caption.borrow().as_ref() {
+            f(c);
+        }
+    }
+
+    /// The caption's key under a hit test's answer.
+    fn key_of(hit: u32) -> Option<CaptionHit> {
+        match hit {
+            HTMINBUTTON => Some(CaptionHit::Min),
+            HTMAXBUTTON => Some(CaptionHit::Max),
+            HTCLOSE => Some(CaptionHit::Close),
+            _ => None,
+        }
+    }
+
+    fn press_key(&self, key: CaptionHit) {
+        unsafe {
+            match key {
+                CaptionHit::Min => {
+                    let _ = ShowWindow(self.hwnd, SW_MINIMIZE);
+                }
+                CaptionHit::Max if IsZoomed(self.hwnd).as_bool() => {
+                    let _ = ShowWindow(self.hwnd, SW_RESTORE);
+                }
+                CaptionHit::Max => {
+                    let _ = ShowWindow(self.hwnd, SW_MAXIMIZE);
+                }
+                CaptionHit::Close => app::push(Input::Close(self.hwnd.0 as isize)),
+                CaptionHit::Bar => {}
+            }
+        }
+    }
+
+    /// The window's own menu, drawn like the rest: what a right click on
+    /// the caption or Alt+Space opens.
+    fn window_menu(&self) {
+        const RESTORE: usize = 1;
+        const MIN: usize = 2;
+        const MAX: usize = 3;
+        const CLOSE: usize = 4;
+        let zoomed = unsafe { IsZoomed(self.hwnd) }.as_bool();
+        let items = vec![
+            if zoomed {
+                Item::action(RESTORE, "Restore")
+            } else {
+                Item::Disabled("Restore".into())
+            },
+            Item::action(MIN, "Minimise"),
+            if zoomed {
+                Item::Disabled("Maximise".into())
+            } else {
+                Item::action(MAX, "Maximise")
+            },
+            Item::Separator,
+            Item::action(CLOSE, "Close\tAlt+F4"),
+        ];
+        match menu::popup(&items) {
+            Some(RESTORE) => unsafe {
+                let _ = ShowWindow(self.hwnd, SW_RESTORE);
+            },
+            Some(MIN) => self.press_key(CaptionHit::Min),
+            Some(MAX) => self.press_key(CaptionHit::Max),
+            Some(CLOSE) => self.press_key(CaptionHit::Close),
+            _ => {}
+        }
     }
 
     /// The pane under the cursor, as an index into the grid.
@@ -767,6 +937,96 @@ impl TerminalWindow {
 
     fn handle(&self, msg: u32, wparam: WPARAM, lparam: LPARAM) -> Option<LRESULT> {
         match msg {
+            // The client runs up to the top of the frame, over where the
+            // title bar was: the caption is drawn there instead. Maximised,
+            // the frame hangs past the screen's edge, so the client starts
+            // where the screen does.
+            WM_NCCALCSIZE if wparam.0 != 0 => {
+                let top = unsafe { (*(lparam.0 as *const NCCALCSIZE_PARAMS)).rgrc[0].top };
+                unsafe {
+                    DefWindowProcW(self.hwnd, msg, wparam, lparam);
+                }
+                let zoomed = unsafe { IsZoomed(self.hwnd) }.as_bool();
+                let params = unsafe { &mut *(lparam.0 as *mut NCCALCSIZE_PARAMS) };
+                params.rgrc[0].top = top + if zoomed { self.frame_y() } else { 0 };
+                Some(LRESULT(0))
+            }
+            WM_NCHITTEST => {
+                let hit = unsafe { DefWindowProcW(self.hwnd, msg, wparam, lparam) };
+                if hit.0 != HTCLIENT as isize {
+                    return Some(hit);
+                }
+                let mut p = POINT {
+                    x: (lparam.0 & 0xffff) as i16 as i32,
+                    y: ((lparam.0 >> 16) & 0xffff) as i16 as i32,
+                };
+                unsafe {
+                    let _ = ScreenToClient(self.hwnd, &mut p);
+                }
+                Some(LRESULT(self.hit_test(p) as isize))
+            }
+            WM_NCMOUSEMOVE => {
+                if !self.tracking.replace(true) {
+                    let mut track = TRACKMOUSEEVENT {
+                        cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                        dwFlags: TME_LEAVE | TME_NONCLIENT,
+                        hwndTrack: self.hwnd,
+                        dwHoverTime: 0,
+                    };
+                    unsafe {
+                        let _ = TrackMouseEvent(&mut track);
+                    }
+                }
+                let key = Self::key_of(wparam.0 as u32);
+                self.with_caption(|c| {
+                    c.set_hot(key);
+                    if c.pressed().is_some() && c.pressed() != key {
+                        c.set_pressed(None);
+                    }
+                });
+                None
+            }
+            WM_NCMOUSELEAVE => {
+                self.tracking.set(false);
+                self.with_caption(|c| {
+                    c.set_hot(None);
+                    c.set_pressed(None);
+                });
+                None
+            }
+            // Windows would draw its own keys over the caption on a press,
+            // so the caption's keys are pressed and let go here.
+            WM_NCLBUTTONDOWN | WM_NCLBUTTONDBLCLK => {
+                let key = Self::key_of(wparam.0 as u32)?;
+                self.with_caption(|c| c.set_pressed(Some(key)));
+                Some(LRESULT(0))
+            }
+            WM_NCLBUTTONUP => {
+                let key = Self::key_of(wparam.0 as u32)?;
+                let pressed = self.caption.borrow().as_ref().and_then(|c| c.pressed());
+                self.with_caption(|c| c.set_pressed(None));
+                if pressed == Some(key) {
+                    self.press_key(key);
+                }
+                Some(LRESULT(0))
+            }
+            WM_NCRBUTTONUP if wparam.0 as u32 == HTCAPTION => {
+                self.window_menu();
+                Some(LRESULT(0))
+            }
+            WM_SYSCOMMAND
+                if wparam.0 & 0xFFF0 == SC_KEYMENU as usize && lparam.0 == ' ' as isize =>
+            {
+                self.window_menu();
+                Some(LRESULT(0))
+            }
+            // Windows repaints its frame on activation; with no title bar
+            // there is nothing of it to see, and the caption goes quiet
+            // instead.
+            WM_NCACTIVATE => {
+                self.with_caption(|c| c.set_active(wparam.0 != 0));
+                Some(unsafe { DefWindowProcW(self.hwnd, msg, wparam, LPARAM(-1)) })
+            }
             WM_SIZE => {
                 self.layout();
                 // The faceplate's light runs top to bottom of the whole
@@ -782,6 +1042,7 @@ impl TerminalWindow {
             }
             WM_ERASEBKGND => Some(LRESULT(1)),
             WM_DPICHANGED => {
+                self.with_caption(Caption::set_dpi);
                 let r = unsafe { *(lparam.0 as *const RECT) };
                 unsafe {
                     let _ = SetWindowPos(

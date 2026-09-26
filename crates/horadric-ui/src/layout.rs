@@ -1011,6 +1011,80 @@ pub fn dialog_place(size: (i32, i32), work: [i32; 4]) -> (i32, i32) {
     (x.max(wl), y.max(wt))
 }
 
+/// How tall the stage's caption is, in DIPs.
+pub const CAPTION_H: f32 = 38.0;
+const CAPTION_KEY_W: f32 = 42.0;
+const CAPTION_KEY_H: f32 = 28.0;
+
+/// The geometry of the stage's caption: the project's lamp and title on
+/// the left, the window's three keys on the right.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CaptionLayout {
+    pub lamp: (f32, f32),
+    pub title: Rect,
+    pub min: Rect,
+    pub max: Rect,
+    pub close: Rect,
+}
+
+/// What a point on the caption is over.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptionHit {
+    Min,
+    Max,
+    Close,
+    /// The rest of it, which drags the window.
+    Bar,
+}
+
+/// Lays out the caption of a stage `width` DIPs wide.
+pub fn caption(width: f32) -> CaptionLayout {
+    let top = (CAPTION_H - CAPTION_KEY_H) / 2.0 + 1.0;
+    let close = Rect::new(
+        width - 9.0 - CAPTION_KEY_W,
+        top,
+        CAPTION_KEY_W,
+        CAPTION_KEY_H,
+    );
+    let max = Rect::new(
+        close.x - 2.0 - CAPTION_KEY_W,
+        top,
+        CAPTION_KEY_W,
+        CAPTION_KEY_H,
+    );
+    let min = Rect::new(
+        max.x - 2.0 - CAPTION_KEY_W,
+        top,
+        CAPTION_KEY_W,
+        CAPTION_KEY_H,
+    );
+    let lamp = (20.0, CAPTION_H / 2.0 + 1.0);
+    let x = 32.0;
+    CaptionLayout {
+        lamp,
+        title: Rect::new(x, 1.0, (min.x - 16.0 - x).max(0.0), CAPTION_H),
+        min,
+        max,
+        close,
+    }
+}
+
+/// What a point is over, None below the caption.
+pub fn caption_hit(l: &CaptionLayout, x: f32, y: f32) -> Option<CaptionHit> {
+    if !(0.0..CAPTION_H).contains(&y) {
+        return None;
+    }
+    Some(if l.close.contains(x, y) {
+        CaptionHit::Close
+    } else if l.max.contains(x, y) {
+        CaptionHit::Max
+    } else if l.min.contains(x, y) {
+        CaptionHit::Min
+    } else {
+        CaptionHit::Bar
+    })
+}
+
 /// The geometry of a notification: a lamp and a title, the text under
 /// them, and a cross to dismiss it.
 #[derive(Debug, Clone, PartialEq)]
@@ -1560,6 +1634,22 @@ mod tests {
             dialog_place((400, 200), [1000, 100, 2000, 800]),
             (1300, 300)
         );
+    }
+
+    #[test]
+    fn the_caption_keeps_its_keys_on_the_right_and_its_title_clear_of_them() {
+        let l = caption(800.0);
+        assert!(l.close.right() < 800.0);
+        assert!(l.max.right() < l.close.x && l.min.right() < l.max.x);
+        assert!(l.title.right() < l.min.x);
+        assert!(l.close.bottom() <= CAPTION_H);
+        let hit = |r: Rect| caption_hit(&l, r.x + 1.0, r.y + 1.0);
+        assert_eq!(hit(l.close), Some(CaptionHit::Close));
+        assert_eq!(hit(l.max), Some(CaptionHit::Max));
+        assert_eq!(hit(l.min), Some(CaptionHit::Min));
+        assert_eq!(caption_hit(&l, 100.0, 10.0), Some(CaptionHit::Bar));
+        assert_eq!(caption_hit(&l, 100.0, CAPTION_H + 1.0), None);
+        assert_eq!(caption(100.0).title.w, 0.0);
     }
 
     #[test]

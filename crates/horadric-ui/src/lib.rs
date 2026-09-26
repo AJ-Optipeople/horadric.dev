@@ -71,6 +71,8 @@ mod backdrop;
 #[cfg(windows)]
 mod browsers;
 #[cfg(windows)]
+mod caption;
+#[cfg(windows)]
 mod clipboard;
 #[cfg(windows)]
 mod console;

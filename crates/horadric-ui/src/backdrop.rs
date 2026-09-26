@@ -1,4 +1,4 @@
-//! What DWM draws around a window: the colours of its frame and title bar,
+//! What DWM draws around a window: the colour of its frame,
 //! and whether Windows wants things to move. The clay windows draw every
 //! pixel themselves, so no material goes behind them.
 
@@ -6,9 +6,7 @@ use std::ffi::c_void;
 
 use windows::core::BOOL;
 use windows::Win32::Foundation::{COLORREF, HWND};
-use windows::Win32::Graphics::Dwm::{
-    DwmSetWindowAttribute, DWMWA_BORDER_COLOR, DWMWA_CAPTION_COLOR, DWMWA_TEXT_COLOR,
-};
+use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_BORDER_COLOR};
 use windows::Win32::UI::WindowsAndMessaging::{
     SystemParametersInfoW, SPI_GETCLIENTAREAANIMATION, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
 };
@@ -21,14 +19,6 @@ pub fn border(hwnd: HWND, c: Option<Color>) {
     let value = c.map_or(0xFFFF_FFFE, colorref);
     unsafe {
         let _ = set(hwnd, DWMWA_BORDER_COLOR.0, &COLORREF(value));
-    }
-}
-
-/// The title bar in `c`, its title in `text`.
-pub fn caption(hwnd: HWND, c: Color, text: Color) {
-    unsafe {
-        let _ = set(hwnd, DWMWA_CAPTION_COLOR.0, &COLORREF(colorref(c)));
-        let _ = set(hwnd, DWMWA_TEXT_COLOR.0, &COLORREF(colorref(text)));
     }
 }
 

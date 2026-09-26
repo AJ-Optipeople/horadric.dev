@@ -60,9 +60,9 @@ use crate::anim::Look;
 use crate::board::RowState;
 use crate::files::{Row, Tree};
 use crate::layout::{
-    self, AskLayout, Button, ClusterLayout, DialogLayout, DropdownLayout, FilesLayout, Hit,
-    MenuLayout, Metrics, Rect, SettingRow, StartHit, StartLayout, TasksLayout, ToastLayout,
-    UsageHit, UsageLayout, KNOB_R,
+    self, AskLayout, Button, CaptionHit, CaptionLayout, ClusterLayout, DialogLayout,
+    DropdownLayout, FilesLayout, Hit, MenuLayout, Metrics, Rect, SettingRow, StartHit, StartLayout,
+    TasksLayout, ToastLayout, UsageHit, UsageLayout, KNOB_R,
 };
 use crate::motion::{self, BREATH, ORBIT};
 use crate::theme::{self, Color};
@@ -336,6 +336,27 @@ pub struct MenuLook<'a> {
     pub open: bool,
 }
 
+/// Everything one frame of the stage's caption needs.
+pub struct CaptionScene<'a> {
+    pub layout: &'a CaptionLayout,
+    /// The caption's size, and the plate's colour at its top and bottom
+    /// edges: the plate's light runs down the whole stage.
+    pub size: (f32, f32),
+    pub top: Color,
+    pub bottom: Color,
+    /// How far in the plate's seam is cut.
+    pub seam: f32,
+    pub project: &'a str,
+    /// The session with the keyboard and what its agent is doing.
+    pub detail: &'a str,
+    pub accent: Color,
+    /// The window is in front. Behind, the caption goes quiet.
+    pub active: bool,
+    pub maximized: bool,
+    pub hot: Option<CaptionHit>,
+    pub pressed: Option<CaptionHit>,
+}
+
 /// Everything one frame of a notification needs.
 pub struct ToastScene<'a> {
     pub layout: &'a ToastLayout,
@@ -587,6 +608,15 @@ impl Target {
         unsafe {
             self.rt.BeginDraw();
             self.painter(&self.rt).menu(gpu, m, scene);
+            self.rt.EndDraw(None, None)
+        }
+    }
+
+    /// Draws the stage's caption. `Err` means the target must be recreated.
+    pub fn draw_caption(&self, gpu: &Gpu, scene: &CaptionScene) -> Result<()> {
+        unsafe {
+            self.rt.BeginDraw();
+            self.painter(&self.rt).caption(gpu, scene);
             self.rt.EndDraw(None, None)
         }
     }
@@ -913,6 +943,82 @@ impl Painter<'_> {
             }
         }
         self.rt.PopAxisAlignedClip();
+    }
+
+    /// The stage's caption: the top of the faceplate, its seam and light
+    /// carried on from the plate below, with the project's lamp and name,
+    /// what its session is doing, and the window's keys.
+    unsafe fn caption(&self, gpu: &Gpu, scene: &CaptionScene) {
+        let (w, h) = scene.size;
+        self.rt.Clear(Some(&color(scene.bottom)));
+        self.fill_gradient(
+            &Rect::new(0.0, 0.0, w, h),
+            (0.0, h),
+            &[(0.0, scene.top), (1.0, scene.bottom)],
+        );
+        // The seam as the plate cuts it with GDI, which has no alpha: a dark
+        // line with a lit one under it along the top, dark down the sides.
+        let s = scene.seam;
+        let black = Color::rgb(0);
+        let white = Color::rgb(0xFFFFFF);
+        let dark = theme::WINDOW_BG.mix(black, 0.5);
+        let light = theme::WINDOW_BG.mix(white, 0.05);
+        self.fill_rounded(
+            &Rect::new(s + 1.0, s + 1.0, w - 2.0 * s - 2.0, 1.0),
+            0.0,
+            light,
+        );
+        self.fill_rounded(&Rect::new(s, s, w - 2.0 * s, 1.0), 0.0, dark);
+        self.fill_rounded(&Rect::new(s, s, 1.0, h - s), 0.0, dark);
+        self.fill_rounded(&Rect::new(w - s - 1.0, s, 1.0, h - s), 0.0, dark);
+
+        let l = scene.layout;
+        let quiet = |c: Color| if scene.active { c } else { c.fade(0.6) };
+        self.led(l.lamp.0, l.lamp.1, quiet(scene.accent));
+        let name_w = self
+            .layout(gpu, &gpu.name, scene.project, l.title)
+            .map(|t| text_size(&t).0.ceil())
+            .unwrap_or(0.0)
+            .min(l.title.w);
+        let name = Rect::new(l.title.x, l.title.y, name_w, l.title.h);
+        self.text(&gpu.name, quiet(theme::TEXT), scene.project, name);
+        if !scene.detail.is_empty() {
+            let x = name.right() + 12.0;
+            let rest = Rect::new(x, l.title.y, l.title.right() - x, l.title.h);
+            self.text(&gpu.small, quiet(theme::TEXT_DIM), scene.detail, rest);
+        }
+
+        let restore = if scene.maximized {
+            '\u{E923}'
+        } else {
+            '\u{E922}'
+        };
+        let keys = [
+            (CaptionHit::Min, l.min, '\u{E921}'),
+            (CaptionHit::Max, l.max, restore),
+            (CaptionHit::Close, l.close, '\u{E8BB}'),
+        ];
+        for (which, r, glyph) in keys {
+            let b = layout::button(Some(which), scene.hot, scene.pressed.map(Some));
+            let close = which == CaptionHit::Close;
+            let ink = match b {
+                Button::Idle => quiet(theme::TEXT_DIM),
+                Button::Hover if close => white,
+                Button::Hover => theme::TEXT,
+                Button::Pressed if close => white.fade(0.8),
+                Button::Pressed => theme::TEXT_DIM,
+            };
+            let fill = match b {
+                Button::Idle => None,
+                Button::Hover if close => Some(theme::ERROR.mix(black, 0.15)),
+                Button::Pressed if close => Some(theme::ERROR.mix(black, 0.35)),
+                _ => theme::button_look(b).0,
+            };
+            if let Some(f) = fill {
+                self.fill_rounded(&r, 7.0, f);
+            }
+            self.icon(&gpu.icon_small, ink, glyph, r);
+        }
     }
 
     /// A notification: a lamp in its tone by the title, the text under it,

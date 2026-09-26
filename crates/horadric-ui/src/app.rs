@@ -83,6 +83,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::agents;
+use crate::caption;
 use crate::columns::{self, Columns};
 use crate::console::{self, Console, Launch};
 use crate::dialog::{self, Dialog, Tone};
@@ -305,6 +306,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
     dropdown::register_class()?;
     ask::register_class()?;
     menu::register_class()?;
+    caption::register_class()?;
     dialog::register_class()?;
     toast::register_class()?;
     start::register_class()?;
