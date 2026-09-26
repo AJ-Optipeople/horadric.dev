@@ -26,6 +26,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
+use horadric_core::journal::{self, Entry, What};
 use horadric_core::tasks::{self, Holder, Mark, Mode, Next, Task, TASKS_FILE};
 use horadric_core::usage::format_until;
 use horadric_core::worktree::{self, Worktree};
@@ -38,7 +39,7 @@ use crate::board::{self, Board, RowState};
 use crate::menu::{self, Item};
 use crate::toast::Kind;
 use crate::window::{folder_key, project_key, project_name};
-use crate::{ask, watch};
+use crate::{ask, store, watch};
 
 /// The least time between two sessions the runner starts in one project.
 const START_GAP: Duration = Duration::from_secs(10);
@@ -81,6 +82,8 @@ pub(super) struct State {
     /// The finished branch the last notification offered to merge, which
     /// a click on it asks about.
     pub(super) merge_for: Option<Merge>,
+    /// The limit last journaled, by when it resets, so each is written once.
+    limit_journaled: Option<u64>,
     /// Set while the runner acts. Starting a session reconciles, and
     /// nothing in there may start the runner again.
     busy: bool,
@@ -225,6 +228,13 @@ impl App {
             let fresh = read_board(dir);
             let mut boards = self.shared.boards.borrow_mut();
             if boards.get(key) != Some(&fresh) {
+                let lines = boards
+                    .get(key)
+                    .map(|old| journal::marks(key, &old.tasks, &fresh.tasks, unix_now()))
+                    .unwrap_or_default();
+                for e in &lines {
+                    store::journal(e);
+                }
                 boards.insert(key.clone(), fresh);
                 changed.push(key.clone());
             }
@@ -520,6 +530,15 @@ impl App {
             }
         }
         if let (Some(at), true) = (held, waiting) {
+            if self.tasks.limit_journaled.replace(at) != Some(at) {
+                store::journal(&Entry {
+                    at: now,
+                    session: String::new(),
+                    name: String::new(),
+                    project: String::new(),
+                    what: What::Limit { until: at },
+                });
+            }
             said.push((
                 format!("limit:{at}"),
                 "Usage limit reached".to_string(),
@@ -829,11 +848,23 @@ impl App {
     pub(super) fn merge(&mut self, m: &Merge) {
         let into = crate::worktree::checked_out(&m.main).unwrap_or_else(|| "main".into());
         match crate::worktree::merge(&m.main, &m.branch) {
-            Ok(()) => self.toasts.show(
-                Kind::Done,
-                &format!("Merged {}", m.branch),
-                &format!("{} is in {into}.", tasks::one_line(&m.title)),
-            ),
+            Ok(()) => {
+                store::journal(&Entry {
+                    at: unix_now(),
+                    session: String::new(),
+                    name: String::new(),
+                    project: folder_key(&m.main.to_string_lossy()),
+                    what: What::Merged {
+                        branch: m.branch.clone(),
+                        title: m.title.clone(),
+                    },
+                });
+                self.toasts.show(
+                    Kind::Done,
+                    &format!("Merged {}", m.branch),
+                    &format!("{} is in {into}.", tasks::one_line(&m.title)),
+                )
+            }
             Err(e) => {
                 eprintln!("horadric: cannot merge {}: {e}", m.branch);
                 self.toasts.show(

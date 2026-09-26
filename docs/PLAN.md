@@ -1422,8 +1422,6 @@ behind other windows both lamps stayed green; with the stage in front the
 one with the keyboard went dark within a second and the other stayed lit;
 Ctrl+Alt+Left moved the keyboard over and that one went dark too.
 
-## Next
-
 ### Stay a while and listen
 
 Deckard Cain's catch-up. Asked for after the task list ran by itself for
@@ -1456,6 +1454,60 @@ happened while you were gone.
   message. The last assistant message and the commits say a lot already;
   asking a small model to summarise a run is a step after that, and a
   cost to justify.
+
+Built:
+
+- **The journal** is `journal.jsonl` beside `state.json`
+  (`store::journal`, `horadric_core::journal::Entry`). The app writes a
+  line when a session's phase changes into waiting, done or ended (a
+  session that vanishes counts as ended), compared in `reconcile` against
+  the phases last written (`App::journaled`); a session first seen at a
+  start or a reload writes nothing. A task list read that changes an
+  item's mark writes started, review, blocked or finished
+  (`journal::marks`, matched by title). A merge from the menu or the
+  notification writes merged, and a usage limit that holds the runner
+  writes once per reset. Lines older than a week go at each start.
+- **The summary** (`journal::summary`, pure and tested) keeps only the
+  last word on each session and each item, so waited, answered and
+  finished is one line. What asks something of you is told only while it
+  still holds, which the app answers from the registry and the lists.
+  Lines go waiting, review, unread, blocked, then what happened, oldest
+  first in each, grouped by project, the project with the most pressing
+  line first. The account's lines (a limit) stand under "Account".
+- **Away** (`catchup::Away`, tested): 15 minutes without input by
+  `GetLastInputInfo`, looked at every second, or the screen locked
+  (`WTSRegisterSessionNotification`); input within 5 seconds, or
+  unlocking, is coming back. Input on the lock screen is not. Coming back
+  opens the panel only if something happened, and not while Windows asks
+  for quiet (a full screen game, a presentation), as the toasts do.
+- **On demand** from the tray's "Stay a while and listen" and
+  Ctrl+Alt+Home (Ctrl+Alt+Shift+Home for a dev instance): since local
+  midnight, or the last eight hours early in the day. Asked for, it says
+  "Nothing happened" rather than staying shut.
+- **The panel** (`catchup.rs`, laid out by `layout::catchup`, drawn by
+  `render::catchup`) is a plate like the toasts in the middle of the
+  primary screen, a lamp by each line in its section's colour and dark
+  for what simply happened, the age at the right. As many lines as fit
+  the screen, then "and N more". It takes the focus like a setting's
+  list; Esc, the cross or a click outside closes it. Windows may refuse
+  the focus to an app you are not using, and then it closes when the
+  focus moves anywhere. A click on a line with a live session shows it
+  as a tile click does.
+
+Tested on screen with a dev instance on its own port and `APPDATA`, a
+journal seeded with a finished item, a merge, a limit and a line ten
+days old, and three fake sessions posted to it: the old line was trimmed
+at start; a permission wait, a `Stop` and a `SessionEnd` each wrote their
+line; the hotkey opened the panel with the waiting session first, the
+unread turn, the ended one, then the other project's finished item and
+merge, and the limit under Account. Not tried on screen: coming back
+after 15 minutes or an unlock, clicking a line, and the tray item.
+
+Not done yet: commits under a finished item (the journal does not hear
+them), a mark of its own for a background session's lines, and scrolling
+past "and N more".
+
+## Next
 
 ### Step 4: worktrees and the git glance
 
