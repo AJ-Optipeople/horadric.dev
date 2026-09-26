@@ -16,6 +16,8 @@ pub const ENTER: Duration = Duration::from_millis(320);
 /// A key moving from how one phase stands it to how the next does:
 /// rising out of a pause, sinking as its session ends.
 pub const SETTLE: Duration = Duration::from_millis(450);
+/// A tile whose session has gone sinking and fading out of its place.
+pub const LEAVE: Duration = Duration::from_millis(320);
 /// Hover fades in and out this fast. Fast enough to feel instant, slow
 /// enough to not flicker as the cursor crosses a column of tiles.
 pub const HOVER: Duration = Duration::from_millis(120);

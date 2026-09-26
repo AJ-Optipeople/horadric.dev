@@ -199,6 +199,52 @@ impl Tiles {
     }
 }
 
+/// Tiles that have gone, drawn a moment longer as they sink and fade, so a
+/// session that leaves is seen to leave. Holds what drew each tile last,
+/// by id.
+pub struct Leaving<T> {
+    last: Vec<(String, T)>,
+    gone: Vec<(T, Instant)>,
+    started: bool,
+}
+
+impl<T> Default for Leaving<T> {
+    fn default() -> Self {
+        Leaving {
+            last: Vec::new(),
+            gone: Vec::new(),
+            started: false,
+        }
+    }
+}
+
+impl<T: Clone> Leaving<T> {
+    /// Takes this frame's tiles and returns the ghosts of those gone, each
+    /// with how far through leaving it is, 0 to 1.
+    pub fn step(&mut self, now: Instant, tiles: Vec<(String, T)>) -> Vec<(T, f32)> {
+        if self.started {
+            for (id, t) in self.last.drain(..) {
+                if !tiles.iter().any(|(k, _)| *k == id) {
+                    self.gone.push((t, now));
+                }
+            }
+        }
+        self.started = true;
+        self.last = tiles;
+        self.gone
+            .retain(|(_, at)| now.duration_since(*at) < motion::LEAVE);
+        self.gone
+            .iter()
+            .map(|(t, at)| {
+                (
+                    t.clone(),
+                    motion::progress(now.duration_since(*at), motion::LEAVE),
+                )
+            })
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -350,6 +396,26 @@ mod tests {
             Some(FRAME_FAST),
             "still sliding"
         );
+    }
+
+    #[test]
+    fn a_tile_that_goes_leaves_a_ghost_for_a_moment() {
+        let mut l = Leaving::default();
+        let now = Instant::now();
+        let both = || vec![("a".to_string(), 1), ("b".to_string(), 2)];
+        assert!(l.step(now, both()).is_empty());
+        assert!(l.step(now + ms(16), both()).is_empty());
+        let only_a = || vec![("a".to_string(), 1)];
+        assert_eq!(l.step(now + ms(32), only_a()), vec![(2, 0.0)]);
+        let half = l.step(now + ms(32) + motion::LEAVE / 2, only_a());
+        assert!((half[0].1 - 0.5).abs() < 1e-3);
+        assert!(l.step(now + ms(32) + motion::LEAVE, only_a()).is_empty());
+    }
+
+    #[test]
+    fn nothing_leaves_on_the_first_frame() {
+        let mut l: Leaving<i32> = Leaving::default();
+        assert!(l.step(Instant::now(), vec![]).is_empty());
     }
 
     #[test]

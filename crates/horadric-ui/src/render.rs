@@ -91,6 +91,8 @@ const TRACE_H: f32 = 11.0;
 const LAND_RISE: f32 = 3.0;
 /// How tall a finished turn's loot beam grows above its key, in DIPs.
 const BEAM_H: f32 = 120.0;
+/// How far a tile whose session has gone sinks as it fades, in DIPs.
+const LEAVE_SINK: f32 = 8.0;
 
 /// How many shapes make one soft edge. Fewer shows as bands.
 const BLUR_STEPS: usize = 8;
@@ -226,6 +228,9 @@ pub struct Scene<'a> {
     pub sessions: &'a [&'a Session],
     /// How each tile draws this frame, in the same order.
     pub looks: &'a [Look],
+    /// Tiles whose sessions have gone: where each was, what it showed,
+    /// and how far through leaving it is.
+    pub ghosts: &'a [(Rect, Session, f32)],
     /// The tile being carried to a new place, drawn over the others.
     pub held: Option<usize>,
     /// This project is the one the stage shows.
@@ -687,6 +692,18 @@ impl Painter<'_> {
         }
 
         self.header(gpu, scene);
+        // A tile that has gone sinks back into the plate and fades, under
+        // the ones sliding up over its place.
+        for (r, s, t) in scene.ghosts {
+            let k = motion::ease_in_out(*t);
+            let look = Look {
+                enter: 1.0 - k,
+                phase_age: motion::ARRIVAL * 4,
+                ..Look::still(r.y + LEAVE_SINK * k)
+            };
+            let at = Rect::new(r.x, look.y, r.w, r.h);
+            self.tile(gpu, m, scene, usize::MAX, &at, s, &look);
+        }
         for (i, (r, s, look)) in tiles(scene).enumerate() {
             if scene.held != Some(i) {
                 self.tile(gpu, m, scene, i, &r, s, &look);
@@ -1538,6 +1555,24 @@ impl Painter<'_> {
         self.fill_rounded(&r.inset(1.0), (round - 1.0).max(0.5), hot);
     }
 
+    /// A lamp switched off like an old picture tube, `t` of the way
+    /// through: its light squeezes to a bright line across its middle, the
+    /// line to a dot, and the dot goes out.
+    unsafe fn power_down(&self, r: &Rect, t: f32) {
+        let white = Color::rgb(0xFFFFFF);
+        let (cx, cy) = (r.x + r.w / 2.0, r.y + r.h / 2.0);
+        if t < 0.5 {
+            let q = motion::ease_in_out(t / 0.5);
+            let h = (r.h * (1.0 - q)).max(1.5);
+            let line = Rect::new(r.x, cy - h / 2.0, r.w, h);
+            self.fill_rounded(&line, r.w / 2.0, white.with_alpha(0.55 + 0.4 * q));
+            self.glow_dot(cx, cy, 6.0 + 4.0 * q, white, 0.3 + 0.5 * q);
+        } else {
+            let q = (t - 0.5) / 0.5;
+            self.glow_dot(cx, cy, 10.0 * (1.0 - q) + 2.0, white, 0.8 * (1.0 - q));
+        }
+    }
+
     /// A hot spot running up and down a working session's lamp, `t` of
     /// the way through a sweep.
     unsafe fn scan(&self, r: &Rect, c: Color, t: f32, strength: f32) {
@@ -1930,6 +1965,9 @@ impl Painter<'_> {
             (stance.lamp + 0.3 * arrival) * look.enter
         };
         self.lamp(&lamp_rect(r), c, level);
+        if ambient && *phase == Phase::Ended && look.settle > 0.0 {
+            self.power_down(&lamp_rect(r), 1.0 - look.settle);
+        }
 
         // The icon: what the agent is doing, in the phase's light.
         let icon_c = if matches!(lit, Phase::Idle | Phase::Ended | Phase::Paused) {

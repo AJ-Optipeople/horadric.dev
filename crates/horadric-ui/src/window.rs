@@ -49,6 +49,7 @@ use crate::board::{self, Board, RowState};
 use crate::files::{Change, Expansion, Row, Tree};
 use crate::glyphs::Font;
 use crate::layout::{self, ClusterLayout, Hit, Metrics};
+use crate::motion;
 pub use crate::project::{folder_key, project_key, project_name};
 use crate::render::{FilesScene, Gpu, Scene, Target, TaskRow, TasksScene};
 use crate::theme;
@@ -115,6 +116,8 @@ pub struct Cluster {
     tracking: Cell<bool>,
     /// Where each tile has got to on its way somewhere.
     tiles: RefCell<anim::Tiles>,
+    /// Tiles whose sessions have gone, fading out where they were.
+    leaving: RefCell<anim::Leaving<(layout::Rect, Session)>>,
     /// The frame interval the animation timer runs at, if it runs.
     frames: Cell<Option<Duration>>,
     /// Something besides the moving light changed, so the kept layer of
@@ -263,6 +266,7 @@ impl Cluster {
             pressed: Cell::new(None),
             tracking: Cell::new(false),
             tiles: RefCell::new(anim::Tiles::default()),
+            leaving: RefCell::new(anim::Leaving::default()),
             frames: Cell::new(None),
             dirty: Cell::new(true),
         });
@@ -678,17 +682,36 @@ impl Cluster {
                 }
             })
             .collect();
-        let looks = self.tiles.borrow_mut().step(Instant::now(), &inputs);
+        let now = Instant::now();
+        let looks = self.tiles.borrow_mut().step(now, &inputs);
         let ambient = backdrop::animations_on();
+        let drawn = refs
+            .iter()
+            .zip(&looks)
+            .zip(&layout.tiles)
+            .map(|((s, l), r)| {
+                let at = layout::Rect::new(r.x, l.y, r.w, r.h);
+                (s.id.clone(), (at, (*s).clone()))
+            })
+            .collect();
+        let ghosts: Vec<(layout::Rect, Session, f32)> = self
+            .leaving
+            .borrow_mut()
+            .step(now, drawn)
+            .into_iter()
+            .filter(|_| ambient)
+            .map(|((r, s), t)| (r, s, t))
+            .collect();
         // A tile on its way somewhere changes what holds still.
         let moving = looks.iter().zip(&inputs).any(|(l, t)| l.moving(t.y));
-        let rebuild = self.dirty.replace(false) || moving;
+        let rebuild = self.dirty.replace(false) || moving || !ghosts.is_empty();
         let scene = Scene {
             layout: &layout,
             name: &self.name,
             collapsed: self.collapsed,
             sessions: &refs,
             looks: &looks,
+            ghosts: &ghosts,
             held,
             on_stage,
             selected,
@@ -716,7 +739,12 @@ impl Cluster {
         }
         let phases: Vec<&horadric_core::Phase> = refs.iter().map(|s| &s.phase).collect();
         let targets: Vec<f32> = inputs.iter().map(|t| t.y).collect();
-        self.schedule(anim::Tiles::next_frame(&looks, &phases, &targets, ambient));
+        let next = anim::Tiles::next_frame(&looks, &phases, &targets, ambient);
+        self.schedule(if ghosts.is_empty() {
+            next
+        } else {
+            Some(motion::FRAME_FAST)
+        });
     }
 
     /// Keeps the animation timer at the rate the next frame needs, or stops
