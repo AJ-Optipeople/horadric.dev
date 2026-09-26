@@ -683,17 +683,24 @@ impl Pane {
     /// Sends typed bytes: the view jumps back to the live screen and any
     /// selection goes, as in every terminal. The console notes it, since
     /// what was typed may sit in the agent's prompt box as a draft.
+    /// It repaints only when the view changed: otherwise the echo repaints,
+    /// and a paint now would show the old screen and put the echo a frame
+    /// behind.
     fn send(&self, bytes: Vec<u8>) {
-        if let Ok(mut s) = self.console.screen.lock() {
-            s.term.selection = None;
-            if s.term.grid().display_offset() != 0 {
+        let moved = self.console.screen.lock().is_ok_and(|mut s| {
+            let selected = s.term.selection.take().is_some();
+            let scrolled = s.term.grid().display_offset() != 0;
+            if scrolled {
                 s.term.scroll_display(Scroll::Bottom);
             }
-        }
+            selected || scrolled
+        });
         self.console.note_typed();
         self.caret_since.set(Instant::now());
         self.console.write(bytes);
-        self.invalidate();
+        if moved {
+            self.invalidate();
+        }
     }
 
     /// The kitty keyboard flags the program has pushed, if any.

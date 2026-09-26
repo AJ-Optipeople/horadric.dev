@@ -7,8 +7,8 @@ document: someone picking the project up cold should need nothing else.
 Last updated 2026-09-26, after step 3, the launchers, persistence, install,
 the stage, reload, the project grid, browser windows, the look, plain
 terminals, a pass of quality of life, the columns, the task list, session
-hosts, drawing every last piece of chrome ourselves, identify, and the
-stash.
+hosts, drawing every last piece of chrome ourselves, identify, the
+stash, and a performance pass.
 
 Ideas that are not planned yet, most of them from the Diablo name, are in
 [IDEAS.md](IDEAS.md).
@@ -2058,6 +2058,59 @@ through the rename too.
   them.
 
 Not checked on screen: the tile's words are the only change there.
+
+### Performance
+
+On 2026-09-26 everything felt less smooth: typing in the stage, right
+clicks, the app in general. Every thread but the UI thread sat idle, and
+the UI thread did work nobody asked for. Measured on a dev instance with
+fifteen clusters, three animating tiles and eight hook events a second,
+its share of a core fell from 75% to 6%. With the tiles
+animating and no events, it fell from 15% to 1.3%. What was
+fixed, and what to keep that way:
+
+- **No paint waits for the screen.** Render targets present with
+  `D2D1_PRESENT_OPTIONS_IMMEDIATELY`. With the default, every `EndDraw`
+  waited for the next refresh, and every window paints on the one UI
+  thread, so a few animating clusters filled each frame and a keystroke's
+  echo waited behind them. DWM composes the windows, so nothing tears.
+- **A keystroke paints once.** Sending typed bytes repaints the pane only
+  when that cleared a selection or scrolled back to the live screen. The
+  echo repaints; a paint before it showed the old screen and pushed the
+  echo a frame back.
+- **A cluster redraws only when what it shows changed.** A full redraw of
+  the kept layer is the dearest thing the app does. `Cluster::update`
+  lays out again and redraws only if the layout, the sessions, the quest
+  rows, the board or the stage marks differ from what the kept layer was
+  drawn from (`Still`). Every hook event, every arrange and every change
+  count goes through it, so an event for one project redraws that one.
+  `Cluster::fit` still always redraws, for a click that changed something
+  only the cluster knows. The second tick redraws a cluster only when an
+  age label or an activity trace moved (`Clock`), which for an old tile is
+  once a minute.
+- **Hook events are taken in bursts.** The feeder posts
+  `WM_HORADRIC_EVENT` only if the UI has not been told yet, and the flags
+  wait in `EVENTS`. Ten events queued behind a menu cost one pass.
+- **Folder keys of missing folders are remembered for five seconds.**
+  `folder_key` is called per session, per cluster, per paint. For a
+  folder that is gone (a swept worktree, a deleted project) it started
+  `git` every time, which made each event cost 90 ms with four such
+  folders in the saved state.
+- **Menus do not wait for git.** The tile menu lists the change count the
+  tile keeps, counted again within seconds of the agent's last move, and
+  counts only when there is none. The project menu reads history and asks
+  git side by side, transcript titles are kept while their file is
+  unchanged, and `worktree::main_tree` remembers its answer.
+- **Light nobody can see does not move.** A cluster's animation frame is
+  skipped while it is minimised, off screen or wholly under another
+  window. Browsers and Electron apps draw without a redirection bitmap,
+  so that style alone does not make a window see-through; layered,
+  click-through and overlay tool windows never count as covering.
+
+Left for later: each pane paint makes a new layer and geometry for its
+glass (`glyphs.rs`), characters missing from the terminal font get a
+`DrawText` each, the pane caption repaints on every spinner frame of the
+title, and each paint of a cluster clones its sessions twice.
 
 ## Next
 

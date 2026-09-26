@@ -38,7 +38,7 @@ use windows::Win32::Graphics::Direct2D::{
     D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE, D2D1_EXTEND_MODE_CLAMP,
     D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_FEATURE_LEVEL_DEFAULT, D2D1_GAMMA_2_2,
     D2D1_HWND_RENDER_TARGET_PROPERTIES, D2D1_LAYER_OPTIONS_NONE, D2D1_LAYER_PARAMETERS,
-    D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES, D2D1_LINE_JOIN_ROUND, D2D1_PRESENT_OPTIONS_NONE,
+    D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES, D2D1_LINE_JOIN_ROUND, D2D1_PRESENT_OPTIONS_IMMEDIATELY,
     D2D1_RADIAL_GRADIENT_BRUSH_PROPERTIES, D2D1_RENDER_TARGET_PROPERTIES,
     D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_USAGE_NONE, D2D1_ROUNDED_RECT,
     D2D1_STROKE_STYLE_PROPERTIES,
@@ -87,7 +87,7 @@ const INNER_PAD: f32 = 14.0;
 /// The room a background session's mark takes after a catch-up line.
 const MARK_W: f32 = 18.0;
 /// The activity trace at the bottom right of a tile.
-const TRACE_BARS: usize = 20;
+pub const TRACE_BARS: usize = 20;
 const TRACE_BAR_W: f32 = 1.6;
 const TRACE_GAP: f32 = 0.8;
 const TRACE_H: f32 = 11.0;
@@ -625,7 +625,7 @@ pub fn hwnd_target(
                 width: width_px.max(1),
                 height: height_px.max(1),
             },
-            presentOptions: D2D1_PRESENT_OPTIONS_NONE,
+            presentOptions: D2D1_PRESENT_OPTIONS_IMMEDIATELY,
         };
         let rt = gpu.d2d.CreateHwndRenderTarget(&props, &hwnd_props)?;
         rt.SetDpi(dpi as f32, dpi as f32);

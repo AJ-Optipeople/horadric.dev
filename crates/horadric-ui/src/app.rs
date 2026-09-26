@@ -40,7 +40,7 @@ use std::os::windows::io::AsRawHandle;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -125,8 +125,14 @@ mod runner;
 
 pub use runner::ssh_prompt;
 
-/// A hook event changed the registry. `wparam` is 1 when a phase changed.
+/// Hook events changed the registry. What they did waits in [`EVENTS`].
 const WM_HORADRIC_EVENT: u32 = WM_APP + 1;
+/// Events the UI has not taken yet: [`EVENTS_DUE`] once a
+/// `WM_HORADRIC_EVENT` is on its way, [`EVENTS_PHASE`] if one of them
+/// changed a phase. A burst of events costs the UI one pass, not one each.
+static EVENTS: AtomicUsize = AtomicUsize::new(0);
+const EVENTS_DUE: usize = 1;
+const EVENTS_PHASE: usize = 2;
 /// A window procedure queued input with [`push`].
 const WM_HORADRIC_INPUT: u32 = WM_APP + 2;
 /// A console has new output. `wparam` is its serial.
@@ -319,6 +325,15 @@ pub(crate) fn push(input: Input) {
     post(APP_WINDOW.with(Cell::get), WM_HORADRIC_INPUT, 0);
 }
 
+/// Tells the UI the registry changed, unless it has yet to hear of the
+/// last change, when it will see this one with it.
+fn post_event(window: isize, phase: bool) {
+    let flags = EVENTS_DUE | if phase { EVENTS_PHASE } else { 0 };
+    if EVENTS.fetch_or(flags, Ordering::AcqRel) & EVENTS_DUE == 0 {
+        post(window, WM_HORADRIC_EVENT, 0);
+    }
+}
+
 fn post(window: isize, msg: u32, wparam: usize) {
     unsafe {
         let _ = PostMessageW(
@@ -404,7 +419,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
         // Background sessions already running get their tiles now, not at
         // their next hook, which may be a while for one that is done.
         if agents::list().is_some_and(|list| agents::adopt_all(&feed_registry, &list)) {
-            post(notify_id, WM_HORADRIC_EVENT, 1);
+            post_event(notify_id, true);
         }
         let mut asked = Asked::default();
         for t in rx {
@@ -441,7 +456,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
                 .lock()
                 .map(|mut r| r.apply(&target, &t.event, SystemTime::now()))
                 .unwrap_or(false);
-            post(notify_id, WM_HORADRIC_EVENT, changed as usize);
+            post_event(notify_id, changed);
         }
     });
 
@@ -1441,9 +1456,26 @@ fn project_menu(key: &str) {
     const MERGE: usize = 300;
     const MERGE_END: usize = 400;
     let dir = with_app(|app| app.project_dir(key)).flatten();
-    let past = match &dir {
-        Some(d) => with_app(|app| app.history(d)).unwrap_or_default(),
-        None => Vec::new(),
+    // Reading transcripts and asking git are the slow part of opening the
+    // menu, so they are done side by side.
+    let held = with_app(|app| app.held_conversations())
+        .flatten()
+        .unwrap_or_default();
+    let (past, mut merges, own_trees) = match &dir {
+        Some(d) => std::thread::scope(|scope| {
+            let past = scope.spawn(|| past_in(d, &held));
+            let merges = scope.spawn(|| runner::merges(d));
+            // Only a repository's main tree can add worktrees.
+            let own_trees = worktree::main_tree(d)
+                .is_some()
+                .then(|| horadric_hooks::tasks::worktrees(d).enabled);
+            (
+                past.join().unwrap_or_default(),
+                merges.join().unwrap_or_default(),
+                own_trees,
+            )
+        }),
+        None => (Vec::new(), Vec::new(), None),
     };
     let hosts = dir
         .as_deref()
@@ -1457,10 +1489,6 @@ fn project_menu(key: &str) {
     let mut suggested = horadric_hooks::tasks::ssh_config_hosts();
     suggested.retain(|h| !hosts.contains(h));
     let offering = suggested.len() <= MENU_HOSTS;
-    let mut merges = match &dir {
-        Some(d) => with_app(|app| app.merges(d)).unwrap_or_default(),
-        None => Vec::new(),
-    };
     merges.truncate(MERGE_END - MERGE);
     let mut items = vec![
         Item::action(ADD, "New session"),
@@ -1489,11 +1517,6 @@ fn project_menu(key: &str) {
             Item::Submenu("Add host".into(), offer)
         });
     }
-    // Only a repository's main tree can add worktrees.
-    let own_trees = dir
-        .as_deref()
-        .filter(|d| worktree::main_tree(d).is_some())
-        .map(|d| horadric_hooks::tasks::worktrees(d).enabled);
     if let Some(on) = own_trees {
         items.extend([
             Item::Separator,
@@ -1682,6 +1705,11 @@ fn add_host(dir: &Path, host: &str) {
 
 /// The lines of a History menu: each past conversation, `first` on, then
 /// Claude Code's own picker for the rest.
+/// The past conversations held in `dir`, leaving out the ones in `held`.
+fn past_in(dir: &Path, held: &[String]) -> Vec<Past> {
+    transcript::history(&dir.to_string_lossy(), held, HISTORY)
+}
+
 fn history_items(past: &[Past], first: usize) -> Vec<Item> {
     let now = SystemTime::now();
     let mut items: Vec<Item> = past
@@ -2041,7 +2069,11 @@ impl App {
     fn on_message(&mut self, msg: u32, wparam: usize) {
         match msg {
             WM_HORADRIC_EVENT => {
-                self.reconcile(wparam != 0);
+                let events = EVENTS.swap(0, Ordering::AcqRel);
+                if events & EVENTS_DUE == 0 {
+                    return;
+                }
+                self.reconcile(events & EVENTS_PHASE != 0);
                 self.switch_free();
                 self.run_tasks();
                 self.recount();
@@ -2741,21 +2773,23 @@ impl App {
             self.sound(Loot::Rune);
         }
         for c in &self.clusters {
-            c.invalidate();
+            c.refresh();
         }
     }
 
-    /// The worktree of a session, counted now, for its menu to list what
-    /// changed as it is this moment.
+    /// The worktree of a session and what it changed, for its menu. The
+    /// count kept on the tile is fresh within seconds of the agent's last
+    /// move, and counting again takes several git runs the menu would
+    /// wait for, so it is counted now only when it never was.
     fn diff_of(&mut self, id: &str) -> Option<(Worktree, Option<Diff>)> {
-        let w = self
-            .shared
-            .registry
-            .lock()
-            .ok()?
-            .get(id)?
-            .worktree
-            .clone()?;
+        let (w, kept) = {
+            let r = self.shared.registry.lock().ok()?;
+            let s = r.get(id)?;
+            (s.worktree.clone()?, s.diff.clone())
+        };
+        if kept.is_some() {
+            return Some((w, kept));
+        }
         let diff = worktree::count(&w);
         if let Ok(mut r) = self.shared.registry.lock() {
             if let Some(s) = r.get_mut(id) {
@@ -2763,7 +2797,7 @@ impl App {
             }
         }
         for c in &self.clusters {
-            c.invalidate();
+            c.refresh();
         }
         Some((w, diff))
     }
@@ -2781,9 +2815,17 @@ impl App {
     /// first. Claude Code keeps every one, ended or not, so this is the way
     /// back to a session closed for good.
     fn history(&self, dir: &Path) -> Vec<Past> {
-        let open: Vec<String> = match self.shared.registry.lock() {
-            Ok(r) => r
-                .all()
+        match self.held_conversations() {
+            Some(open) => past_in(dir, &open),
+            None => Vec::new(),
+        }
+    }
+
+    /// The conversations tiles hold, running, paused or stashed.
+    fn held_conversations(&self) -> Option<Vec<String>> {
+        let r = self.shared.registry.lock().ok()?;
+        Some(
+            r.all()
                 .filter_map(|s| s.claude_session_id.clone())
                 .chain(
                     r.stashed()
@@ -2791,9 +2833,7 @@ impl App {
                         .filter_map(|s| s.claude_session_id.clone()),
                 )
                 .collect(),
-            Err(_) => return Vec::new(),
-        };
-        transcript::history(&dir.to_string_lossy(), &open, HISTORY)
+        )
     }
 
     /// Carries on a past conversation from `past`, the History menu's list
@@ -3470,7 +3510,7 @@ impl App {
                     r.apply(&id, &HookEvent::synthetic("SessionEnd"), SystemTime::now());
                 }
             }
-            post(notify, WM_HORADRIC_EVENT, 1);
+            post_event(notify, true);
         });
     }
 
@@ -3909,7 +3949,7 @@ impl App {
         if *self.shared.staged.borrow() != now {
             *self.shared.staged.borrow_mut() = now;
             for c in &self.clusters {
-                c.invalidate();
+                c.refresh();
             }
         }
     }
@@ -4088,7 +4128,7 @@ impl App {
             self.reconcile(true);
         } else {
             for c in &self.clusters {
-                c.invalidate();
+                c.tick();
             }
         }
         // Bringing the stage to the front says nothing to the app, so a
@@ -4276,7 +4316,7 @@ impl App {
 
         self.order_sessions();
         for c in &self.clusters {
-            c.fit();
+            c.update();
         }
         self.sync_stash();
         self.sync_cube();
@@ -4501,7 +4541,7 @@ impl App {
             .is_ok_and(|mut r| r.get_mut(&id).is_some_and(Session::identify));
         if changed {
             for c in &self.clusters {
-                c.invalidate();
+                c.refresh();
             }
         }
     }

@@ -1,9 +1,11 @@
 //! Reads a conversation's title out of its transcript file, and lists the
 //! conversations Claude Code keeps for a folder.
 
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use std::time::SystemTime;
 
 use horadric_core::{title, Title};
@@ -67,25 +69,28 @@ pub fn history(cwd: &str, skip: &[String], limit: usize) -> Vec<Past> {
 }
 
 fn list_in(root: &Path, cwd: &str, skip: &[String], limit: usize) -> Vec<Past> {
-    let mut files: Vec<(PathBuf, SystemTime)> = folders(root, cwd)
+    let mut files: Vec<(PathBuf, SystemTime, u64)> = folders(root, cwd)
         .iter()
         .filter_map(|dir| std::fs::read_dir(dir).ok())
         .flatten()
         .flatten()
         .filter(|e| e.path().extension().is_some_and(|x| x == "jsonl"))
-        .filter_map(|e| Some((e.path(), e.metadata().ok()?.modified().ok()?)))
+        .filter_map(|e| {
+            let meta = e.metadata().ok()?;
+            Some((e.path(), meta.modified().ok()?, meta.len()))
+        })
         .collect();
     files.sort_by_key(|f| std::cmp::Reverse(f.1));
     files
         .into_iter()
-        .filter_map(|(path, modified)| {
+        .filter_map(|(path, modified, len)| {
             let id = path.file_stem()?.to_str()?.to_string();
-            Some((path, id, modified))
+            Some((path, id, modified, len))
         })
-        .filter(|(_, id, _)| !skip.contains(id))
+        .filter(|(_, id, ..)| !skip.contains(id))
         .take(LOOKED_AT)
-        .filter_map(|(path, id, modified)| {
-            let title = tail_title(&path)?;
+        .filter_map(|(path, id, modified, len)| {
+            let title = kept_title(&path, modified, len)?;
             Some(Past {
                 id,
                 title,
@@ -129,6 +134,28 @@ fn folder_name(cwd: &str) -> String {
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect()
+}
+
+/// [`tail_title`], remembered while the file stays as it was. A menu
+/// opening reads the tails of dozens of transcripts, megabytes, and a
+/// conversation that is over never changes.
+fn kept_title(path: &Path, modified: SystemTime, len: u64) -> Option<Title> {
+    type Kept = HashMap<PathBuf, (SystemTime, u64, Option<Title>)>;
+    static KEPT: OnceLock<Mutex<Kept>> = OnceLock::new();
+    let kept = KEPT.get_or_init(Default::default);
+    let same = |k: &Kept| {
+        k.get(path)
+            .filter(|(m, l, _)| (*m, *l) == (modified, len))
+            .map(|(.., t)| t.clone())
+    };
+    if let Some(title) = kept.lock().ok().and_then(|k| same(&k)) {
+        return title;
+    }
+    let title = tail_title(path);
+    if let Ok(mut k) = kept.lock() {
+        k.insert(path.to_path_buf(), (modified, len, title.clone()));
+    }
+    title
 }
 
 /// The title from the end of the file only. A menu is opening, so no

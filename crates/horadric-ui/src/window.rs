@@ -19,14 +19,16 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use horadric_core::tasks::{Mark, Mode};
-use horadric_core::{Defaults, Registry, Session, Usage};
+use horadric_core::{format_age, Defaults, Registry, Session, Usage};
 use windows::core::{w, Result, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{
-    DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
-    DWM_WINDOW_CORNER_PREFERENCE,
+    DwmGetWindowAttribute, DwmSetWindowAttribute, DWMWA_CLOAKED, DWMWA_WINDOW_CORNER_PREFERENCE,
+    DWMWCP_ROUND, DWM_WINDOW_CORNER_PREFERENCE,
 };
-use windows::Win32::Graphics::Gdi::{InvalidateRect, ScreenToClient, ValidateRect};
+use windows::Win32::Graphics::Gdi::{
+    InvalidateRect, MonitorFromRect, ScreenToClient, ValidateRect, MONITOR_DEFAULTTONULL,
+};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -34,14 +36,15 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     VK_CONTROL,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GetCursorPos, GetWindowLongPtrW, GetWindowRect,
-    KillTimer, LoadCursorW, PostMessageW, RegisterClassW, SetTimer, SetWindowLongPtrW,
-    SetWindowPos, ShowWindow, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, HWND_NOTOPMOST,
-    HWND_TOPMOST, IDC_ARROW, MA_NOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GetCursorPos, GetWindow, GetWindowLongPtrW,
+    GetWindowLongW, GetWindowRect, IsIconic, IsWindowVisible, KillTimer, LoadCursorW, PostMessageW,
+    RegisterClassW, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, CREATESTRUCTW,
+    CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, GWL_EXSTYLE, GW_HWNDPREV, HWND_NOTOPMOST, HWND_TOPMOST,
+    IDC_ARROW, MA_NOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
     SW_SHOWNOACTIVATE, WM_APP, WM_CAPTURECHANGED, WM_DPICHANGED, WM_ERASEBKGND, WM_LBUTTONDOWN,
     WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY,
-    WM_PAINT, WM_RBUTTONUP, WM_SIZE, WM_TIMER, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-    WS_POPUP,
+    WM_PAINT, WM_RBUTTONUP, WM_SIZE, WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+    WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
 use crate::anim::{self, TileIn};
@@ -55,7 +58,7 @@ use crate::glyphs::Font;
 use crate::layout::{self, ClusterLayout, Hit, Metrics};
 use crate::motion;
 pub use crate::project::{folder_key, project_key, project_name};
-use crate::render::{FilesScene, Flight, Gpu, Scene, Target, TaskRow, TasksScene};
+use crate::render::{FilesScene, Flight, Gpu, Scene, Target, TaskRow, TasksScene, TRACE_BARS};
 use crate::theme;
 use crate::watch::{self, Slot, Watcher};
 
@@ -137,6 +140,44 @@ pub struct Cluster {
     /// Something besides the moving light changed, so the kept layer of
     /// what holds still has to be drawn again.
     dirty: Cell<bool>,
+    /// What the kept layer was last drawn from, so an event for another
+    /// project, or one that changed nothing here, draws nothing.
+    drawn: RefCell<Option<Still>>,
+    /// The tiles' clock readings at the last tick, so the tick redraws only
+    /// when an age or a trace has moved.
+    clock: RefCell<Vec<Clock>>,
+}
+
+/// What the kept layer shows, besides the clock and the cursor.
+#[derive(PartialEq)]
+struct Still {
+    layout: ClusterLayout,
+    sessions: Vec<Session>,
+    items: Option<Vec<Item>>,
+    board: Option<(String, String)>,
+    staged: Vec<bool>,
+    active: Option<String>,
+}
+
+/// What a tile shows that moves with time alone: its age, and its trace
+/// of the last minutes, the trace's slide rounded to a quarter bar.
+#[derive(PartialEq)]
+struct Clock {
+    age: String,
+    trace: Vec<u8>,
+    slide: u8,
+}
+
+impl Clock {
+    fn of(s: &Session, now: SystemTime) -> Clock {
+        let (bars, scrolled) = s.trace(now, TRACE_BARS);
+        let busy = bars.iter().any(|&b| b > 0.0);
+        Clock {
+            age: format_age(now.duration_since(s.since).unwrap_or_default()),
+            trace: bars.iter().map(|b| (b * 32.0) as u8).collect(),
+            slide: if busy { (scrolled * 4.0) as u8 } else { 0 },
+        }
+    }
 }
 
 /// The files tile. It only shows once git has answered with a tree.
@@ -200,6 +241,7 @@ struct Tasks {
 }
 
 /// A row of the tasks tile as the cluster reads it: which item, and how.
+#[derive(Clone, PartialEq)]
 struct Item {
     line: usize,
     title: String,
@@ -290,6 +332,8 @@ impl Cluster {
             refit_due: Cell::new(false),
             frames: Cell::new(None),
             dirty: Cell::new(true),
+            drawn: RefCell::new(None),
+            clock: RefCell::new(Vec::new()),
         });
 
         unsafe {
@@ -582,16 +626,74 @@ impl Cluster {
     }
 
     /// Gives the files tile the room its column has for it, in physical
-    /// pixels below its header, and fits the window to it.
+    /// pixels below its header, and fits the window to it. Every arrange
+    /// gives every cluster its room, so it draws again only if that
+    /// changed anything.
     pub fn set_files_room(&self, px: Option<i32>) {
         let room = px.map(|p| p as f32 / self.scale());
         self.files.borrow_mut().room = room;
-        self.fit();
+        self.update();
     }
 
-    /// Recomputes layout from the registry and resizes the window to fit.
-    /// True when the size changed, so the clusters need arranging again.
+    /// Recomputes layout from the registry, resizes the window to fit and
+    /// draws it again. True when the size changed, so the clusters need
+    /// arranging again.
     pub fn fit(&self) -> bool {
+        let changed = self.lay_out();
+        self.invalidate();
+        changed
+    }
+
+    /// As [`Cluster::fit`], for when the registry or the boards changed:
+    /// draws again only if that changed what this cluster shows. Every hook
+    /// event lands here for every cluster, and a full redraw of each is
+    /// the dearest thing the app does.
+    pub fn update(&self) -> bool {
+        let changed = self.lay_out();
+        self.refresh();
+        changed
+    }
+
+    /// Draws again if what it shows changed since it was last drawn.
+    pub fn refresh(&self) {
+        if self.drawn.borrow().as_ref() != Some(&self.still()) {
+            self.invalidate();
+        }
+    }
+
+    /// Once a second: draws again only if an age or a trace moved.
+    pub fn tick(&self) {
+        let now = SystemTime::now();
+        let clock: Vec<Clock> = self.sessions().iter().map(|s| Clock::of(s, now)).collect();
+        if *self.clock.borrow() != clock {
+            *self.clock.borrow_mut() = clock;
+            self.invalidate();
+        }
+    }
+
+    fn still(&self) -> Still {
+        let sessions = self.sessions();
+        let staged = {
+            let staged = self.shared.staged.borrow();
+            sessions.iter().map(|s| staged.contains(&s.id)).collect()
+        };
+        let board = self
+            .shared
+            .boards
+            .borrow()
+            .get(&self.key)
+            .map(|b| (b.summary(), b.mode_key()));
+        Still {
+            layout: self.layout.borrow().clone(),
+            sessions,
+            items: self.items(),
+            board,
+            staged,
+            active: self.shared.active.borrow().clone(),
+        }
+    }
+
+    fn lay_out(&self) -> bool {
         let sessions = self.sessions();
         let n = sessions.len();
         let m = &self.shared.metrics;
@@ -646,7 +748,6 @@ impl Cluster {
                 );
             }
         }
-        self.invalidate();
         changed
     }
 
@@ -801,6 +902,9 @@ impl Cluster {
             .collect();
         let finishing = finishing || !flights.is_empty();
         let rebuild = self.dirty.replace(false) || moving || !ghosts.is_empty() || finishing;
+        if rebuild {
+            *self.drawn.borrow_mut() = Some(self.still());
+        }
         let scene = Scene {
             layout: &layout,
             name: &self.name,
@@ -877,10 +981,14 @@ impl Cluster {
                 Some(LRESULT(0))
             }
             WM_ERASEBKGND => Some(LRESULT(1)),
-            // Only the light moved: the kept layer stays.
+            // Only the light moved: the kept layer stays. Nobody sees the
+            // light of a cluster under another window, so it waits there,
+            // and moves on within a frame of coming back into view.
             WM_TIMER if wparam.0 == ANIM_TIMER => {
-                unsafe {
-                    let _ = InvalidateRect(Some(self.hwnd), None, false);
+                if !out_of_sight(self.hwnd) {
+                    unsafe {
+                        let _ = InvalidateRect(Some(self.hwnd), None, false);
+                    }
                 }
                 Some(LRESULT(0))
             }
@@ -1385,5 +1493,93 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
     match cluster.handle(msg, wparam, lparam) {
         Some(r) => r,
         None => DefWindowProcW(hwnd, msg, wparam, lparam),
+    }
+}
+
+/// Whether nothing of `hwnd` can be seen: minimised, hidden, off every
+/// screen, or under one window that covers it whole, as a maximised one
+/// does. A window that may be see-through never counts as covering.
+fn out_of_sight(hwnd: HWND) -> bool {
+    unsafe {
+        if !IsWindowVisible(hwnd).as_bool() || IsIconic(hwnd).as_bool() {
+            return true;
+        }
+        let mut mine = RECT::default();
+        if GetWindowRect(hwnd, &mut mine).is_err() {
+            return false;
+        }
+        if MonitorFromRect(&mine, MONITOR_DEFAULTTONULL).is_invalid() {
+            return true;
+        }
+        // Browsers and Electron apps draw without a redirection bitmap,
+        // and so do overlays, which are tool windows.
+        let overlay = WS_EX_NOREDIRECTIONBITMAP.0 | WS_EX_TOOLWINDOW.0;
+        let see_through =
+            |ex: u32| ex & (WS_EX_LAYERED | WS_EX_TRANSPARENT).0 != 0 || ex & overlay == overlay;
+        let mut above = GetWindow(hwnd, GW_HWNDPREV);
+        while let Ok(w) = above {
+            let covers = IsWindowVisible(w).as_bool()
+                && !IsIconic(w).as_bool()
+                && !see_through(GetWindowLongW(w, GWL_EXSTYLE) as u32)
+                && !cloaked(w)
+                && {
+                    let mut r = RECT::default();
+                    GetWindowRect(w, &mut r).is_ok()
+                        && r.left <= mine.left
+                        && r.top <= mine.top
+                        && r.right >= mine.right
+                        && r.bottom >= mine.bottom
+                };
+            if covers {
+                return true;
+            }
+            above = GetWindow(w, GW_HWNDPREV);
+        }
+        false
+    }
+}
+
+/// A window on another virtual desktop, or hidden by the shell, still says
+/// it is visible.
+fn cloaked(hwnd: HWND) -> bool {
+    let mut cloak = 0u32;
+    unsafe {
+        DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_CLOAKED,
+            &mut cloak as *mut u32 as *mut c_void,
+            std::mem::size_of::<u32>() as u32,
+        )
+        .is_ok()
+            && cloak != 0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use horadric_core::session::ACTIVITY_SPAN;
+
+    #[test]
+    fn an_idle_tile_reads_the_same_until_its_age_moves() {
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let mut s = Session::new("t", "t", "C:/repo");
+        s.since = t0;
+        let at = |secs| Clock::of(&s, t0 + Duration::from_secs(secs));
+        assert!(at(300) == at(301));
+        assert!(at(300) != at(360));
+    }
+
+    #[test]
+    fn a_busy_trace_moves_a_quarter_bar_at_a_time() {
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let mut s = Session::new("t", "t", "C:/repo");
+        s.since = t0;
+        s.activity = vec![t0 + Duration::from_secs(290)];
+        let bar = ACTIVITY_SPAN.as_secs() / TRACE_BARS as u64;
+        let slides: HashSet<u8> = (0..bar)
+            .map(|i| Clock::of(&s, t0 + Duration::from_secs(300 + i)).slide)
+            .collect();
+        assert_eq!(slides.len(), 4);
     }
 }

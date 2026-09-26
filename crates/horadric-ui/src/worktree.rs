@@ -2,10 +2,12 @@
 //! and what a worktree is told live in `horadric_core::worktree`; this is
 //! the part that runs `git`.
 
+use std::collections::HashMap;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use horadric_core::diff::{self, Diff};
 use horadric_core::experience;
@@ -30,7 +32,35 @@ pub struct Fresh {
 
 /// Where `dir` is in its repository's main working tree, None when it is
 /// in a linked worktree or in no repository.
+///
+/// Menus ask this as they open, so an answer is remembered: a folder's
+/// place in its repository hardly ever changes. A folder in no repository
+/// may get one, so that answer is asked again after [`NO_PLACE_FOR`].
 pub fn main_tree(dir: &Path) -> Option<Place> {
+    type Known = HashMap<PathBuf, (Option<Place>, Instant)>;
+    static KNOWN: OnceLock<Mutex<Known>> = OnceLock::new();
+    let known = KNOWN.get_or_init(Default::default);
+    let now = Instant::now();
+    let kept = known.lock().ok().and_then(|k| {
+        k.get(dir)
+            .filter(|(place, at)| place.is_some() || now.duration_since(*at) < NO_PLACE_FOR)
+            .map(|(place, _)| place.clone())
+    });
+    if let Some(place) = kept {
+        return place;
+    }
+    let place = ask_main_tree(dir);
+    if let Ok(mut k) = known.lock() {
+        k.insert(dir.to_path_buf(), (place.clone(), now));
+    }
+    place
+}
+
+/// How long a folder is taken to be in no repository before git is asked
+/// again.
+const NO_PLACE_FOR: Duration = Duration::from_secs(30);
+
+fn ask_main_tree(dir: &Path) -> Option<Place> {
     let out = git(
         dir,
         &[

@@ -72,7 +72,7 @@ impl Phase {
 }
 
 /// One running (or finished) agent session.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Session {
     /// Horadric's id. Set by Horadric when it spawns the CLI and carried back in
     /// every hook via the environment.

@@ -967,23 +967,6 @@ impl App {
         }
     }
 
-    /// The finished branches of a project not merged yet, for its menu.
-    pub(super) fn merges(&self, dir: &Path) -> Vec<Merge> {
-        let Some(place) = crate::worktree::main_tree(dir) else {
-            return Vec::new();
-        };
-        let main = PathBuf::from(&place.top);
-        let list = tasks::parse(&file::read(dir));
-        worktree::finished(&list, &crate::worktree::unmerged(&main))
-            .into_iter()
-            .map(|(branch, title)| Merge {
-                main: main.clone(),
-                branch,
-                title,
-            })
-            .collect()
-    }
-
     /// Merges a finished branch and says how it went. True when it merged.
     pub(super) fn merge(&mut self, m: &Merge) -> bool {
         let into = crate::worktree::checked_out(&m.main).unwrap_or_else(|| "main".into());
@@ -1270,6 +1253,23 @@ fn at_once(n: usize) -> String {
         1 => "One at a time".into(),
         n => format!("{n} at once, each in its own worktree"),
     }
+}
+
+/// The finished branches of a project not merged yet, for its menu.
+pub(super) fn merges(dir: &Path) -> Vec<Merge> {
+    let Some(place) = crate::worktree::main_tree(dir) else {
+        return Vec::new();
+    };
+    let main = PathBuf::from(&place.top);
+    let list = tasks::parse(&file::read(dir));
+    worktree::finished(&list, &crate::worktree::unmerged(&main))
+        .into_iter()
+        .map(|(branch, title)| Merge {
+            main: main.clone(),
+            branch,
+            title,
+        })
+        .collect()
 }
 
 #[cfg(test)]
