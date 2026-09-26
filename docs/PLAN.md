@@ -1576,9 +1576,21 @@ unread turn, the ended one, then the other project's finished item and
 merge, and the limit under Account. Not tried on screen: coming back
 after 15 minutes or an unlock, clicking a line, and the tray item.
 
-Not done yet: commits under a finished item (the journal does not hear
-them), a mark of its own for a background session's lines, and scrolling
-past "and N more".
+- **Commits under a finished item** are asked of git when the list says
+  it is done, not heard as they happen: `git log --first-parent
+  --no-merges --since` the item's last started line, in the tree of the
+  session that held it (its worktree, or the main tree when it is gone).
+  First parent only, since a merge of main into the branch would bring
+  every commit main had meanwhile. They go on the finished line
+  (`What::Finished`'s `commits`, newest first) and its detail says the
+  one, or how many and their subjects. An item the journal never heard
+  taken has none. Checked with a dev instance: an item held by a session
+  in its own worktree, two commits and a merge of main there, then done;
+  the line had the two and the panel said "2 commits: Test the gizmo ·
+  Add the gizmo". Commits on main meanwhile were rightly not its.
+
+Not done yet: a mark of its own for a background session's lines, and
+scrolling past "and N more".
 
 ## Next
 

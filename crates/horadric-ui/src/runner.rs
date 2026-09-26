@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
-use horadric_core::journal::{self, Entry, What};
+use horadric_core::journal::{self, Commit, Entry, What};
 use horadric_core::tasks::{self, Holder, Mark, Mode, Next, Task, TASKS_FILE};
 use horadric_core::usage::format_until;
 use horadric_core::worktree::{self, Worktree};
@@ -232,11 +232,14 @@ impl App {
             let fresh = read_board(dir);
             let mut boards = self.shared.boards.borrow_mut();
             if boards.get(key) != Some(&fresh) {
-                let lines = boards
+                let mut lines = boards
                     .get(key)
                     .map(|old| journal::marks(key, &old.tasks, &fresh.tasks, unix_now()))
                     .unwrap_or_default();
-                for e in &lines {
+                for e in &mut lines {
+                    if let What::Finished { title, commits } = &mut e.what {
+                        *commits = self.commits_under(key, dir, &e.session, title);
+                    }
                     store::journal(e);
                 }
                 boards.insert(key.clone(), fresh);
@@ -256,6 +259,24 @@ impl App {
             self.arrange();
         }
         self.listed() != before
+    }
+
+    /// The commits made under the item `title` of `key` that just
+    /// finished: those on the branch of the session that held it, since
+    /// the item was taken. The main tree `dir` when that session is gone.
+    fn commits_under(&self, key: &str, dir: &Path, session: &str, title: &str) -> Vec<Commit> {
+        let Some(since) = journal::started_at(&store::journal_since(0), key, title) else {
+            return Vec::new();
+        };
+        let tree = self
+            .shared
+            .registry
+            .lock()
+            .ok()
+            .and_then(|r| r.get(session).map(|s| PathBuf::from(&s.cwd)))
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| dir.to_path_buf());
+        crate::worktree::commits_since(&tree, since)
     }
 
     /// The phase of a session, none when it is gone.

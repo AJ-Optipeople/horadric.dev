@@ -8,6 +8,7 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use horadric_core::diff::{self, Diff};
+use horadric_core::journal::{self, Commit};
 use horadric_core::worktree::{self, Place, Ports, Worktree};
 use horadric_hooks::tasks as file;
 
@@ -186,6 +187,27 @@ pub fn head(dir: &Path) -> Option<String> {
     git(dir, &["rev-parse", "HEAD"])
         .ok()
         .map(|h| h.trim().to_string())
+}
+
+/// The commits made on the branch checked out in `dir` since `since`, in
+/// Unix seconds, newest first. Only its own line: a merge of main into it
+/// would otherwise bring every commit main had meanwhile.
+pub fn commits_since(dir: &Path, since: u64) -> Vec<Commit> {
+    let since = format!("--since=@{since}");
+    let format = format!("--format={}", journal::LOG_FORMAT);
+    git(
+        dir,
+        &[
+            "log",
+            "--first-parent",
+            "--no-merges",
+            &since,
+            &format,
+            "HEAD",
+        ],
+    )
+    .map(|log| journal::commits(&log))
+    .unwrap_or_default()
 }
 
 /// Removes the linked worktrees of the repository `dir` is in that are

@@ -61,8 +61,13 @@ pub enum What {
         #[serde(default)]
         reason: String,
     },
-    /// An item was marked done.
-    Finished { title: String },
+    /// An item was marked done, and the commits made under it, newest
+    /// first.
+    Finished {
+        title: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        commits: Vec<Commit>,
+    },
     /// A finished item's branch went into the main tree.
     Merged { branch: String, title: String },
     /// A usage limit ran out, until then in Unix seconds.
@@ -83,7 +88,7 @@ impl Entry {
             What::Started { title }
             | What::Review { title }
             | What::Blocked { title, .. }
-            | What::Finished { title } => Some(title),
+            | What::Finished { title, .. } => Some(title),
             _ => None,
         }
     }
@@ -119,6 +124,61 @@ pub fn trimmed(text: &str, now: u64) -> Option<String> {
     })
 }
 
+/// A commit, as `git log` told it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Commit {
+    /// The short hash.
+    pub hash: String,
+    pub subject: String,
+}
+
+/// The format [`commits`] reads: `git log --format=` this.
+pub const LOG_FORMAT: &str = "%h%x09%s";
+
+/// The commits in what `git log --format=`[`LOG_FORMAT`] printed.
+pub fn commits(log: &str) -> Vec<Commit> {
+    log.lines()
+        .filter_map(|l| {
+            let (hash, subject) = l.split_once('\t')?;
+            let hash = hash.trim();
+            (!hash.is_empty()).then(|| Commit {
+                hash: hash.to_string(),
+                subject: subject.trim().to_string(),
+            })
+        })
+        .collect()
+}
+
+/// When the item `title` of `project` was last taken, which is where its
+/// commits begin. None when the journal never heard it taken.
+pub fn started_at(entries: &[Entry], project: &str, title: &str) -> Option<u64> {
+    entries
+        .iter()
+        .rev()
+        .find(|e| {
+            e.project == project && matches!(&e.what, What::Started { title: t } if t == title)
+        })
+        .map(|e| e.at)
+}
+
+/// What a finished item's line says of its commits: the one, or how many
+/// and their subjects, newest first.
+fn commits_detail(commits: &[Commit]) -> String {
+    match commits {
+        [] => String::new(),
+        [c] => format!("{} {}", c.hash, c.subject),
+        _ => format!(
+            "{} commits: {}",
+            commits.len(),
+            commits
+                .iter()
+                .map(|c| c.subject.as_str())
+                .collect::<Vec<_>>()
+                .join(" \u{b7} ")
+        ),
+    }
+}
+
 /// The lines for what changed between two reads of a project's task list:
 /// an item taken, sent for review, blocked or finished. Items are matched
 /// by title, since lines move as the list is edited.
@@ -137,7 +197,10 @@ pub fn marks(project: &str, old: &[Task], new: &[Task], now: u64) -> Vec<Entry> 
                     title,
                     reason: t.reason.clone().unwrap_or_default(),
                 },
-                Mark::Done => What::Finished { title },
+                Mark::Done => What::Finished {
+                    title,
+                    commits: Vec::new(),
+                },
                 Mark::Open => return None,
             };
             Some(Entry {
@@ -284,10 +347,10 @@ fn item_line(e: &Entry, title: &str, still: &impl Fn(&Entry) -> bool) -> Option<
         What::Blocked { reason, .. } if still(e) => {
             (Section::Blocked, title.to_string(), reason.clone())
         }
-        What::Finished { .. } => (
+        What::Finished { commits, .. } => (
             Section::Happened,
             format!("Finished: {title}"),
-            String::new(),
+            commits_detail(commits),
         ),
         What::Started { .. } => (
             Section::Happened,
@@ -458,7 +521,15 @@ mod tests {
         let entries = [
             entry(1, "a", "p", What::Started { title: t() }),
             entry(2, "a", "p", What::Review { title: t() }),
-            entry(3, "a", "p", What::Finished { title: t() }),
+            entry(
+                3,
+                "a",
+                "p",
+                What::Finished {
+                    title: t(),
+                    commits: Vec::new(),
+                },
+            ),
             entry(
                 4,
                 "b",
@@ -490,6 +561,7 @@ mod tests {
                 "p",
                 What::Finished {
                     title: "Ship".into(),
+                    commits: Vec::new(),
                 },
             ),
             entry(
@@ -498,6 +570,7 @@ mod tests {
                 "q",
                 What::Finished {
                     title: "Ship".into(),
+                    commits: Vec::new(),
                 },
             ),
         ];
@@ -590,11 +663,77 @@ mod tests {
                 (
                     "s3",
                     &What::Finished {
-                        title: "Three".into()
+                        title: "Three".into(),
+                        commits: Vec::new(),
                     }
                 ),
             ]
         );
         assert!(got.iter().all(|e| e.project == "p" && e.at == 9));
+    }
+
+    #[test]
+    fn a_log_reads_into_commits_and_a_line_without_a_tab_is_left_out() {
+        let log = "b8f81ef\tRound the panes\n\n9e439e8\tMerge: a\tb \ngarbage\n";
+        let got = commits(log);
+        assert_eq!(
+            got,
+            [
+                Commit {
+                    hash: "b8f81ef".into(),
+                    subject: "Round the panes".into()
+                },
+                Commit {
+                    hash: "9e439e8".into(),
+                    subject: "Merge: a\tb".into()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn an_item_starts_where_it_was_last_taken_in_its_own_project() {
+        let started = |title: &str| What::Started {
+            title: title.into(),
+        };
+        let entries = [
+            entry(1, "a", "p", started("One")),
+            entry(2, "b", "q", started("One")),
+            entry(3, "c", "p", started("Two")),
+            entry(4, "d", "p", started("One")),
+        ];
+        assert_eq!(started_at(&entries, "p", "One"), Some(4));
+        assert_eq!(started_at(&entries, "q", "One"), Some(2));
+        assert_eq!(started_at(&entries, "p", "Three"), None);
+    }
+
+    #[test]
+    fn a_finished_item_tells_its_commits() {
+        let c = |hash: &str, subject: &str| Commit {
+            hash: hash.into(),
+            subject: subject.into(),
+        };
+        let finished = |commits: Vec<Commit>| What::Finished {
+            title: "Add x".into(),
+            commits,
+        };
+        let detail = |what: What| {
+            summary(&[entry(1, "a", "p", what)], 0, 10, |_| true)[0].lines[0]
+                .detail
+                .clone()
+        };
+        assert_eq!(detail(finished(Vec::new())), "");
+        assert_eq!(
+            detail(finished(vec![c("abc1234", "Add x")])),
+            "abc1234 Add x"
+        );
+        assert_eq!(
+            detail(finished(vec![c("2", "Test x"), c("1", "Add x")])),
+            "2 commits: Test x \u{b7} Add x"
+        );
+        let e = entry(1, "a", "p", finished(vec![c("1", "Add x")]));
+        assert_eq!(parse(&e.line()), vec![e]);
+        let bare = entry(1, "a", "p", finished(Vec::new()));
+        assert!(!bare.line().contains("commits"));
     }
 }
