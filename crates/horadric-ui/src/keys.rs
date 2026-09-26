@@ -52,55 +52,187 @@ impl Mods {
     }
 }
 
+/// How a non character key is written: `CSI 1 ; m X` (or SS3 X and CSI X
+/// without modifiers), or `CSI n ; m ~`.
+#[derive(Clone, Copy)]
+enum Form {
+    Letter(u8),
+    Tilde(u8),
+}
+
+fn form(key: Key) -> Option<Form> {
+    let form = match key {
+        Key::Up => Form::Letter(b'A'),
+        Key::Down => Form::Letter(b'B'),
+        Key::Right => Form::Letter(b'C'),
+        Key::Left => Form::Letter(b'D'),
+        Key::Home => Form::Letter(b'H'),
+        Key::End => Form::Letter(b'F'),
+        Key::F(1) => Form::Letter(b'P'),
+        Key::F(2) => Form::Letter(b'Q'),
+        Key::F(3) => Form::Letter(b'R'),
+        Key::F(4) => Form::Letter(b'S'),
+        Key::Insert => Form::Tilde(2),
+        Key::Delete => Form::Tilde(3),
+        Key::PageUp => Form::Tilde(5),
+        Key::PageDown => Form::Tilde(6),
+        Key::F(5) => Form::Tilde(15),
+        Key::F(6) => Form::Tilde(17),
+        Key::F(7) => Form::Tilde(18),
+        Key::F(8) => Form::Tilde(19),
+        Key::F(9) => Form::Tilde(20),
+        Key::F(10) => Form::Tilde(21),
+        Key::F(11) => Form::Tilde(23),
+        Key::F(12) => Form::Tilde(24),
+        _ => return None,
+    };
+    Some(form)
+}
+
 /// The bytes for a non character key. `app_cursor` is DECCKM, which switches
 /// unmodified arrows to their SS3 form.
 pub fn key_bytes(key: Key, mods: Mods, app_cursor: bool) -> Vec<u8> {
-    // Keys of the form CSI 1 ; m X, or SS3 X / CSI X without modifiers.
-    let letter = match key {
-        Key::Up => Some(b'A'),
-        Key::Down => Some(b'B'),
-        Key::Right => Some(b'C'),
-        Key::Left => Some(b'D'),
-        Key::Home => Some(b'H'),
-        Key::End => Some(b'F'),
-        Key::F(1) => Some(b'P'),
-        Key::F(2) => Some(b'Q'),
-        Key::F(3) => Some(b'R'),
-        Key::F(4) => Some(b'S'),
-        _ => None,
-    };
-    if let Some(l) = letter {
-        let is_f = matches!(key, Key::F(_));
-        return if mods.any() {
+    match form(key) {
+        Some(Form::Letter(l)) if mods.any() => {
             format!("\x1b[1;{}{}", mods.param(), l as char).into_bytes()
-        } else if is_f || app_cursor {
-            vec![0x1b, b'O', l]
-        } else {
-            vec![0x1b, b'[', l]
-        };
+        }
+        Some(Form::Letter(l)) if app_cursor || matches!(key, Key::F(_)) => vec![0x1b, b'O', l],
+        Some(Form::Letter(l)) => vec![0x1b, b'[', l],
+        Some(Form::Tilde(n)) if mods.any() => format!("\x1b[{n};{}~", mods.param()).into_bytes(),
+        Some(Form::Tilde(n)) => format!("\x1b[{n}~").into_bytes(),
+        None => Vec::new(),
     }
+}
 
-    // Keys of the form CSI n ~ or CSI n ; m ~.
-    let n = match key {
-        Key::Insert => 2,
-        Key::Delete => 3,
-        Key::PageUp => 5,
-        Key::PageDown => 6,
-        Key::F(5) => 15,
-        Key::F(6) => 17,
-        Key::F(7) => 18,
-        Key::F(8) => 19,
-        Key::F(9) => 20,
-        Key::F(10) => 21,
-        Key::F(11) => 23,
-        Key::F(12) => 24,
-        _ => return Vec::new(),
-    };
-    if mods.any() {
-        format!("\x1b[{n};{}~", mods.param()).into_bytes()
-    } else {
-        format!("\x1b[{n}~").into_bytes()
+/// The kitty keyboard protocol's progressive enhancements a program has
+/// asked for, one field a bit, numbered as the protocol numbers them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Kitty {
+    /// 1: keys that are ambiguous in xterm's encoding (Esc, Alt and Ctrl
+    /// chords, Shift+Enter) become `CSI code ; mods u`.
+    pub disambiguate: bool,
+    /// 2: repeats and releases are reported too.
+    pub events: bool,
+    /// 4: the shifted key comes with the key, as `code:shifted`.
+    pub alternates: bool,
+    /// 8: every key is an escape code, plain letters and Enter included.
+    pub all_keys: bool,
+    /// 16: with 8, the text a key makes comes with it.
+    pub text: bool,
+}
+
+impl Kitty {
+    pub fn any(self) -> bool {
+        self.disambiguate || self.events || self.alternates || self.all_keys || self.text
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyEvent {
+    Press,
+    Repeat,
+    Release,
+}
+
+impl KeyEvent {
+    /// The event type after the modifiers, or none for a press, which is
+    /// the default. Without flag 2 a repeat is sent as a press.
+    fn param(self, flags: Kitty) -> Option<u8> {
+        match self {
+            _ if !flags.events => None,
+            KeyEvent::Press => None,
+            KeyEvent::Repeat => Some(2),
+            KeyEvent::Release => Some(3),
+        }
+    }
+}
+
+/// `;m` or `;m:e`, or nothing when both are the default and `always` is
+/// not set.
+fn kitty_mods(mods: Mods, event: Option<u8>, always: bool) -> String {
+    match event {
+        Some(e) => format!(";{}:{e}", mods.param()),
+        None if mods.any() || always => format!(";{}", mods.param()),
+        None => String::new(),
+    }
+}
+
+/// A non character key under the kitty protocol. The xterm forms stay, as
+/// the protocol says, except F3: `CSI 1 ; m R` reads as a cursor position
+/// report, so it is `CSI 13 ~`. Empty means nothing is sent.
+pub fn kitty_key(key: Key, mods: Mods, event: KeyEvent, flags: Kitty, app_cursor: bool) -> Vec<u8> {
+    if event == KeyEvent::Release && !flags.events {
+        return Vec::new();
+    }
+    let ev = event.param(flags);
+    let form = if key == Key::F(3) {
+        Some(Form::Tilde(13))
+    } else {
+        form(key)
+    };
+    match form {
+        _ if ev.is_none() && !flags.all_keys && key != Key::F(3) => {
+            key_bytes(key, mods, app_cursor)
+        }
+        Some(Form::Letter(l)) if ev.is_none() && !mods.any() => vec![0x1b, b'[', l],
+        Some(Form::Letter(l)) => {
+            format!("\x1b[1{}{}", kitty_mods(mods, ev, true), l as char).into_bytes()
+        }
+        Some(Form::Tilde(n)) => format!("\x1b[{n}{}~", kitty_mods(mods, ev, false)).into_bytes(),
+        None => Vec::new(),
+    }
+}
+
+/// The kitty code of a key from what `MapVirtualKey` makes of it without
+/// modifiers: letters in lower case, Backspace as DEL. None for a dead key
+/// (the top bit) or a key that makes no character.
+pub fn kitty_base(mapped: u32) -> Option<u32> {
+    match mapped {
+        0 => None,
+        m if m & 0x8000_0000 != 0 => None,
+        8 => Some(127),
+        m => char::from_u32(m).map(|c| c.to_lowercase().next().unwrap_or(c) as u32),
+    }
+}
+
+/// A key that makes a character, or Esc, Enter, Tab or Backspace, under the
+/// kitty protocol. `base` is from [`kitty_base`], `typed` is the character
+/// Windows made of the press, if any. None means the key is no escape code
+/// with these flags and goes the xterm way, as its character.
+pub fn kitty_text(
+    base: u32,
+    typed: Option<char>,
+    mods: Mods,
+    event: KeyEvent,
+    flags: Kitty,
+) -> Option<Vec<u8>> {
+    let printable = typed.filter(|c| !c.is_control());
+    // AltGr is Ctrl+Alt. When the pair typed a character, it is typing.
+    let altgr = mods.ctrl && mods.alt && printable.is_some();
+    let chord = (mods.ctrl || mods.alt) && !altgr;
+    // Plain Enter, Tab and Backspace stay as they were, so a shell is still
+    // usable after a program that set the flags dies without clearing them.
+    let enter_like = matches!(base, 13 | 9 | 127);
+    let escaped = flags.all_keys
+        || (flags.disambiguate && (base == 27 || chord || (enter_like && mods.shift)));
+    if !escaped {
+        return None;
+    }
+    if event == KeyEvent::Release && !flags.events {
+        return Some(Vec::new());
+    }
+    let mut out = format!("\x1b[{base}");
+    if let Some(c) = printable.filter(|&c| flags.alternates && mods.shift && c as u32 != base) {
+        out += &format!(":{}", c as u32);
+    }
+    let text =
+        printable.filter(|_| flags.text && flags.all_keys && !chord && event != KeyEvent::Release);
+    out += &kitty_mods(mods, event.param(flags), text.is_some());
+    if let Some(c) = text {
+        out += &format!(";{}", c as u32);
+    }
+    out.push('u');
+    Some(out.into_bytes())
 }
 
 /// What a typed character means.
@@ -355,6 +487,130 @@ mod tests {
         ctrl: false,
         alt: true,
     };
+
+    const KITTY: Kitty = Kitty {
+        disambiguate: true,
+        events: false,
+        alternates: false,
+        all_keys: false,
+        text: false,
+    };
+    const EVENTS: Kitty = Kitty {
+        events: true,
+        ..KITTY
+    };
+
+    #[test]
+    fn kitty_base_is_the_unshifted_code() {
+        assert_eq!(kitty_base('A' as u32), Some('a' as u32));
+        assert_eq!(kitty_base('1' as u32), Some('1' as u32));
+        assert_eq!(kitty_base(0xC6), Some(0xE6));
+        assert_eq!(kitty_base(8), Some(127));
+        assert_eq!(kitty_base(13), Some(13));
+        assert_eq!(kitty_base(0), None);
+        assert_eq!(kitty_base(0x8000_00B4), None);
+    }
+
+    #[test]
+    fn disambiguate_leaves_plain_typing_alone() {
+        let press =
+            |base: char, typed, mods| kitty_text(base as u32, typed, mods, KeyEvent::Press, KITTY);
+        assert_eq!(press('a', Some('a'), Mods::NONE), None);
+        assert_eq!(press('a', Some('A'), SHIFT), None);
+        assert_eq!(press('\r', Some('\r'), Mods::NONE), None);
+        let backspace = kitty_text(127, Some('\u{8}'), Mods::NONE, KeyEvent::Press, KITTY);
+        assert_eq!(backspace, None);
+        // AltGr+2 on a Danish keyboard is @, not Ctrl+Alt+2.
+        let altgr = Mods { alt: true, ..CTRL };
+        assert_eq!(press('2', Some('@'), altgr), None);
+        let off = kitty_text(97, None, CTRL, KeyEvent::Press, Kitty::default());
+        assert_eq!(off, None);
+    }
+
+    #[test]
+    fn disambiguate_codes_the_ambiguous_keys() {
+        let press =
+            |base: u32, typed, mods| kitty_text(base, typed, mods, KeyEvent::Press, KITTY).unwrap();
+        assert_eq!(press(27, Some('\u{1b}'), Mods::NONE), b"\x1b[27u");
+        assert_eq!(press(13, Some('\r'), SHIFT), b"\x1b[13;2u");
+        assert_eq!(press(13, Some('\n'), CTRL), b"\x1b[13;5u");
+        assert_eq!(press(9, Some('\t'), SHIFT), b"\x1b[9;2u");
+        assert_eq!(press(127, Some('\u{7f}'), CTRL), b"\x1b[127;5u");
+        assert_eq!(press('c' as u32, Some('\u{3}'), CTRL), b"\x1b[99;5u");
+        assert_eq!(press('x' as u32, Some('x'), ALT), b"\x1b[120;3u");
+        let ctrl_shift = Mods {
+            shift: true,
+            ..CTRL
+        };
+        assert_eq!(press('a' as u32, Some('\u{1}'), ctrl_shift), b"\x1b[97;6u");
+        // Ctrl+1 makes no character at all, and still reaches the program.
+        assert_eq!(press('1' as u32, None, CTRL), b"\x1b[49;5u");
+    }
+
+    #[test]
+    fn events_report_repeats_and_releases_of_coded_keys() {
+        let key = |event, flags| kitty_text('a' as u32, None, CTRL, event, flags);
+        assert_eq!(key(KeyEvent::Repeat, EVENTS).unwrap(), b"\x1b[97;5:2u");
+        assert_eq!(key(KeyEvent::Release, EVENTS).unwrap(), b"\x1b[97;5:3u");
+        assert_eq!(key(KeyEvent::Repeat, KITTY).unwrap(), b"\x1b[97;5u");
+        assert_eq!(key(KeyEvent::Release, KITTY).unwrap(), b"");
+        let esc = kitty_text(27, None, Mods::NONE, KeyEvent::Release, EVENTS).unwrap();
+        assert_eq!(esc, b"\x1b[27;1:3u");
+        // A plain letter was typed as text, so its release is not news.
+        let plain = kitty_text(97, None, Mods::NONE, KeyEvent::Release, EVENTS);
+        assert_eq!(plain, None);
+    }
+
+    #[test]
+    fn all_keys_codes_everything_with_alternates_and_text() {
+        let all = Kitty {
+            all_keys: true,
+            ..KITTY
+        };
+        let press = |base: u32, typed, mods, flags| {
+            kitty_text(base, typed, mods, KeyEvent::Press, flags).unwrap()
+        };
+        assert_eq!(press(97, Some('a'), Mods::NONE, all), b"\x1b[97u");
+        assert_eq!(press(13, Some('\r'), Mods::NONE, all), b"\x1b[13u");
+        assert_eq!(press(97, Some('A'), SHIFT, all), b"\x1b[97;2u");
+        let alternates = Kitty {
+            alternates: true,
+            ..all
+        };
+        assert_eq!(press(97, Some('A'), SHIFT, alternates), b"\x1b[97:65;2u");
+        let text = Kitty { text: true, ..all };
+        assert_eq!(press(97, Some('a'), Mods::NONE, text), b"\x1b[97;1;97u");
+        assert_eq!(press(97, Some('A'), SHIFT, text), b"\x1b[97;2;65u");
+        assert_eq!(press(97, Some('\u{1}'), CTRL, text), b"\x1b[97;5u");
+    }
+
+    #[test]
+    fn kitty_function_keys_keep_their_xterm_forms() {
+        use KeyEvent::*;
+        let key = |k, m, e, f| kitty_key(k, m, e, f, false);
+        assert_eq!(key(Key::Up, Mods::NONE, Press, KITTY), b"\x1b[A");
+        assert_eq!(
+            kitty_key(Key::Up, Mods::NONE, Press, KITTY, true),
+            b"\x1bOA"
+        );
+        assert_eq!(key(Key::Left, CTRL, Press, KITTY), b"\x1b[1;5D");
+        assert_eq!(key(Key::Delete, SHIFT, Press, KITTY), b"\x1b[3;2~");
+        assert_eq!(key(Key::F(3), Mods::NONE, Press, KITTY), b"\x1b[13~");
+        assert_eq!(key(Key::F(3), CTRL, Press, KITTY), b"\x1b[13;5~");
+        assert_eq!(key(Key::Up, Mods::NONE, Release, KITTY), b"");
+        assert_eq!(key(Key::Up, Mods::NONE, Release, EVENTS), b"\x1b[1;1:3A");
+        assert_eq!(key(Key::Up, CTRL, Repeat, EVENTS), b"\x1b[1;5:2A");
+        assert_eq!(
+            key(Key::PageUp, Mods::NONE, Release, EVENTS),
+            b"\x1b[5;1:3~"
+        );
+        let all = Kitty {
+            all_keys: true,
+            ..KITTY
+        };
+        assert_eq!(kitty_key(Key::Up, Mods::NONE, Press, all, true), b"\x1b[A");
+        assert!(key(Key::F(13), CTRL, Press, KITTY).is_empty());
+    }
 
     #[test]
     fn arrows_follow_cursor_mode_and_modifiers() {

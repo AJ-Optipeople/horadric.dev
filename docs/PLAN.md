@@ -148,6 +148,24 @@ arrow keys, a prompt and its answer, resize, collapse and expand, `/exit`.
   cursor counts, since agents hide it and park it where the user types.
   Checked on screen by reading the placement back against a screenshot;
   no IME is installed here, so a real composition is not seen yet.
+- **Kitty keyboard protocol.** A program that pushes flags with `CSI > n u`
+  gets keys in the kitty encoding. alacritty_terminal already parses the
+  push, pop, set and query and keeps the flags in `TermMode`, once its
+  `kitty_keyboard` config is on; `keys.rs` does the encoding. All five
+  flags are honoured: disambiguate (Esc, Ctrl and Alt chords and
+  Shift+Enter become `CSI code ; mods u`, plain Enter, Tab and Backspace
+  stay as they were), event types (repeats from bit 30 of the key
+  message, releases from `WM_KEYUP`), alternate keys, all keys as escape
+  codes, and associated text. The key's code comes from `MapVirtualKey`
+  and the character Windows made of the press is read off the queue
+  before it is dropped, which is how AltGr typing stays typing. Paste,
+  copy and Ctrl+Shift+T stay the stage's; Ctrl+C with nothing selected is
+  `CSI 99 ; 5 u`. A release is only sent for a key whose press was, so the
+  stage's own chords never leak one. F3 is `CSI 13 ~`, as kitty has it.
+  Not done: the modifier keys themselves under "all keys", the lock
+  modifiers, and the keypad's own codes. Checked on screen with a script
+  that pushed flag 3 and logged its raw input, and with Claude Code,
+  where Shift+Enter and Ctrl+Enter still make a new line.
 - **Images.** Passing Ctrl+V on for Claude Code to read the clipboard did
   not work, so Horadric does it: a clipboard image is saved as a PNG in
   `%TEMP%\Horadric` and its path is pasted, which Claude Code turns into an
@@ -2198,7 +2216,6 @@ if people download Horadric by hand, the same point as NSIS above.
 
 ## Not in any step yet, but needed before daily use
 
-- **Terminal gaps.** The kitty keyboard protocol is not implemented.
 - **Expanding from a synthetic click can open behind other windows.** Windows
   only lets a process take the foreground after real input. A real click on
   a tile is real input, so this only bites scripted tests.

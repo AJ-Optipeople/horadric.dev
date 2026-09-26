@@ -40,23 +40,23 @@ use windows::Win32::UI::Input::Ime::{
     ImmSetCompositionWindow, CANDIDATEFORM, CFS_EXCLUDE, CFS_POINT, COMPOSITIONFORM,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, ReleaseCapture, SetCapture, SetFocus, VIRTUAL_KEY, VK_CONTROL, VK_DELETE, VK_DOWN,
-    VK_END, VK_F1, VK_F12, VK_F3, VK_F4, VK_HOME, VK_INSERT, VK_LEFT, VK_MENU, VK_NEXT, VK_PRIOR,
-    VK_RIGHT, VK_SHIFT, VK_UP,
+    GetKeyState, MapVirtualKeyW, ReleaseCapture, SetCapture, SetFocus, MAPVK_VK_TO_CHAR,
+    VIRTUAL_KEY, VK_CONTROL, VK_DELETE, VK_DOWN, VK_END, VK_F1, VK_F12, VK_F3, VK_F4, VK_HOME,
+    VK_INSERT, VK_LEFT, VK_MENU, VK_NEXT, VK_PRIOR, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_UP,
 };
 use windows::Win32::UI::Shell::{DragAcceptFiles, DragFinish, HDROP};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetCaretBlinkTime, GetClientRect, GetCursorPos,
     GetParent, GetWindowLongPtrW, KillTimer, LoadCursorW, PeekMessageW, RegisterClassW,
     SendMessageW, SetCursor, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, CREATESTRUCTW,
-    CS_DBLCLKS, GWLP_USERDATA, HTCLIENT, IDC_ARROW, IDC_IBEAM, MSG, PM_REMOVE, SWP_NOACTIVATE,
-    SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOWNA, WINDOW_EX_STYLE, WM_CAPTURECHANGED,
-    WM_CHAR, WM_DEADCHAR, WM_DPICHANGED_AFTERPARENT, WM_DROPFILES, WM_ERASEBKGND,
-    WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL,
-    WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SETFOCUS,
-    WM_SIZE, WM_SYSCHAR, WM_SYSDEADCHAR, WM_SYSKEYDOWN, WM_TIMER, WM_USER, WNDCLASSW, WS_CHILD,
-    WS_CLIPSIBLINGS, WS_VISIBLE,
+    CS_DBLCLKS, GWLP_USERDATA, HTCLIENT, IDC_ARROW, IDC_IBEAM, MSG, PM_NOREMOVE, PM_REMOVE,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOWNA, WINDOW_EX_STYLE,
+    WM_CAPTURECHANGED, WM_CHAR, WM_DEADCHAR, WM_DPICHANGED_AFTERPARENT, WM_DROPFILES,
+    WM_ERASEBKGND, WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS, WM_LBUTTONDBLCLK,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE,
+    WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR,
+    WM_SETFOCUS, WM_SIZE, WM_SYSCHAR, WM_SYSDEADCHAR, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER,
+    WM_USER, WNDCLASSW, WS_CHILD, WS_CLIPSIBLINGS, WS_VISIBLE,
 };
 
 use crate::app::{self, Input};
@@ -64,7 +64,8 @@ use crate::clipboard;
 use crate::console::{Console, GridSize};
 use crate::glyphs::{self, CellSize, FindBar, GridTarget, Header, HEADER_H};
 use crate::keys::{
-    self, Button, CharAction, Chord, FontStep, Key, Mods, MouseEncoding, MouseEvent,
+    self, Button, CharAction, Chord, FontStep, Key, KeyEvent, Kitty, Mods, MouseEncoding,
+    MouseEvent,
 };
 use crate::layout::Dir;
 use crate::motion::{self, REVEAL, SPOTLIGHT};
@@ -140,6 +141,9 @@ pub struct Pane {
     moved_to: Cell<Option<(usize, usize)>>,
     /// First half of a character outside the BMP, until the second arrives.
     high_surrogate: Cell<Option<u16>>,
+    /// Keys whose press went to the program as a kitty escape code, so
+    /// their release does too. A chord the stage kept stays unreported.
+    kitty_down: RefCell<Vec<u16>>,
     /// Wheel movement below one notch, from precision touchpads.
     wheel: Cell<i32>,
     /// The same, sideways, for a file view.
@@ -163,6 +167,25 @@ pub struct Pane {
     /// where its blink starts: a cursor on the move stays lit.
     caret_at: Cell<Option<Point>>,
     caret_since: Cell<Instant>,
+}
+
+/// The keys that make no character, which `WM_CHAR` never carries.
+fn function_key(vk: VIRTUAL_KEY) -> Option<Key> {
+    let key = match vk {
+        VK_UP => Key::Up,
+        VK_DOWN => Key::Down,
+        VK_LEFT => Key::Left,
+        VK_RIGHT => Key::Right,
+        VK_HOME => Key::Home,
+        VK_END => Key::End,
+        VK_PRIOR => Key::PageUp,
+        VK_NEXT => Key::PageDown,
+        VK_INSERT => Key::Insert,
+        VK_DELETE => Key::Delete,
+        v if (VK_F1.0..=VK_F12.0).contains(&v.0) => Key::F((v.0 - VK_F1.0 + 1) as u8),
+        _ => return None,
+    };
+    Some(key)
 }
 
 pub fn register_class() -> Result<()> {
@@ -207,6 +230,7 @@ impl Pane {
             reported: Cell::new(None),
             moved_to: Cell::new(None),
             high_surrogate: Cell::new(None),
+            kitty_down: RefCell::new(Vec::new()),
             wheel: Cell::new(0),
             hwheel: Cell::new(0),
             accent: Cell::new(theme::ACCENTS[0]),
@@ -672,6 +696,106 @@ impl Pane {
         self.invalidate();
     }
 
+    /// The kitty keyboard flags the program has pushed, if any.
+    fn kitty(&self) -> Kitty {
+        let mode = self.mode();
+        Kitty {
+            disambiguate: mode.contains(TermMode::DISAMBIGUATE_ESC_CODES),
+            events: mode.contains(TermMode::REPORT_EVENT_TYPES),
+            alternates: mode.contains(TermMode::REPORT_ALTERNATE_KEYS),
+            all_keys: mode.contains(TermMode::REPORT_ALL_KEYS_AS_ESC),
+            text: mode.contains(TermMode::REPORT_ASSOCIATED_TEXT),
+        }
+    }
+
+    /// The character Windows made of the key press being handled, still in
+    /// the queue, and whether it came as `WM_SYSCHAR`.
+    fn queued_char(&self) -> Option<(char, bool)> {
+        let mut msg = MSG::default();
+        let peek = |msg: &mut MSG, first, last| unsafe {
+            PeekMessageW(msg, Some(self.hwnd), first, last, PM_NOREMOVE).as_bool()
+        };
+        let sys = if peek(&mut msg, WM_CHAR, WM_DEADCHAR) {
+            false
+        } else if peek(&mut msg, WM_SYSCHAR, WM_SYSDEADCHAR) {
+            true
+        } else {
+            return None;
+        };
+        if msg.message == WM_DEADCHAR || msg.message == WM_SYSDEADCHAR {
+            return None;
+        }
+        char::from_u32(msg.wParam.0 as u32).map(|c| (c, sys))
+    }
+
+    /// A character key under the kitty protocol. Returns false when it goes
+    /// the xterm way, as the `WM_CHAR` already queued.
+    fn kitty_press(&self, vk: u16, mods: Mods, event: KeyEvent, flags: Kitty) -> bool {
+        // Alt+Space is the window menu.
+        if vk == VK_SPACE.0 && mods.alt && !mods.ctrl {
+            return false;
+        }
+        let mapped = unsafe { MapVirtualKeyW(vk as u32, MAPVK_VK_TO_CHAR) };
+        let Some(base) = keys::kitty_base(mapped) else {
+            return false;
+        };
+        let typed = self.queued_char();
+        // Paste, copy and a new shell stay the stage's. Ctrl+C with nothing
+        // selected is the program's, as its escape code.
+        if let Some((c, sys)) = typed {
+            let char_mods = Mods { alt: sys, ..mods };
+            match keys::char_action(c, char_mods) {
+                CharAction::Send(_) => {}
+                CharAction::CopyOrInterrupt if !self.has_selection() => {}
+                _ => return false,
+            }
+        }
+        let typed = typed.map(|(c, _)| c);
+        let Some(bytes) = keys::kitty_text(base, typed, mods, event, flags) else {
+            return false;
+        };
+        self.drop_char();
+        self.kitty_sent(vk, bytes);
+        true
+    }
+
+    fn kitty_sent(&self, vk: u16, bytes: Vec<u8>) {
+        let mut down = self.kitty_down.borrow_mut();
+        if !down.contains(&vk) {
+            down.push(vk);
+        }
+        drop(down);
+        if !bytes.is_empty() {
+            self.send(bytes);
+        }
+    }
+
+    /// A key coming up, which only a program that asked for event types
+    /// hears about, and only for a key it heard go down.
+    fn on_key_up(&self, vk: u16, mods: Mods) {
+        let was_down = {
+            let mut down = self.kitty_down.borrow_mut();
+            let at = down.iter().position(|&d| d == vk);
+            at.map(|i| down.remove(i)).is_some()
+        };
+        let flags = self.kitty();
+        if !was_down || !flags.events || self.console.is_view() {
+            return;
+        }
+        let bytes = match function_key(VIRTUAL_KEY(vk)) {
+            Some(key) => keys::kitty_key(key, mods, KeyEvent::Release, flags, false),
+            None => {
+                let mapped = unsafe { MapVirtualKeyW(vk as u32, MAPVK_VK_TO_CHAR) };
+                keys::kitty_base(mapped)
+                    .and_then(|base| keys::kitty_text(base, None, mods, KeyEvent::Release, flags))
+                    .unwrap_or_default()
+            }
+        };
+        if !bytes.is_empty() {
+            self.console.write(bytes);
+        }
+    }
+
     fn mode(&self) -> TermMode {
         self.console
             .screen
@@ -786,7 +910,7 @@ impl Pane {
     }
 
     /// Keys that make no character. Returns false to let Windows have it.
-    fn on_key(&self, vk: u16, mods: Mods) -> bool {
+    fn on_key(&self, vk: u16, mods: Mods, repeat: bool) -> bool {
         if let Some(chord) = keys::chord(vk, mods) {
             self.drop_char();
             match chord {
@@ -836,22 +960,21 @@ impl Pane {
         if self.console.is_view() {
             return self.scroll_view(vk, mods);
         }
-        let key = match vk {
-            VK_UP => Key::Up,
-            VK_DOWN => Key::Down,
-            VK_LEFT => Key::Left,
-            VK_RIGHT => Key::Right,
-            VK_HOME => Key::Home,
-            VK_END => Key::End,
-            VK_PRIOR => Key::PageUp,
-            VK_NEXT => Key::PageDown,
-            VK_INSERT => Key::Insert,
-            VK_DELETE => Key::Delete,
-            v if (VK_F1.0..=VK_F12.0).contains(&v.0) => Key::F((v.0 - VK_F1.0 + 1) as u8),
-            _ => return false,
+        let flags = self.kitty();
+        let event = if repeat {
+            KeyEvent::Repeat
+        } else {
+            KeyEvent::Press
+        };
+        let Some(key) = function_key(vk) else {
+            return flags.any() && self.kitty_press(vk.0, mods, event, flags);
         };
         let app_cursor = self.mode().contains(TermMode::APP_CURSOR);
-        self.send(keys::key_bytes(key, mods, app_cursor));
+        if flags.any() {
+            self.kitty_sent(vk.0, keys::kitty_key(key, mods, event, flags, app_cursor));
+        } else {
+            self.send(keys::key_bytes(key, mods, app_cursor));
+        }
         true
     }
 
@@ -1459,11 +1582,17 @@ impl Pane {
                 Some(LRESULT(0))
             }
             WM_KEYDOWN | WM_SYSKEYDOWN => {
-                if self.on_key(wparam.0 as u16, Self::mods()) {
+                // Bit 30 is set when the key was already down.
+                let repeat = lparam.0 & (1 << 30) != 0;
+                if self.on_key(wparam.0 as u16, Self::mods(), repeat) {
                     Some(LRESULT(0))
                 } else {
                     None
                 }
+            }
+            WM_KEYUP | WM_SYSKEYUP => {
+                self.on_key_up(wparam.0 as u16, Self::mods());
+                None
             }
             WM_LBUTTONDOWN | WM_LBUTTONDBLCLK => {
                 self.focus();

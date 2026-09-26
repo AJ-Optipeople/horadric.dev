@@ -410,6 +410,9 @@ impl Console {
         };
         let config = Config {
             scrolling_history: SCROLLBACK,
+            // Claude Code tells Shift+Enter from Enter this way, and the
+            // parser keeps the flags only when this is on.
+            kitty_keyboard: true,
             // Blinking until a program asks for a steady cursor, as in
             // Windows Terminal.
             default_cursor_style: CursorStyle {
