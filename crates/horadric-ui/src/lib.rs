@@ -74,6 +74,10 @@ mod clipboard;
 #[cfg(windows)]
 mod console;
 #[cfg(windows)]
+mod dialog;
+#[cfg(windows)]
+pub use dialog::error_alone;
+#[cfg(windows)]
 mod dropdown;
 #[cfg(windows)]
 mod glyphs;

@@ -897,6 +897,77 @@ pub fn ask_hit(l: &AskLayout, x: f32, y: f32) -> Option<usize> {
     }
 }
 
+/// The geometry of a question with buttons: a lamp and a title, the text,
+/// and the buttons in a row along the bottom, right aligned.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DialogLayout {
+    pub size: (f32, f32),
+    pub lamp: (f32, f32),
+    pub title: Rect,
+    pub text: Rect,
+    pub buttons: Vec<Rect>,
+}
+
+pub const DIALOG_W: f32 = 440.0;
+const DIALOG_PAD: f32 = 24.0;
+const DIALOG_BUTTON_H: f32 = 32.0;
+const DIALOG_BUTTON_MIN: f32 = 92.0;
+/// Room either side of a button's label.
+const DIALOG_BUTTON_PAD: f32 = 20.0;
+const DIALOG_BUTTON_GAP: f32 = 10.0;
+
+/// How wide a dialog's text wraps.
+pub fn dialog_text_w() -> f32 {
+    DIALOG_W - 2.0 * DIALOG_PAD
+}
+
+/// Lays out a dialog whose text wraps to `text_h` DIPs at
+/// [`dialog_text_w`], with a button for each of `labels`, their widths.
+pub fn dialog(text_h: f32, labels: &[f32]) -> DialogLayout {
+    let w = dialog_text_w();
+    let lamp = (DIALOG_PAD + 4.0, 20.0 + 12.0);
+    let title = Rect::new(DIALOG_PAD + 16.0, 20.0, w - 16.0, 24.0);
+    let text = Rect::new(DIALOG_PAD, title.bottom() + 8.0, w, text_h);
+    let y = text.bottom() + 22.0;
+    let widths: Vec<f32> = labels
+        .iter()
+        .map(|l| (l.ceil() + 2.0 * DIALOG_BUTTON_PAD).max(DIALOG_BUTTON_MIN))
+        .collect();
+    let mut x = DIALOG_W - DIALOG_PAD;
+    let mut buttons: Vec<Rect> = widths
+        .iter()
+        .rev()
+        .map(|&bw| {
+            x -= bw;
+            let r = Rect::new(x, y, bw, DIALOG_BUTTON_H);
+            x -= DIALOG_BUTTON_GAP;
+            r
+        })
+        .collect();
+    buttons.reverse();
+    DialogLayout {
+        size: (DIALOG_W, y + DIALOG_BUTTON_H + DIALOG_PAD - 4.0),
+        lamp,
+        title,
+        text,
+        buttons,
+    }
+}
+
+pub fn dialog_hit(l: &DialogLayout, x: f32, y: f32) -> Option<usize> {
+    l.buttons.iter().position(|r| r.contains(x, y))
+}
+
+/// Where a dialog `size` goes on the work area `work`, both in screen
+/// pixels: centred across and a little above the middle, where the eye
+/// goes first.
+pub fn dialog_place(size: (i32, i32), work: [i32; 4]) -> (i32, i32) {
+    let [wl, wt, wr, wb] = work;
+    let x = wl + (wr - wl - size.0) / 2;
+    let y = wt + (wb - wt - size.1) * 2 / 5;
+    (x.max(wl), y.max(wt))
+}
+
 /// Where a window `size` goes beside `owner`, both in screen pixels, with
 /// its top a little above `y`, the height it was asked from. Clusters
 /// stand at the right edge of the screen, so it goes to the left when there
@@ -1370,6 +1441,30 @@ mod tests {
         assert_eq!(menu_place((900, 100), (200, 300), work), (700, 100));
         assert_eq!(menu_place((100, 790), (200, 300), work), (100, 490));
         assert_eq!(menu_place((100, 100), (200, 900), work), (100, 0));
+    }
+
+    #[test]
+    fn a_dialog_puts_its_buttons_right_aligned_under_the_text() {
+        let l = dialog(60.0, &[40.0, 120.0]);
+        assert_eq!(l.text.h, 60.0);
+        let [a, b] = [l.buttons[0], l.buttons[1]];
+        assert_eq!(a.w, DIALOG_BUTTON_MIN);
+        assert_eq!(b.w, 120.0 + 2.0 * DIALOG_BUTTON_PAD);
+        assert_eq!(b.right(), DIALOG_W - DIALOG_PAD);
+        assert_eq!(a.right() + DIALOG_BUTTON_GAP, b.x);
+        assert!(a.y > l.text.bottom());
+        assert!(l.size.1 > b.bottom());
+        assert_eq!(dialog_hit(&l, b.x + 1.0, b.y + 1.0), Some(1));
+        assert_eq!(dialog_hit(&l, l.text.x + 1.0, l.text.y + 1.0), None);
+    }
+
+    #[test]
+    fn a_dialog_stands_centred_a_little_high() {
+        assert_eq!(dialog_place((400, 200), [0, 0, 1000, 700]), (300, 200));
+        assert_eq!(
+            dialog_place((400, 200), [1000, 100, 2000, 800]),
+            (1300, 300)
+        );
     }
 
     #[test]

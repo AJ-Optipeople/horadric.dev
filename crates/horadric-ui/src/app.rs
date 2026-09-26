@@ -85,6 +85,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use crate::agents;
 use crate::columns::{self, Columns};
 use crate::console::{self, Console, Launch};
+use crate::dialog::{self, Dialog, Tone};
 use crate::dropdown::{self, Dropdown};
 use crate::glyphs::{self, Font};
 use crate::keys::{self, FontStep};
@@ -303,6 +304,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
     dropdown::register_class()?;
     ask::register_class()?;
     menu::register_class()?;
+    dialog::register_class()?;
     start::register_class()?;
     terminal::register_class()?;
     let notify = create_app_window()?;
@@ -669,7 +671,7 @@ unsafe extern "system" fn app_proc(
         }
         WM_HORADRIC_PROJECT_MENU => {
             if let Some(key) = with_app(|app| app.project_menu_for.take()).flatten() {
-                project_menu(hwnd, &key);
+                project_menu(&key);
             }
             return LRESULT(0);
         }
@@ -700,7 +702,7 @@ unsafe extern "system" fn app_proc(
         }
         WM_HORADRIC_TASK_MENU => {
             if let Some(menu) = with_app(|app| app.tasks.menu.take()).flatten() {
-                runner::show_menu(hwnd, menu);
+                runner::show_menu(menu);
             }
             return LRESULT(0);
         }
@@ -843,7 +845,7 @@ fn tray_menu(hwnd: HWND) {
             with_app(|app| app.install_update());
         }
         Some(Choice::EndAll) => {
-            if confirm_end(hwnd, None) {
+            if confirm_end(None) {
                 with_app(|app| app.end_all(None));
             }
         }
@@ -851,7 +853,14 @@ fn tray_menu(hwnd: HWND) {
             let (agents, shells) = with_app(|app| app.live_counts()).unwrap_or((0, 0));
             let working = with_app(|app| app.mid_turn_count()).unwrap_or(0);
             let keep = match quit_question(agents, shells) {
-                Some(q) => picker::keep_or_stop(hwnd, &q, working > 0),
+                Some(q) => ask(&Dialog {
+                    tone: Tone::Question,
+                    title: "Quit Horadric",
+                    text: &q,
+                    buttons: &["Keep running", "Stop them", "Cancel"],
+                    default: if working > 0 { 0 } else { 1 },
+                })
+                .and_then(|b| (b < 2).then_some(b == 0)),
                 None => Some(false),
             };
             if let Some(keep) = keep {
@@ -904,11 +913,11 @@ fn quit_question(agents: usize, shells: usize) -> Option<String> {
         ),
     };
     Some(format!(
-        "Quit Horadric, and keep {what} going without it?\n\n\
-         Yes: they run on, and their tiles come back as they are when Horadric starts \
-         again.\n\
-         No: they stop. A session comes back as a paused tile and resumes where it left \
-         off. A terminal closes, and whatever runs in it."
+        "Keep {what} going without Horadric?\n\n\
+         Kept running, they carry on, and their tiles come back as they are when \
+         Horadric starts again.\n\n\
+         Stopped, a session comes back as a paused tile and resumes where it left off. A \
+         terminal closes, and whatever runs in it."
     ))
 }
 
@@ -1085,6 +1094,13 @@ fn rename_session(id: &str) {
     }
 }
 
+/// Asks with buttons, outside the app's borrow: the dialog runs a modal
+/// loop that dispatches the app's messages. The button pressed, if one was.
+pub(crate) fn ask(d: &Dialog) -> Option<usize> {
+    let shared = with_app(|app| Rc::clone(&app.shared))?;
+    dialog::show(&shared.gpu, &shared.metrics, d)
+}
+
 /// Asks beside the cluster of project `key`, outside the app's borrow: the
 /// question runs a modal loop that dispatches the app's messages.
 fn ask_beside(key: Option<&str>, question: &ask::Ask) -> Option<ask::Answer> {
@@ -1121,7 +1137,7 @@ pub(crate) enum Run {
     Attach(String),
 }
 
-fn project_menu(hwnd: HWND, key: &str) {
+fn project_menu(key: &str) {
     const ADD: usize = 1;
     const START_BATCH: usize = 2;
     const START_OVER: usize = 3;
@@ -1234,7 +1250,7 @@ fn project_menu(hwnd: HWND, key: &str) {
         _ => {}
     }
     let ending = matches!(picked, Some(START_OVER | END_ALL));
-    if ending && !confirm_end(hwnd, Some(key)) {
+    if ending && !confirm_end(Some(key)) {
         return;
     }
     with_app(|app| match picked {
@@ -1332,11 +1348,24 @@ fn recent_menu(dir: PathBuf) {
 
 /// Asks before ending running sessions. Paused ones cost nothing to lose:
 /// their conversations stay on disk for `claude --resume`.
-fn confirm_end(hwnd: HWND, key: Option<&str>) -> bool {
+fn confirm_end(key: Option<&str>) -> bool {
     let (live, working) = with_app(|app| app.running_in(key)).unwrap_or((0, 0));
     let project = key.map(project_name);
     match end_question(project.as_deref(), live, working) {
-        Some(q) => picker::confirm(hwnd, &q),
+        Some(q) => {
+            let title = match live {
+                1 => "End session",
+                _ => "End sessions",
+            };
+            let pressed = ask(&Dialog {
+                tone: Tone::Warning,
+                title,
+                text: &q,
+                buttons: &["End", "Cancel"],
+                default: 0,
+            });
+            pressed == Some(0)
+        }
         None => true,
     }
 }
@@ -4240,24 +4269,26 @@ mod tests {
         };
         assert_eq!(
             first(1, 0),
-            "Quit Horadric, and keep the running session going without it?"
+            "Keep the running session going without Horadric?"
         );
         assert_eq!(
             first(2, 0),
-            "Quit Horadric, and keep the 2 running sessions going without it?"
+            "Keep the 2 running sessions going without Horadric?"
         );
         assert_eq!(
             first(0, 1),
-            "Quit Horadric, and keep the open terminal going without it?"
+            "Keep the open terminal going without Horadric?"
         );
         assert_eq!(
             first(1, 1),
-            "Quit Horadric, and keep the running session and the open terminal going without it?"
+            "Keep the running session and the open terminal going without Horadric?"
         );
         assert_eq!(
             first(1, 3),
-            "Quit Horadric, and keep 1 running session and 3 open terminals going without it?"
+            "Keep 1 running session and 3 open terminals going without Horadric?"
         );
-        assert!(quit_question(2, 0).unwrap().contains("\nNo: they stop."));
+        assert!(quit_question(2, 0)
+            .unwrap()
+            .contains("\n\nStopped, a session"));
     }
 }

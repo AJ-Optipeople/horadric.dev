@@ -16,17 +16,13 @@ use std::time::{Duration, Instant};
 
 use horadric_hooks::listener::NewSession;
 use horadric_hooks::{client, COMMAND_HEADER, NEW_PATH};
-use windows::core::{w, HSTRING};
-use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR};
 
 /// Runs a console program without giving it a console window.
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 fn main() {
     if let Err(e) = run() {
-        unsafe {
-            MessageBoxW(None, &HSTRING::from(e), w!("Horadric"), MB_ICONERROR);
-        }
+        horadric_ui::error_alone("Horadric could not open", &e);
     }
 }
 

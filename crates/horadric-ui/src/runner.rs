@@ -31,14 +31,13 @@ use horadric_core::usage::format_until;
 use horadric_core::worktree::{self, Worktree};
 use horadric_core::{ssh, Phase, WaitReason};
 use horadric_hooks::tasks as file;
-use windows::Win32::Foundation::HWND;
 
 use super::{post, unix_now, with_app, App, WM_HORADRIC_KEPT, WM_HORADRIC_TASK_MENU};
 use crate::app::Run;
 use crate::board::{self, Board, RowState};
 use crate::menu::{self, Item};
 use crate::window::{folder_key, project_key, project_name};
-use crate::{ask, picker, watch};
+use crate::{ask, watch};
 
 /// The least time between two sessions the runner starts in one project.
 const START_GAP: Duration = Duration::from_secs(10);
@@ -858,7 +857,7 @@ pub(super) fn ask_for(app: &mut App, menu: Menu) {
 }
 
 /// Shows the menu or dialog the app queued.
-pub(super) fn show_menu(hwnd: HWND, menu: Menu) {
+pub(super) fn show_menu(menu: Menu) {
     match menu {
         Menu::Item(key, line, title) => item_menu(&key, line, &title),
         Menu::Mode(key) => mode_menu(&key),
@@ -877,7 +876,14 @@ pub(super) fn show_menu(hwnd: HWND, menu: Menu) {
         }
         Menu::Merge(m) => {
             let into = crate::worktree::checked_out(&m.main).unwrap_or_else(|| "main".into());
-            if picker::yes_no(hwnd, &merge_question(&m.title, &m.branch, &into)) {
+            let pressed = super::ask(&crate::dialog::Dialog {
+                tone: crate::dialog::Tone::Question,
+                title: "Merge finished task",
+                text: &merge_question(&m.title, &m.branch, &into),
+                buttons: &["Merge", "Not now"],
+                default: 0,
+            });
+            if pressed == Some(0) {
                 with_app(|app| app.merge(&m));
             }
         }

@@ -60,8 +60,9 @@ use crate::anim::Look;
 use crate::board::RowState;
 use crate::files::{Row, Tree};
 use crate::layout::{
-    self, AskLayout, Button, ClusterLayout, DropdownLayout, FilesLayout, Hit, MenuLayout, Metrics,
-    Rect, SettingRow, StartHit, StartLayout, TasksLayout, UsageHit, UsageLayout, KNOB_R,
+    self, AskLayout, Button, ClusterLayout, DialogLayout, DropdownLayout, FilesLayout, Hit,
+    MenuLayout, Metrics, Rect, SettingRow, StartHit, StartLayout, TasksLayout, UsageHit,
+    UsageLayout, KNOB_R,
 };
 use crate::motion::{self, BREATH, ORBIT};
 use crate::theme::{self, Color};
@@ -98,6 +99,8 @@ pub struct Gpu {
     pub body: IDWriteTextFormat,
     pub small: IDWriteTextFormat,
     pub small_right: IDWriteTextFormat,
+    /// A button's label, centred on it.
+    pub small_centre: IDWriteTextFormat,
     /// The project's name at the top of its cluster.
     pub display: IDWriteTextFormat,
     /// A session's name on its tile.
@@ -122,6 +125,8 @@ impl Gpu {
             let body = format(&dw, FONT, 14.0, normal, false)?;
             let small = format(&dw, FONT, 12.5, normal, false)?;
             let small_right = format(&dw, FONT, 12.5, normal, true)?;
+            let small_centre = format(&dw, FONT, 12.5, semi, false)?;
+            small_centre.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
             let display = format(&dw, FONT_DISPLAY, 15.5, semi, false)?;
             let name = format(&dw, FONT, 13.5, semi, false)?;
             let chip = format(&dw, FONT, 11.5, semi, false)?;
@@ -149,6 +154,7 @@ impl Gpu {
                 body,
                 small,
                 small_right,
+                small_centre,
                 display,
                 name,
                 chip,
@@ -328,6 +334,21 @@ pub struct MenuLook<'a> {
     pub sub: bool,
     /// Its lines are open beside it now.
     pub open: bool,
+}
+
+/// Everything one frame of a dialog needs.
+pub struct DialogScene<'a> {
+    pub layout: &'a DialogLayout,
+    pub title: &'a str,
+    /// Wrapped to the layout's width by [`wrapped`].
+    pub text: &'a IDWriteTextLayout,
+    /// The lamp by the title: what kind of question it is.
+    pub tone: Color,
+    pub buttons: &'a [String],
+    /// The button Enter presses, ringed.
+    pub focus: usize,
+    pub hot: Option<usize>,
+    pub pressed: Option<usize>,
 }
 
 /// Everything one frame of the input the app asks with needs.
@@ -546,6 +567,15 @@ impl Target {
         unsafe {
             self.rt.BeginDraw();
             self.painter(&self.rt).menu(gpu, m, scene);
+            self.rt.EndDraw(None, None)
+        }
+    }
+
+    /// Draws a dialog. `Err` means the target must be recreated.
+    pub fn draw_dialog(&self, gpu: &Gpu, m: &Metrics, scene: &DialogScene) -> Result<()> {
+        unsafe {
+            self.rt.BeginDraw();
+            self.painter(&self.rt).dialog(gpu, m, scene);
             self.rt.EndDraw(None, None)
         }
     }
@@ -854,6 +884,38 @@ impl Painter<'_> {
             }
         }
         self.rt.PopAxisAlignedClip();
+    }
+
+    /// A dialog: a lamp in its tone by the title, the text, and a key for
+    /// each answer, the one Enter presses ringed like a focused field.
+    unsafe fn dialog(&self, gpu: &Gpu, m: &Metrics, scene: &DialogScene) {
+        let l = scene.layout;
+        self.plate(m, l.size);
+        self.led(l.lamp.0, l.lamp.1, scene.tone);
+        self.text(&gpu.title, theme::TEXT, scene.title, l.title);
+        self.draw_layout(scene.text, theme::TEXT_DIM, l.text);
+        for (i, (r, label)) in l.buttons.iter().zip(scene.buttons).enumerate() {
+            let b = layout::button(Some(i), scene.hot, scene.pressed.map(Some));
+            let depth = match b {
+                Button::Idle => 0.5,
+                Button::Hover => 0.8,
+                Button::Pressed => 0.2,
+            };
+            let radius = 8.0;
+            self.key(gpu, r, radius, theme::SURFACE, depth, 1.0);
+            let focused = i == scene.focus;
+            if focused {
+                self.stroke_rounded(&r.inset(0.5), radius, theme::WORKING.with_alpha(0.55), 1.0);
+            }
+            let ink = if focused || b == Button::Hover {
+                theme::TEXT
+            } else {
+                theme::TEXT_DIM
+            };
+            let sink = if b == Button::Pressed { 1.0 } else { 0.0 };
+            let at = Rect::new(r.x, r.y + sink, r.w, r.h);
+            self.text(&gpu.small_centre, ink, label, at);
+        }
     }
 
     /// The input: its title and what it asks on the plate, each field a

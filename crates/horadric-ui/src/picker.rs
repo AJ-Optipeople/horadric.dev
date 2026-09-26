@@ -1,4 +1,4 @@
-//! The Windows folder picker, and a yes or no question.
+//! The Windows folder picker.
 
 use std::path::{Path, PathBuf};
 
@@ -8,10 +8,6 @@ use windows::Win32::System::Com::{CoCreateInstance, CoTaskMemFree, CLSCTX_INPROC
 use windows::Win32::UI::Shell::{
     FileOpenDialog, IFileOpenDialog, IShellItem, SHCreateItemFromParsingName, FOS_FORCEFILESYSTEM,
     FOS_PICKFOLDERS, SIGDN_FILESYSPATH,
-};
-use windows::Win32::UI::WindowsAndMessaging::{
-    MessageBoxW, IDNO, IDOK, IDYES, MB_DEFBUTTON1, MB_DEFBUTTON2, MB_ICONQUESTION, MB_ICONWARNING,
-    MB_OKCANCEL, MB_SETFOREGROUND, MB_YESNO, MB_YESNOCANCEL,
 };
 
 /// Asks for a folder, starting in `start`. None when cancelled. Runs a modal
@@ -41,53 +37,5 @@ pub fn pick_folder(owner: HWND, start: Option<&Path>) -> Option<PathBuf> {
         let path = name.to_string().ok().map(PathBuf::from);
         CoTaskMemFree(Some(name.0 as *const _));
         path
-    }
-}
-
-/// Asks a yes, no or cancel question whose yes keeps something running:
-/// Some(true) for yes, Some(false) for no, None for cancel. Enter answers
-/// yes when `keep_first`, otherwise no.
-pub fn keep_or_stop(owner: HWND, text: &str, keep_first: bool) -> Option<bool> {
-    let default = if keep_first {
-        MB_DEFBUTTON1
-    } else {
-        MB_DEFBUTTON2
-    };
-    let answer = unsafe {
-        MessageBoxW(
-            Some(owner),
-            &HSTRING::from(text),
-            w!("Horadric"),
-            MB_YESNOCANCEL | MB_ICONQUESTION | MB_SETFOREGROUND | default,
-        )
-    };
-    match answer {
-        IDYES => Some(true),
-        IDNO => Some(false),
-        _ => None,
-    }
-}
-
-/// An OK or Cancel warning. True for OK.
-pub fn confirm(owner: HWND, text: &str) -> bool {
-    unsafe {
-        MessageBoxW(
-            Some(owner),
-            &HSTRING::from(text),
-            w!("Horadric"),
-            MB_OKCANCEL | MB_ICONWARNING | MB_SETFOREGROUND,
-        ) == IDOK
-    }
-}
-
-/// A yes or no question. True for yes.
-pub fn yes_no(owner: HWND, text: &str) -> bool {
-    unsafe {
-        MessageBoxW(
-            Some(owner),
-            &HSTRING::from(text),
-            w!("Horadric"),
-            MB_YESNO | MB_ICONQUESTION | MB_SETFOREGROUND,
-        ) == IDYES
     }
 }
