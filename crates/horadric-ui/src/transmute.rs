@@ -165,7 +165,7 @@ impl App {
             return;
         };
         if let Some(w) = &self.cube_window {
-            w.transmute(recipe.outcome());
+            w.transmute(recipe.outcome(), recipe == Recipe::Cow);
         }
         self.cube.clear();
         self.cube_main = false;
@@ -179,6 +179,8 @@ impl App {
                     self.close_with_summary(s);
                 }
             }
+            // The portal is all it does: the leg goes back to its tile.
+            Recipe::Cow => {}
         }
         self.reconcile(false);
     }

@@ -35,6 +35,9 @@ pub enum Recipe {
     Merge,
     /// Three sessions at rest: each closes, leaving a line in the journal.
     Close,
+    /// Wirt's Leg and the tome of town portal, `main`: a red portal opens
+    /// in the cube and nothing else happens. There is no cow level.
+    Cow,
 }
 
 impl Recipe {
@@ -44,6 +47,7 @@ impl Recipe {
             Recipe::Review => "Review both",
             Recipe::Merge => "Merge into main",
             Recipe::Close => "Close all three",
+            Recipe::Cow => "Open a portal",
         }
     }
 
@@ -53,12 +57,24 @@ impl Recipe {
             Recipe::Review => "A reviewer starts",
             Recipe::Merge => "Merged into main",
             Recipe::Close => "Closed and journaled",
+            Recipe::Cow => "There is no cow level",
         }
     }
 }
 
+/// A session named for Wirt's Leg, the leg that opens the portal. Any name
+/// with Wirt in it will do, however it is written.
+fn is_wirts_leg(name: &str) -> bool {
+    name.to_lowercase().contains("wirt")
+}
+
 /// The recipe what the cube holds makes, if any.
 pub fn recipe(items: &[Ingredient], main: bool) -> Option<Recipe> {
+    // Before the rest, whatever the session is doing: the portal does
+    // nothing to it, so there is no work to cut short.
+    if main && items.len() == 1 && is_wirts_leg(&items[0].name) {
+        return Some(Recipe::Cow);
+    }
     if items.is_empty() || !items.iter().all(Ingredient::at_rest) {
         return None;
     }
@@ -145,7 +161,7 @@ mod tests {
 
     #[test]
     fn each_recipe_says_what_came_of_it() {
-        let all = [Recipe::Review, Recipe::Merge, Recipe::Close];
+        let all = [Recipe::Review, Recipe::Merge, Recipe::Close, Recipe::Cow];
         for r in all {
             assert!(!r.outcome().is_empty());
         }
@@ -219,6 +235,30 @@ mod tests {
         assert_eq!(hint(&items, false), "a is mid turn");
         items[0].phase = Phase::Waiting(WaitReason::Permission);
         assert_eq!(recipe(&items[..1], true), None);
+    }
+
+    #[test]
+    fn wirts_leg_and_main_open_the_portal() {
+        let mut leg = done("Wirt's Leg", false, None);
+        assert_eq!(recipe(&[leg.clone()], true), Some(Recipe::Cow));
+        // Mid turn too, and over the merge its branch would make.
+        leg.phase = Phase::Working;
+        leg.branch = Some("wirts-leg".into());
+        assert_eq!(recipe(&[leg.clone()], true), Some(Recipe::Cow));
+        assert_eq!(
+            recipe(&[done("WIRT", false, None)], true),
+            Some(Recipe::Cow)
+        );
+        // The leg alone, or with company, is nothing.
+        assert_eq!(recipe(&[done("wirt", true, None)], false), None);
+        let two = [done("wirt", true, None), done("b", true, None)];
+        assert_eq!(recipe(&two, true), None);
+        assert_eq!(recipe(&two, false), Some(Recipe::Review));
+        // It gives nothing away.
+        assert_eq!(
+            hint(&[done("wirt", true, None)], false),
+            "Add main to merge, or another to review"
+        );
     }
 
     #[test]

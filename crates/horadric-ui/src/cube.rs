@@ -79,6 +79,19 @@ struct Transmute {
     began: Instant,
     flying: Vec<Flying>,
     outcome: String,
+    /// The secret recipe: a portal opens instead of the burst.
+    portal: bool,
+}
+
+impl Transmute {
+    fn frame(&self) -> motion::Transmuting {
+        let elapsed = self.began.elapsed();
+        if self.portal {
+            motion::portal(elapsed)
+        } else {
+            motion::transmuting(elapsed)
+        }
+    }
 }
 
 struct Drag {
@@ -254,9 +267,10 @@ impl CubeWindow {
     }
 
     /// Plays what the cube holds swirling into it and `outcome` coming
-    /// out. Called before the app empties it, so the slots still say what
-    /// went in. With Windows' animations off nothing plays.
-    pub fn transmute(&self, outcome: &str) {
+    /// out, or with `portal` a portal opening. Called before the app
+    /// empties it, so the slots still say what went in. With Windows'
+    /// animations off nothing plays.
+    pub fn transmute(&self, outcome: &str, portal: bool) {
         if !backdrop::animations_on() {
             return;
         }
@@ -283,6 +297,7 @@ impl CubeWindow {
             began: Instant::now(),
             flying,
             outcome: outcome.to_string(),
+            portal,
         });
         unsafe {
             SetTimer(
@@ -306,7 +321,7 @@ impl CubeWindow {
             .transmute
             .borrow()
             .as_ref()
-            .is_none_or(|t| motion::transmuting(t.began.elapsed()).done);
+            .is_none_or(|t| t.frame().done);
         if done {
             unsafe {
                 let _ = KillTimer(Some(self.hwnd), TRANSMUTE_TIMER);
@@ -351,9 +366,10 @@ impl CubeWindow {
         let looks: Vec<&StashLook> = c.items.iter().map(|(_, l)| l).collect();
         let playing = self.transmute.borrow();
         let transmute = playing.as_ref().map(|t| TransmuteLook {
-            frame: motion::transmuting(t.began.elapsed()),
+            frame: t.frame(),
             flying: &t.flying,
             outcome: &t.outcome,
+            portal: t.portal.then(|| t.began.elapsed().as_secs_f32()),
         });
         let scene = CubeScene {
             layout: &self.layout,

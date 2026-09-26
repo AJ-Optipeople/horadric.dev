@@ -521,7 +521,13 @@ pub struct TransmuteLook<'a> {
     pub flying: &'a [Flying],
     /// What came of it, written on the key once the burst comes.
     pub outcome: &'a str,
+    /// The secret recipe's portal, by how many seconds it has played, which
+    /// turns its swirl.
+    pub portal: Option<f32>,
 }
+
+/// The red of the portal to the cow level.
+const PORTAL_RED: Color = Color::rgb(0xE8323C);
 
 /// Everything one frame of the cube needs.
 pub struct CubeScene<'a> {
@@ -972,7 +978,10 @@ impl Painter<'_> {
     unsafe fn cube(&self, gpu: &Gpu, m: &Metrics, scene: &CubeScene) {
         let l = scene.layout;
         self.plate(m, l.size);
-        let gold = theme::rarity_color(Rarity::Unique);
+        let gold = match &scene.transmute {
+            Some(t) if t.portal.is_some() => PORTAL_RED,
+            _ => theme::rarity_color(Rarity::Unique),
+        };
         let lift = match &scene.transmute {
             Some(t) => t.frame.lid,
             None if scene.open => 1.0,
@@ -1082,6 +1091,10 @@ impl Painter<'_> {
         if bright <= 0.0 {
             return;
         }
+        if let Some(spin) = tr.portal {
+            self.portal(mouth, s, spread, bright, spin);
+            return;
+        }
         self.glow_dot(mouth.0, mouth.1, s * (1.2 + 2.2 * spread), gold, bright);
         // Sparks thrown off the lid, the gold of a unique drop.
         for i in 0..8 {
@@ -1089,6 +1102,44 @@ impl Painter<'_> {
             let d = s * (0.6 + 2.4 * spread);
             let (x, y) = (mouth.0 + d * a.cos(), mouth.1 + d * a.sin() * 0.7);
             self.glow_dot(x, y, 3.0 + 3.0 * (1.0 - spread), gold, bright);
+        }
+    }
+
+    /// The portal to the cow level standing over the cube's mouth, opened
+    /// `spread` of the way and `bright` still lit: a red oval, taller than
+    /// wide, with light turning inward on rings inside it.
+    unsafe fn portal(&self, mouth: (f32, f32), s: f32, spread: f32, bright: f32, spin: f32) {
+        let (cx, cy) = (mouth.0, mouth.1 - s * 0.6);
+        let (rx, ry) = (s * 0.7 * spread, s * 1.25 * spread);
+        if rx <= 0.5 {
+            return;
+        }
+        self.glow_dot(cx, cy, ry * 1.6, PORTAL_RED, 0.8 * bright);
+        let oval = |k: f32, c: Color| {
+            self.brush.SetColor(&color(c));
+            self.rt.FillEllipse(
+                &D2D1_ELLIPSE {
+                    point: Vector2 { X: cx, Y: cy },
+                    radiusX: rx * k,
+                    radiusY: ry * k,
+                },
+                self.brush,
+            );
+        };
+        let black = Color::rgb(0);
+        oval(1.0, PORTAL_RED.fade(bright));
+        oval(0.82, PORTAL_RED.mix(black, 0.45).fade(bright));
+        oval(0.5, PORTAL_RED.mix(black, 0.75).fade(bright));
+        // Specks on three rings, each ring turning faster than the one
+        // outside it, as into a whirlpool.
+        for ring in 0..3 {
+            let k = 0.85 - ring as f32 * 0.25;
+            let turn = spin * (2.0 + ring as f32 * 1.5);
+            for i in 0..6 {
+                let a = i as f32 * std::f32::consts::TAU / 6.0 + turn + ring as f32;
+                let (x, y) = (cx + rx * k * a.cos(), cy + ry * k * a.sin());
+                self.glow_dot(x, y, 2.5, PORTAL_RED.mix(Color::rgb(0xFFFFFF), 0.4), bright);
+            }
         }
     }
 

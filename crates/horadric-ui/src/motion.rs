@@ -159,6 +159,31 @@ pub fn transmuting(elapsed: Duration) -> Transmuting {
     }
 }
 
+/// The secret recipe: what went in swirls in as in a transmute, then a
+/// portal opens over the cube, stands a while and closes.
+pub const PORTAL: Duration = Duration::from_millis(3500);
+
+/// The portal `elapsed` after the recipe ran, as a transmute's frame: the
+/// burst is how far the portal has opened and how bright it still is. It
+/// swirls for as long as a transmute does, opens fast, holds, and fades
+/// over the last part.
+pub fn portal(elapsed: Duration) -> Transmuting {
+    let swirl = TRANSMUTE.mul_f32(SWIRL_SHARE);
+    if elapsed < swirl {
+        return transmuting(elapsed);
+    }
+    let b = progress(elapsed - swirl, PORTAL - swirl);
+    Transmuting {
+        swirl: None,
+        lid: 0.0,
+        burst: (
+            ease_out((b * 4.0).min(1.0)),
+            1.0 - ease_in_out(((b - 0.7) / 0.3).max(0.0)),
+        ),
+        done: b >= 1.0,
+    }
+}
+
 /// How flat the swirl is: its circle seen from above one corner, as the
 /// cube is drawn, and low enough to stay inside the cube's window.
 const SWIRL_FLAT: f32 = 0.3;
@@ -352,6 +377,21 @@ mod tests {
         assert!(burst.burst.0 > 0.0 && burst.burst.1 > 0.5);
         assert!(!burst.done);
         let end = transmuting(TRANSMUTE);
+        assert!(end.done);
+        assert!(end.burst.1.abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_portal_swirls_then_opens_and_holds_then_closes() {
+        assert_eq!(portal(ms(100)), transmuting(ms(100)));
+        let swirl = TRANSMUTE.mul_f32(SWIRL_SHARE);
+        let open = portal(swirl + (PORTAL - swirl).mul_f32(0.4));
+        assert_eq!(open.swirl, None);
+        assert!((open.burst.0 - 1.0).abs() < 1e-3);
+        assert!((open.burst.1 - 1.0).abs() < 1e-6);
+        // Longer than a transmute: still standing when one would be done.
+        assert!(!portal(TRANSMUTE).done);
+        let end = portal(PORTAL);
         assert!(end.done);
         assert!(end.burst.1.abs() < 1e-6);
     }

@@ -128,3 +128,5 @@ goes public and there is a leaderboard to put it on.
 
 There is no cow level. An easter egg: a hidden way in, perhaps forty
 sessions at once or a secret recipe in the cube, and a portal opens.
+
+Built, as a secret recipe: see "The Cow Level" in [PLAN.md](PLAN.md).
