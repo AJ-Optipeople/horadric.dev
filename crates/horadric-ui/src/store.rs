@@ -43,15 +43,20 @@ pub fn load() -> SavedState {
 }
 
 /// Writes the settings Horadric hands each `claude` it starts with
-/// `--settings`: `horadric status` as the status line, run from `exe`. Only
-/// those sessions get it, so a `claude` started anywhere else keeps its own.
-/// Written on every start, since `exe` moves with an install or a reload.
+/// `--settings`: `horadric status` as the status line, run from `exe`, and
+/// the reviews folder open without a prompt, since a runeword's reviewer
+/// writes there and the session it reviewed reads it back, both unattended.
+/// Only those sessions get it, so a `claude` started anywhere else keeps
+/// its own. Written on every start, since `exe` moves with an install or a
+/// reload.
 pub fn write_status_settings(exe: &Path) -> Option<PathBuf> {
     let dir = dir()?;
     fs::create_dir_all(&dir).ok()?;
     let path = dir.join("claude-settings.json");
+    let reviews = rule_path(&dir.join("reviews"));
     let body = serde_json::json!({
-        "statusLine": { "type": "command", "command": status_command(exe), "padding": 0 }
+        "statusLine": { "type": "command", "command": status_command(exe), "padding": 0 },
+        "permissions": { "allow": [format!("Read({reviews})"), format!("Edit({reviews})")] }
     });
     fs::write(&path, body.to_string()).ok()?;
     Some(path)
@@ -68,6 +73,18 @@ fn status_command(exe: &Path) -> String {
     } else {
         format!("{exe} status")
     }
+}
+
+/// A folder and all below it, as a permission rule names it. Claude Code
+/// matches Windows paths in POSIX form, and `//` starts a path at the root
+/// rather than at the project.
+fn rule_path(dir: &Path) -> String {
+    let posix = dir.to_string_lossy().replace('\\', "/");
+    let posix = match posix.split_once(":/") {
+        Some((drive, rest)) => format!("{}/{rest}", drive.to_lowercase()),
+        None => posix.trim_start_matches('/').to_string(),
+    };
+    format!("//{}/**", posix.trim_end_matches('/'))
 }
 
 /// Writes beside and renames, so a crash or a power cut mid write leaves the
@@ -125,6 +142,18 @@ pub fn trim_journal(now: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_rule_path_is_posix_from_the_root() {
+        assert_eq!(
+            rule_path(Path::new(r"C:\Users\me\AppData\Roaming\Horadric\reviews")),
+            "//c/Users/me/AppData/Roaming/Horadric/reviews/**"
+        );
+        assert_eq!(
+            rule_path(Path::new(r"D:\My Data\reviews\")),
+            "//d/My Data/reviews/**"
+        );
+    }
 
     #[test]
     fn the_status_command_quotes_only_for_a_space() {
