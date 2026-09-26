@@ -18,6 +18,8 @@ pub const ENTER: Duration = Duration::from_millis(320);
 pub const SETTLE: Duration = Duration::from_millis(450);
 /// A tile whose session has gone sinking and fading out of its place.
 pub const LEAVE: Duration = Duration::from_millis(320);
+/// A tile's icon turning over to show another tool.
+pub const FLIP: Duration = Duration::from_millis(280);
 /// Hover fades in and out this fast. Fast enough to feel instant, slow
 /// enough to not flicker as the cursor crosses a column of tiles.
 pub const HOVER: Duration = Duration::from_millis(120);

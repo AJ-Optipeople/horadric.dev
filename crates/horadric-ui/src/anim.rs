@@ -9,7 +9,9 @@ use std::time::{Duration, Instant};
 
 use horadric_core::Phase;
 
-use crate::motion::{self, ARRIVAL, ENTER, FRAME_BREATH, FRAME_FAST, FRAME_ORBIT, HOVER, SETTLE};
+use crate::motion::{
+    self, ARRIVAL, ENTER, FLIP, FRAME_BREATH, FRAME_FAST, FRAME_ORBIT, HOVER, SETTLE,
+};
 use crate::theme;
 
 /// How fast a tile slides to a new place: half the way every this long.
@@ -26,6 +28,8 @@ pub struct TileIn<'a> {
     pub hot: bool,
     /// Being dragged: it is where the cursor holds it, with no slide.
     pub held: bool,
+    /// The glyph its tile shows, for turning it over when it changes.
+    pub icon: char,
 }
 
 /// How one tile draws this frame.
@@ -46,6 +50,11 @@ pub struct Look {
     pub settle: f32,
     /// How the last phase stood the key: its depth, presence and lamp.
     pub was: Stance,
+    /// How far the icon still has to turn: 1 the moment it changed, 0
+    /// once the new one faces out.
+    pub flip: f32,
+    /// The icon it is turning over from.
+    pub was_icon: char,
 }
 
 /// How a phase stands a key, from `theme`: how far off the plate, how
@@ -85,6 +94,7 @@ impl Look {
         self.enter < 1.0
             || self.arrival > 0.0
             || self.settle > 0.0
+            || self.flip > 0.0
             || (self.hover > 0.0 && self.hover < 1.0)
             || self.y != y
     }
@@ -99,6 +109,8 @@ impl Look {
             phase_age: Duration::ZERO,
             settle: 0.0,
             was: Stance::of(&Phase::Idle),
+            flip: 0.0,
+            was_icon: ' ',
         }
     }
 }
@@ -106,6 +118,9 @@ impl Look {
 struct State {
     phase: Phase,
     was: Phase,
+    icon: char,
+    was_icon: char,
+    flipped: Instant,
     changed: Instant,
     born: Instant,
     y: f32,
@@ -141,6 +156,9 @@ impl Tiles {
                     State {
                         phase: t.phase.clone(),
                         was: t.phase.clone(),
+                        icon: t.icon,
+                        was_icon: t.icon,
+                        flipped: long_ago,
                         changed: long_ago,
                         born,
                         y,
@@ -150,6 +168,10 @@ impl Tiles {
                 if &s.phase != t.phase {
                     s.was = std::mem::replace(&mut s.phase, t.phase.clone());
                     s.changed = now;
+                }
+                if s.icon != t.icon {
+                    s.was_icon = std::mem::replace(&mut s.icon, t.icon);
+                    s.flipped = now;
                 }
                 // A tile born this frame starts where it was put.
                 let dt = if fresh { Duration::ZERO } else { dt };
@@ -168,6 +190,8 @@ impl Tiles {
                     phase_age: since,
                     settle: 1.0 - motion::progress(since, SETTLE),
                     was: Stance::of(&s.was),
+                    flip: 1.0 - motion::progress(now.duration_since(s.flipped), FLIP),
+                    was_icon: s.was_icon,
                 }
             })
             .collect()
@@ -257,6 +281,7 @@ mod tests {
             y,
             hot,
             held: false,
+            icon: 'a',
         }
     }
 
@@ -321,6 +346,29 @@ mod tests {
             &[tile("a", &Phase::Working, 0.0, false)],
         );
         assert_eq!(later[0].settle, 0.0);
+    }
+
+    #[test]
+    fn a_new_tool_turns_the_icon_over() {
+        let mut t = Tiles::default();
+        let now = Instant::now();
+        let read = TileIn {
+            icon: 'r',
+            ..tile("a", &Phase::Working, 0.0, false)
+        };
+        let l = t.step(now, &[read]);
+        assert_eq!(l[0].flip, 0.0, "not on the first frame");
+        let edit = TileIn {
+            icon: 'e',
+            ..tile("a", &Phase::Working, 0.0, false)
+        };
+        let l = t.step(now + ms(10), &[edit]);
+        assert_eq!((l[0].flip, l[0].was_icon), (1.0, 'r'));
+        let edit = TileIn {
+            icon: 'e',
+            ..tile("a", &Phase::Working, 0.0, false)
+        };
+        assert_eq!(t.step(now + ms(10) + FLIP, &[edit])[0].flip, 0.0);
     }
 
     #[test]

@@ -10,7 +10,7 @@
 //! the stage showing it. So a project's colour is never mistaken for a
 //! session needing you.
 
-use horadric_core::{Phase, WaitReason};
+use horadric_core::{Phase, Session, WaitReason};
 
 use crate::files::Change;
 use crate::layout::Button;
@@ -159,6 +159,16 @@ pub const SSH_ICON: char = '\u{E968}';
 
 /// The Segoe Fluent Icons glyph for a session: the tool it is in while it
 /// works, otherwise what its phase is.
+/// The glyph on a session's tile: what its agent is doing, or what kind
+/// of terminal it is while it does nothing.
+pub fn tile_icon(s: &Session) -> char {
+    match s.phase {
+        Phase::Idle if s.ssh.is_some() => SSH_ICON,
+        Phase::Idle if s.shell => SHELL_ICON,
+        _ => icon(&s.phase, s.tool.as_deref()),
+    }
+}
+
 pub fn icon(phase: &Phase, tool: Option<&str>) -> char {
     match phase {
         Phase::Working => tool.map_or('\u{EA80}', tool_icon),

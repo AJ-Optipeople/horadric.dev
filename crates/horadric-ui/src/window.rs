@@ -679,6 +679,7 @@ impl Cluster {
                     y: carried.filter(|_| is_held).map_or(r.y, |l| l.top),
                     hot: is_held || (pressed.is_none() && hot == Hit::Tile(i)),
                     held: is_held,
+                    icon: theme::tile_icon(s),
                 }
             })
             .collect();

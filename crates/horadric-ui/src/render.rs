@@ -2019,16 +2019,30 @@ impl Painter<'_> {
             let track = Rect::new(ix - 10.0, iy + 14.0, 20.0, 3.0);
             self.meter(&track, c / 100.0, ink.fade(presence), 5);
         }
-        self.icon(
-            &gpu.icon,
-            icon_c.fade(presence),
-            match phase {
-                Phase::Idle if s.ssh.is_some() => theme::SSH_ICON,
-                Phase::Idle if s.shell => theme::SHELL_ICON,
-                _ => theme::icon(phase, s.tool.as_deref()),
-            },
-            Rect::new(ix - 14.0, iy - 14.0, 28.0, 28.0),
-        );
+        // A new tool turns the icon over like a card: the old one folds
+        // away edge on, and the new one opens out.
+        let icon_r = Rect::new(ix - 14.0, iy - 14.0, 28.0, 28.0);
+        let icon_ink = icon_c.fade(presence);
+        if ambient && look.flip > 0.0 {
+            let t = 1.0 - look.flip;
+            let (glyph, squash) = if t < 0.5 {
+                (look.was_icon, (std::f32::consts::PI * t).cos())
+            } else {
+                (theme::tile_icon(s), -(std::f32::consts::PI * t).cos())
+            };
+            self.rt.SetTransform(&Matrix3x2 {
+                M11: 1.0,
+                M12: 0.0,
+                M21: 0.0,
+                M22: squash.max(0.02),
+                M31: 0.0,
+                M32: iy * (1.0 - squash.max(0.02)),
+            });
+            self.icon(&gpu.icon, icon_ink, glyph, icon_r);
+            self.rt.SetTransform(&Matrix3x2::identity());
+        } else {
+            self.icon(&gpu.icon, icon_ink, theme::tile_icon(s), icon_r);
+        }
 
         let pad = INNER_PAD;
         let left = r.x + TILE_TEXT_X;
