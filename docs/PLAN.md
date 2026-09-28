@@ -1825,6 +1825,11 @@ it, and a recipe that runs on what it holds. Dragging tiles together says
   that runs the recipe (latched and saying what is missing while there is
   none), the `main` rune, and a well of three slots showing each session
   as the stash does. The cube's runes light gold once a recipe is ready.
+- **Off by default.** The recipes mostly repeat what a tile's menu does,
+  so the cube is shown only once "Horadric Cube" is ticked in the menu a
+  right click on the usage window opens (`cube` in `state.json`). Turned
+  off, it lets go of what it held and goes, after a transmute playing has
+  finished. The recipes it could grow into are in [IDEAS.md](IDEAS.md).
 - **Not saved.** What the cube holds is a hand of tiles on the way to a
   recipe; after a restart they stand in their clusters as before.
 - **The transmute animation.** Running a recipe plays it in the cube's

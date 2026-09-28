@@ -64,8 +64,8 @@ pub(in crate::app) fn look(s: &Session) -> StashLook {
 }
 
 impl App {
-    /// Makes the cube window match what the cube holds: there while an
-    /// agent session has a tile, the cube holds anything or a transmute is
+    /// Makes the cube window match what the cube holds: there while it is
+    /// switched on and an agent session has a tile, the cube holds anything or a transmute is
     /// still playing, under the stash
     /// or the usage window when it first comes. True when it came or went,
     /// so the columns are laid out again.
@@ -74,7 +74,8 @@ impl App {
             let Ok(r) = self.shared.registry.lock() else {
                 return false;
             };
-            self.cube.retain(|id| r.get(id).is_some_and(fits));
+            let on = self.cube_on;
+            self.cube.retain(|id| on && r.get(id).is_some_and(fits));
             let held: Vec<&Session> = self.cube.iter().filter_map(|id| r.get(id)).collect();
             let ingredients: Vec<Ingredient> = held.iter().map(|s| ingredient(s)).collect();
             let contents = Contents {
@@ -84,7 +85,10 @@ impl App {
                 hint: cube::hint(&ingredients, self.cube_main),
             };
             let playing = self.cube_window.as_ref().is_some_and(|w| w.transmuting());
-            (contents, r.all().any(fits) || !held.is_empty() || playing)
+            (
+                contents,
+                (on && r.all().any(fits)) || !held.is_empty() || playing,
+            )
         };
         if !wanted {
             self.cube_main = false;
@@ -132,7 +136,7 @@ impl App {
             .registry
             .lock()
             .is_ok_and(|r| r.get(id).is_some_and(fits));
-        if !fits || self.cube.iter().any(|c| c == id) {
+        if !self.cube_on || !fits || self.cube.iter().any(|c| c == id) {
             return;
         }
         if self.cube.len() >= cube::SLOTS {

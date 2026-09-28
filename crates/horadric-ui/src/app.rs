@@ -169,6 +169,8 @@ const WM_HORADRIC_DOWNLOADED: u32 = WM_APP + 17;
 const WM_HORADRIC_KEPT: u32 = WM_APP + 18;
 /// Show the menu for the stashed session the app's `stash_menu_for` names.
 const WM_HORADRIC_STASH_MENU: u32 = WM_APP + 19;
+/// Show the usage window's own menu.
+const WM_HORADRIC_USAGE_MENU: u32 = WM_APP + 23;
 
 const APP_CLASS: PCWSTR = w!("HoradricApp");
 /// Runs a console program without giving it a console window.
@@ -268,6 +270,8 @@ pub(crate) enum Input {
     /// A list setting in the usage window clicked: drop its list under its
     /// row, given in screen pixels.
     SettingMenu(Setting, RECT),
+    /// The usage window right clicked: its own menu.
+    UsageMenu,
     /// A setting's list closed, with the value picked, if one was.
     Picked(Setting, Option<Option<String>>),
     /// A slider in the usage window let go at a new value.
@@ -580,6 +584,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             autostart_offered,
             quiet: saved.quiet,
             sounds: saved.sounds,
+            cube_on: saved.cube,
             font_family: saved.font_family.clone(),
             screen: saved.screen.clone(),
             last_saved: Some(saved),
@@ -830,6 +835,10 @@ unsafe extern "system" fn app_proc(
             if let Some(id) = with_app(|app| app.stash_menu_for.take()).flatten() {
                 stash_menu(&id);
             }
+            return LRESULT(0);
+        }
+        WM_HORADRIC_USAGE_MENU => {
+            usage_menu();
             return LRESULT(0);
         }
         WM_HORADRIC_RECENT_MENU => {
@@ -1730,6 +1739,26 @@ fn history_items(past: &[Past], first: usize) -> Vec<Item> {
 
 /// A recent project right clicked in the start window, which has no
 /// cluster and so no project menu: a new session, or an old one back.
+/// The usage window's menu, for what the settings rows do not hold.
+fn usage_menu() {
+    const CUBE: usize = 1;
+    let on = with_app(|app| app.cube_on).unwrap_or_default();
+    let items = [Item::Action {
+        id: CUBE,
+        label: "Horadric Cube".into(),
+        checked: on,
+    }];
+    if menu::popup(&items) == Some(CUBE) {
+        with_app(|app| {
+            app.cube_on = !on;
+            app.save();
+            if app.sync_cube() {
+                app.arrange();
+            }
+        });
+    }
+}
+
 fn recent_menu(dir: PathBuf) {
     const ADD: usize = 1;
     const PAST: usize = 100;
@@ -2004,6 +2033,8 @@ struct App {
     quiet: bool,
     /// Loot sounds, from the tray menu.
     sounds: bool,
+    /// The cube is shown, from the usage window's menu.
+    cube_on: bool,
     /// The terminal font picked from the tray menu. Kept as picked, so a
     /// family that is uninstalled for a while comes back when it is not.
     font_family: Option<String>,
@@ -4225,6 +4256,7 @@ impl App {
             font_size: Some(self.shared.font.size()).filter(|&s| s != keys::FONT_DEFAULT),
             quiet: self.quiet,
             sounds: self.sounds,
+            cube: self.cube_on,
             font_family: self.font_family.clone(),
             screen: self.screen.clone(),
             live: !self.quit,
@@ -4650,6 +4682,7 @@ impl App {
                         c.invalidate();
                     }
                 }
+                Input::UsageMenu => post(self.notify.0 as isize, WM_HORADRIC_USAGE_MENU, 0),
                 Input::SettingMenu(s, row) => {
                     self.setting_menu_for = Some((s, row));
                     post(self.notify.0 as isize, WM_HORADRIC_SETTING_MENU, 0);

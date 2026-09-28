@@ -29,6 +29,42 @@ combine, runewords for sequences.
 
 Built, with these three recipes: see "Transmute" in [PLAN.md](PLAN.md).
 
+Built, but the three recipes mostly repeat what a tile's menu does, so the
+cube is off by default until it holds something only it can do (see "New
+recipes" below).
+
+### New recipes
+
+What the cube could do that no menu could. Each one is about putting things
+together and getting something new out, and about running several agents at
+once, which is what Horadric is for.
+
+- **Fuse.** Two sessions go in, one new session comes out that knows what
+  both learned. For two threads that drifted into the same problem.
+- **Teach.** A, then B. A writes down what it found out (the gotchas, the
+  dead ends) and that goes into B, so what one agent learned reaches
+  another without you telling it again.
+- **Conflict check.** Two sessions go in and the cube says whether their
+  branches will clash before either merges: the files both touched, or a
+  gold "clean".
+- **Forge.** One session goes in and forks into three, each trying a
+  different approach from the same point. When all three are done the cube
+  reviews them and hands back the winner. Best of three on demand.
+- **Pipeline.** A, then B. B waits paused until A finishes, then starts
+  with what A did as its prompt. The order of the drops is the order of the
+  work: write it, test it, review it.
+- **Wait for.** A session goes in with a condition (CI green, another
+  session done, nine in the morning) and wakes by itself when it holds.
+- **Ingredients.** Files from Explorer, a screenshot or a URL go in with a
+  session and are handed to it as context. Without a session, a new one
+  starts about them.
+- **Extract.** A finished session goes in and a lesson comes out: a line
+  for CLAUDE.md, a memory, or a skill. The session ends; what it learned
+  stays.
+
+Pipeline and Forge are the strongest: both orchestrate several agents, and
+dragging really is quicker than a menu for them.
+
 ### Identify
 
 In Diablo an unidentified item drops grey and you do not know what it is

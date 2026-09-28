@@ -79,6 +79,10 @@ pub struct SavedState {
     /// turned on from the tray.
     #[serde(default)]
     pub sounds: bool,
+    /// The Horadric Cube is shown, off until turned on from the usage
+    /// window's menu.
+    #[serde(default)]
+    pub cube: bool,
     /// The device name of the screen the columns stand on, when it is not
     /// the primary one.
     #[serde(default)]
