@@ -40,6 +40,9 @@ Do not reopen these without asking. They were argued through and chosen.
   screen instead, see below.
 - `cargo fmt --all`, then `cargo clippy --workspace --all-targets -- -D
   warnings`, then `cargo test --workspace`. All three before every commit.
+- The Rust version is pinned in `rust-toolchain.toml`, for this machine
+  and CI alike. Moving it is a commit of its own, with whatever new
+  clippy lints it brings fixed in the same commit.
 - Commit messages: one line saying what changed, a blank line, then why.
 - Work lands on `main`. When a piece of work is finished, and always
   before shipping, merge its branch into `main`. No branch is left with

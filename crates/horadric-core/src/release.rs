@@ -275,10 +275,8 @@ pub struct Url {
 pub fn split_url(url: &str) -> Option<Url> {
     let (secure, rest) = if let Some(r) = url.strip_prefix("https://") {
         (true, r)
-    } else if let Some(r) = url.strip_prefix("http://") {
-        (false, r)
     } else {
-        return None;
+        (false, url.strip_prefix("http://")?)
     };
     let (authority, path) = match rest.find(['/', '?']) {
         Some(i) if rest[i..].starts_with('/') => (&rest[..i], rest[i..].to_string()),

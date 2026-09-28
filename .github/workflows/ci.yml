@@ -8,9 +8,9 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
+      # The version and components come from rust-toolchain.toml, so CI
+      # lints with the same clippy as the machine that committed.
+      - run: rustup toolchain install
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
