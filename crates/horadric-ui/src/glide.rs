@@ -112,6 +112,12 @@ impl Glides {
         !self.on.is_empty()
     }
 
+    /// Stops the window where it is, since something else moves it now: a
+    /// pane taken by the mouse. Its next aim glides from there.
+    pub fn halt(&mut self, id: isize) {
+        self.on.remove(&id);
+    }
+
     /// The window is gone. Its handle may be given to another.
     pub fn forget(&mut self, id: isize) {
         self.on.remove(&id);
@@ -197,5 +203,16 @@ mod tests {
         g.aim(1, (0, 0), (0, 0), true);
         g.forget(1);
         assert_eq!(g.aim(1, (0, 0), (0, 100), true), Some((0, 100)));
+    }
+
+    #[test]
+    fn a_halted_window_stays_put_and_glides_from_there_next() {
+        let mut g = Glides::default();
+        g.aim(1, (0, 0), (0, 0), true);
+        g.aim(1, (0, 0), (0, 100), true);
+        g.halt(1);
+        assert!(!g.moving());
+        assert_eq!(g.aim(1, (40, 40), (0, 100), true), None);
+        assert_eq!(g.target(1), Some((0, 100)));
     }
 }

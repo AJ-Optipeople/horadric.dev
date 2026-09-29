@@ -61,6 +61,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_SETCURSOR, WM_SETFOCUS, WM_SIZE, WM_SYSCHAR, WM_SYSDEADCHAR, WM_SYSKEYDOWN, WM_SYSKEYUP,
     WM_TIMER, WM_USER, WNDCLASSW, WS_CHILD, WS_CLIPSIBLINGS, WS_VISIBLE,
 };
+use windows::Win32::UI::WindowsAndMessaging::{
+    GetWindowRect, SetParent, GWLP_HWNDPARENT, GWL_EXSTYLE, GWL_STYLE, HWND_TOP, SWP_FRAMECHANGED,
+    SWP_NOCOPYBITS, SWP_NOOWNERZORDER, SWP_NOREDRAW, SWP_NOSENDCHANGING, WS_EX_NOACTIVATE,
+    WS_EX_TOOLWINDOW, WS_POPUP,
+};
 
 use crate::app::{self, Input};
 use crate::clipboard;
@@ -138,7 +143,15 @@ pub struct Pane {
     name: RefCell<String>,
     header: Cell<bool>,
     lifted: Cell<bool>,
-    drop_target: Cell<bool>,
+    /// The grid keeps its size while the window's changes, until let go.
+    held: Cell<bool>,
+    /// The stage, while the pane floats above it as a window of its own.
+    floating: Cell<Option<HWND>>,
+    /// Something shown has changed since the last frame was drawn. Until
+    /// it has, a paint only presents that frame again: Windows asks for
+    /// one when a neighbour uncovers a strip of this pane, or when this
+    /// pane is moved, and neither changes what it shows.
+    stale: Cell<bool>,
     target: RefCell<Option<GridTarget>>,
     /// The DPI the render target was made for. A child window hears of a
     /// new monitor only through its parent.
@@ -240,7 +253,9 @@ impl Pane {
             name: RefCell::new(name),
             header: Cell::new(false),
             lifted: Cell::new(false),
-            drop_target: Cell::new(false),
+            held: Cell::new(false),
+            floating: Cell::new(None),
+            stale: Cell::new(true),
             target: RefCell::new(None),
             dpi: Cell::new(0),
             focused: Cell::new(false),
@@ -334,15 +349,72 @@ impl Pane {
 
     /// Moves the pane inside the stage, in client pixels, keeping its size.
     pub fn move_to(&self, x: i32, y: i32) {
+        let mut at = POINT { x, y };
+        let mut flags = SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSIZE;
+        if let Some(stage) = self.floating.get() {
+            unsafe {
+                let _ = ClientToScreen(stage, &mut at);
+            }
+            // The compositor moves a window of its own as it is: there are
+            // no pixels to copy and nothing uncovered to paint.
+            flags |= SWP_NOCOPYBITS | SWP_NOREDRAW | SWP_NOSENDCHANGING | SWP_NOOWNERZORDER;
+        }
         unsafe {
+            let _ = SetWindowPos(self.hwnd, None, at.x, at.y, 0, 0, flags);
+        }
+    }
+
+    /// Takes the pane out of the stage into a window of its own, owned by
+    /// the stage so it stays above it, or puts it back, where it is on
+    /// screen either way. A child moved across the stage damages the stage
+    /// and every pane it passes over, and each of them paints again; a
+    /// window of its own is only moved by the compositor.
+    pub fn float(&self, stage: HWND, on: bool) {
+        if self.floating.get().is_some() == on {
+            return;
+        }
+        let mut r = RECT::default();
+        unsafe {
+            let _ = GetWindowRect(self.hwnd, &mut r);
+            let style = GetWindowLongPtrW(self.hwnd, GWL_STYLE) as u32;
+            let ex = GetWindowLongPtrW(self.hwnd, GWL_EXSTYLE) as u32;
+            let loose = WS_EX_NOACTIVATE.0 | WS_EX_TOOLWINDOW.0;
+            let mut at = POINT {
+                x: r.left,
+                y: r.top,
+            };
+            // Windows leaves the child and popup styles to the caller, in
+            // the order SetParent's documentation gives.
+            if on {
+                let _ = SetParent(self.hwnd, None);
+                SetWindowLongPtrW(
+                    self.hwnd,
+                    GWL_STYLE,
+                    ((style & !WS_CHILD.0) | WS_POPUP.0) as isize,
+                );
+                SetWindowLongPtrW(self.hwnd, GWL_EXSTYLE, (ex | loose) as isize);
+                SetWindowLongPtrW(self.hwnd, GWLP_HWNDPARENT, stage.0 as isize);
+                self.floating.set(Some(stage));
+            } else {
+                SetWindowLongPtrW(self.hwnd, GWLP_HWNDPARENT, 0);
+                SetWindowLongPtrW(
+                    self.hwnd,
+                    GWL_STYLE,
+                    ((style & !WS_POPUP.0) | WS_CHILD.0) as isize,
+                );
+                SetWindowLongPtrW(self.hwnd, GWL_EXSTYLE, (ex & !loose) as isize);
+                let _ = SetParent(self.hwnd, Some(stage));
+                let _ = ScreenToClient(stage, &mut at);
+                self.floating.set(None);
+            }
             let _ = SetWindowPos(
                 self.hwnd,
-                None,
-                x,
-                y,
+                Some(HWND_TOP),
+                at.x,
+                at.y,
                 0,
                 0,
-                SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSIZE,
+                SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED,
             );
         }
     }
@@ -412,8 +484,13 @@ impl Pane {
         }
     }
 
-    pub fn set_drop_target(&self, on: bool) {
-        if self.drop_target.replace(on) != on {
+    /// Holds the grid at its size while a drag rearranges the stage. A
+    /// pane passing through a cell of another size would otherwise make
+    /// its agent redraw for a size it keeps for a moment. Let go, the grid
+    /// takes the size the window has by then.
+    pub fn hold(&self, on: bool) {
+        if self.held.replace(on) && !on {
+            self.fit_grid();
             self.invalidate();
         }
     }
@@ -447,6 +524,7 @@ impl Pane {
     }
 
     pub fn invalidate(&self) {
+        self.stale.set(true);
         unsafe {
             let _ = InvalidateRect(Some(self.hwnd), None, false);
         }
@@ -485,6 +563,17 @@ impl Pane {
     }
 
     fn paint(&self) {
+        if !self.stale.get() {
+            let shown = self.target.borrow().as_ref().map(|t| t.present());
+            match shown {
+                Some(Ok(())) => return,
+                Some(Err(_)) => *self.target.borrow_mut() = None,
+                None => {}
+            }
+        }
+        // Before drawing, so a change the drawing itself asks to show is
+        // not lost.
+        self.stale.set(false);
         if let Some(wait) = self.console.flush_sync() {
             unsafe {
                 SetTimer(
@@ -515,6 +604,7 @@ impl Pane {
                 }
                 Err(e) => {
                     eprintln!("horadric: pane render target: {e}");
+                    self.stale.set(true);
                     return;
                 }
             }
@@ -566,7 +656,10 @@ impl Pane {
                 let offset = s.term.grid().display_offset() as i32;
                 (frame, frame::cursor_cell(&s.term), offset)
             }
-            Err(_) => return,
+            Err(_) => {
+                self.stale.set(true);
+                return;
+            }
         };
         if let Some(cells) = self.link.borrow().as_ref() {
             let rows = self.console.size().rows as i32;
@@ -604,13 +697,13 @@ impl Pane {
                 &frame,
                 header.as_ref(),
                 find.as_ref(),
-                self.drop_target.get(),
                 veil,
                 plate,
             )
         });
         if let Some(Err(_)) = result {
             *slot = None;
+            self.stale.set(true);
         }
     }
 
@@ -1619,7 +1712,7 @@ impl Pane {
                 if let Some(t) = self.target.borrow().as_ref() {
                     let _ = t.resize(w, h);
                 }
-                if w > 0 && h > 0 {
+                if w > 0 && h > 0 && !self.held.get() {
                     self.fit_grid();
                 }
                 self.invalidate();

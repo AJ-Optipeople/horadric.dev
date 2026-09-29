@@ -1776,6 +1776,25 @@ pub fn beside_stage(
     (area[2] - area[0] >= min_w).then(|| dock(size, area, stage_left))
 }
 
+/// The grid cell of the pane at `i` while `swap` says the pane at the
+/// first index is dragged over the second's cell: the two trade places and
+/// the rest stay where they are.
+pub fn swapped_cell(i: usize, swap: Option<(usize, usize)>) -> usize {
+    match swap {
+        Some((a, b)) if i == a => b,
+        Some((a, b)) if i == b => a,
+        _ => i,
+    }
+}
+
+/// Where a box of `size` with its top left at `at` has to go to lie inside
+/// `area` (left, top, right, bottom), moved as little as it can be. One
+/// too big for the area keeps to its left or top edge.
+pub fn clamp_into(at: (i32, i32), size: (i32, i32), area: [i32; 4]) -> (i32, i32) {
+    let [l, t, r, b] = area;
+    (at.0.min(r - size.0).max(l), at.1.min(b - size.1).max(t))
+}
+
 /// Which of `rects` (left, top, right, bottom) holds the point, if any.
 pub fn slot_at(rects: &[[i32; 4]], x: i32, y: i32) -> Option<usize> {
     rects
@@ -2729,6 +2748,24 @@ mod tests {
         assert_eq!(tile_slot(&tiles, 400.0), 2);
         assert_eq!(tile_slot(&tiles, -50.0), 0);
         assert_eq!(tile_slot(&[], 10.0), 0);
+    }
+
+    #[test]
+    fn swapped_cell_trades_two_places_and_keeps_the_rest() {
+        assert_eq!(swapped_cell(0, Some((0, 2))), 2);
+        assert_eq!(swapped_cell(2, Some((0, 2))), 0);
+        assert_eq!(swapped_cell(1, Some((0, 2))), 1);
+        assert_eq!(swapped_cell(1, Some((1, 1))), 1);
+        assert_eq!(swapped_cell(3, None), 3);
+    }
+
+    #[test]
+    fn clamp_into_keeps_a_box_inside_the_area() {
+        let area = [10, 20, 110, 220];
+        assert_eq!(clamp_into((30, 40), (50, 50), area), (30, 40));
+        assert_eq!(clamp_into((-5, 0), (50, 50), area), (10, 20));
+        assert_eq!(clamp_into((90, 200), (50, 50), area), (60, 170));
+        assert_eq!(clamp_into((90, 200), (500, 50), area), (10, 170));
     }
 
     #[test]
