@@ -422,7 +422,9 @@ pub struct GridTarget {
 
 impl GridTarget {
     pub fn new(gpu: &Gpu, hwnd: HWND, width_px: u32, height_px: u32, dpi: u32) -> Result<Self> {
-        let rt = hwnd_target(gpu, hwnd, width_px, height_px, dpi)?;
+        // Kept after each present, so a pane only uncovered or moved can
+        // be shown again without being drawn again.
+        let rt = hwnd_target(gpu, hwnd, width_px, height_px, dpi, true)?;
         unsafe {
             // Cell backgrounds meet edge to edge. Antialiased, their shared
             // edges would blend into a visible line.
@@ -448,13 +450,21 @@ impl GridTarget {
         unsafe { self.rt.SetDpi(dpi as f32, dpi as f32) }
     }
 
+    /// Shows the frame drawn last again. `Err` means the target must be
+    /// recreated.
+    pub fn present(&self) -> Result<()> {
+        unsafe {
+            self.rt.BeginDraw();
+            self.rt.EndDraw(None, None)
+        }
+    }
+
     /// Draws a frame, below `header` when there is one, and the search bar
-    /// over it when open. With `drop`, the pane is where a dragged one
-    /// would land. `veil` from 0 to 1 lays the background over the glass:
-    /// a pane without the keyboard steps back, a pane just shown fades in.
-    /// `plate` is where the pane's top is in the stage and how tall the
-    /// stage is, in DIPs, so the faceplate's light runs across all panes as
-    /// one. `Err` means the target must be recreated.
+    /// over it when open. `veil` from 0 to 1 lays the background over the
+    /// glass: a pane without the keyboard steps back, a pane just shown
+    /// fades in. `plate` is where the pane's top is in the stage and how
+    /// tall the stage is, in DIPs, so the faceplate's light runs across all
+    /// panes as one. `Err` means the target must be recreated.
     #[allow(clippy::too_many_arguments)]
     pub fn draw(
         &self,
@@ -464,7 +474,6 @@ impl GridTarget {
         frame: &Frame,
         header: Option<&Header>,
         find: Option<&FindBar>,
-        drop: bool,
         veil: f32,
         plate: (f32, f32),
     ) -> Result<()> {
@@ -488,9 +497,17 @@ impl GridTarget {
             self.rt.BeginDraw();
             self.bezel(&screen, frame.background, plate, size);
             self.rt.SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
-            // Nothing a program draws spills out of the glass.
+            // Nothing a program draws spills out of the glass, nor into the
+            // margin the grid keeps inside it. A grid fitted to its pane
+            // never reaches that far: one held at its size while the pane
+            // passes through a smaller cell is cut off with its margin.
+            let inner = D2D_RECT_F {
+                right: screen.right - PAD,
+                bottom: screen.bottom - PAD,
+                ..screen
+            };
             self.rt
-                .PushAxisAlignedClip(&screen, D2D1_ANTIALIAS_MODE_ALIASED);
+                .PushAxisAlignedClip(&inner, D2D1_ANTIALIAS_MODE_ALIASED);
 
             for f in &frame.fills {
                 self.brush.SetColor(&color(f.color));
@@ -623,21 +640,6 @@ impl GridTarget {
                 self.rt
                     .FillRoundedRectangle(&rounded(&screen, SCREEN_RADIUS), &self.brush);
             }
-            if drop {
-                let inset = D2D_RECT_F {
-                    left: 1.0,
-                    top: 1.0,
-                    right: size.width - 1.0,
-                    bottom: size.height - 1.0,
-                };
-                let edge = rounded(&inset, PANE_RADIUS - 1.0);
-                self.brush
-                    .SetColor(&render::color(theme::WORKING.with_alpha(0.12)));
-                self.rt.FillRoundedRectangle(&edge, &self.brush);
-                self.brush.SetColor(&render::color(theme::WORKING));
-                self.rt.DrawRoundedRectangle(&edge, &self.brush, 2.0, None);
-            }
-
             self.rt.EndDraw(None, None)
         }
     }

@@ -76,6 +76,8 @@ const PANE_GAP_DIP: f32 = 8.0;
 const SEAM_DIP: f32 = 4.0;
 /// Runs while a pane glides to its new place in the grid.
 const GLIDE_TIMER: usize = 1;
+/// Carries a dragged pane on the display's frames.
+const DRAG_TIMER: usize = 2;
 /// How far a header has to move before a press becomes a drag.
 const DRAG_THRESHOLD: i32 = 4;
 
@@ -92,7 +94,18 @@ struct Drag {
     /// The pane whose header was pressed.
     serial: usize,
     start: POINT,
+    /// Where in the pane it was taken, so it stays under the cursor there.
+    grab: (i32, i32),
     moved: bool,
+    /// The grid cell the pane is over, whose pane has moved to where the
+    /// dragged one came from.
+    over: Option<usize>,
+    /// The pane's size, which it keeps until it is let go.
+    size: (i32, i32),
+    /// The cursor, in client pixels, the last time the pane was carried.
+    at: Option<(i32, i32)>,
+    /// Whether the cube was last told to lift its lid.
+    lid: bool,
 }
 
 pub struct TerminalWindow {
@@ -105,9 +118,6 @@ pub struct TerminalWindow {
     /// a raw pointer to it, so it must not move.
     #[allow(clippy::vec_box)]
     panes: RefCell<Vec<Box<Pane>>>,
-    /// Where each pane is, in client pixels, in the same order. Zoomed,
-    /// only the one shown has a place.
-    rects: RefCell<Vec<[i32; 4]>>,
     /// Where each pane is in the grid, zoomed or not: what the keyboard
     /// moves across.
     grid: RefCell<Vec<[i32; 4]>>,
@@ -169,7 +179,6 @@ impl TerminalWindow {
             project: RefCell::new(String::new()),
             project_name: RefCell::new(String::new()),
             panes: RefCell::new(Vec::new()),
-            rects: RefCell::new(Vec::new()),
             grid: RefCell::new(Vec::new()),
             zoomed: Cell::new(false),
             active: RefCell::new(None),
@@ -264,6 +273,13 @@ impl TerminalWindow {
         }
         let changed = new.iter().map(|p| p.serial()).ne(before);
         *self.panes.borrow_mut() = new;
+        // The cells a drag was aiming at are not these any more.
+        if changed && self.drag.take().is_some() {
+            self.put_down();
+            unsafe {
+                let _ = ReleaseCapture();
+            }
+        }
         for p in old {
             self.glides.borrow_mut().forget(p.hwnd.0 as isize);
             p.destroy();
@@ -332,6 +348,8 @@ impl TerminalWindow {
     /// Lays the panes out, gliding each on screen to its new place when
     /// `glide`. A pane takes its new size at once, since a terminal that
     /// changes size every frame redraws its agent's screen every frame.
+    /// While a pane is dragged it is left to the mouse, and the pane whose
+    /// cell it is over takes the cell it came from.
     fn layout_with(&self, glide: bool) {
         let glide = glide && crate::backdrop::animations_on();
         let mut r = RECT::default();
@@ -350,8 +368,14 @@ impl TerminalWindow {
         let many = panes.len() > 1;
         let zoomed = many && self.zoomed.get();
         let active = self.active.borrow().clone();
-        let mut rects = Vec::with_capacity(panes.len());
-        for (p, cell) in panes.iter().zip(&grid) {
+        let drag = self.drag.get().filter(|d| d.moved && !zoomed);
+        let dragged = drag.and_then(|d| panes.iter().position(|p| p.serial() == d.serial));
+        let swap = dragged.zip(drag.and_then(|d| d.over));
+        for (i, p) in panes.iter().enumerate() {
+            if Some(i) == dragged {
+                continue;
+            }
+            let cell = &grid[layout::swapped_cell(i, swap)];
             let shown = !zoomed || Some(p.session()) == active.as_deref();
             p.set_header(many);
             p.set_zoom(many.then_some(zoomed));
@@ -371,14 +395,9 @@ impl TerminalWindow {
                 if let Some((x, y)) = jump {
                     p.move_to(x, y);
                 }
-                rects.push(rect);
-            } else {
-                // Out of reach of a drop, which finds panes by place.
-                rects.push([0; 4]);
             }
             p.set_visible(shown);
         }
-        *self.rects.borrow_mut() = rects;
         *self.grid.borrow_mut() = grid;
         if self.glides.borrow().moving() && self.glided.get().is_none() {
             self.glided.set(Some(Instant::now()));
@@ -846,14 +865,14 @@ impl TerminalWindow {
         }
     }
 
-    /// The pane under the cursor, as an index into the grid.
-    fn slot_under_cursor(&self) -> Option<usize> {
+    /// The cursor in client pixels.
+    fn cursor(&self) -> POINT {
         let mut p = POINT::default();
         unsafe {
             let _ = GetCursorPos(&mut p);
             let _ = ScreenToClient(self.hwnd, &mut p);
         }
-        layout::slot_at(&self.rects.borrow(), p.x, p.y)
+        p
     }
 
     /// A header was pressed. The stage takes the mouse until it is let go.
@@ -862,18 +881,32 @@ impl TerminalWindow {
         unsafe {
             let _ = GetCursorPos(&mut start);
         }
+        let at = self
+            .panes
+            .borrow()
+            .iter()
+            .find(|p| p.serial() == serial)
+            .map_or((0, 0), |p| self.child_at(p.hwnd));
+        let c = self.cursor();
         self.drag.set(Some(Drag {
             serial,
             start,
+            grab: (c.x - at.0, c.y - at.1),
             moved: false,
+            over: None,
+            size: (0, 0),
+            at: None,
+            lid: false,
         }));
         unsafe {
             SetCapture(self.hwnd);
         }
     }
 
-    /// Lifts the dragged pane once the cursor has moved far enough, and
-    /// marks the pane it would swap with.
+    /// Lifts the dragged pane once the cursor has moved far enough. From
+    /// then on the pane is carried on the display's frames, not on every
+    /// mouse move: a fast mouse reports a thousand moves a second, and
+    /// each move of the pane repaints what it uncovers.
     fn drag_to(&self) {
         let Some(mut d) = self.drag.get() else {
             return;
@@ -888,21 +921,101 @@ impl TerminalWindow {
                 return;
             }
             d.moved = true;
+            d.size = self.lift(d.serial);
             self.drag.set(Some(d));
         }
         unsafe {
             SetCursor(LoadCursorW(None, IDC_SIZEALL).ok());
         }
-        let over = cube::under_cursor(&self.shared);
-        cube::lid(&self.shared, over);
-        let slot = self.slot_under_cursor().filter(|_| !over);
-        for (i, p) in self.panes.borrow().iter().enumerate() {
-            p.set_lifted(p.serial() == d.serial);
-            p.set_drop_target(Some(i) == slot && p.serial() != d.serial);
+        crate::vsync::start(self.hwnd, DRAG_TIMER);
+    }
+
+    /// Carries the dragged pane to the cursor as it is at this frame. The
+    /// pane whose cell it comes over glides into the cell it left, so the
+    /// grid shows the swap before it is let go. A frame with the cursor
+    /// where it was stops the frames until the mouse moves again.
+    fn carry(&self) {
+        let Some(mut d) = self.drag.get().filter(|d| d.moved) else {
+            crate::vsync::stop(self.hwnd, DRAG_TIMER);
+            return;
+        };
+        let c = self.cursor();
+        if d.at == Some((c.x, c.y)) {
+            crate::vsync::stop(self.hwnd, DRAG_TIMER);
+            return;
+        }
+        d.at = Some((c.x, c.y));
+        let cube = cube::under_cursor(&self.shared);
+        if d.lid != cube {
+            d.lid = cube;
+            cube::lid(&self.shared, cube);
+        }
+        self.drag.set(Some(d));
+        // Zoomed, the pane fills the stage and has nowhere to go but the
+        // cube.
+        if self.zoomed.get() {
+            return;
+        }
+        let mut client = RECT::default();
+        unsafe {
+            let _ = GetClientRect(self.hwnd, &mut client);
+        }
+        if let Some(p) = self.panes.borrow().iter().find(|p| p.serial() == d.serial) {
+            // Kept on the stage: a pane partly off it would repaint the
+            // strip it brings back into view on every frame.
+            let gap = (PANE_GAP_DIP * self.dpi() as f32 / 96.0).round() as i32;
+            let area = [
+                gap,
+                self.caption_h(),
+                client.right - gap,
+                client.bottom - gap,
+            ];
+            let (x, y) = layout::clamp_into((c.x - d.grab.0, c.y - d.grab.1), d.size, area);
+            p.move_to(x, y);
+        }
+        let inside = c.x >= 0 && c.y >= 0 && c.x < client.right && c.y < client.bottom;
+        // In a gap between cells the swap shown stays, so crossing one does
+        // not send a pane home and back. Out of the stage, or over the
+        // cube, everything goes home.
+        let hit = layout::slot_at(&self.grid.borrow(), c.x, c.y);
+        let over = if inside && !cube {
+            hit.or(d.over)
+        } else {
+            None
+        };
+        if over != d.over {
+            d.over = over;
+            self.drag.set(Some(d));
+            self.layout_with(true);
         }
     }
 
-    /// Swaps the dragged pane with the one it was let go on.
+    /// Floats the dragged pane above the stage and holds every grid at its
+    /// size until the drag ends. Returns the lifted pane's size.
+    fn lift(&self, serial: usize) -> (i32, i32) {
+        let mut size = (0, 0);
+        for p in self.panes.borrow().iter() {
+            p.hold(true);
+            if p.serial() != serial {
+                continue;
+            }
+            p.set_lifted(true);
+            let mut r = RECT::default();
+            unsafe {
+                let _ = GetClientRect(p.hwnd, &mut r);
+            }
+            size = (r.right, r.bottom);
+            self.glides.borrow_mut().halt(p.hwnd.0 as isize);
+            // Zoomed, it stays where it is and only the cube takes it.
+            if !self.zoomed.get() {
+                p.float(self.hwnd, true);
+            }
+        }
+        size
+    }
+
+    /// Let go: over the cube the session goes in it, over another pane's
+    /// cell the two swap. Either way the dragged pane glides into its cell.
     fn drop_drag(&self) {
         let Some(d) = self.drag.take() else {
             return;
@@ -912,26 +1025,60 @@ impl TerminalWindow {
             if let Some(p) = panes.iter().find(|p| p.serial() == d.serial) {
                 app::push(Input::ToCube(p.session().into()));
             }
-        } else if d.moved {
-            let slot = self.slot_under_cursor();
-            let panes = self.panes.borrow();
-            let from = panes.iter().find(|p| p.serial() == d.serial);
-            let onto = slot.and_then(|i| panes.get(i));
-            if let (Some(a), Some(b)) = (from, onto) {
-                if a.serial() != b.serial() {
-                    app::push(Input::Swap(a.session().into(), b.session().into()));
-                }
+        } else if let Some(over) = d.over {
+            let mut panes = self.panes.borrow_mut();
+            let from = panes.iter().position(|p| p.serial() == d.serial);
+            if let Some(from) = from.filter(|&f| f != over && over < panes.len()) {
+                // Swapped here too, so the grid is in its new order at once
+                // and the app's show of that order changes nothing.
+                panes.swap(from, over);
+                app::push(Input::Swap(
+                    panes[over].session().into(),
+                    panes[from].session().into(),
+                ));
             }
         }
-        self.end_drag();
+        self.put_down();
+        if d.moved {
+            self.recentre(d.serial);
+            self.layout_with(true);
+        }
     }
 
-    fn end_drag(&self) {
-        self.drag.set(None);
+    /// Moves a pane about to take the size of another cell so its centre
+    /// stays where it is. It then grows or shrinks about the point it was
+    /// let go at, instead of from its corner, on its way to the cell.
+    fn recentre(&self, serial: usize) {
+        if self.zoomed.get() {
+            return;
+        }
+        let panes = self.panes.borrow();
+        let Some(i) = panes.iter().position(|p| p.serial() == serial) else {
+            return;
+        };
+        let Some(&[l, t, r, b]) = self.grid.borrow().get(i) else {
+            return;
+        };
+        let p = &panes[i];
+        let (x, y) = self.child_at(p.hwnd);
+        let mut now = RECT::default();
+        unsafe {
+            let _ = GetClientRect(p.hwnd, &mut now);
+        }
+        let (w, h) = (r - l, b - t);
+        if (w, h) != (now.right, now.bottom) {
+            p.move_to(x + (now.right - w) / 2, y + (now.bottom - h) / 2);
+        }
+    }
+
+    /// Undoes what a drag changed, other than where the panes are.
+    fn put_down(&self) {
+        crate::vsync::stop(self.hwnd, DRAG_TIMER);
         cube::lid(&self.shared, false);
         for p in self.panes.borrow().iter() {
+            p.float(self.hwnd, false);
             p.set_lifted(false);
-            p.set_drop_target(false);
+            p.hold(false);
         }
     }
 
@@ -1028,6 +1175,11 @@ impl TerminalWindow {
 
     fn handle(&self, msg: u32, wparam: WPARAM, lparam: LPARAM) -> Option<LRESULT> {
         match msg {
+            WM_TIMER if wparam.0 == DRAG_TIMER => {
+                crate::vsync::took(self.hwnd, DRAG_TIMER);
+                self.carry();
+                Some(LRESULT(0))
+            }
             WM_TIMER if wparam.0 == GLIDE_TIMER => {
                 crate::vsync::took(self.hwnd, GLIDE_TIMER);
                 self.glide();
@@ -1224,8 +1376,14 @@ impl TerminalWindow {
                 }
                 Some(LRESULT(0))
             }
+            // Taken away mid drag: everything goes back where it was.
             WM_CAPTURECHANGED => {
-                self.end_drag();
+                if let Some(d) = self.drag.take() {
+                    self.put_down();
+                    if d.moved {
+                        self.layout_with(true);
+                    }
+                }
                 Some(LRESULT(0))
             }
             _ => None,

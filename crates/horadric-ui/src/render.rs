@@ -39,9 +39,9 @@ use windows::Win32::Graphics::Direct2D::{
     D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_FEATURE_LEVEL_DEFAULT, D2D1_GAMMA_2_2,
     D2D1_HWND_RENDER_TARGET_PROPERTIES, D2D1_LAYER_OPTIONS_NONE, D2D1_LAYER_PARAMETERS,
     D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES, D2D1_LINE_JOIN_ROUND, D2D1_PRESENT_OPTIONS_IMMEDIATELY,
-    D2D1_RADIAL_GRADIENT_BRUSH_PROPERTIES, D2D1_RENDER_TARGET_PROPERTIES,
-    D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_USAGE_NONE, D2D1_ROUNDED_RECT,
-    D2D1_STROKE_STYLE_PROPERTIES,
+    D2D1_PRESENT_OPTIONS_RETAIN_CONTENTS, D2D1_RADIAL_GRADIENT_BRUSH_PROPERTIES,
+    D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_USAGE_NONE,
+    D2D1_ROUNDED_RECT, D2D1_STROKE_STYLE_PROPERTIES,
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWriteCreateFactory, IDWriteFactory, IDWriteFontCollection, IDWriteRenderingParams,
@@ -606,6 +606,7 @@ pub fn hwnd_target(
     width_px: u32,
     height_px: u32,
     dpi: u32,
+    retain: bool,
 ) -> Result<ID2D1HwndRenderTarget> {
     unsafe {
         let props = D2D1_RENDER_TARGET_PROPERTIES {
@@ -629,7 +630,11 @@ pub fn hwnd_target(
             // vertical blank in each EndDraw would cost a whole frame per
             // window that moves. The vsync clock paces paints instead, and
             // DWM composes them, so nothing tears.
-            presentOptions: D2D1_PRESENT_OPTIONS_IMMEDIATELY,
+            presentOptions: if retain {
+                D2D1_PRESENT_OPTIONS_IMMEDIATELY | D2D1_PRESENT_OPTIONS_RETAIN_CONTENTS
+            } else {
+                D2D1_PRESENT_OPTIONS_IMMEDIATELY
+            },
         };
         let rt = gpu.d2d.CreateHwndRenderTarget(&props, &hwnd_props)?;
         rt.SetDpi(dpi as f32, dpi as f32);
@@ -649,7 +654,7 @@ pub fn resize_target(rt: &ID2D1HwndRenderTarget, width_px: u32, height_px: u32) 
 
 impl Target {
     pub fn new(gpu: &Gpu, hwnd: HWND, width_px: u32, height_px: u32, dpi: u32) -> Result<Self> {
-        let rt = hwnd_target(gpu, hwnd, width_px, height_px, dpi)?;
+        let rt = hwnd_target(gpu, hwnd, width_px, height_px, dpi, false)?;
         let brush = unsafe { rt.CreateSolidColorBrush(&color(theme::TEXT), None)? };
         Ok(Target {
             rt,

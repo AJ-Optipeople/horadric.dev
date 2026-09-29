@@ -548,11 +548,27 @@ piece of work, with less freedom and more structure.
   the line already says it. The one with the keyboard is underlined in
   the project's colour and the others step back. One pane alone has no
   header; the title bar says it all.
-- **Drag to swap.** Pressing a header gives the stage the mouse
+- **Drag to swap, live.** Pressing a header gives the stage the mouse
   (`WM_PANE_GRAB`, then `SetCapture` on the stage). Past 4 pixels the pane
-  lifts, blue, and the pane under the cursor is outlined; letting go swaps
-  the two. The swap goes through the app (`Input::Swap`), which owns the
-  order.
+  lifts and follows the cursor, and the pane whose cell it comes over
+  glides into the cell it left, so the grid shows the swap before the
+  mouse is let go. Letting go glides the dragged pane into its cell, its
+  centre kept, and the swap goes through the app (`Input::Swap`), which
+  owns the order. The stage swaps its own panes at once, so the app's
+  `show` of the new order changes nothing.
+- **What keeps a drag cheap.** Every grid is held at its size
+  (`Pane::hold`) until the drag ends, so a pane passing through a cell of
+  another size never reaches its agent as a resize and a redraw. The
+  lifted pane floats as a window of its own, owned by the stage
+  (`Pane::float`): a child moved across the stage damages the stage and
+  every pane it passes over, a popup is only moved by the compositor.
+  The pane is carried on the vsync clock, not on each mouse move, so a
+  1000 Hz mouse still moves it once a frame, and it is kept on the stage.
+  A pane's render target keeps its last frame, and a paint Windows asks
+  for when nothing shown has changed (a neighbour uncovered a strip) only
+  presents it again, about half the cost of drawing. Measured on a 2x2
+  grid in a release build, a drag costs about 2 ms of CPU a frame; with
+  the pane left a child window it cost twice that.
 - **The order is kept** per project in `grids` in `state.json`. A paused
   session keeps its place, so a restart puts each back where it was as it
   resumes (`layout::grid_order`). A reload brought a swapped grid back
@@ -1289,7 +1305,7 @@ square child window, but a groove cut round it with corners of the glass's
 radius plus the bezel shows its edge, and outside the groove its plate runs
 on into the stage's, so the corners read as round. No window region: a
 region's edge is aliased, and the plate at the corners is the same either
-way. The drop target and a lifted header are rounded with it. Checked on
+way. A lifted header is rounded with it. Checked on
 screen with `cmd.exe` panes on a dark glass and on a light one (a program
 setting the background by OSC 11): the corners run parallel to the
 glass's, and nothing clips the text. The drop and lift highlights were not
