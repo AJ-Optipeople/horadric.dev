@@ -64,12 +64,14 @@ work. Worktrees are next.
   and plus, minus or the wheel sizes the font, Ctrl+0 puts it back.
 - Ctrl+Shift+F searches a pane's history, which keeps 10,000 lines. Enter
   finds the next match up, Shift+Enter the next one down, Esc closes it.
-- A browser per project: Ctrl+Shift+B in any pane, or "Browser" in the
-  project menu, opens Edge on a profile of the project's own, beside the
-  stage. It hides when the stage shows another project and comes back
-  with its own. Pressed again, it brings that window to the front.
-- Ctrl+click opens what a pane shows: a web address in the browser (the
-  project's own when it has one open), a
+- A browser pane: Ctrl+Shift+B in any pane, or "Browser" in the project
+  menu, puts a web page on the stage beside the sessions and asks where
+  to go (`localhost:3000`, an address, or words to search). Ctrl+L asks
+  again, a right click on its header has back, forward and reload. Every
+  project and every session share one browser profile, so a login stays.
+  The page keeps its place when the stage shows another project.
+- Ctrl+click opens what a pane shows: a web address in the browser pane
+  when the project has one, otherwise in your browser, a
   file in VS Code at its line (`src/main.rs:12`, relative to the session's
   folder), a folder in Explorer, a program by running it. Hold Ctrl and
   the link under the mouse is underlined.
@@ -173,7 +175,8 @@ Horadric's; everything else in your Claude Code settings stays as it was.
 4. Worktree per session, changed files, open in VS Code.
 5. Inbox, installer, updater.
 
-Pure Rust, Win32 and Direct2D directly. No web view, no toolkit.
+Pure Rust, Win32 and Direct2D directly. No toolkit, and no web view
+except the browser pane, which shows web pages.
 [docs/PLAN.md](docs/PLAN.md) has the detail, the open questions and the
 known gaps.
 

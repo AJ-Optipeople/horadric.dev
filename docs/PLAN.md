@@ -736,9 +736,10 @@ its mark with it.
 An agent testing a web page starts a browser of its own, through Playwright
 or the Chrome DevTools MCP. Its window used to land anywhere, with nothing
 saying which session opened it. Embedding a browser in Horadric was
-considered and dropped: the agent drives its browser over a debug protocol
-and never needs a window Horadric owns, and it would be the web view the
-settled decisions rule out. So Horadric manages the browser's window instead.
+considered and dropped at first: the agent drives its browser over a debug
+protocol and never needs a window Horadric owns. So Horadric manages the
+browser's window instead. The browser pane below came later, for the
+user's own browsing and for pages user and agent look at together.
 
 - **Which session.** Every agent starts inside a job object of its own
   (`horadric-pty`, `PROC_THREAD_ATTRIBUTE_JOB_LIST`, so it is in the job from
@@ -782,39 +783,62 @@ Edge to the front, and closing an Edge took the mark off its tile. The user's
 own Chrome was never touched. The hook costs no CPU to speak of: 16 ms in 5
 idle seconds.
 
-**A project's own browser.** Asked for because a browser the user opened
-by hand never snapped or followed the sessions. Still no web view: it is
-Edge, in a window Horadric manages the way it manages an agent's.
+### Browser pane
 
-- **Opening it.** Ctrl+Shift+B in any pane (`CharAction::Browse`, plain
-  Ctrl+B stays the program's) or "Browser" in the project menu. When the
-  project has a window of it open, that window comes to the front
-  instead.
-- **Which project.** Edge runs in a job Horadric makes for the project
-  (`browsers::open`), named after the instance and the profile so a
-  reloaded Horadric opens the same job instead of an empty one. The job
-  is joined right after the start rather than from the first
-  instruction: Edge's window comes long after. It leaves a session's job
-  when Horadric runs in one (a dev build started from a session), so that
-  session's Horadric does not take it.
-- **Its own profile**, in `%LOCALAPPDATA%\Horadric\browsers\<folder>-<hash>`.
-  Without one, Edge hands the start over to the Edge already running,
-  outside the job, and ends. With one, a second start for the project
-  hands over to the project's Edge, which is in the job, so the tab lands
-  there. The price is that logins are the profile's, not the user's own
-  Edge's. Edge signs in the Windows account by itself.
-- **Links.** A web address Ctrl+clicked in a pane opens as a tab in the
-  project's browser when it has one open, otherwise in the user's own.
-- It is placed and follows its project like an agent's, and has no tile
-  mark: it belongs to no one session.
+Asked for because a browser beside the stage never fitted with the
+sessions and tiles, and because the agent should see the page the user
+means and drive it, instead of being pasted a screenshot. A first go
+managed an Edge window with a profile per project, which meant logging in
+again for every project; it was dropped the same day. This reverses the
+settled "no web view" for web pages only: Horadric's own UI stays Direct2D.
 
-Tested on screen with a dev instance on its own port and `cmd.exe` sessions
-in two projects: Ctrl+Shift+B opened Edge beside the stage, again brought
-it forward without a second window, switching to the other project
-minimised it and a tile click brought it back, the other project got an
-Edge of its own on its own profile, and an `https://example.com` Ctrl+clicked
-there opened as a tab in it. Ctrl+Shift+B in a pane whose session had
-exited did nothing; not looked into.
+- **A pane on the stage** (`web.rs`, `Console::web`, `App::webs`), one per
+  project, after its sessions and the file view in the grid. Ctrl+Shift+B
+  in a pane (`CharAction::Browse`, plain Ctrl+B stays the program's) or
+  "Browser" in the project menu opens it and, when new, asks for an
+  address (`web::address`, pure: a scheme kept, a local server over http,
+  a host over https, anything else a search). The header shows the page's
+  title and address and ends in a cross. Ctrl+L asks again; a right click
+  on the header has Go to, Back, Forward, Reload, Open in your browser and
+  Close. Ctrl+Shift+T in the page still opens a terminal: the page has the
+  keyboard, so those two are caught by `AcceleratorKeyPressed` first.
+- **WebView2**, through `webview2-com`. It is Edge's engine, part of
+  Windows 11. The loader is linked statically, so there is no DLL to ship.
+  A controller is up about 250 ms after it is asked for, so it is made
+  asynchronously: the pane shows at once and the page arrives in it.
+  Nothing waits on WebView2 in a handler, and no borrow is held across a
+  call into it, since a call can raise an event that comes back.
+- **The page outlives its pane.** The stage destroys its panes whenever it
+  shows another project, and a destroyed WebView loses its page. So the
+  controller is `web`'s: a pane lends it a window while it shows it
+  (`attach`, the pane has `WS_CLIPCHILDREN` so its own drawing leaves the
+  page alone), and on the pane's `WM_DESTROY` it goes, hidden, onto the
+  app's window (`detach`). Closing the stage keeps it too. Only its cross
+  or Close ends it. Not yet kept over a reload of Horadric itself.
+- **One profile for everything**, `%LOCALAPPDATA%\Horadric\web`, for every
+  project, session and Horadric, dev instances included, so a login made
+  once stays. WebView2 lets two processes share a profile when they start
+  it with the same arguments, which is why the DevTools port below is
+  chosen once and kept in the profile folder rather than per instance.
+- **Agents can reach it.** The browser listens for the DevTools protocol
+  on 127.0.0.1, on the port in `web\devtools-port`. Checked: a
+  `Page.navigate` and a `Runtime.evaluate` sent to that port from outside
+  moved and read the page in the pane. Next is handing the port to
+  sessions (the Chrome DevTools MCP takes `--browserUrl`, Playwright
+  `connectOverCDP`), then letting the user point at part of the page and
+  send it to a session with a screenshot, the address and the element.
+  While the port is open, any program on the machine can drive that
+  logged in browser. Loopback only is the whole of the protection so far.
+- Popups a page opens (an OAuth login, say) are WebView2's default: a
+  window of their own. Not yet caught.
+
+Tested on screen with a dev instance on its own port and `cmd.exe`
+sessions in two projects: Ctrl+Shift+B put the pane in the grid and asked
+for an address, `example.com` loaded with its title in the header, a
+DevTools `Page.navigate` from a script moved it, and a value set in the
+page over DevTools was still there after the stage switched to the other
+project and back, so the page was parked and not reloaded. Two processes
+started the WebView on one profile at once and shared it.
 
 ### Plain terminals
 

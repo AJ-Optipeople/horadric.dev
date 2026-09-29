@@ -54,12 +54,13 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SendMessageW, SetCursor, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, CREATESTRUCTW,
     CS_DBLCLKS, GWLP_USERDATA, HTCLIENT, IDC_ARROW, IDC_HAND, IDC_IBEAM, MSG, PM_NOREMOVE,
     PM_REMOVE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOWNA,
-    WINDOW_EX_STYLE, WM_CAPTURECHANGED, WM_CHAR, WM_DEADCHAR, WM_DPICHANGED_AFTERPARENT,
-    WM_DROPFILES, WM_ERASEBKGND, WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS,
-    WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL,
-    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP,
-    WM_SETCURSOR, WM_SETFOCUS, WM_SIZE, WM_SYSCHAR, WM_SYSDEADCHAR, WM_SYSKEYDOWN, WM_SYSKEYUP,
-    WM_TIMER, WM_USER, WNDCLASSW, WS_CHILD, WS_CLIPSIBLINGS, WS_VISIBLE,
+    WINDOW_EX_STYLE, WINDOW_STYLE, WM_CAPTURECHANGED, WM_CHAR, WM_DEADCHAR, WM_DESTROY,
+    WM_DPICHANGED_AFTERPARENT, WM_DROPFILES, WM_ERASEBKGND, WM_IME_STARTCOMPOSITION, WM_KEYDOWN,
+    WM_KEYUP, WM_KILLFOCUS, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
+    WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY, WM_PAINT,
+    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SETFOCUS, WM_SIZE, WM_SYSCHAR, WM_SYSDEADCHAR,
+    WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WM_USER, WNDCLASSW, WS_CHILD, WS_CLIPCHILDREN,
+    WS_CLIPSIBLINGS, WS_VISIBLE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowRect, SetParent, GWLP_HWNDPARENT, GWL_EXSTYLE, GWL_STYLE, HWND_TOP, SWP_FRAMECHANGED,
@@ -82,6 +83,7 @@ use crate::motion::{self, REVEAL, SPOTLIGHT};
 use crate::paste::{self, Source};
 use crate::theme::{self, Color};
 use crate::viewer::Hit;
+use crate::web;
 use crate::window::Shared;
 use crate::{find, frame, watch};
 
@@ -280,13 +282,20 @@ impl Pane {
             caret_at: Cell::new(None),
             caret_since: Cell::new(Instant::now()),
         });
+        // A browser pane's page is a window inside it, which its own
+        // drawing must leave alone.
+        let clip = if pane.console.web.is_some() {
+            WS_CLIPCHILDREN
+        } else {
+            WINDOW_STYLE(0)
+        };
         unsafe {
             let instance = GetModuleHandleW(None)?;
             let hwnd = CreateWindowExW(
                 WINDOW_EX_STYLE(0),
                 CLASS,
                 PCWSTR::null(),
-                WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
+                WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | clip,
                 0,
                 0,
                 0,
@@ -299,6 +308,10 @@ impl Pane {
             pane.hwnd = hwnd;
             // A dropped path would have nowhere to go in a file.
             DragAcceptFiles(hwnd, !pane.console.is_view());
+        }
+        if let Some(key) = &pane.console.web {
+            pane.header.set(true);
+            web::attach(key, pane.hwnd, pane.page_rect());
         }
         Ok(pane)
     }
@@ -421,6 +434,8 @@ impl Pane {
 
     /// Shows or hides the header. The grid gives up or takes back its rows.
     pub fn set_header(&self, on: bool) {
+        // A page has no other place for its title and address.
+        let on = on || self.console.web.is_some();
         if self.header.replace(on) != on {
             self.fit_grid();
             self.invalidate();
@@ -521,6 +536,31 @@ impl Pane {
         unsafe {
             let _ = SetFocus(Some(self.hwnd));
         }
+        if let Some(key) = &self.console.web {
+            web::focus(key);
+        }
+    }
+
+    /// Where a browser pane's page goes: the glass, in the pane's pixels.
+    fn page_rect(&self) -> RECT {
+        let mut r = RECT::default();
+        unsafe {
+            let _ = GetClientRect(self.hwnd, &mut r);
+        }
+        let scale = self.dpi_now() as f32 / 96.0;
+        let px = |dip: f32| (dip * scale).round() as i32;
+        RECT {
+            left: px(glyphs::BEZEL),
+            top: px(glyphs::screen_top(self.header.get())),
+            right: (r.right - px(glyphs::BEZEL)).max(0),
+            bottom: (r.bottom - px(glyphs::BEZEL)).max(0),
+        }
+    }
+
+    /// Ends in a cross: a file view and a browser pane, which close without
+    /// ending a session.
+    fn closes(&self) -> bool {
+        self.console.is_view() || self.console.web.is_some()
     }
 
     pub fn invalidate(&self) {
@@ -538,8 +578,13 @@ impl Pane {
         self.shared.font.cell(self.dpi_now())
     }
 
-    /// Resizes the grid to fill the pane below its header.
+    /// Resizes the grid to fill the pane below its header, or a browser
+    /// pane's page to fill its glass.
     fn fit_grid(&self) {
+        if let Some(key) = &self.console.web {
+            web::set_bounds(key, self.page_rect());
+            return;
+        }
         let mut r = RECT::default();
         unsafe {
             let _ = GetClientRect(self.hwnd, &mut r);
@@ -614,12 +659,18 @@ impl Pane {
                 t.set_dpi(dpi);
             }
         }
-        let name = self.name.borrow().clone();
-        let detail = match (self.console.exit_code(), self.console.title()) {
+        let mut name = self.name.borrow().clone();
+        let mut detail = match (self.console.exit_code(), self.console.title()) {
             (Some(code), _) => format!("exited {code}"),
             (None, Some(t)) => t.trim().to_string(),
             (None, None) => String::new(),
         };
+        if let Some((title, url)) = self.console.web.as_deref().and_then(web::label) {
+            if !title.is_empty() && title != url {
+                name = title;
+            }
+            detail = url;
+        }
         let phase = self
             .shared
             .registry
@@ -635,7 +686,7 @@ impl Pane {
             accent: self.accent.get(),
             active: self.focused.get(),
             lifted: self.lifted.get(),
-            close: self.console.is_view(),
+            close: self.closes(),
             zoom: self.zoom.get(),
         });
         let search = self.search.borrow();
@@ -1148,7 +1199,10 @@ impl Pane {
     }
 
     fn close(&self) {
-        app::push(Input::CloseView(self.serial()));
+        match &self.console.web {
+            Some(key) => app::push(Input::CloseWeb(key.clone())),
+            None => app::push(Input::CloseView(self.serial())),
+        }
     }
 
     /// A chord was handled on its key press. The character Windows made of
@@ -1382,7 +1436,7 @@ impl Pane {
             let _ = GetClientRect(self.hwnd, &mut r);
         }
         let width = r.right as f32 * 96.0 / self.dpi_now() as f32;
-        glyphs::header_buttons(width, self.zoom.get().is_some(), self.console.is_view())
+        glyphs::header_buttons(width, self.zoom.get().is_some(), self.closes())
     }
 
     fn on_button(&self, lparam: LPARAM, at: Option<f32>) -> bool {
@@ -1920,6 +1974,12 @@ impl Pane {
                 }
                 None
             }
+            WM_RBUTTONUP if self.console.web.is_some() => {
+                if let Some(key) = &self.console.web {
+                    app::push(Input::WebAsk(key.clone(), app::WebAsk::Menu));
+                }
+                Some(LRESULT(0))
+            }
             WM_RBUTTONUP => {
                 // The console convention, unless the program took the press:
                 // right click copies a selection, otherwise pastes.
@@ -1940,6 +2000,17 @@ impl Pane {
             WM_DROPFILES => {
                 self.on_drop(HDROP(wparam.0 as *mut c_void));
                 Some(LRESULT(0))
+            }
+            web::WM_WEB_CHANGED => {
+                self.invalidate();
+                Some(LRESULT(0))
+            }
+            // Before the page's own window goes with this one.
+            WM_DESTROY => {
+                if let Some(key) = &self.console.web {
+                    web::detach(key, self.hwnd);
+                }
+                None
             }
             _ => None,
         }

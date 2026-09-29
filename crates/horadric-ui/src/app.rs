@@ -21,7 +21,6 @@
 //! A browser window a session opens is placed beside the stage when it
 //! first appears, and follows its project: switching the stage to another
 //! project minimises the browsers of the rest and brings back that one's.
-//! A project's own browser, asked for with Ctrl+Shift+B, does the same.
 //!
 //! Every console runs in a session host of its own, so the sessions outlive
 //! the app: a start finds the hosts still running and attaches to them,
@@ -121,7 +120,7 @@ use crate::usage::{self, UsageWindow};
 use crate::window::{self, folder_key, project_key, project_name, Cluster, Shared};
 use crate::{
     ask, autostart, browsers, history, inbox, paths, picker, recent, shell, snapping, store, theme,
-    update, watch, worktree,
+    update, watch, web, worktree,
 };
 
 #[path = "runner.rs"]
@@ -177,6 +176,17 @@ const WM_HORADRIC_STASH_MENU: u32 = WM_APP + 19;
 const WM_HORADRIC_USAGE_MENU: u32 = WM_APP + 23;
 /// Show the list of Claude accounts, from the usage window's Account row.
 const WM_HORADRIC_ACCOUNT_MENU: u32 = WM_APP + 24;
+/// Ask what the app's `web_ask` says, for a browser pane.
+const WM_HORADRIC_WEB: u32 = WM_APP + 25;
+
+/// What is asked for a browser pane, outside the app's borrow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WebAsk {
+    /// Where to go.
+    Address,
+    /// The header's menu.
+    Menu,
+}
 
 const APP_CLASS: PCWSTR = w!("HoradricApp");
 /// Runs a console program without giving it a console window.
@@ -207,6 +217,8 @@ const RECOVERED_AFTER: Duration = Duration::from_secs(60);
 const SWEEP_GAP: Duration = Duration::from_secs(10);
 /// Starts the id of a file view, which is no session.
 const VIEW: &str = "view:";
+/// The start of a browser pane's id, before its project key.
+const WEB: &str = "web:";
 pub(crate) const MARGIN_DIP: i32 = 12;
 pub(crate) const GAP_DIP: i32 = 12;
 /// Narrower than this beside the stage, a new browser window stays where
@@ -256,16 +268,22 @@ pub(crate) enum Input {
     Reorder(String, Vec<String>),
     /// A tile's browser button clicked: bring up this session's browsers.
     Browser(String),
-    /// Ctrl+Shift+B in a pane: the browser of the project on the stage,
-    /// opened or brought up.
-    Browse,
-    /// A web address Ctrl+clicked in a pane: to the browser of the project
-    /// on the stage when it has one open, otherwise to the user's own.
-    Link(String),
     /// A file in a files tile clicked: show it on the stage beside the
     /// sessions of the project with this key. The folder, then the file's
     /// path inside it.
     View(String, PathBuf, String),
+    /// Ctrl+Shift+B in a pane: the browser pane of the project on the
+    /// stage, opened or given the keyboard.
+    Browse,
+    /// A web address Ctrl+clicked in a pane: to the browser pane of the
+    /// project on the stage when it has one, otherwise to the user's own
+    /// browser.
+    Link(String),
+    /// A browser pane's cross: close the page of the project with this key.
+    CloseWeb(String),
+    /// A browser pane's header right clicked, or Ctrl+L in its page: what
+    /// can be done with the page of the project with this key.
+    WebAsk(String, WebAsk),
     /// A file view's cross or Esc: close the view with this serial.
     CloseView(usize),
     /// Ctrl and plus, minus, zero or the wheel in a pane: the terminal font
@@ -403,6 +421,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
     let notify = create_app_window()?;
     let notify_id = notify.0 as isize;
     APP_WINDOW.with(|w| w.set(notify_id));
+    web::init(notify);
     let hotkey = register_hotkey(notify);
     let listen_key = register_listen_key(notify);
     // Locking the screen is going away, and unlocking it coming back.
@@ -576,6 +595,8 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             clusters: Vec::new(),
             consoles: HashMap::new(),
             views: HashMap::new(),
+            webs: HashMap::new(),
+            web_ask: None,
             stage: None,
             stage_rect: saved.stage.filter(|r| on_screen(r[0], r[1])),
             stage_key: None,
@@ -625,7 +646,6 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             stop_on_exit: false,
             recovering: (how == Carry::Crash).then(Instant::now),
             browsers: HashMap::new(),
-            project_browsers: HashMap::new(),
             waiting: HashSet::new(),
             alert_for: None,
             tasks: runner::State::default(),
@@ -867,6 +887,15 @@ unsafe extern "system" fn app_proc(
         }
         WM_HORADRIC_USAGE_MENU => {
             usage_menu();
+            return LRESULT(0);
+        }
+        WM_HORADRIC_WEB => {
+            if let Some((key, what)) = with_app(|app| app.web_ask.take()).flatten() {
+                match what {
+                    WebAsk::Address => ask_address(&key),
+                    WebAsk::Menu => web_menu(&key),
+                }
+            }
             return LRESULT(0);
         }
         WM_HORADRIC_ACCOUNT_MENU => {
@@ -1479,12 +1508,73 @@ pub(crate) enum Run {
     Attach(String),
 }
 
+/// Asks where the project's browser pane should go.
+fn ask_address(key: &str) {
+    let current = web::label(key).map(|(_, url)| url).unwrap_or_default();
+    let current = if current == "about:blank" {
+        String::new()
+    } else {
+        current
+    };
+    let question = ask::Ask {
+        title: "Go to",
+        prompt: "An address, a local server such as localhost:3000, or words to search for.",
+        initial: &current,
+        placeholder: "localhost:3000",
+        verb: "go",
+        notes: false,
+        pick: None,
+    };
+    let Some(a) = ask_beside(Some(key), &question) else {
+        return;
+    };
+    if let Some(url) = web::address(&a.text) {
+        with_app(|app| app.open_web(key, Some(&url)));
+    }
+}
+
+/// What can be done with the project's browser pane.
+fn web_menu(key: &str) {
+    const ADDRESS: usize = 1;
+    const BACK: usize = 2;
+    const FORWARD: usize = 3;
+    const RELOAD: usize = 4;
+    const OUTSIDE: usize = 5;
+    const CLOSE: usize = 6;
+    let items = vec![
+        Item::action(ADDRESS, "Go to...\tCtrl+L"),
+        Item::action(BACK, "Back\tAlt+Left"),
+        Item::action(FORWARD, "Forward\tAlt+Right"),
+        Item::action(RELOAD, "Reload\tF5"),
+        Item::Separator,
+        Item::action(OUTSIDE, "Open in your browser"),
+        Item::Separator,
+        Item::action(CLOSE, "Close"),
+    ];
+    match menu::popup(&items) {
+        Some(ADDRESS) => ask_address(key),
+        Some(BACK) => web::go(key, web::Step::Back),
+        Some(FORWARD) => web::go(key, web::Step::Forward),
+        Some(RELOAD) => web::go(key, web::Step::Reload),
+        Some(OUTSIDE) => {
+            if let Some((_, url)) = web::label(key).filter(|(_, u)| u.starts_with("http")) {
+                watch::open_link(&crate::links::Target::Web(url), None);
+            }
+        }
+        Some(CLOSE) => {
+            with_app(|app| app.close_web(key));
+        }
+        _ => {}
+    }
+}
+
 fn project_menu(key: &str) {
     const ADD: usize = 1;
     const START_BATCH: usize = 2;
     const START_OVER: usize = 3;
     const END_ALL: usize = 4;
     const SHELL: usize = 5;
+    const BROWSE: usize = 14;
     const CODE: usize = 7;
     const EXPLORE: usize = 8;
     const OTHER_HOST: usize = 9;
@@ -1493,7 +1583,6 @@ fn project_menu(key: &str) {
     const SSH_FIND: usize = 11;
     const CLOSE: usize = 12;
     const BRANCHES: usize = 13;
-    const BROWSE: usize = 14;
     const SSH: usize = 20;
     const PAST: usize = 100;
     const SUGGEST: usize = 200;
@@ -1647,7 +1736,7 @@ fn project_menu(key: &str) {
         Some(END_ALL) => app.end_all(Some(key)),
         Some(CLOSE) => app.close_project(key),
         Some(SHELL) => app.open_shell(key),
-        Some(BROWSE) => app.browse(key, None),
+        Some(BROWSE) => app.open_web(key, None),
         Some(i) if (SSH..PAST).contains(&i) => app.open_ssh(key, &listed[i - SSH], None),
         Some(i) if (MERGE..MERGE_END).contains(&i) => {
             app.merge(&merges[i - MERGE]);
@@ -2088,6 +2177,11 @@ struct App {
     /// A click on another file replaces it, like VS Code's preview tab, so
     /// browsing a project never piles up panes.
     views: HashMap<String, Arc<Console>>,
+    /// Browser panes, at most one per project, by project key. The page
+    /// itself is `web`'s and outlives its pane.
+    webs: HashMap<String, Arc<Console>>,
+    /// What to ask for which project's browser pane, once out of the borrow.
+    web_ask: Option<(String, WebAsk)>,
     /// The terminal window, showing one project's sessions, while open.
     stage: Option<Box<TerminalWindow>>,
     /// Where the stage was when it last closed.
@@ -2165,10 +2259,8 @@ struct App {
     /// When this start resumed sessions after a crash, until it has run
     /// long enough not to count as the same crash again.
     recovering: Option<Instant>,
-    /// Browser windows sessions or projects opened, by window handle.
+    /// Browser windows sessions opened, by window handle.
     browsers: HashMap<isize, Browser>,
-    /// The jobs of projects' own browsers, by project key.
-    project_browsers: HashMap<String, browsers::Owned>,
     /// The sessions waiting on you as last seen, so only one that starts
     /// waiting is announced.
     waiting: HashSet<String>,
@@ -2254,29 +2346,12 @@ const SETTLES_IN: Duration = Duration::from_secs(15);
 /// How long a login opened by Add account is waited for.
 const ADDING_FOR: Duration = Duration::from_secs(15 * 60);
 
-/// A browser window a session or a project opened.
+/// A browser window a session opened.
 struct Browser {
-    owner: Owner,
+    session: String,
     /// Minimised by a project switch, so switching back restores it. One
     /// the user minimised stays minimised.
     hidden: bool,
-}
-
-#[derive(PartialEq, Eq)]
-enum Owner {
-    /// Started by this session's agent.
-    Session(String),
-    /// The project's own, with this key.
-    Project(String),
-}
-
-impl Browser {
-    fn session(&self) -> Option<&str> {
-        match &self.owner {
-            Owner::Session(s) => Some(s),
-            Owner::Project(_) => None,
-        }
-    }
 }
 
 impl App {
@@ -2376,6 +2451,7 @@ impl App {
         self.consoles
             .get(id)
             .or_else(|| self.views.values().find(|v| v.id == id))
+            .or_else(|| self.webs.values().find(|v| v.id == id))
     }
 
     /// The stage, when it shows this console.
@@ -3753,7 +3829,7 @@ impl App {
         self.paused.remove(id);
         self.journaled.remove(id);
         self.browsers.retain(|&hwnd, b| {
-            let keep = b.session() != Some(id);
+            let keep = b.session != id;
             if !keep {
                 browsers::untrack(hwnd_of(hwnd));
             }
@@ -3945,7 +4021,7 @@ impl App {
         }
         self.paused.remove(id);
         self.browsers.retain(|&hwnd, b| {
-            let keep = b.session() != Some(id);
+            let keep = b.session != id;
             if !keep {
                 browsers::untrack(hwnd_of(hwnd));
             }
@@ -4085,6 +4161,9 @@ impl App {
         if let Some(view) = self.views.get(key) {
             ids.push(view.id.clone());
         }
+        if let Some(page) = self.webs.get(key) {
+            ids.push(page.id.clone());
+        }
         ids
     }
 
@@ -4141,25 +4220,19 @@ impl App {
             return;
         };
         let process = HANDLE(process.as_raw_handle());
-        let owner = self
+        let Some(session) = self
             .consoles
             .iter()
             .find(|(_, c)| c.contains(process))
-            .map(|(id, _)| Owner::Session(id.clone()))
-            .or_else(|| {
-                self.project_browsers
-                    .iter()
-                    .find(|(_, b)| b.contains(process))
-                    .map(|(key, _)| Owner::Project(key.clone()))
-            });
-        let Some(owner) = owner else {
+            .map(|(id, _)| id.clone())
+        else {
             return;
         };
         browsers::track(hwnd);
         self.browsers.insert(
             id,
             Browser {
-                owner,
+                session,
                 hidden: false,
             },
         );
@@ -4208,23 +4281,17 @@ impl App {
         let Some(stage) = self.stage.as_ref().map(|s| s.hwnd) else {
             return;
         };
-        let projects: HashMap<isize, String> = match self.shared.registry.lock() {
+        let projects: HashMap<String, String> = match self.shared.registry.lock() {
             Ok(r) => self
                 .browsers
-                .iter()
-                .filter_map(|(&id, b)| {
-                    let key = match &b.owner {
-                        Owner::Session(s) => project_key(r.get(s)?),
-                        Owner::Project(key) => key.clone(),
-                    };
-                    Some((id, key))
-                })
+                .values()
+                .filter_map(|b| Some((b.session.clone(), project_key(r.get(&b.session)?))))
                 .collect(),
             Err(_) => return,
         };
         for (&id, b) in self.browsers.iter_mut() {
             let hwnd = hwnd_of(id);
-            match projects.get(&id) {
+            match projects.get(&b.session) {
                 // One the user minimised stays down.
                 Some(p) if p == key => {
                     if b.hidden || !browsers::minimised(hwnd) {
@@ -4241,60 +4308,17 @@ impl App {
     /// Brings up a session's browser windows, from a click on its tile.
     fn show_browsers(&mut self, id: &str) {
         for (&hwnd, b) in self.browsers.iter_mut() {
-            if b.session() == Some(id) {
+            if b.session == id {
                 browsers::bring_to_front(hwnd_of(hwnd));
                 b.hidden = false;
             }
         }
     }
 
-    /// Brings up the project's own browser, or starts it when it has no
-    /// window open. With a url, the page opens in a new tab of it.
-    fn browse(&mut self, key: &str, url: Option<&str>) {
-        let open: Vec<HWND> = self
-            .browsers
-            .iter_mut()
-            .filter(|(_, b)| b.owner == Owner::Project(key.to_string()))
-            .map(|(&id, b)| {
-                b.hidden = false;
-                hwnd_of(id)
-            })
-            .collect();
-        if url.is_none() {
-            if let Some(&hwnd) = open.first() {
-                browsers::bring_to_front(hwnd);
-                return;
-            }
-        }
-        let Some(profiles) = store::local_dir().map(|d| d.join("browsers")) else {
-            return;
-        };
-        match browsers::open(key, &profiles, url) {
-            Ok(b) => {
-                self.project_browsers.insert(key.to_string(), b);
-                if let Some(&hwnd) = open.first() {
-                    browsers::bring_to_front(hwnd);
-                }
-            }
-            Err(e) => eprintln!("horadric: cannot open a browser: {e}"),
-        }
-    }
-
-    /// Whether the project has a window of its own browser open.
-    fn browsing(&self, key: &str) -> bool {
-        self.browsers
-            .values()
-            .any(|b| b.owner == Owner::Project(key.to_string()))
-    }
-
     /// Tells the tiles which sessions have a browser open.
     fn mark_browsers(&mut self) {
         self.browsers.retain(|&id, _| browsers::exists(hwnd_of(id)));
-        let now: HashSet<String> = self
-            .browsers
-            .values()
-            .filter_map(|b| b.session().map(str::to_string))
-            .collect();
+        let now: HashSet<String> = self.browsers.values().map(|b| b.session.clone()).collect();
         if *self.shared.browsing.borrow() != now {
             *self.shared.browsing.borrow_mut() = now;
             for c in &self.clusters {
@@ -4515,6 +4539,7 @@ impl App {
                 let path = self.console_of(id)?.path()?;
                 Some(path.file_name()?.to_string_lossy().into_owned())
             })
+            .or_else(|| id.starts_with(WEB).then(|| "Browser".to_string()))
             .unwrap_or_else(|| id.to_string())
     }
 
@@ -4546,6 +4571,36 @@ impl App {
     fn close_view(&mut self, serial: usize) {
         self.views.retain(|_, v| v.serial != serial);
         self.sync_stage();
+    }
+
+    /// Shows the project's browser pane on the stage beside its sessions,
+    /// with the keyboard, at `url` when given. A new one with no address
+    /// asks for one.
+    fn open_web(&mut self, key: &str, url: Option<&str>) {
+        let id = format!("{WEB}{key}");
+        let new = !self.webs.contains_key(key);
+        if new {
+            let serial = self.next_serial;
+            self.next_serial += 1;
+            let page = Console::web(id.clone(), serial, key.to_string());
+            self.webs.insert(key.to_string(), page);
+        }
+        web::open(key, url);
+        if self.fill_stage(key, false) {
+            if let Some(stage) = &self.stage {
+                stage.focus_session(&id);
+            }
+        }
+        if new && url.is_none() {
+            self.web_ask = Some((key.to_string(), WebAsk::Address));
+            post(self.notify.0 as isize, WM_HORADRIC_WEB, 0);
+        }
+    }
+
+    fn close_web(&mut self, key: &str) {
+        self.webs.remove(key);
+        self.sync_stage();
+        web::close(key);
     }
 
     /// A project's files changed: its view reads its file again, if that
@@ -4813,7 +4868,7 @@ impl App {
                 .stage
                 .as_ref()
                 .and_then(|s| s.active())
-                .filter(|id| !id.starts_with(VIEW)),
+                .filter(|id| !id.starts_with(VIEW) && !id.starts_with(WEB)),
             grids: self
                 .shared
                 .orders
@@ -5263,17 +5318,22 @@ impl App {
                 Input::Swap(a, b) => self.swap(&a, &b),
                 Input::Reorder(key, shown) => self.reorder(&key, &shown),
                 Input::Browser(id) => self.show_browsers(&id),
+                Input::View(key, dir, rel) => self.open_view(&key, &dir, &rel),
+                Input::CloseView(serial) => self.close_view(serial),
                 Input::Browse => {
                     if let Some(key) = self.stage.as_ref().map(|s| s.project()) {
-                        self.browse(&key, None);
+                        self.open_web(&key, None);
                     }
                 }
                 Input::Link(url) => match self.stage.as_ref().map(|s| s.project()) {
-                    Some(key) if self.browsing(&key) => self.browse(&key, Some(&url)),
+                    Some(key) if self.webs.contains_key(&key) => self.open_web(&key, Some(&url)),
                     _ => watch::open_link(&crate::links::Target::Web(url), None),
                 },
-                Input::View(key, dir, rel) => self.open_view(&key, &dir, &rel),
-                Input::CloseView(serial) => self.close_view(serial),
+                Input::CloseWeb(key) => self.close_web(&key),
+                Input::WebAsk(key, what) => {
+                    self.web_ask = Some((key, what));
+                    post(self.notify.0 as isize, WM_HORADRIC_WEB, 0);
+                }
                 Input::Font(step) => self.set_font(step),
                 Input::FilesChanged(key) => self.files_changed(&key),
                 Input::Arrange => relayout = true,

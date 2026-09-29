@@ -13,10 +13,12 @@ the reasoning. The plan supersedes it wherever the two disagree.
 
 Do not reopen these without asking. They were argued through and chosen.
 
-- **Pure Rust, no toolkit, no web view.** Win32 through the `windows` crate,
-  Direct2D and DirectWrite for drawing. Performance is the reason and so is
-  control: the window manager fight is the whole project, and a layer in
-  between makes it unwinnable.
+- **Pure Rust, no toolkit, no web view for Horadric's own UI.** Win32
+  through the `windows` crate, Direct2D and DirectWrite for drawing.
+  Performance is the reason and so is control: the window manager fight
+  is the whole project, and a layer in between makes it unwinnable. The
+  one web view is the browser pane, which shows web pages, not Horadric
+  (decided 2026-09-29, see the plan's Browser pane).
 - **One window per project cluster, not per tile.** Tiles are drawn inside
   the cluster window. Forty tiles must not mean forty windows.
 - **One terminal window for all sessions, the stage.** It shows one
@@ -26,9 +28,10 @@ Do not reopen these without asking. They were argued through and chosen.
 - **State comes from hook events, never from parsing terminal output.**
 - **Dependencies are justified one at a time.** Today: `serde`, `serde_json`,
   `windows`, `windows-numerics`, `alacritty_terminal` for the terminal
-  grid (writing a VT parser is not the project), and `syntect` for the
-  file viewer's colours (writing grammars is not either). Adding one is a
-  decision, not a reflex.
+  grid (writing a VT parser is not the project), `syntect` for the
+  file viewer's colours (writing grammars is not either), and
+  `webview2-com` for the browser pane (the WebView2 COM bindings, on the
+  same `windows` version). Adding one is a decision, not a reflex.
 
 ## Conventions
 

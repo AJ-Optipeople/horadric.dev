@@ -134,6 +134,8 @@ mod vsync;
 #[cfg(windows)]
 mod watch;
 #[cfg(windows)]
+mod web;
+#[cfg(windows)]
 mod window;
 #[cfg(windows)]
 mod worktree;

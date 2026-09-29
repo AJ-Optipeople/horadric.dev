@@ -113,6 +113,9 @@ pub struct Console {
     /// The session host, None for a file view, which has no program.
     remote: Option<Arc<Remote>>,
     view: Option<Mutex<View>>,
+    /// The project whose browser page this pane shows, for a browser pane,
+    /// which has no program and draws no grid: the page covers it.
+    pub web: Option<String>,
     pub screen: Mutex<Screen>,
     size: Mutex<GridSize>,
     /// Set by the reader when output arrived and no wake message is queued
@@ -434,6 +437,7 @@ impl Console {
             serial: meta.serial,
             remote: Some(remote),
             view: None,
+            web: None,
             screen: Mutex::new(Screen {
                 term: Term::new(config, &size, events),
                 parser: Processor::new(),
@@ -503,6 +507,7 @@ impl Console {
             id,
             serial,
             remote: None,
+            web: None,
             view: Some(Mutex::new(View {
                 path,
                 stamp: None,
@@ -535,6 +540,40 @@ impl Console {
 
     pub fn is_view(&self) -> bool {
         self.view.is_some()
+    }
+
+    /// A console with no program for the browser pane of project `key`.
+    /// Its grid is never drawn, but a pane is made of a console.
+    pub fn web(id: String, serial: usize, key: String) -> Arc<Console> {
+        let size = GridSize {
+            cols: DEFAULT_COLS,
+            rows: DEFAULT_ROWS,
+        };
+        let title = Arc::new(Mutex::new(None));
+        let events = Events {
+            remote: None,
+            title: Arc::clone(&title),
+        };
+        Arc::new(Console {
+            id,
+            serial,
+            remote: None,
+            view: None,
+            web: Some(key),
+            screen: Mutex::new(Screen {
+                term: Term::new(Config::default(), &size, events),
+                parser: Processor::new(),
+            }),
+            size: Mutex::new(size),
+            dirty: AtomicBool::new(false),
+            exit: Mutex::new(None),
+            title,
+            args: Vec::new(),
+            shell: false,
+            claude: false,
+            cwd: None,
+            typed: Mutex::new(None),
+        })
     }
 
     /// The file a view shows.
