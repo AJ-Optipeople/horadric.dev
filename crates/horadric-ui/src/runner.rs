@@ -201,7 +201,7 @@ impl App {
             .boards
             .borrow()
             .iter()
-            .filter(|(_, b)| tasks::unfinished(&b.tasks))
+            .filter(|(k, b)| !self.closed.contains(*k) && tasks::unfinished(&b.tasks))
             .map(|(k, _)| k.clone())
             .collect()
     }
@@ -631,6 +631,7 @@ impl App {
             .boards
             .borrow()
             .iter()
+            .filter(|(k, _)| !self.closed.contains(*k))
             .map(|(k, b)| (k.clone(), b.clone()))
             .collect();
         let now = unix_now();

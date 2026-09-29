@@ -653,6 +653,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
                 .map(|c| (c.key.clone(), c.clone()))
                 .collect(),
             open: saved.clusters.iter().map(|c| c.key.clone()).collect(),
+            closed: saved.closed.iter().cloned().collect(),
             columns: Columns::from_keys(&saved.columns),
             recent: saved.recent.clone(),
             autostart_offered,
@@ -2440,6 +2441,10 @@ struct App {
     /// from the project menu. Ending every session is often a fresh start
     /// in the same project, not leaving it.
     open: HashSet<String>,
+    /// Projects closed from the project menu. Their unfinished tasks no
+    /// longer keep the cluster up, and the runner leaves them alone, until
+    /// a session starts in them again.
+    closed: HashSet<String>,
     /// Which column each cluster and the usage window stand in.
     columns: Columns,
     /// Projects sessions were started in, newest first, for the tray menu.
@@ -4192,10 +4197,11 @@ impl App {
         self.reconcile(false);
     }
 
-    /// Ends the project's sessions and takes its cluster down. One with
-    /// unfinished tasks stays up for them.
+    /// Ends the project's sessions and takes its cluster down, unfinished
+    /// tasks or not.
     fn close_project(&mut self, key: &str) {
         self.open.remove(key);
+        self.closed.insert(key.to_string());
         self.end_all(Some(key));
     }
 
@@ -5105,6 +5111,11 @@ impl App {
             clusters,
             columns: columns.keys(),
             recent: self.recent.clone(),
+            closed: {
+                let mut closed: Vec<String> = self.closed.iter().cloned().collect();
+                closed.sort();
+                closed
+            },
             autostart_offered: self.autostart_offered,
             stage: self
                 .stage
@@ -5202,6 +5213,7 @@ impl App {
             .lock()
             .map(|r| r.all().map(project_key).collect())
             .unwrap_or_default();
+        self.closed.retain(|k| !projects.contains(k));
         self.open
             .extend(projects.iter().filter(|k| !k.is_empty()).cloned());
         projects.extend(self.open.iter().cloned());

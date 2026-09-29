@@ -41,6 +41,10 @@ pub struct SavedState {
     /// Newest first.
     #[serde(default)]
     pub recent: Vec<String>,
+    /// Projects closed from their menu, kept down even with unfinished
+    /// tasks until a session starts in them again.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub closed: Vec<String>,
     /// Start with Windows is switched on once, the first time Horadric runs.
     /// After that it is the user's call, so this remembers it was offered.
     #[serde(default)]
