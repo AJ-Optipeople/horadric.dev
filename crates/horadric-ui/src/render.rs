@@ -335,6 +335,8 @@ pub struct SettingLook {
     pub value: String,
     /// For a scale, the stop it is at and how many there are.
     pub stop: Option<(usize, usize)>,
+    /// A click drops a list, so the row shows a chevron.
+    pub list: bool,
 }
 
 /// Everything one frame of a setting's dropped down list needs.
@@ -1262,6 +1264,10 @@ impl Painter<'_> {
                 self.fill_rounded(&row.rect.inset(3.0), 8.0, fill);
             }
             self.text(&gpu.small, theme::TEXT_DIM, look.label, inner);
+            if !look.list {
+                self.text(&gpu.small_right, ink, &look.value, inner);
+                return;
+            }
             let chevron = 12.0;
             let glyph = if open { '\u{E70E}' } else { '\u{E70D}' };
             self.icon(

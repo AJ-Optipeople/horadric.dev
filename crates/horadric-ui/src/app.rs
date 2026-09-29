@@ -181,6 +181,9 @@ const WM_HORADRIC_ACCOUNT_MENU: u32 = WM_APP + 24;
 const WM_HORADRIC_WEB: u32 = WM_APP + 25;
 /// Do what the app's `pane_ask` says, for a session's pane.
 const WM_HORADRIC_PANE: u32 = WM_APP + 26;
+/// The usage window's Version row clicked, handled outside the app's
+/// borrow since it may ask.
+const WM_HORADRIC_VERSION: u32 = WM_APP + 27;
 
 /// A button in a session pane's header, handled outside the app's borrow
 /// since it may ask first.
@@ -322,6 +325,9 @@ pub(crate) enum Input {
     UsageMenu,
     /// The usage window's Account row clicked: the accounts to switch to.
     AccountMenu,
+    /// The usage window's Version row clicked: the release it names, or a
+    /// check for one.
+    Version,
     /// A setting's list closed, with the value picked, if one was.
     Picked(Setting, Option<Option<String>>),
     /// A slider in the usage window let go at a new value.
@@ -929,6 +935,15 @@ unsafe extern "system" fn app_proc(
         }
         WM_HORADRIC_ACCOUNT_MENU => {
             account_menu();
+            return LRESULT(0);
+        }
+        WM_HORADRIC_VERSION => {
+            match with_app(|app| app.update.clone()).flatten() {
+                Some(m) => offer_update(&m),
+                None => {
+                    with_app(|app| app.check_update(true));
+                }
+            }
             return LRESULT(0);
         }
         WM_HORADRIC_PANE => {
@@ -3193,10 +3208,12 @@ impl App {
                         .show(Kind::Done, &format!("Horadric {} is out", m.version), &text);
                     self.update_told = Some(m.version.clone());
                 }
+                self.offer_in_usage(Some(&m.version));
                 self.update = Some(m);
             }
             Ok(None) => {
                 self.update = None;
+                self.offer_in_usage(None);
                 if asked {
                     self.toasts.show(
                         Kind::Done,
@@ -3211,6 +3228,15 @@ impl App {
                     self.toasts.show(Kind::Failed, "Update check failed", &e);
                 }
             }
+        }
+    }
+
+    /// Puts the release to update to, if any, on the usage window's
+    /// Version row.
+    fn offer_in_usage(&self, version: Option<&str>) {
+        if let Some(u) = &self.usage_window {
+            *u.update.borrow_mut() = version.map(str::to_string);
+            u.invalidate();
         }
     }
 
@@ -5573,6 +5599,7 @@ impl App {
                 }
                 Input::UsageMenu => post(self.notify.0 as isize, WM_HORADRIC_USAGE_MENU, 0),
                 Input::AccountMenu => post(self.notify.0 as isize, WM_HORADRIC_ACCOUNT_MENU, 0),
+                Input::Version => post(self.notify.0 as isize, WM_HORADRIC_VERSION, 0),
                 Input::SettingMenu(s, row) => {
                     self.setting_menu_for = Some((s, row));
                     post(self.notify.0 as isize, WM_HORADRIC_SETTING_MENU, 0);

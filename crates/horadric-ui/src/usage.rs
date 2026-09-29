@@ -64,20 +64,33 @@ pub struct UsageWindow {
     /// A slider held down: its setting and the stop it is at so far. It is
     /// set when let go.
     slide: Cell<Option<(usize, usize)>>,
+    /// A newer release's version, set by the app when a check finds one.
+    pub update: RefCell<Option<String>>,
 }
 
 /// Which rows of settings are sliders, in the order the window shows
-/// them: the settings, then the account.
+/// them: the settings, then the account and the version.
 fn scales() -> Vec<bool> {
     Setting::ALL
         .iter()
         .map(|s| s.is_scale())
-        .chain([false])
+        .chain([false, false])
         .collect()
 }
 
 /// The row after the settings, which names the account.
 const ACCOUNT_ROW: usize = Setting::ALL.len();
+/// The last row, which says which Horadric this is.
+const VERSION_ROW: usize = ACCOUNT_ROW + 1;
+
+/// What the Version row says: this build's version, or the release to
+/// update to when a check found one, which a click then offers.
+fn version_value(current: &str, update: Option<&str>) -> String {
+    match update {
+        Some(v) => format!("Update to {v}"),
+        None => current.to_string(),
+    }
+}
 
 /// What each stop of a scale sets: the default, then its values.
 fn stops(setting: Setting) -> Vec<Option<&'static str>> {
@@ -135,6 +148,7 @@ impl UsageWindow {
             tracking: Cell::new(false),
             open: Cell::new(None),
             slide: Cell::new(None),
+            update: RefCell::new(None),
         });
         unsafe {
             let hwnd = CreateWindowExW(
@@ -316,12 +330,23 @@ impl UsageWindow {
                             let at = all.iter().position(|v| *v == value).unwrap_or(0);
                             (at, all.len())
                         }),
+                        list: true,
                     }
                 })
                 .chain([SettingLook {
                     label: "Account",
                     value: account_name(self.shared.account.borrow().as_deref()),
                     stop: None,
+                    list: true,
+                }])
+                .chain([SettingLook {
+                    label: "Version",
+                    value: version_value(
+                        env!("CARGO_PKG_VERSION"),
+                        self.update.borrow().as_deref(),
+                    ),
+                    stop: None,
+                    list: false,
                 }])
                 .collect(),
             hot: self.hot.get(),
@@ -378,6 +403,7 @@ impl UsageWindow {
                 app::push(Input::Arrange);
             }
             UsageHit::Setting(ACCOUNT_ROW) => app::push(Input::AccountMenu),
+            UsageHit::Setting(VERSION_ROW) => app::push(Input::Version),
             UsageHit::Setting(i) => {
                 if let (Some(&s), Some(row)) = (Setting::ALL.get(i), self.row_on_screen(i)) {
                     app::push(Input::SettingMenu(s, row));
@@ -653,7 +679,13 @@ mod tests {
         assert_eq!(all.first(), Some(&None));
         assert_eq!(all.last(), Some(&Some("max")));
         assert_eq!(all.len(), Setting::Effort.choices().len() + 1);
-        assert_eq!(scales(), [false, true, false, false]);
+        assert_eq!(scales(), [false, true, false, false, false]);
+    }
+
+    #[test]
+    fn the_version_row_offers_a_newer_release() {
+        assert_eq!(version_value("0.3.1", None), "0.3.1");
+        assert_eq!(version_value("0.3.1", Some("0.4.0")), "Update to 0.4.0");
     }
 
     #[test]

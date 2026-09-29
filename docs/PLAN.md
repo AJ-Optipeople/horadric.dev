@@ -1131,6 +1131,10 @@ a switch between them without logging in again, while the sessions run.
   opens `claude auth login` in a console of its own (a login, not a
   session, so no pane), and once the new login lands the old one goes back,
   so adding stops nothing. The new one is a pick away.
+- **The Version row** is the last one: this build's version, or "Update
+  to <version>" once a check found a release. A click shows that
+  release's notes with Update now, or checks for one and says what it
+  found. No chevron, since it drops no list.
 - **Switching** is the hot part. A running `claude` holds its token in
   memory, so every agent Horadric runs stops and resumes (`claude --resume
   <id>`), which keeps its conversation. Each stops once
