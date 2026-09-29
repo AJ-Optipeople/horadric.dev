@@ -111,9 +111,22 @@ the dev one by the `X-Horadric-Port` header.
 The agent working on Horadric runs in a terminal of the installed Horadric. It
 builds and tests dev instances as above and never touches the installed
 one, with one exception: shipping, and only when the human says to ship.
+There are two kinds, and the human's words pick one.
 
-Shipping is merging into `main` as above, `cargo build --release` from
-the merged code, then `target\release\horadric.exe
+- **"Ship" or "ship local"** updates only this machine. Nothing goes to
+  GitHub.
+- **"Ship public"** cuts a release every install is offered: bump the
+  version, sign, tag, push, draft the GitHub release with notes, try the
+  draft's build as a dev instance, publish it, then ship local. The steps
+  are in [RELEASING.md](RELEASING.md). Saying "ship public" is the
+  human's go ahead to publish, which is the moment every install sees
+  it, so the agent does not stop at the draft to ask again. It picks the
+  version (patch for fixes, minor for new features), writes the notes
+  for users from the commits since the last tag, and says both before
+  publishing.
+
+Shipping local is merging into `main` as above, `cargo build --release`
+from the merged code, then `target\release\horadric.exe
 reload`. The installed Horadric hands over to the new build at once, and
 the new build attaches to every session's host, including the agent's
 own, which keeps running through it. An installed Horadric from before

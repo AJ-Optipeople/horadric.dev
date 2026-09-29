@@ -33,6 +33,9 @@ happens on this machine.
 
 ## 2. Cutting a release
 
+This is what "ship public" means (see CLAUDE.md). Plain "ship" skips it
+and only reloads this machine.
+
 1. Bump `version` under `[workspace.package]` in `Cargo.toml`. That is the
    release's version, and every install compares its own against it, so
    it must go up each time or no one is offered the release.
