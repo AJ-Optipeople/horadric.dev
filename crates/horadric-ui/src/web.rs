@@ -50,6 +50,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use crate::app::{self, Input, WebAsk};
 use crate::terminal::WM_STAGE_LAYOUT;
+use crate::viewport;
+use horadric_core::saved::{Dock, Side};
 
 /// Posted to the pane showing a project's page when its title or address
 /// changed, so the header is drawn again.
@@ -98,9 +100,9 @@ thread_local! {
     /// Each project's page size in CSS pixels, where it has one. Kept
     /// apart from the pages, since a size outlives a page closed.
     static SIZES: RefCell<HashMap<String, (u32, u32)>> = RefCell::new(HashMap::new());
-    /// Each project's browser pane width in DIPs, where it stands on the
-    /// right of the stage instead of in the grid.
-    static DOCKS: RefCell<HashMap<String, f32>> = RefCell::new(HashMap::new());
+    /// Where each project's browser pane stands beside the stage's grid,
+    /// where it is not in it.
+    static DOCKS: RefCell<HashMap<String, Dock>> = RefCell::new(HashMap::new());
     /// The app's hidden window, where a page not on the stage waits.
     static PARK: Cell<isize> = const { Cell::new(0) };
 }
@@ -228,23 +230,23 @@ pub fn set_sizes(saved: &std::collections::BTreeMap<String, [u32; 2]>) {
     });
 }
 
-/// How wide the project's browser pane is on the right of the stage, or
-/// None while it takes a place in the grid.
-pub fn dock(key: &str) -> Option<f32> {
+/// Where the project's browser pane stands beside the stage's grid, or
+/// None while it takes a place in it.
+pub fn dock(key: &str) -> Option<Dock> {
     DOCKS.with(|d| d.borrow().get(key).copied())
 }
 
-/// Puts the project's browser pane on the right of the stage this wide,
-/// or back in the grid with None. The stage showing it lays out again.
-pub fn set_dock(key: &str, width: Option<f32>) {
+/// Stands the project's browser pane beside the grid, or puts it back in
+/// it with None. The stage showing it lays out again.
+pub fn set_dock(key: &str, dock: Option<Dock>) {
     let old = DOCKS.with(|d| {
         let mut d = d.borrow_mut();
-        match width {
-            Some(w) => d.insert(key.to_string(), w),
+        match dock {
+            Some(v) => d.insert(key.to_string(), v),
             None => d.remove(key),
         }
     });
-    if old == width {
+    if old == dock {
         return;
     }
     let pane = WEBS.with(|w| w.borrow().get(key).and_then(|w| w.pane));
@@ -254,17 +256,25 @@ pub fn set_dock(key: &str, width: Option<f32>) {
                 let _ = PostMessageW(Some(stage), WM_STAGE_LAYOUT, WPARAM(0), LPARAM(0));
             }
         }
+        // The header's place buttons light the side it is on.
+        let _ = unsafe { PostMessageW(Some(p), WM_WEB_CHANGED, WPARAM(0), LPARAM(0)) };
     }
 }
 
-/// Every project's docked width, to save.
-pub fn docks() -> std::collections::BTreeMap<String, f32> {
-    DOCKS.with(|d| d.borrow().iter().map(|(k, &w)| (k.clone(), w)).collect())
+/// Moves the browser pane to `side`, keeping its size along the same
+/// axis, or back into the grid when it is there already.
+pub fn toggle_dock(key: &str, side: Side) {
+    set_dock(key, viewport::toggled(dock(key), side, size(key)));
 }
 
-/// The docked widths saved last time.
-pub fn set_docks(saved: &std::collections::BTreeMap<String, f32>) {
-    DOCKS.with(|d| *d.borrow_mut() = saved.iter().map(|(k, &w)| (k.clone(), w)).collect());
+/// Every project's dock, to save.
+pub fn docks() -> std::collections::BTreeMap<String, Dock> {
+    DOCKS.with(|d| d.borrow().iter().map(|(k, &v)| (k.clone(), v)).collect())
+}
+
+/// The docks saved last time.
+pub fn set_docks(saved: &std::collections::BTreeMap<String, Dock>) {
+    DOCKS.with(|d| *d.borrow_mut() = saved.iter().map(|(k, &v)| (k.clone(), v)).collect());
 }
 
 /// The pane showing the page has room for this size unscaled.

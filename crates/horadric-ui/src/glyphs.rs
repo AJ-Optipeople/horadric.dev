@@ -39,6 +39,7 @@ use crate::frame::{Decoration, Frame, BOLD, ITALIC};
 use crate::render::{self, hwnd_target, Gpu};
 use crate::theme::{self, Color};
 use crate::viewport;
+use horadric_core::saved::Side;
 
 /// Cascadia ships with Windows 11. Consolas is on every Windows since Vista.
 const FAMILIES: [&str; 2] = ["Cascadia Mono", "Consolas"];
@@ -131,6 +132,9 @@ pub struct Bar<'a> {
     pub forward: bool,
     /// The page has a size of its own, so the size button is lit.
     pub sized: bool,
+    /// The side the pane stands on beside the grid, whose place button is
+    /// lit. None in the grid.
+    pub dock: Option<Side>,
 }
 
 /// A browser pane's page laid out at a size of its own: a rim round it,
@@ -160,6 +164,9 @@ pub struct BarLayout {
     pub reload: f32,
     /// The button for the page's size.
     pub size: f32,
+    /// The buttons that stand the pane on the left, on top and on the
+    /// right of the stage, [`PLACE_W`] wide each.
+    pub places: [(Side, f32); 3],
     /// The field's left and right edges.
     pub field: (f32, f32),
 }
@@ -170,17 +177,20 @@ pub enum BarHit {
     Forward,
     Reload,
     Size,
+    Place(Side),
     Field,
 }
+
+/// A place button's width, narrower than a square so the three fit.
+pub const PLACE_W: f32 = 20.0;
 
 /// Room between the field's edge and its text.
 pub const BAR_INSET: f32 = 8.0;
 /// Between the field and the header's top and bottom.
 const BAR_MARGIN: f32 = 3.0;
 
-/// Back, forward, reload and size after the lamp, one square each, then
-/// the field up to the
-/// zoom button or the cross.
+/// Back, forward, reload and size after the lamp, one square each, the
+/// three place buttons, then the field up to the zoom button or the cross.
 pub fn bar_layout(width: f32, zoom: bool, close: bool) -> BarLayout {
     let back = BEZEL + 14.0;
     let forward = back + HEADER_H;
@@ -188,12 +198,16 @@ pub fn bar_layout(width: f32, zoom: bool, close: bool) -> BarLayout {
     let size = reload + HEADER_H;
     let (zoom_at, close_at) = header_buttons(width, zoom, close);
     let end = zoom_at.or(close_at).unwrap_or(width - BEZEL);
-    let left = size + HEADER_H + 4.0;
+    let first = size + HEADER_H + 2.0;
+    let places = [Side::Left, Side::Top, Side::Right];
+    let places = std::array::from_fn(|i| (places[i], first + i as f32 * PLACE_W));
+    let left = first + 3.0 * PLACE_W + 6.0;
     BarLayout {
         back,
         forward,
         reload,
         size,
+        places,
         field: (left, (end - 4.0).max(left)),
     }
 }
@@ -209,6 +223,8 @@ pub fn bar_hit(l: &BarLayout, x: f32) -> Option<BarHit> {
         Some(BarHit::Reload)
     } else if on(l.size) {
         Some(BarHit::Size)
+    } else if let Some(&(side, _)) = l.places.iter().find(|(_, at)| x >= *at && x < at + PLACE_W) {
+        Some(BarHit::Place(side))
     } else if x >= l.field.0 && x < l.field.1 {
         Some(BarHit::Field)
     } else {
@@ -772,6 +788,40 @@ impl GridTarget {
         }
     }
 
+    /// A stage in outline with its browser's part of it filled: the left
+    /// third, the top half or the right third. Drawn, since the icon font
+    /// has no dock on top. Solid when that is where the pane is.
+    unsafe fn place_icon(&self, side: Side, at: f32, ink: Color, on: bool) {
+        let (w, h) = (13.0, 10.0);
+        let l = (at + (PLACE_W - w) / 2.0).round() + 0.5;
+        let t = ((HEADER_H - h) / 2.0).round() + 0.5;
+        let frame = D2D_RECT_F {
+            left: l,
+            top: t,
+            right: l + w,
+            bottom: t + h,
+        };
+        self.brush.SetColor(&render::color(ink));
+        self.rt.DrawRectangle(&frame, &self.brush, 1.0, None);
+        let part = match side {
+            Side::Left => D2D_RECT_F {
+                right: l + 5.0,
+                ..frame
+            },
+            Side::Top => D2D_RECT_F {
+                bottom: t + 4.0,
+                ..frame
+            },
+            Side::Right => D2D_RECT_F {
+                left: l + w - 5.0,
+                ..frame
+            },
+        };
+        let fill = if on { ink } else { ink.with_alpha(0.55) };
+        self.brush.SetColor(&render::color(fill));
+        self.rt.FillRectangle(&part, &self.brush);
+    }
+
     /// A rim round a sized page, a grip in the middle of its right and
     /// bottom edges and one at the corner, and its size under it. The page
     /// is a window over the glass, so all of this is drawn round it.
@@ -1131,6 +1181,14 @@ impl GridTarget {
             ("\u{E7F4}", theme::TEXT_DIM)
         };
         button(glyph, l.size, ink);
+        for &(side, at) in &l.places {
+            let ink = if bar.dock == Some(side) {
+                accent.mix(theme::TEXT, 0.35)
+            } else {
+                theme::TEXT_DIM
+            };
+            self.place_icon(side, at, ink, bar.dock == Some(side));
+        }
 
         let field = D2D_RECT_F {
             left: l.field.0,
@@ -1408,7 +1466,8 @@ mod tests {
         assert_eq!(l.forward, l.back + HEADER_H);
         assert_eq!(l.reload, l.forward + HEADER_H);
         assert_eq!(l.size, l.reload + HEADER_H);
-        assert!(l.field.0 >= l.size + HEADER_H);
+        assert!(l.places[0].1 >= l.size + HEADER_H);
+        assert!(l.field.0 >= l.places[2].1 + PLACE_W);
         assert!(l.field.1 <= close.unwrap());
         let zoomed = bar_layout(600.0, true, true);
         assert_eq!(zoomed.field.1, l.field.1 - HEADER_H, "the zoom button");
@@ -1423,6 +1482,11 @@ mod tests {
         assert_eq!(bar_hit(&l, l.forward + 1.0), Some(BarHit::Forward));
         assert_eq!(bar_hit(&l, l.reload + HEADER_H - 1.0), Some(BarHit::Reload));
         assert_eq!(bar_hit(&l, l.size + 1.0), Some(BarHit::Size));
+        for (side, at) in l.places {
+            assert_eq!(bar_hit(&l, at + 1.0), Some(BarHit::Place(side)));
+            assert_eq!(bar_hit(&l, at + PLACE_W - 1.0), Some(BarHit::Place(side)));
+        }
+        assert_eq!(l.places.map(|p| p.0), [Side::Left, Side::Top, Side::Right]);
         assert_eq!(bar_hit(&l, l.field.0 + 50.0), Some(BarHit::Field));
         assert_eq!(bar_hit(&l, 2.0), None, "the lamp is for dragging");
         assert_eq!(bar_hit(&l, l.field.1 + 1.0), None);

@@ -779,6 +779,7 @@ impl Pane {
                 back,
                 forward,
                 sized: web::size(key).is_some(),
+                dock: web::dock(key).map(|d| d.side),
             }
         });
         let sized = self.page_fit().and_then(|(fit, size)| Some((fit, size?)));
@@ -1594,6 +1595,10 @@ impl Pane {
                 } else {
                     self.edit_address();
                 }
+                return true;
+            }
+            Some(BarHit::Place(side)) => {
+                web::toggle_dock(key, side);
                 return true;
             }
             Some(BarHit::Size) => {

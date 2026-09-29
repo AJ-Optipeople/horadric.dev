@@ -53,6 +53,7 @@ use horadric_core::fleet::{self, Device};
 use horadric_core::journal::{self, Entry, What};
 use horadric_core::overlap::Overlap;
 use horadric_core::release::{self, Manifest};
+use horadric_core::saved::Side;
 use horadric_core::ssh;
 use horadric_core::usage::has_flag;
 use horadric_core::worktree::{self as tree, Worktree};
@@ -1565,20 +1566,25 @@ fn size_items(key: &str, base: usize) -> Vec<Item> {
     items.push(check(base + 10, "Resize by hand".into(), custom.is_some()));
     items.push(Item::action(base + 11, "Size..."));
     items.push(Item::Separator);
-    items.push(check(
-        base + 12,
-        "Browser on the right".into(),
-        web::dock(key).is_some(),
-    ));
+    let dock = web::dock(key).map(|d| d.side);
+    items.push(check(base + 12, "In the grid".into(), dock.is_none()));
+    for (i, (side, label)) in PLACES.iter().enumerate() {
+        items.push(check(base + 13 + i, (*label).into(), dock == Some(*side)));
+    }
     items
 }
 
-/// How wide the browser pane is when first put on the right, in DIPs.
-const DOCK_WIDTH: f32 = 640.0;
+/// Where the browser pane can stand beside the grid, as the menu names
+/// them.
+const PLACES: [(Side, &str); 3] = [
+    (Side::Left, "On the left"),
+    (Side::Top, "On top"),
+    (Side::Right, "On the right"),
+];
 
 /// Does what a line from [`size_items`] says. False for another line.
 fn pick_size(key: &str, base: usize, picked: usize) -> bool {
-    let Some(i) = picked.checked_sub(base).filter(|i| *i <= 12) else {
+    let Some(i) = picked.checked_sub(base).filter(|i| *i <= 15) else {
         return false;
     };
     match i {
@@ -1591,15 +1597,12 @@ fn pick_size(key: &str, base: usize, picked: usize) -> bool {
             }
         }
         11 => ask_size(key),
-        12 => {
-            // As wide as a sized page needs to show unscaled, or else a
-            // browser's usual share. The seam beside it changes it after.
-            let width = match (web::dock(key), web::size(key)) {
-                (Some(_), _) => None,
-                (None, Some((w, _))) => Some(w as f32 + 2.0 * (viewport::GRIP + glyphs::BEZEL)),
-                (None, None) => Some(DOCK_WIDTH),
-            };
-            web::set_dock(key, width);
+        12 => web::set_dock(key, None),
+        13..=15 => {
+            let (side, _) = PLACES[i - 13];
+            if web::dock(key).map(|d| d.side) != Some(side) {
+                web::toggle_dock(key, side);
+            }
         }
         n => {
             if let Some((_, w, h)) = viewport::PRESETS.get(n - 1) {

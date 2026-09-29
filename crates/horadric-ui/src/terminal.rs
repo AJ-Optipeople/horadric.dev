@@ -42,7 +42,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     LoadCursorW, LoadIconW, RegisterClassW, SetCursor, SetForegroundWindow, SetWindowLongPtrW,
     SetWindowPos, SetWindowTextW, ShowWindow, CREATESTRUCTW, CW_USEDEFAULT, GWLP_USERDATA,
     HTCAPTION, HTCLIENT, HTCLOSE, HTMAXBUTTON, HTMINBUTTON, HTTOP, HTTOPLEFT, HTTOPRIGHT,
-    IDC_ARROW, IDC_SIZEALL, IDC_SIZEWE, NCCALCSIZE_PARAMS, SC_KEYMENU, SM_CXMINTRACK,
+    IDC_ARROW, IDC_SIZEALL, IDC_SIZENS, IDC_SIZEWE, NCCALCSIZE_PARAMS, SC_KEYMENU, SM_CXMINTRACK,
     SM_CXPADDEDBORDER, SM_CYFRAME, SM_CYMINTRACK, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
     SWP_NOSIZE, SWP_NOZORDER, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOWNOACTIVATE,
     SW_SHOWNORMAL, WINDOW_EX_STYLE, WMSZ_BOTTOM, WMSZ_BOTTOMLEFT, WMSZ_BOTTOMRIGHT, WMSZ_LEFT,
@@ -56,6 +56,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 /// Not in the `windows` crate's WindowsAndMessaging.
 const WM_NCMOUSELEAVE: u32 = 0x02A2;
+
+use horadric_core::saved::{Dock, Side};
 
 use crate::app::{self, Input};
 use crate::backdrop;
@@ -151,11 +153,11 @@ pub struct TerminalWindow {
     glides: RefCell<Glides>,
     /// When the glides last moved on, while they move.
     glided: Cell<Option<Instant>>,
-    /// The gap between the grid and a browser pane docked on the right,
-    /// as its left and right in client pixels, while there is one.
-    seam: Cell<Option<(i32, i32)>>,
-    /// The seam is being dragged: how far right of the seam's right edge
-    /// the cursor was taken.
+    /// The gap between the grid and a docked browser pane, while there is
+    /// one: the pane's side, and the gap's start and end across it in
+    /// client pixels, x for a side and y on top.
+    seam: Cell<Option<(Side, (i32, i32))>>,
+    /// The seam is being dragged: how far into it the cursor took it.
     seam_drag: Cell<Option<i32>>,
 }
 
@@ -380,15 +382,14 @@ impl TerminalWindow {
             c.set_maximized(unsafe { IsZoomed(self.hwnd) }.as_bool());
         }
         let area = (gap, top, r.right - gap, r.bottom - gap);
-        let docked = self.dock_width(&panes).and_then(|w| {
+        let dock = self.dock(&panes);
+        let docked = dock.and_then(|d| {
             let px = |dip: f32| (dip * self.dpi() as f32 / 96.0).round() as i32;
-            layout::docked_grid(panes.len(), area, gap, px(w), px(DOCK_MIN_DIP))
+            layout::docked_grid(panes.len(), area, gap, d.side, px(d.size), px(DOCK_MIN_DIP))
         });
         self.seam.set(
-            docked
-                .as_ref()
-                .and_then(|g| g.last())
-                .map(|c| (c[0] - gap, c[0])),
+            dock.zip(docked.as_ref().and_then(|g| g.last()))
+                .map(|(d, c)| (d.side, layout::seam(d.side, *c, gap))),
         );
         let grid = docked.unwrap_or_else(|| layout::grid(panes.len(), area, gap));
         let many = panes.len() > 1;
@@ -431,36 +432,58 @@ impl TerminalWindow {
         }
     }
 
-    /// How wide the browser pane is, in DIPs, when it is docked on the
-    /// right. It is always the last pane.
-    fn dock_width(&self, panes: &[Box<Pane>]) -> Option<f32> {
+    /// Where the browser pane stands beside the grid, when it does. It is
+    /// always the last pane.
+    fn dock(&self, panes: &[Box<Pane>]) -> Option<Dock> {
         let key = panes.last()?.console().web.as_deref()?;
         web::dock(key)
     }
 
-    /// Whether a client point is on the seam beside a docked browser pane.
-    fn on_seam(&self, p: POINT) -> bool {
-        self.seam.get().is_some_and(|(l, r)| p.x >= l && p.x < r)
+    /// Where a client point is across the seam: x beside a side dock, y
+    /// below one on top.
+    fn across(side: Side, p: POINT) -> i32 {
+        if side == Side::Top {
+            p.y
+        } else {
+            p.x
+        }
     }
 
-    /// Follows the seam with the cursor: the docked pane is as wide as
-    /// from there to the stage's right edge.
-    fn drag_seam(&self, grab: i32) {
-        let p = self.cursor();
+    /// Whether a client point is on the seam beside a docked browser pane.
+    fn on_seam(&self, p: POINT) -> bool {
+        self.seam.get().is_some_and(|(side, (a, b))| {
+            let at = Self::across(side, p);
+            at >= a && at < b
+        })
+    }
+
+    /// The client area the panes are laid out in, as `layout_with` has it.
+    fn pane_area(&self) -> ((i32, i32, i32, i32), i32) {
         let mut r = RECT::default();
         unsafe {
             let _ = GetClientRect(self.hwnd, &mut r);
         }
         let gap = (PANE_GAP_DIP * self.dpi() as f32 / 96.0).round() as i32;
-        let width = r.right - gap - (p.x - grab);
-        let dip = width as f32 * 96.0 / self.dpi() as f32;
+        ((gap, self.caption_h(), r.right - gap, r.bottom - gap), gap)
+    }
+
+    /// Follows the seam with the cursor: the docked pane grows or shrinks
+    /// to meet it.
+    fn drag_seam(&self, grab: i32) {
+        let Some((side, _)) = self.seam.get() else {
+            return;
+        };
+        let (area, gap) = self.pane_area();
+        let at = Self::across(side, self.cursor()) - grab;
+        let px = layout::seam_size(side, area, gap, at);
+        let size = (px as f32 * 96.0 / self.dpi() as f32).max(DOCK_MIN_DIP);
         let key = self
             .panes
             .borrow()
             .last()
             .and_then(|p| p.console().web.clone());
         if let Some(key) = key {
-            web::set_dock(&key, Some(dip.max(DOCK_MIN_DIP)));
+            web::set_dock(&key, Some(Dock { side, size }));
             self.layout();
         }
     }
@@ -1423,15 +1446,20 @@ impl TerminalWindow {
                 if (lparam.0 & 0xffff) as u32 == HTCLIENT
                     && (self.seam_drag.get().is_some() || self.on_seam(self.cursor())) =>
             {
+                let cursor = match self.seam.get() {
+                    Some((Side::Top, _)) => IDC_SIZENS,
+                    _ => IDC_SIZEWE,
+                };
                 unsafe {
-                    SetCursor(LoadCursorW(None, IDC_SIZEWE).ok());
+                    SetCursor(LoadCursorW(None, cursor).ok());
                 }
                 Some(LRESULT(1))
             }
             WM_LBUTTONDOWN if self.on_seam(self.cursor()) => {
-                let p = self.cursor();
-                let right = self.seam.get().map_or(p.x, |(_, r)| r);
-                self.seam_drag.set(Some(p.x - right));
+                if let Some((side, (start, _))) = self.seam.get() {
+                    self.seam_drag
+                        .set(Some(Self::across(side, self.cursor()) - start));
+                }
                 unsafe {
                     SetCapture(self.hwnd);
                 }

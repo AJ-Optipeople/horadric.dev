@@ -853,16 +853,21 @@ settled "no web view" for web pages only: Horadric's own UI stays Direct2D.
   kept: the pane still moves between cells as sessions come and go.
   Checked over DevTools: Phone gave `innerWidth` 390, a drag 680 × 497,
   Desktop scaled to 54% still 1920 × 1080, and Fit the whole glass.
-- **Browser on the right** (`layout::docked_grid`, pure), the last line
-  of the size menu. The browser pane stands full height on the right of
-  the stage and the sessions share the grid left of it, so it keeps its
-  place and width as sessions come and go. Off, it takes a cell in the
-  grid as before. The gap beside it is a seam: drag it to change the
-  width, kept per project (`page_docks`). It starts as wide as a sized
-  page needs to show unscaled, or 640 DIPs, and each side keeps at least
-  320. Tested with four `cmd.exe` sessions: on, they went 2 by 2 on the
-  left of a full height browser; the seam dragged 200 pixels widened it
-  by that; off, the grid came back.
+- **Its place beside the grid** (`layout::docked_grid`, pure). Three
+  buttons after the size button, drawn since the icon font has no dock
+  on top, stand the browser pane on the left, on top or on the right of
+  the stage, the whole of that side, with the sessions in a grid of their
+  own beside it. So it keeps its place and size as sessions come and go.
+  The lit one says where it is, and a click on it puts it back in the
+  grid, as before. The size menu has the same four. The gap beside it is
+  a seam: drag it to change its width, or height on top, kept per project
+  with its side (`page_docks`, which still reads the width the first
+  build wrote, as the right). It starts big enough to show a sized page
+  unscaled, or 640 wide or 420 tall, keeps its width going from left to
+  right, and each side keeps at least 320. Tested with five `cmd.exe`
+  sessions: left, top and right each put the browser along that whole
+  side with the grid beside it, the top seam dragged 150 pixels made it
+  that much taller, and the lit button put it back in the grid.
 
 Tested on screen with a dev instance on its own port and `cmd.exe`
 sessions in two projects: Ctrl+Shift+B put the pane in the grid and asked

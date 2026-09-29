@@ -60,10 +60,10 @@ pub struct SavedState {
     /// pixels, when it is not fitted to the pane.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub page_sizes: BTreeMap<String, [u32; 2]>,
-    /// How wide each project's browser pane is, in DIPs, where it stands
-    /// full height on the right of the stage instead of in the grid.
+    /// Where each project's browser pane stands beside the stage's grid,
+    /// where it is not in it.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub page_docks: BTreeMap<String, f32>,
+    pub page_docks: BTreeMap<String, Dock>,
     /// Model, effort and permission mode for the sessions Horadric starts.
     #[serde(default)]
     pub defaults: Defaults,
@@ -105,6 +105,45 @@ pub struct SavedState {
     /// the sessions resumed, so it resumes nothing.
     #[serde(default)]
     pub recovering: bool,
+}
+
+/// The side of the stage a browser pane stands on, beside the grid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Side {
+    Left,
+    Top,
+    Right,
+}
+
+/// A browser pane beside the grid: its side, and its width, or its height
+/// on top, in DIPs.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(from = "SavedDock")]
+pub struct Dock {
+    pub side: Side,
+    pub size: f32,
+}
+
+/// A dock as written, or as the first build that had one wrote it: only
+/// a width, always on the right.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum SavedDock {
+    Placed { side: Side, size: f32 },
+    Right(f32),
+}
+
+impl From<SavedDock> for Dock {
+    fn from(d: SavedDock) -> Dock {
+        match d {
+            SavedDock::Placed { side, size } => Dock { side, size },
+            SavedDock::Right(size) => Dock {
+                side: Side::Right,
+                size,
+            },
+        }
+    }
 }
 
 /// Whether a start brings back the sessions that were running.
@@ -355,6 +394,28 @@ pub struct SavedPanel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_dock_reads_its_side_and_an_old_bare_width_as_the_right() {
+        let d: Dock = serde_json::from_str(r#"{"side":"top","size":300.0}"#).unwrap();
+        assert_eq!(
+            d,
+            Dock {
+                side: Side::Top,
+                size: 300.0
+            }
+        );
+        let old: Dock = serde_json::from_str("640.0").unwrap();
+        assert_eq!(
+            old,
+            Dock {
+                side: Side::Right,
+                size: 640.0
+            }
+        );
+        let written = serde_json::to_string(&d).unwrap();
+        assert_eq!(serde_json::from_str::<Dock>(&written).unwrap(), d);
+    }
 
     fn saved(args: &[&str], prompted: bool) -> SavedSession {
         SavedSession {
