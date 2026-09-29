@@ -78,11 +78,12 @@ fn ask_main_tree(dir: &Path) -> Option<Place> {
 
 /// Adds a worktree for a new session named `name` in `dir`, on a new
 /// branch from what the main tree has checked out, with a range of ports
-/// that `taken` does not use. None when the project does not want one;
-/// an error when git refused, and the session then shares the main tree.
-pub fn add(dir: &Path, name: &str, taken: &[Ports]) -> Result<Option<Fresh>, String> {
+/// that `taken` does not use. None when the project does not want one and
+/// it was not `asked` for; an error when git refused, and the session then
+/// shares the main tree.
+pub fn add(dir: &Path, name: &str, taken: &[Ports], asked: bool) -> Result<Option<Fresh>, String> {
     let settings = file::worktrees(dir);
-    if !settings.enabled {
+    if !settings.enabled && !asked {
         return Ok(None);
     }
     let Some(place) = main_tree(dir) else {

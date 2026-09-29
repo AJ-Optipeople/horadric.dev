@@ -50,6 +50,7 @@ use horadric_core::background::Asked;
 use horadric_core::diff::{self as changes, Diff, FileDiff, Recount};
 use horadric_core::fleet::{self, Device};
 use horadric_core::journal::{self, Entry, What};
+use horadric_core::overlap::Overlap;
 use horadric_core::release::{self, Manifest};
 use horadric_core::ssh;
 use horadric_core::usage::has_flag;
@@ -1457,9 +1458,11 @@ fn project_menu(key: &str) {
     const CODE: usize = 7;
     const EXPLORE: usize = 8;
     const OTHER_HOST: usize = 9;
-    const WORKTREES: usize = 10;
+    const ADD_TREE: usize = 6;
+    const TRUNK: usize = 10;
     const SSH_FIND: usize = 11;
     const CLOSE: usize = 12;
+    const BRANCHES: usize = 13;
     const SSH: usize = 20;
     const PAST: usize = 100;
     const SUGGEST: usize = 200;
@@ -1501,14 +1504,18 @@ fn project_menu(key: &str) {
     suggested.retain(|h| !hosts.contains(h));
     let offering = suggested.len() <= MENU_HOSTS;
     merges.truncate(MERGE_END - MERGE);
-    let mut items = vec![
-        Item::action(ADD, "New session"),
+    let mut items = vec![Item::action(ADD, "New session")];
+    // In trunk mode a worktree is had by asking for one.
+    if own_trees == Some(false) {
+        items.push(Item::action(ADD_TREE, "New session in its own worktree"));
+    }
+    items.extend([
         Item::Submenu("History".into(), history_items(&past, PAST)),
         Item::action(START_BATCH, format!("Start {BATCH} sessions")),
         Item::action(START_OVER, format!("Start over with {BATCH} sessions")),
         Item::Separator,
         Item::action(SHELL, "New terminal\tCtrl+Shift+T"),
-    ];
+    ]);
     for (i, host) in listed.iter().enumerate() {
         items.push(Item::action(SSH + i, format!("SSH to {host}")));
     }
@@ -1531,11 +1538,21 @@ fn project_menu(key: &str) {
     if let Some(on) = own_trees {
         items.extend([
             Item::Separator,
-            Item::Action {
-                id: WORKTREES,
-                label: "A worktree for each new session".into(),
-                checked: on,
-            },
+            Item::Submenu(
+                "Work mode".into(),
+                vec![
+                    Item::Action {
+                        id: TRUNK,
+                        label: "Trunk: sessions share the tree and commit on it".into(),
+                        checked: !on,
+                    },
+                    Item::Action {
+                        id: BRANCHES,
+                        label: "Branch per session: each in a worktree of its own".into(),
+                        checked: on,
+                    },
+                ],
+            ),
         ]);
     }
     if !merges.is_empty() {
@@ -1572,9 +1589,8 @@ fn project_menu(key: &str) {
             return ask_host(key, dir, if offering { &[] } else { &suggested });
         }
         (Some(SSH_FIND), Some(_)) => return ssh_to(key, &hosts, &devices),
-        (Some(WORKTREES), Some(dir)) => {
-            let on = own_trees.unwrap_or(false);
-            if let Err(e) = horadric_hooks::tasks::set_worktrees(dir, !on) {
+        (Some(i @ (TRUNK | BRANCHES)), Some(dir)) => {
+            if let Err(e) = horadric_hooks::tasks::set_worktrees(dir, i == BRANCHES) {
                 eprintln!("horadric: cannot write the project's config: {e}");
             }
             return;
@@ -1587,6 +1603,13 @@ fn project_menu(key: &str) {
     }
     with_app(|app| match picked {
         Some(ADD) => app.add_sessions(key, 1),
+        Some(ADD_TREE) => {
+            if let Some(dir) = app.project_dir(key) {
+                if let Err(e) = app.start_in(None, dir, Vec::new(), true) {
+                    eprintln!("horadric: cannot start session: {e}");
+                }
+            }
+        }
         Some(START_BATCH) => app.add_sessions(key, BATCH),
         Some(START_OVER) => app.start_over(key, BATCH),
         Some(END_ALL) => app.end_all(Some(key)),
@@ -2148,6 +2171,7 @@ impl App {
                             self.refresh_boards(true);
                             self.run_tasks();
                         }
+                        Command::Overlap(o) => self.overlapped(&o),
                     }
                 }
             }
@@ -2469,6 +2493,18 @@ impl App {
         cwd: PathBuf,
         args: Vec<String>,
     ) -> Result<String, String> {
+        self.start_in(name, cwd, args, false)
+    }
+
+    /// [`App::start`], in a worktree of its own when `own_tree` even where
+    /// the project works in one shared tree.
+    fn start_in(
+        &mut self,
+        name: Option<String>,
+        cwd: PathBuf,
+        args: Vec<String>,
+        own_tree: bool,
+    ) -> Result<String, String> {
         if !cwd.is_dir() {
             return Err(format!("{} is not a directory", cwd.display()));
         }
@@ -2477,7 +2513,7 @@ impl App {
         let id = self.unique_id(&base);
         let branch = name.as_deref().unwrap_or("session").to_string();
         let shown = name.unwrap_or(folder);
-        let cwd = self.own_tree(&id, &branch, cwd, &args);
+        let cwd = self.own_tree(&id, &branch, cwd, &args, own_tree);
         if let Err(e) = self.launch(&id, &shown, cwd, args, Run::Agent, false) {
             // A worktree the session never started in holds nothing.
             if let Some((w, _)) = self.new_trees.remove(&id) {
@@ -2498,17 +2534,24 @@ impl App {
     }
 
     /// Where a new session starts: a worktree of its own added from `cwd`,
-    /// or `cwd` itself when the project keeps one shared tree, is not in a
-    /// repository, or `args` carry on a conversation, which Claude Code
-    /// keeps by the folder it was held in.
-    fn own_tree(&mut self, id: &str, branch: &str, cwd: PathBuf, args: &[String]) -> PathBuf {
+    /// or `cwd` itself when the project is in trunk mode and none was
+    /// `asked` for, is not in a repository, or `args` carry on a
+    /// conversation, which Claude Code keeps by the folder it was held in.
+    fn own_tree(
+        &mut self,
+        id: &str,
+        branch: &str,
+        cwd: PathBuf,
+        args: &[String],
+        asked: bool,
+    ) -> PathBuf {
         let carries_on = ["--resume", "-r", "--continue", "-c"]
             .iter()
             .any(|f| has_flag(args, f));
         if carries_on {
             return cwd;
         }
-        match worktree::add(&cwd, branch, &self.ports_taken()) {
+        match worktree::add(&cwd, branch, &self.ports_taken(), asked) {
             Ok(Some(fresh)) => {
                 // The project is where it was asked for, not the worktree.
                 recent::remember(&mut self.recent, &cwd.to_string_lossy());
@@ -3872,6 +3915,37 @@ impl App {
             self.tasks.merge_for = None;
             self.toasts.show(Kind::Waiting, &a.title, &a.text);
         }
+    }
+
+    /// Two sessions changed the same file in one tree. The agent was told
+    /// in its hook's reply; this tells the human, and a click shows the
+    /// session that edited last. Only for sessions this app holds: the
+    /// installed Horadric hears a dev instance's hooks first.
+    fn overlapped(&mut self, o: &Overlap) {
+        let names: Option<(String, Vec<String>)> = self.shared.registry.lock().ok().and_then(|r| {
+            let me = r.get(&o.session)?.label().to_string();
+            let others = o
+                .others
+                .iter()
+                .filter_map(|id| r.get(id).map(|s| s.label().to_string()))
+                .collect();
+            Some((me, others))
+        });
+        let Some((me, others)) = names.filter(|(_, others)| !others.is_empty()) else {
+            return;
+        };
+        let file = o.file.rsplit(['/', '\\']).next().unwrap_or(&o.file);
+        self.alert_for = Some(o.session.clone());
+        self.tasks.merge_for = None;
+        self.toasts.show(
+            Kind::Waiting,
+            &format!("Two sessions in {file}"),
+            &format!(
+                "{me} changed {file}, which {} changed too and has not committed. \
+                 {me} was told to keep their changes.",
+                others.join(" and ")
+            ),
+        );
     }
 
     /// The notification was clicked: show the session it was about, or,

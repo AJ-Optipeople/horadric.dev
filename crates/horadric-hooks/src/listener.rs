@@ -10,9 +10,11 @@
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::mpsc::Sender;
+use std::sync::{Mutex, OnceLock};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
+use horadric_core::overlap::{self, Claims, Overlap};
 use horadric_core::{HookEvent, Status};
 use serde_json::{json, Value};
 
@@ -115,6 +117,9 @@ pub enum Command {
     New(NewSession),
     Reload(Reload),
     Tasks(TasksChanged),
+    /// A session edited a file another session changed and has not
+    /// committed, in the same working tree.
+    Overlap(Overlap),
 }
 
 /// Starts listening on 127.0.0.1 and forwards every tagged event on `tx`,
@@ -261,8 +266,23 @@ fn handle(
         return respond(&mut stream, "200 OK");
     }
 
-    // Reply before parsing. The agent should not wait on us for anything.
-    respond(&mut stream, "200 OK")?;
+    // Parsing is all that happens before the reply, which tells an agent
+    // that just edited a file another session is still changing.
+    let parsed = HookEvent::from_json(&body);
+    let overlap = match &parsed {
+        Ok(event) => claims()
+            .lock()
+            .ok()
+            .and_then(|mut c| c.hear(&horadric_id, event, SystemTime::now())),
+        Err(_) => None,
+    };
+    match &overlap {
+        Some(o) => respond_with(&mut stream, "200 OK", &overlap::reply(&overlap::context(o)))?,
+        None => respond(&mut stream, "200 OK")?,
+    }
+    if let (Some(o), Some(commands)) = (overlap, commands) {
+        let _ = commands.send(Command::Overlap(o));
+    }
 
     // Untagged events are kept too: a background session whose daemon was
     // started outside Horadric has no tag, and the app asks Claude Code
@@ -275,7 +295,7 @@ fn handle(
         let _ = client::post(owner, HOOK_PATH, &[(SESSION_HEADER, &horadric_id)], &body);
         return Ok(());
     }
-    if let Ok(mut event) = HookEvent::from_json(&body) {
+    if let Ok(mut event) = parsed {
         if event.may_retitle() {
             event.title = transcript::title(&event.transcript_path);
         }
@@ -284,9 +304,20 @@ fn handle(
     Ok(())
 }
 
+/// Who changed which file, across every session this listener hears.
+fn claims() -> &'static Mutex<Claims> {
+    static CLAIMS: OnceLock<Mutex<Claims>> = OnceLock::new();
+    CLAIMS.get_or_init(Default::default)
+}
+
 fn respond(stream: &mut TcpStream, status: &str) -> io::Result<()> {
+    respond_with(stream, status, "{}")
+}
+
+fn respond_with(stream: &mut TcpStream, status: &str, body: &str) -> io::Result<()> {
     let reply = format!(
-        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}"
+        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
     );
     stream.write_all(reply.as_bytes())?;
     stream.flush()
@@ -339,6 +370,19 @@ mod tests {
         let got = rx.recv_timeout(Duration::from_secs(2)).unwrap();
         assert_eq!(got.horadric_id, "tile-7");
         assert_eq!(got.event.hook_event_name, "Stop");
+    }
+
+    #[test]
+    fn an_edit_to_a_file_another_session_changed_is_answered_with_a_warning() {
+        let (port, _rx) = start();
+        let edit = r#"{"session_id":"c","hook_event_name":"PostToolUse","tool_name":"Edit",
+            "tool_input":{"file_path":"C:/listener-test/shared.rs"}}"#;
+        let first = post(port, "X-Horadric-Session: one\r\n", edit);
+        assert!(first.ends_with("\r\n\r\n{}"), "{first}");
+        let second = post(port, "X-Horadric-Session: two\r\n", edit);
+        assert!(second.starts_with("HTTP/1.1 200"), "{second}");
+        assert!(second.contains("additionalContext"), "{second}");
+        assert!(second.contains("C:/listener-test/shared.rs"), "{second}");
     }
 
     #[test]

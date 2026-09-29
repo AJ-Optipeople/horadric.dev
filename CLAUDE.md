@@ -44,11 +44,16 @@ Do not reopen these without asking. They were argued through and chosen.
   and CI alike. Moving it is a commit of its own, with whatever new
   clippy lints it brings fixed in the same commit.
 - Commit messages: one line saying what changed, a blank line, then why.
-- Work lands on `main`. When a piece of work is finished, and always
-  before shipping, merge its branch into `main`. No branch is left with
-  work `main` lacks. From a worktree: merge `main` into the branch first
-  if it has moved, run the three checks again, then `git -C
-  <main checkout> merge --ff-only <branch>`.
+- Work lands on `main`. This repository is in trunk mode: sessions share
+  the main checkout and commit on `main` directly, small and often,
+  staging only their own files by name. Other agents may be editing
+  beside you, so never `git add -A`, `git stash` or `git checkout --` a
+  file you did not change. A worktree only when the human asks for one.
+- When you are in a worktree anyway (you were asked, or it is a tomb or
+  a parallel task), finish by merging it into `main`: merge `main` into
+  the branch first if it has moved, run the three checks again, then
+  `git -C <main checkout> merge --ff-only <branch>`. No branch is left
+  with work `main` lacks.
 
 ## Verifying Windows code
 
@@ -56,7 +61,7 @@ Tests cannot tell you a window looks right. The loop that works:
 
 1. Always test as a dev instance: `HORADRIC_DEV=1`. It listens on 43118,
    keeps its state in `%APPDATA%\Horadric-dev`, never turns on autostart, has
-   a red topped tray icon, and refuses `install`, `uninstall` and hook or Explorer
+   a red lit tray icon, and refuses `install`, `uninstall` and hook or Explorer
    changes. The installed Horadric keeps running beside it.
 2. Stop only the dev build, never every `horadric.exe`. You may be running
    inside a terminal of the installed one, and killing it kills you.

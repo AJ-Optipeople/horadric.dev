@@ -226,7 +226,10 @@ new project, so three ways in that need no terminal:
   recent projects one click away, and Quit, which warns when sessions in
   Horadric terminals would end. Recent projects live in
   `%APPDATA%\Horadric\recent.json`. The tooltip counts sessions and waiting
-  ones. The icon is drawn in code (`icon.rs`), so there is no file to ship.
+  ones. The icon is drawn in code (`icon.rs`), so there is no file to ship:
+  a dark cube with its lid lifted and light pouring out. One colour lights
+  it (gold, red for a dev instance), and `icon::lit` takes any other, so
+  the light can later follow what Horadric is doing.
   Pulled forward from step 5.
 - **The full width `+` below a cluster's last tile** starts another session
   in that project at once, no picker. It is outlined, not filled, so it
@@ -445,7 +448,7 @@ a dev instance:
   already live in the installed Horadric.
 - No autostart offer and no switch for it in the tray. The first dev run
   used to point the `Run` key at `target\debug\horadricw.exe`.
-- A red topped tray icon and "Horadric dev" in the tooltip.
+- A red lit tray icon and "Horadric dev" in the tooltip.
 - `install`, `uninstall` and the hook and Explorer installers refuse to run.
 
 The hook URL is fixed at install time, so a `claude` in a dev terminal
@@ -2159,8 +2162,10 @@ title, and each paint of a cluster clones its sessions twice.
 - Worktrees must be optional per project. A session that wants the shared
   working tree, or is not in a repo at all, has to keep working.
 
-Built so far: the project key resolves to the main working tree, each new
-session gets a worktree of its own, and its tile shows what it changed.
+Built so far: the project key resolves to the main working tree, a project
+works in trunk mode or with a branch per session, a session in a worktree
+has a tile that shows what it changed, and sessions in one tree are told
+when they edit the same file.
 
 - **Where.** A new session started from a repository's main working tree
   (the plus, the project menu, the start window, `horadric new`) runs `git
@@ -2174,9 +2179,39 @@ session gets a worktree of its own, and its tile shows what it changed.
   folder already in a linked worktree, outside a repository, or a git that
   refuses, keeps the shared tree.
 - **Config.** `.horadric/config.json`, read from the main tree since it may
-  be kept out of git: `"worktrees": {"setup": [...], "ports": 10}`. On by
-  default. `"worktrees": false` or `"enabled": false` keeps the shared tree,
-  and "A worktree for each new session" in the project menu switches it.
+  be kept out of git: `"worktrees": {"enabled": true, "setup": [...],
+  "ports": 10}`. Without `enabled` the project is in trunk mode, see work
+  modes below, and `setup` and `ports` apply to the worktrees it asks for.
+- **Work modes.** A worktree for every session was the default, and it
+  got in the way. The human mostly works on one branch, committing and
+  pushing often, and says "build", "show on dev" or "ship" expecting all
+  of today's work. With a worktree per session that work sat on branches
+  not merged yet, or not committed, and it was hard to tell which. So a
+  project now works in one of two modes, picked under Work mode in the
+  project menu. **Trunk**, the default: every session starts in the main
+  tree, and its system prompt says the tree is shared, to commit small and
+  often on the branch that is checked out, to stage only its own files by
+  name and never `git add -A`, to push when there is an upstream, and not
+  to make branches unasked (`worktree::trunk_prompt`). A worktree is had by
+  asking: "New session in its own worktree" in the project menu, tombs,
+  and task items run side by side, which get one in either mode since
+  they would edit the same files. **Branch per session**: every new
+  session gets a worktree, as below. Switching writes `enabled` into the
+  config and changes only the sessions started after.
+- **Overlaps.** In a shared tree two agents can overwrite each other. The
+  listener claims each file a session edits (`Edit`, `Write`,
+  `MultiEdit`, `NotebookEdit`) for it until it commits or ends, or four
+  hours pass (`overlap::Claims`, pure and tested). An edit to a file
+  another session claims is answered, in the reply to that `PostToolUse`
+  hook, with `additionalContext` telling the agent another session
+  changed the file and has not committed, to look at `git diff` before
+  changing it further, keep what is theirs and stage only its own
+  changes. Once per file and set of others, so an agent editing a file
+  ten times hears it once. The app shows a toast with both sessions'
+  names, and a click shows the one that edited last. Paths are compared
+  whole, so sessions in worktrees of their own never overlap. The
+  installed Horadric hears a dev instance's hooks first and answers them,
+  and toasts only for sessions it holds.
 - **Setup.** The commands run in the session's own pane before the agent,
   through `horadric setup <program> <args>`, which runs each with `cmd /d /s
   /c` and then starts the agent with its arguments exactly as given (a
