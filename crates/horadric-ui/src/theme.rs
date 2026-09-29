@@ -13,6 +13,9 @@
 //! A third job, how a session ended, is the colour of its name and only
 //! that: Diablo's item colours, printed like a legend, never lit.
 
+use std::cell::RefCell;
+use std::collections::BTreeMap;
+
 use horadric_core::rarity::Rarity;
 use horadric_core::{Phase, Session, WaitReason};
 
@@ -135,24 +138,88 @@ pub fn button_look(b: Button) -> (Option<Color>, Color) {
 
 /// Project colours: distinct from each other and from every phase colour,
 /// so an accent never reads as a state. Soft enough to sit beside text.
-pub const ACCENTS: [Color; 8] = [
-    Color::rgb(0xA78BFA), // violet
-    Color::rgb(0x818CF8), // indigo
-    Color::rgb(0xE879F9), // orchid
-    Color::rgb(0xF472B6), // pink
-    Color::rgb(0x2DD4BF), // teal
-    Color::rgb(0xBEF264), // lime
-    Color::rgb(0xE0976B), // copper
-    Color::rgb(0xFDA4AF), // rose
+/// Saved by their place here, so new ones go on the end.
+pub const ACCENTS: [(Color, &str); 8] = [
+    (Color::rgb(0xA78BFA), "Violet"),
+    (Color::rgb(0x818CF8), "Indigo"),
+    (Color::rgb(0xE879F9), "Orchid"),
+    (Color::rgb(0xF472B6), "Pink"),
+    (Color::rgb(0x2DD4BF), "Teal"),
+    (Color::rgb(0xBEF264), "Lime"),
+    (Color::rgb(0xE0976B), "Copper"),
+    (Color::rgb(0xFDA4AF), "Rose"),
 ];
 
-/// A project's colour, the same every time for the same key.
+thread_local! {
+    /// Each project's colour once given, by project key, as its place in
+    /// [`ACCENTS`]. Kept for good, since a project is known by its colour.
+    static GIVEN: RefCell<BTreeMap<String, usize>> = const { RefCell::new(BTreeMap::new()) };
+}
+
+/// A project's colour: the one it was given, or the one its key hashes to
+/// until it is given one.
 pub fn accent(key: &str) -> Color {
+    ACCENTS[accent_index(key)].0
+}
+
+/// A project's colour as its place in [`ACCENTS`].
+pub fn accent_index(key: &str) -> usize {
+    GIVEN
+        .with(|g| g.borrow().get(key).copied())
+        .filter(|&i| i < ACCENTS.len())
+        .unwrap_or_else(|| hashed(key))
+}
+
+/// Gives a project with no colour yet the one fewest of the `open`
+/// projects wear, so projects side by side stand apart. True when it was
+/// given one.
+pub fn give_accent(key: &str, open: &[&str]) -> bool {
+    if GIVEN.with(|g| g.borrow().contains_key(key)) {
+        return false;
+    }
+    let worn: Vec<usize> = open
+        .iter()
+        .filter(|&&k| k != key)
+        .map(|k| accent_index(k))
+        .collect();
+    let i = least_worn(hashed(key), &worn);
+    GIVEN.with(|g| g.borrow_mut().insert(key.to_string(), i));
+    true
+}
+
+/// Paints a project in the colour picked from its menu.
+pub fn set_accent(key: &str, i: usize) {
+    GIVEN.with(|g| g.borrow_mut().insert(key.to_string(), i));
+}
+
+/// Every project's colour, to save.
+pub fn accents() -> BTreeMap<String, usize> {
+    GIVEN.with(|g| g.borrow().clone())
+}
+
+/// The colours saved last time.
+pub fn set_accents(saved: &BTreeMap<String, usize>) {
+    GIVEN.with(|g| *g.borrow_mut() = saved.clone());
+}
+
+/// The colour the fewest of `worn` are, ties going to `first` and the
+/// ones after it, so a project keeps the colour its key hashes to when no
+/// one else wears it.
+pub fn least_worn(first: usize, worn: &[usize]) -> usize {
+    let n = ACCENTS.len();
+    (0..n)
+        .map(|k| (first + k) % n)
+        .min_by_key(|&i| worn.iter().filter(|&&w| w == i).count())
+        .unwrap_or(first % n)
+}
+
+/// The colour a key hashes to, the same every time.
+fn hashed(key: &str) -> usize {
     // FNV-1a: tiny, and stable across runs and builds, unlike std's hasher.
     let hash = key.bytes().fold(0x811c_9dc5u32, |h, b| {
         (h ^ b as u32).wrapping_mul(0x0100_0193)
     });
-    ACCENTS[hash as usize % ACCENTS.len()]
+    hash as usize % ACCENTS.len()
 }
 
 /// A plain terminal's tile, and the button that opens one.
@@ -432,13 +499,7 @@ mod tests {
     fn a_project_keeps_its_accent_and_projects_spread_over_them() {
         assert_eq!(accent("c:/code/horadric"), accent("c:/code/horadric"));
         let keys = ["a", "b", "c", "horadric", "purrch", "opticore", "x/y", "zz"];
-        let distinct: std::collections::HashSet<u32> = keys
-            .iter()
-            .map(|k| {
-                let c = accent(k);
-                ((c.r * 255.0) as u32) << 16 | ((c.g * 255.0) as u32) << 8 | (c.b * 255.0) as u32
-            })
-            .collect();
+        let distinct: std::collections::HashSet<usize> = keys.iter().map(|k| hashed(k)).collect();
         assert!(
             distinct.len() >= 4,
             "eight keys landed on {}",
@@ -447,8 +508,40 @@ mod tests {
     }
 
     #[test]
+    fn a_new_project_takes_the_colour_fewest_wear() {
+        assert_eq!(least_worn(3, &[]), 3, "its own when no one wears it");
+        assert_eq!(least_worn(3, &[0, 1, 2]), 3);
+        assert_eq!(least_worn(3, &[3]), 4, "the next when taken");
+        assert_eq!(least_worn(7, &[7]), 0, "round past the end");
+        let all: Vec<usize> = (0..ACCENTS.len()).collect();
+        assert_eq!(least_worn(2, &all), 2, "shared once every one is worn");
+        let mut twice = all.clone();
+        twice.extend([2, 3]);
+        assert_eq!(least_worn(2, &twice), 4);
+    }
+
+    #[test]
+    fn open_projects_are_given_colours_apart_and_keep_them() {
+        set_accents(&BTreeMap::new());
+        let keys: Vec<String> = (0..ACCENTS.len()).map(|i| format!("p{i}")).collect();
+        let mut open: Vec<&str> = Vec::new();
+        for k in &keys {
+            assert!(give_accent(k, &open));
+            open.push(k);
+        }
+        let worn: std::collections::HashSet<usize> = keys.iter().map(|k| accent_index(k)).collect();
+        assert_eq!(worn.len(), ACCENTS.len());
+        let before = accent_index("p0");
+        assert!(!give_accent("p0", &[]));
+        assert_eq!(accent_index("p0"), before);
+        set_accent("p0", 5);
+        assert_eq!(accent_index("p0"), 5);
+        assert_eq!(accents().get("p0"), Some(&5));
+    }
+
+    #[test]
     fn no_accent_is_a_phase_colour() {
-        for a in ACCENTS {
+        for (a, _) in ACCENTS {
             for p in [WORKING, WAITING, ERROR, DONE, IDLE] {
                 let d = (a.r - p.r).abs() + (a.g - p.g).abs() + (a.b - p.b).abs();
                 assert!(d > 0.25, "{a:?} is too close to {p:?}");

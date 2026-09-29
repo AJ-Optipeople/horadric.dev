@@ -457,6 +457,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
 
     let saved = store::load();
     web::set_sizes(&saved.page_sizes);
+    theme::set_accents(&saved.accents);
     web::set_docks(&saved.page_docks);
     let mut registry = Registry::new();
     let now = SystemTime::now();
@@ -1800,6 +1801,7 @@ fn project_menu(key: &str) {
     const SUGGEST_END: usize = 300;
     const MERGE: usize = 300;
     const MERGE_END: usize = 400;
+    const COLOUR: usize = 400;
     let dir = with_app(|app| app.project_dir(key)).flatten();
     // Reading transcripts and asking git are the slow part of opening the
     // menu, so they are done side by side.
@@ -1887,6 +1889,22 @@ fn project_menu(key: &str) {
             ),
         ]);
     }
+    let worn = theme::accent_index(key);
+    items.extend([
+        Item::Separator,
+        Item::Submenu(
+            "Colour".into(),
+            theme::ACCENTS
+                .iter()
+                .enumerate()
+                .map(|(i, (_, name))| Item::Action {
+                    id: COLOUR + i,
+                    label: (*name).into(),
+                    checked: i == worn,
+                })
+                .collect(),
+        ),
+    ]);
     if !merges.is_empty() {
         let into = merges
             .first()
@@ -1951,6 +1969,9 @@ fn project_menu(key: &str) {
         Some(i) if (SSH..PAST).contains(&i) => app.open_ssh(key, &listed[i - SSH], None),
         Some(i) if (MERGE..MERGE_END).contains(&i) => {
             app.merge(&merges[i - MERGE]);
+        }
+        Some(i) if (COLOUR..COLOUR + theme::ACCENTS.len()).contains(&i) => {
+            app.recolour(key, i - COLOUR);
         }
         Some(CODE) => {
             if let Some(dir) = app.project_dir(key) {
@@ -4205,6 +4226,21 @@ impl App {
         self.end_all(Some(key));
     }
 
+    /// Paints the project in another colour: its cluster, its stash and
+    /// cube slots, and the stage while it shows the project.
+    fn recolour(&mut self, key: &str, i: usize) {
+        theme::set_accent(key, i);
+        for c in self.clusters.iter().filter(|c| c.key == key) {
+            c.invalidate();
+        }
+        if self.stage.as_ref().is_some_and(|s| s.project() == key) {
+            self.fill_stage(key);
+        }
+        self.sync_stash();
+        self.sync_cube();
+        self.save();
+    }
+
     /// Starts `n` more sessions in the project with this key.
     fn add_sessions(&mut self, key: &str, n: usize) {
         let Some(dir) = self.project_dir(key) else {
@@ -5163,6 +5199,7 @@ impl App {
             live: !self.quit,
             recovering: self.recovering.is_some(),
             page_sizes: web::sizes(),
+            accents: theme::accents(),
             page_docks: web::docks(),
             update_told: self.update_told.clone(),
             ..Default::default()
@@ -5237,6 +5274,8 @@ impl App {
             if self.clusters.iter().any(|c| &c.key == key) {
                 continue;
             }
+            let open: Vec<&str> = self.clusters.iter().map(|c| c.key.as_str()).collect();
+            theme::give_accent(key, &open);
             match Cluster::create(
                 Rc::clone(&self.shared),
                 key.clone(),

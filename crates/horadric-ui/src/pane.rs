@@ -299,7 +299,7 @@ impl Pane {
             kitty_down: RefCell::new(Vec::new()),
             wheel: Cell::new(0),
             hwheel: Cell::new(0),
-            accent: Cell::new(theme::ACCENTS[0]),
+            accent: Cell::new(theme::ACCENTS[0].0),
             dim: Cell::new(0.0),
             dimmed: Cell::new(false),
             shown: Cell::new(None),

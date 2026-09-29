@@ -68,6 +68,10 @@ pub struct SavedState {
     /// where it is not in it.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub page_docks: BTreeMap<String, Dock>,
+    /// Each project's colour, by project key, as its place in the list of
+    /// project colours.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub accents: BTreeMap<String, usize>,
     /// Model, effort and permission mode for the sessions Horadric starts.
     #[serde(default)]
     pub defaults: Defaults,
