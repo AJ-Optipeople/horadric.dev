@@ -19,6 +19,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -29,6 +30,7 @@ use alacritty_terminal::index::{Boundary, Column, Direction, Line, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::search::{Match, RegexSearch};
 use alacritty_terminal::term::{Term, TermMode};
+use alacritty_terminal::vte::ansi::Rgb;
 use windows::core::{w, Result, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::LOGFONTW;
@@ -40,40 +42,43 @@ use windows::Win32::UI::Input::Ime::{
     ImmSetCompositionWindow, CANDIDATEFORM, CFS_EXCLUDE, CFS_POINT, COMPOSITIONFORM,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, MapVirtualKeyW, ReleaseCapture, SetCapture, SetFocus, MAPVK_VK_TO_CHAR,
-    VIRTUAL_KEY, VK_CONTROL, VK_DELETE, VK_DOWN, VK_END, VK_F1, VK_F12, VK_F3, VK_F4, VK_HOME,
-    VK_INSERT, VK_LEFT, VK_MENU, VK_NEXT, VK_PRIOR, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_UP,
+    GetKeyState, MapVirtualKeyW, ReleaseCapture, SetCapture, SetFocus, TrackMouseEvent,
+    MAPVK_VK_TO_CHAR, TME_LEAVE, TRACKMOUSEEVENT, VIRTUAL_KEY, VK_CONTROL, VK_DELETE, VK_DOWN,
+    VK_END, VK_F1, VK_F12, VK_F3, VK_F4, VK_HOME, VK_INSERT, VK_LEFT, VK_MENU, VK_NEXT, VK_PRIOR,
+    VK_RIGHT, VK_SHIFT, VK_SPACE, VK_UP,
 };
 use windows::Win32::UI::Shell::{DragAcceptFiles, DragFinish, HDROP};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetCaretBlinkTime, GetClientRect, GetCursorPos,
     GetParent, GetWindowLongPtrW, KillTimer, LoadCursorW, PeekMessageW, RegisterClassW,
     SendMessageW, SetCursor, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, CREATESTRUCTW,
-    CS_DBLCLKS, GWLP_USERDATA, HTCLIENT, IDC_ARROW, IDC_IBEAM, MSG, PM_NOREMOVE, PM_REMOVE,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOWNA, WINDOW_EX_STYLE,
-    WM_CAPTURECHANGED, WM_CHAR, WM_DEADCHAR, WM_DPICHANGED_AFTERPARENT, WM_DROPFILES,
-    WM_ERASEBKGND, WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS, WM_LBUTTONDBLCLK,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE,
-    WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR,
-    WM_SETFOCUS, WM_SIZE, WM_SYSCHAR, WM_SYSDEADCHAR, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER,
-    WM_USER, WNDCLASSW, WS_CHILD, WS_CLIPSIBLINGS, WS_VISIBLE,
+    CS_DBLCLKS, GWLP_USERDATA, HTCLIENT, IDC_ARROW, IDC_HAND, IDC_IBEAM, MSG, PM_NOREMOVE,
+    PM_REMOVE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOWNA,
+    WINDOW_EX_STYLE, WM_CAPTURECHANGED, WM_CHAR, WM_DEADCHAR, WM_DPICHANGED_AFTERPARENT,
+    WM_DROPFILES, WM_ERASEBKGND, WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS,
+    WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL,
+    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP,
+    WM_SETCURSOR, WM_SETFOCUS, WM_SIZE, WM_SYSCHAR, WM_SYSDEADCHAR, WM_SYSKEYDOWN, WM_SYSKEYUP,
+    WM_TIMER, WM_USER, WNDCLASSW, WS_CHILD, WS_CLIPSIBLINGS, WS_VISIBLE,
 };
 
 use crate::app::{self, Input};
 use crate::clipboard;
 use crate::console::{Console, GridSize};
+use crate::frame::{Decoration, Stroke};
 use crate::glyphs::{self, CellSize, FindBar, GridTarget, Header, HEADER_H};
 use crate::keys::{
     self, Button, CharAction, Chord, FontStep, Key, KeyEvent, Kitty, Mods, MouseEncoding,
     MouseEvent,
 };
 use crate::layout::Dir;
+use crate::links::{self, Target};
 use crate::motion::{self, REVEAL, SPOTLIGHT};
 use crate::paste::{self, Source};
 use crate::theme::{self, Color};
 use crate::viewer::Hit;
 use crate::window::Shared;
-use crate::{find, frame};
+use crate::{find, frame, watch};
 
 const CLASS: PCWSTR = w!("HoradricPane");
 const SYNC_TIMER: usize = 1;
@@ -89,6 +94,15 @@ const WHEEL_LINES: i32 = 3;
 const WHEEL_COL: i32 = 20;
 /// Columns an arrow key scrolls a file view sideways.
 const ARROW_COLS: isize = 4;
+/// In the Controls part of the Windows API, which is not worth the feature
+/// for one number.
+const WM_MOUSELEAVE: u32 = 0x02A3;
+/// The underline of the link under the mouse while Ctrl is held.
+const LINK: Rgb = Rgb {
+    r: 0x6C,
+    g: 0xB6,
+    b: 0xFF,
+};
 
 /// Sent to the stage when a pane gets the keyboard. `wparam` is its serial.
 pub const WM_PANE_FOCUS: u32 = WM_USER + 1;
@@ -167,6 +181,11 @@ pub struct Pane {
     /// where its blink starts: a cursor on the move stays lit.
     caret_at: Cell<Option<Point>>,
     caret_since: Cell<Instant>,
+    /// The cells of the link under the mouse while Ctrl is held, drawn
+    /// underlined.
+    link: RefCell<Option<Vec<Point>>>,
+    /// Whether Windows was asked to say when the mouse leaves.
+    tracking: Cell<bool>,
 }
 
 /// The keys that make no character, which `WM_CHAR` never carries.
@@ -227,6 +246,8 @@ impl Pane {
             focused: Cell::new(false),
             ime_at: Cell::new(None),
             selecting: Cell::new(false),
+            link: RefCell::new(None),
+            tracking: Cell::new(false),
             reported: Cell::new(None),
             moved_to: Cell::new(None),
             high_surrogate: Cell::new(None),
@@ -536,16 +557,39 @@ impl Pane {
         let plate = self.place_in_stage();
         let font = &self.shared.font;
         let cell = font.cell(dpi);
-        let (frame, at) = match self.console.screen.lock() {
+        let (mut frame, at, offset) = match self.console.screen.lock() {
             Ok(s) => {
                 let lit = self.caret_lit(&s.term);
                 let frame = frame::build(&s.term, self.focused.get(), lit, |c, style| {
                     font.glyph(c, style)
                 });
-                (frame, frame::cursor_cell(&s.term))
+                let offset = s.term.grid().display_offset() as i32;
+                (frame, frame::cursor_cell(&s.term), offset)
             }
             Err(_) => return,
         };
+        if let Some(cells) = self.link.borrow().as_ref() {
+            let rows = self.console.size().rows as i32;
+            for p in cells {
+                let row = p.line.0 + offset;
+                if !(0..rows).contains(&row) {
+                    continue;
+                }
+                let (row, col) = (row as usize, p.column.0);
+                match frame.strokes.last_mut() {
+                    Some(s) if s.color == LINK && s.row == row && s.col + s.cells == col => {
+                        s.cells += 1
+                    }
+                    _ => frame.strokes.push(Stroke {
+                        row,
+                        col,
+                        cells: 1,
+                        kind: Decoration::Underline,
+                        color: LINK,
+                    }),
+                }
+            }
+        }
         if let (true, Some((row, col))) = (self.focused.get(), at) {
             let rect = glyphs::cell_rect(self.header.get(), &cell, row, col, dpi as f32 / 96.0);
             if self.ime_at.replace(Some(rect)) != Some(rect) {
@@ -1292,6 +1336,84 @@ impl Pane {
         (col, row, side)
     }
 
+    /// The link under a client point while Ctrl is held: the cells it
+    /// takes and what it opens. A link a program made wins over the text.
+    fn link_at(&self, lparam: LPARAM) -> Option<(Vec<Point>, Target)> {
+        if !Self::mods().ctrl || self.in_header(lparam) {
+            return None;
+        }
+        let (point, _) = self.cell_at(lparam);
+        let probe = |p: &Path| std::fs::metadata(p).ok().map(|m| m.is_dir());
+        let (text, points, at, made) = {
+            let s = self.console.screen.lock().ok()?;
+            let (text, points, at) = links::line_at(&s.term, point)?;
+            let grid = s.term.grid();
+            let made = grid[points[at]].hyperlink().map(|link| {
+                let same = |i: &usize| grid[points[*i]].hyperlink().as_ref() == Some(&link);
+                let start = (0..=at).rev().take_while(same).last().unwrap_or(at);
+                let end = (at..points.len()).take_while(same).last().unwrap_or(at) + 1;
+                (start, end, link.uri().to_string())
+            });
+            (text, points, at, made)
+        };
+        if let Some((start, end, uri)) = made {
+            let target = links::from_uri(&uri, &probe)?;
+            return Some((points[start..end].to_vec(), target));
+        }
+        let home = std::env::var_os("USERPROFILE").map(PathBuf::from);
+        let base = links::Base {
+            cwd: self.console.cwd.as_deref(),
+            home: home.as_deref(),
+        };
+        let found = links::find(&text, at, &base, &probe)?;
+        Some((points[found.start..found.end].to_vec(), found.target))
+    }
+
+    /// Underlines the link under a client point, or nothing when there is
+    /// none or Ctrl is up.
+    fn hover(&self, lparam: Option<LPARAM>) {
+        let cells = lparam.and_then(|at| self.link_at(at)).map(|l| l.0);
+        if cells.is_some() && !self.tracking.replace(true) {
+            let mut track = TRACKMOUSEEVENT {
+                cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                dwFlags: TME_LEAVE,
+                hwndTrack: self.hwnd,
+                dwHoverTime: 0,
+            };
+            unsafe {
+                let _ = TrackMouseEvent(&mut track);
+            }
+        }
+        if *self.link.borrow() != cells {
+            *self.link.borrow_mut() = cells;
+            self.invalidate();
+        }
+    }
+
+    /// The mouse's client point, when it is over the pane.
+    fn mouse_here(&self) -> Option<LPARAM> {
+        let mut p = POINT::default();
+        let mut r = RECT::default();
+        unsafe {
+            let _ = GetCursorPos(&mut p);
+            let _ = ScreenToClient(self.hwnd, &mut p);
+            let _ = GetClientRect(self.hwnd, &mut r);
+        }
+        let inside = p.x >= 0 && p.y >= 0 && p.x < r.right && p.y < r.bottom;
+        inside.then_some(LPARAM(((p.y as u16 as isize) << 16) | p.x as u16 as isize))
+    }
+
+    /// Opens a link. VS Code gets the project, so the file opens in the
+    /// window that has it; a view's folder is no project.
+    fn open_link(&self, target: &Target) {
+        let root = self
+            .console
+            .cwd
+            .as_deref()
+            .filter(|_| !self.console.is_view());
+        watch::open_link(target, root);
+    }
+
     fn start_selection(&self, lparam: LPARAM, ty: SelectionType) {
         let (point, side) = self.cell_at(lparam);
         if let Ok(mut s) = self.console.screen.lock() {
@@ -1556,6 +1678,11 @@ impl Pane {
                         SetCursor(LoadCursorW(None, IDC_ARROW).ok());
                     }
                     Some(LRESULT(1))
+                } else if self.link.borrow().is_some() {
+                    unsafe {
+                        SetCursor(LoadCursorW(None, IDC_HAND).ok());
+                    }
+                    Some(LRESULT(1))
                 } else {
                     None
                 }
@@ -1585,6 +1712,9 @@ impl Pane {
             WM_KEYDOWN | WM_SYSKEYDOWN => {
                 // Bit 30 is set when the key was already down.
                 let repeat = lparam.0 & (1 << 30) != 0;
+                if wparam.0 == VK_CONTROL.0 as usize && !repeat {
+                    self.hover(self.mouse_here());
+                }
                 if self.on_key(wparam.0 as u16, Self::mods(), repeat) {
                     Some(LRESULT(0))
                 } else {
@@ -1592,6 +1722,9 @@ impl Pane {
                 }
             }
             WM_KEYUP | WM_SYSKEYUP => {
+                if wparam.0 == VK_CONTROL.0 as usize {
+                    self.hover(None);
+                }
                 self.on_key_up(wparam.0 as u16, Self::mods());
                 None
             }
@@ -1608,6 +1741,8 @@ impl Pane {
                     } else {
                         self.tell_stage(WM_PANE_GRAB);
                     }
+                } else if let Some((_, target)) = self.link_at(lparam) {
+                    self.open_link(&target);
                 } else if self.report_press(Button::Left, lparam) {
                 } else if msg == WM_LBUTTONDOWN {
                     self.start_selection(lparam, SelectionType::Simple);
@@ -1616,7 +1751,15 @@ impl Pane {
                 }
                 Some(LRESULT(0))
             }
+            WM_MOUSELEAVE => {
+                self.tracking.set(false);
+                self.hover(None);
+                Some(LRESULT(0))
+            }
             WM_MOUSEMOVE => {
+                if !self.selecting.get() {
+                    self.hover(Some(lparam));
+                }
                 if self.selecting.get() {
                     let (point, side) = self.cell_at(lparam);
                     if let Ok(mut s) = self.console.screen.lock() {

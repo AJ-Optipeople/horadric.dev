@@ -184,6 +184,20 @@ arrow keys, a prompt and its answer, resize, collapse and expand, `/exit`.
   encoded as 1006, 1005 or the old bytes) gets clicks, releases, the
   wheel and moves instead; Shift keeps a click for selecting, as in
   xterm.
+- **Links.** Ctrl+click opens what is under the mouse, and while Ctrl is
+  held that link is underlined and the cursor is a hand (`links.rs` finds
+  it, pure; `watch::open_link` opens it). A web address goes to the
+  browser, a folder to Explorer, a text file to VS Code with `-g` at the
+  line the text gave (`a.rs:12:5`, `a.rs(12,5)`), in the window that has
+  the project, anything else to what Windows opens it with, so a program
+  runs. A path counts only when it is on disk, relative ones against the
+  folder the session started in, which the console keeps for that. Quoted
+  text is tried whole first, for paths with spaces, and a line wrapped by
+  the terminal is read as one. Links a program made with OSC 8 are always
+  underlined and win over the text, but open only web pages and files
+  that are not programs: their text can say anything, and a click should
+  not run what it hid. Claude Code wraps long lines itself, with real
+  line breaks, so an address it splits over two rows is not rejoined.
 - **Lifetime.** Closing the window collapses: window and renderer go, the
   console and its grid stay, and the window comes back where it was. A
   clean exit closes the window; a failed one keeps it open so the error can

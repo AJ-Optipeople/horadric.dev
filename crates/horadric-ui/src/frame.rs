@@ -167,7 +167,8 @@ pub fn build<T: EventListener>(
 
         for (on, kind) in [
             (
-                flags.intersects(Flags::ALL_UNDERLINES),
+                // A link a program made shows as one, as in Windows Terminal.
+                flags.intersects(Flags::ALL_UNDERLINES) || cell.hyperlink().is_some(),
                 Decoration::Underline,
             ),
             (flags.contains(Flags::STRIKEOUT), Decoration::Strike),

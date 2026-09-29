@@ -10,7 +10,8 @@
 //! index, which the watcher would see as a change, and scan again, forever.
 
 use std::collections::HashSet;
-use std::ffi::c_void;
+use std::ffi::{c_void, OsStr};
+use std::io::Read;
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -33,6 +34,8 @@ use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, SW_SHOWNORMAL};
 
 use crate::files::{self, Tree};
+use crate::links::{self, Target};
+use crate::viewer;
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 /// How long the files must be quiet before git runs again.
@@ -228,6 +231,66 @@ pub fn open(root: &Path, rel: &str) {
             PCWSTR(wide.as_ptr()),
             None,
             None,
+            SW_SHOWNORMAL,
+        );
+    }
+}
+
+/// Opens what a link in a pane points at. A text file goes to VS Code at
+/// its line, in the window that has `root` open; anything else, and every
+/// file without VS Code, to whatever Windows opens it with. A program runs.
+pub fn open_link(target: &Target, root: Option<&Path>) {
+    let (path, line) = match target {
+        Target::Web(url) => return shell_open(OsStr::new(url), None),
+        Target::Folder(dir) => return explore(dir),
+        Target::File(path, line) => (path, *line),
+    };
+    if !links::is_program(path) && is_text(path) {
+        if let Some(code) = vs_code() {
+            let at = match line {
+                Some(n) => format!("{}:{n}", path.display()),
+                None => path.display().to_string(),
+            };
+            let mut cmd = Command::new(code);
+            if let Some(root) = root {
+                cmd.arg(root);
+            }
+            let spawned = cmd
+                .arg("-g")
+                .arg(at)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn();
+            match spawned {
+                Ok(_) => return,
+                Err(e) => eprintln!("horadric: cannot start VS Code: {e}"),
+            }
+        }
+    }
+    shell_open(path.as_os_str(), path.parent());
+}
+
+/// Whether the start of a file reads as text.
+fn is_text(path: &Path) -> bool {
+    let mut head = [0u8; 8192];
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return false;
+    };
+    let n = f.read(&mut head).unwrap_or(0);
+    !viewer::is_binary(&head[..n])
+}
+
+fn shell_open(what: &OsStr, dir: Option<&Path>) {
+    let wide: Vec<u16> = what.encode_wide().chain([0]).collect();
+    let dir: Option<Vec<u16>> = dir.map(|d| d.as_os_str().encode_wide().chain([0]).collect());
+    unsafe {
+        ShellExecuteW(
+            None,
+            w!("open"),
+            PCWSTR(wide.as_ptr()),
+            None,
+            dir.as_ref().map_or(PCWSTR::null(), |d| PCWSTR(d.as_ptr())),
             SW_SHOWNORMAL,
         );
     }
