@@ -158,9 +158,10 @@ fn kept_title(path: &Path, modified: SystemTime, len: u64) -> Option<Title> {
     title
 }
 
-/// The title from the end of the file only. A menu is opening, so no
-/// reading a long transcript whole on the off chance.
-fn tail_title(path: &Path) -> Option<Title> {
+/// The title from the end of the file only, for a menu that is opening
+/// or a tool that just finished: no reading a long transcript whole on
+/// the off chance.
+pub fn tail_title(path: &Path) -> Option<Title> {
     let mut file = File::open(path).ok()?;
     let len = file.metadata().ok()?.len();
     read_from(&mut file, len.saturating_sub(TAIL)).and_then(|b| title::latest(&b))

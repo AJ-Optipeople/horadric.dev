@@ -112,6 +112,16 @@ impl HookEvent {
                 "SessionStart" | "UserPromptSubmit" | "Stop"
             )
     }
+
+    /// Whether the end of the transcript is worth a look for a title. The
+    /// first turn may run for an hour of tools, and Claude Code writes the
+    /// title early in it, so the tile would keep the folder name until the
+    /// turn ends. Only the end is read: this comes with every tool.
+    pub fn may_peek_title(&self) -> bool {
+        !self.is_subagent()
+            && !self.transcript_path.is_empty()
+            && self.hook_event_name == "PostToolUse"
+    }
 }
 
 #[cfg(test)]
@@ -130,5 +140,17 @@ mod tests {
         assert!(!e("PreToolUse", "t.jsonl", None).may_retitle());
         assert!(!e("Stop", "", None).may_retitle());
         assert!(!e("Stop", "t.jsonl", Some("sub")).may_retitle());
+    }
+
+    #[test]
+    fn a_tool_that_finished_peeks_at_the_title() {
+        let e = |name: &str, agent: Option<&str>| HookEvent {
+            transcript_path: "t.jsonl".into(),
+            agent_id: agent.map(str::to_string),
+            ..HookEvent::synthetic(name)
+        };
+        assert!(e("PostToolUse", None).may_peek_title());
+        assert!(!e("PreToolUse", None).may_peek_title());
+        assert!(!e("PostToolUse", Some("sub")).may_peek_title());
     }
 }

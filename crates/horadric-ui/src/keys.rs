@@ -248,6 +248,9 @@ pub enum CharAction {
     /// Ctrl+Shift+T: a new plain terminal in the project, as a new tab is
     /// in Windows Terminal. Plain Ctrl+T still reaches the program.
     NewShell,
+    /// Ctrl+Shift+B: the project's own browser. Plain Ctrl+B still reaches
+    /// the program.
+    Browse,
 }
 
 /// Maps a `WM_CHAR` (or `WM_SYSCHAR` when `mods.alt`) to its bytes.
@@ -258,6 +261,7 @@ pub fn char_action(c: char, mods: Mods) -> CharAction {
         '\u{3}' if mods.shift => return CharAction::Copy,
         '\u{3}' => return CharAction::CopyOrInterrupt,
         '\u{14}' if mods.shift && mods.ctrl => return CharAction::NewShell,
+        '\u{2}' if mods.shift && mods.ctrl => return CharAction::Browse,
         // Meta+Enter is the newline Claude Code understands everywhere.
         '\r' if mods.shift => out.extend_from_slice(b"\x1b\r"),
         '\t' if mods.shift => out.extend_from_slice(b"\x1b[Z"),
@@ -659,6 +663,8 @@ mod tests {
         assert_eq!(char_action('\u{3}', ctrl_shift), CharAction::Copy);
         assert_eq!(char_action('\u{14}', ctrl_shift), CharAction::NewShell);
         assert_eq!(char_action('\u{14}', CTRL), CharAction::Send(vec![0x14]));
+        assert_eq!(char_action('\u{2}', ctrl_shift), CharAction::Browse);
+        assert_eq!(char_action('\u{2}', CTRL), CharAction::Send(vec![0x02]));
     }
 
     #[test]

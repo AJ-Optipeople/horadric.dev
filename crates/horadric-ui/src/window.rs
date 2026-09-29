@@ -94,6 +94,8 @@ pub struct Shared {
     pub browsing: RefCell<HashSet<String>>,
     /// Written by the feeder thread as status lines arrive.
     pub usage: Arc<Mutex<Option<Usage>>>,
+    /// The Claude account in use, as the usage window names it.
+    pub account: RefCell<Option<String>>,
     pub defaults: RefCell<Defaults>,
     /// Each project's task list as last read, by project key.
     pub boards: RefCell<HashMap<String, Board>>,

@@ -298,6 +298,8 @@ fn handle(
     if let Ok(mut event) = parsed {
         if event.may_retitle() {
             event.title = transcript::title(&event.transcript_path);
+        } else if event.may_peek_title() {
+            event.title = transcript::tail_title(std::path::Path::new(&event.transcript_path));
         }
         let _ = tx.send(Tagged { horadric_id, event });
     }

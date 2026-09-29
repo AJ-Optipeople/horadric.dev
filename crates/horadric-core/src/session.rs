@@ -205,12 +205,24 @@ impl Session {
             self.phase,
             Phase::Idle | Phase::Done | Phase::Waiting(WaitReason::Input)
         );
-        let no_draft = match (typed, self.prompted_at) {
+        !self.shell && at_prompt && self.status.is_some() && self.no_draft(typed)
+    }
+
+    /// Whether the agent can be stopped and resumed, as switching accounts
+    /// does, without losing anything: it is not in the middle of a turn,
+    /// and nothing was typed since its last prompt went in. A question it
+    /// waits on comes back with the resume.
+    pub fn free_to_restart(&self, typed: Option<SystemTime>) -> bool {
+        !self.shell && !self.phase.mid_turn() && self.no_draft(typed)
+    }
+
+    /// Nothing typed into its terminal since the last prompt went in.
+    fn no_draft(&self, typed: Option<SystemTime>) -> bool {
+        match (typed, self.prompted_at) {
             (None, _) => true,
             (Some(t), Some(p)) => t <= p,
             (Some(_), None) => false,
-        };
-        !self.shell && at_prompt && self.status.is_some() && no_draft
+        }
     }
 
     /// A finished turn nobody has looked at. Its lamp stays lit until then.
@@ -261,14 +273,19 @@ impl Session {
         }
     }
 
-    /// Named after its folder, or after its id when adopted.
+    /// Named after its folder, or after its id when adopted. A session in
+    /// a worktree of its own is named after the project it was added
+    /// from, which the cluster shows just the same.
     fn name_is_default(&self) -> bool {
-        let folder = self
-            .cwd
-            .trim_end_matches(['/', '\\'])
-            .rsplit(['/', '\\'])
-            .next();
-        self.name == self.id || folder.is_some_and(|f| f.eq_ignore_ascii_case(&self.name))
+        let named_after = |path: &str| {
+            path.trim_end_matches(['/', '\\'])
+                .rsplit(['/', '\\'])
+                .next()
+                .is_some_and(|f| f.eq_ignore_ascii_case(&self.name))
+        };
+        self.name == self.id
+            || named_after(&self.cwd)
+            || self.worktree.as_ref().is_some_and(|w| named_after(&w.main))
     }
 
     /// Applies a hook event. Returns true when the phase changed.
@@ -851,6 +868,23 @@ mod tests {
     }
 
     #[test]
+    fn a_restart_waits_for_the_turn_and_any_draft_but_not_a_question() {
+        let t = |secs| SystemTime::UNIX_EPOCH + Duration::from_secs(secs);
+        let mut s = Session::new("g1", "x", "");
+        s.apply(&ev("SessionStart"), t(1));
+        assert!(s.free_to_restart(None), "no status line needed");
+        assert!(!s.free_to_restart(Some(t(2))), "typed, never sent");
+        s.apply(&ev("UserPromptSubmit"), t(3));
+        assert!(!s.free_to_restart(None), "mid turn");
+        s.apply(&ev("PermissionRequest"), t(4));
+        assert!(s.free_to_restart(Some(t(2))), "the question comes back");
+        s.apply(&ev("Stop"), t(5));
+        assert!(!s.free_to_restart(Some(t(6))), "a draft since");
+        s.shell = true;
+        assert!(!s.free_to_restart(None));
+    }
+
+    #[test]
     fn pause_and_register_bracket_a_restart() {
         let mut s = Session::new("g1", "x", "");
         s.apply(&ev("UserPromptSubmit"), now());
@@ -882,6 +916,19 @@ mod tests {
         let mut s = Session::new("g9", "g9", "C:/elsewhere");
         s.apply(&titled("Tile naming", false), now());
         assert_eq!(s.label(), "Tile naming");
+    }
+
+    #[test]
+    fn a_worktree_named_after_its_project_takes_claudes_title() {
+        let mut s = Session::new("h-1", "horadric.dev", "C:/Github/horadric.dev.session-3");
+        s.worktree = Some(Worktree {
+            path: "C:/Github/horadric.dev.session-3".into(),
+            main: "C:/Github/horadric.dev".into(),
+            branch: "session-3".into(),
+            ports: None,
+        });
+        s.apply(&titled("Account switching", false), now());
+        assert_eq!(s.label(), "Account switching");
     }
 
     #[test]

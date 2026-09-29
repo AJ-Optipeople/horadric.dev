@@ -5,6 +5,7 @@
 //! reads [`Session`]s out of a [`Registry`]. Everything here is testable
 //! without a terminal or a network.
 
+pub mod accounts;
 pub mod background;
 pub mod cube;
 pub mod diff;

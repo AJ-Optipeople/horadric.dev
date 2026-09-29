@@ -782,6 +782,40 @@ Edge to the front, and closing an Edge took the mark off its tile. The user's
 own Chrome was never touched. The hook costs no CPU to speak of: 16 ms in 5
 idle seconds.
 
+**A project's own browser.** Asked for because a browser the user opened
+by hand never snapped or followed the sessions. Still no web view: it is
+Edge, in a window Horadric manages the way it manages an agent's.
+
+- **Opening it.** Ctrl+Shift+B in any pane (`CharAction::Browse`, plain
+  Ctrl+B stays the program's) or "Browser" in the project menu. When the
+  project has a window of it open, that window comes to the front
+  instead.
+- **Which project.** Edge runs in a job Horadric makes for the project
+  (`browsers::open`), named after the instance and the profile so a
+  reloaded Horadric opens the same job instead of an empty one. The job
+  is joined right after the start rather than from the first
+  instruction: Edge's window comes long after. It leaves a session's job
+  when Horadric runs in one (a dev build started from a session), so that
+  session's Horadric does not take it.
+- **Its own profile**, in `%LOCALAPPDATA%\Horadric\browsers\<folder>-<hash>`.
+  Without one, Edge hands the start over to the Edge already running,
+  outside the job, and ends. With one, a second start for the project
+  hands over to the project's Edge, which is in the job, so the tab lands
+  there. The price is that logins are the profile's, not the user's own
+  Edge's. Edge signs in the Windows account by itself.
+- **Links.** A web address Ctrl+clicked in a pane opens as a tab in the
+  project's browser when it has one open, otherwise in the user's own.
+- It is placed and follows its project like an agent's, and has no tile
+  mark: it belongs to no one session.
+
+Tested on screen with a dev instance on its own port and `cmd.exe` sessions
+in two projects: Ctrl+Shift+B opened Edge beside the stage, again brought
+it forward without a second window, switching to the other project
+minimised it and a tile click brought it back, the other project got an
+Edge of its own on its own profile, and an `https://example.com` Ctrl+clicked
+there opened as a tab in it. Ctrl+Shift+B in a pane whose session had
+exited did nothing; not looked into.
+
 ### Plain terminals
 
 A project needs terminals that are not an agent: a dev server, a log, a
@@ -1004,6 +1038,69 @@ then one real `claude` running, picking Haiku 4.5 typed
 tested on screen: a draft holding a command back, and the keys on a list,
 since a scripted key goes to whatever has the focus. The draft rule is
 unit tested.
+
+### Accounts
+
+Asked for: several Claude Max subscriptions, logged in to all of them, and
+a switch between them without logging in again, while the sessions run.
+
+- **What a login is.** Claude Code keeps one. On Windows the token is in
+  `.credentials.json` under `claudeAiOauth`, beside the MCP servers'
+  tokens, and whose it is sits in `.claude.json` under `oauthAccount`.
+  Nothing else cares who is logged in: hooks, settings and conversations
+  are shared. So an account is that pair (`horadric_core::accounts`), and
+  a switch writes another pair in and leaves the rest of both files as it
+  was. `CLAUDE_CONFIG_DIR` per account was the other way, turned down: each
+  account would need the hooks, and a conversation could not be resumed on
+  another account.
+- **Kept logins** are in `accounts.dat` beside `state.json`, sealed with
+  DPAPI for this Windows user. Claude Code's own file is plain text, so
+  this is no weaker than what it copies.
+- **Watched, not asked.** The app reads the login at start and whenever
+  either file changes and has held still for a tick, since a login writes
+  them one after the other. A pair whose organizations disagree is a login
+  caught half written and is not kept, or the old account would get the
+  new one's token. A refreshed token replaces the kept one, and a `/login`
+  typed into any session adds its account.
+- **The Account row** sits under the settings in the usage window and
+  names the account in use. A click lists every account kept, with its
+  plan ("Max 20x"), Add account, and Forget for the others. Add account
+  opens `claude auth login` in a console of its own (a login, not a
+  session, so no pane), and once the new login lands the old one goes back,
+  so adding stops nothing. The new one is a pick away.
+- **Switching** is the hot part. A running `claude` holds its token in
+  memory, so every agent Horadric runs stops and resumes (`claude --resume
+  <id>`), which keeps its conversation. Each stops once
+  `Session::free_to_restart`: not mid turn, and nothing typed since its
+  last prompt, which could be a draft. A question it waits on comes back
+  with the resume. The files change only once every one has stopped: one
+  left on the old login would write its token back when it refreshes it.
+  Then all resume together, and the pane that had the keyboard gets it
+  back. While it waits, the list says for how many turns, and Switch now
+  stops them at once.
+- **Written over.** Any `claude` that read `.claude.json` before the switch
+  can write it back after with the old profile, Horadric's own `claude
+  agents` included. For 15 seconds after a switch the login is put back if
+  it is found changed.
+- **Limits are per account.** The ones shown go with the account leaving
+  and the arriving account's come back, so the window never shows one
+  account's numbers under another's name.
+- **A dev instance** switches only a Claude Code of its own, with
+  `CLAUDE_CONFIG_DIR` set, never the real login.
+
+Tested with a dev instance on its own port and `APPDATA`, a fake
+`CLAUDE_CONFIG_DIR` holding two made-up logins, and a `claude.cmd`
+standing in for the agent: the row named the account, a login written into
+the files from outside was picked up, and picking the other account
+stopped both sessions and resumed them on it, one process each, the
+conversation of one resumed by id, the MCP tokens left alone. A session
+made to work by a faked `UserPromptSubmit` held the switch after the idle
+one had stopped, the list said "after 1 turn", and its `Stop` finished it.
+Add account opened `claude auth login` and its browser page. Not tested:
+a real second subscription, which needs its owner to log in. Two things to
+watch on that first real switch: that `claude auth login` does not revoke
+the login it replaces, and that a resumed session really runs on the new
+account (`/status`).
 
 ### The look
 
