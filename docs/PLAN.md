@@ -2266,6 +2266,16 @@ through the rename too.
 - **The tile** says quests: "New quest", "Accept", "Mark completed",
   "Edit the quest log", and the toasts "Quest log completed" and "N quests
   need you".
+- **Editing on the tile.** A quest's right click menu has "Edit quest"
+  (the themed input with its title and notes filled in), "Move up",
+  "Move down" and "Delete quest", so the log is kept without VS Code.
+  Asked for on 2026-09-29. Each changes the file as the rest of the list
+  does, found by line and title and doing nothing when the file moved
+  under it (`tasks::edit`, `remove`, `shift`, pure and tested). A move
+  swaps a quest with the next one, notes and all, and leaves a heading
+  between them where it is, so a quest crosses into the next section.
+  Delete asks first and is not offered while a session holds the quest:
+  put it back first. Checked on screen with a dev instance.
 - **Left alone**: the `"tasks"` key in `config.json`, the
   `/horadric/tasks` path, its header and `HORADRIC_TASKS`. They are what
   builds on either side of the rename say to each other, and no one reads

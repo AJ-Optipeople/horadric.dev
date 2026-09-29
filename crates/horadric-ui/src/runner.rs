@@ -23,6 +23,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -567,6 +568,19 @@ impl App {
                 "horadric: cannot write {}: {e}",
                 file::config_file(&dir).display()
             );
+        }
+        self.refresh_boards(true);
+        self.run_tasks();
+    }
+
+    /// Writes a change to a project's list made from its tile, and looks
+    /// at it again: a quest moved to the top may be the next to start.
+    fn change_list(&mut self, key: &str, change: impl FnOnce(&str) -> Option<String>) {
+        let Some(dir) = self.project_dir(key) else {
+            return;
+        };
+        if let Err(e) = file::update(&dir, change) {
+            eprintln!("horadric: cannot write {}: {e}", file::file(&dir).display());
         }
         self.refresh_boards(true);
         self.run_tasks();
@@ -1136,23 +1150,30 @@ fn item_menu(key: &str, line: usize, title: &str) {
     const DONE: usize = 4;
     const BACK: usize = 5;
     const EDIT: usize = 6;
+    const REWRITE: usize = 7;
+    const UP: usize = 8;
+    const DOWN: usize = 9;
+    const DELETE: usize = 10;
     // Beyond the ids of `tombs::MOST` tombs.
     const TOMBS: usize = 100;
     const PICK: usize = 200;
-    let Some((state, holder, own_trees, pickable)) = with_app(|app| {
+    let Some((state, t, own_trees, pickable, (first, last))) = with_app(|app| {
         let t = app.task_at(key, line, title)?;
-        let own_trees = app
-            .shared
-            .boards
-            .borrow()
-            .get(key)
-            .is_some_and(|b| b.own_trees);
+        let boards = app.shared.boards.borrow();
+        let board = boards.get(key)?;
+        let own_trees = board.own_trees;
+        let ends = (
+            board.tasks.first().is_some_and(|f| f.line == line),
+            board.tasks.last().is_some_and(|l| l.line == line),
+        );
+        drop(boards);
         let pickable = t.holder.as_deref().and_then(|h| app.pickable(h));
-        Some((app.row_state(&t), t.holder, own_trees, pickable))
+        Some((app.row_state(&t), t, own_trees, pickable, ends))
     })
     .flatten() else {
         return;
     };
+    let holder = t.holder.clone();
     let mut items = Vec::new();
     match state {
         RowState::Open => items.push(Item::action(START, "Accept")),
@@ -1186,6 +1207,17 @@ fn item_menu(key: &str, line: usize, title: &str) {
         items.push(Item::action(BACK, "Put back in the log"));
     }
     items.push(Item::Separator);
+    items.push(Item::action(REWRITE, "Edit quest"));
+    if !first {
+        items.push(Item::action(UP, "Move up"));
+    }
+    if !last {
+        items.push(Item::action(DOWN, "Move down"));
+    }
+    // A held quest has a session working it, which must be let go first.
+    if holder.is_none() || t.mark == Mark::Done {
+        items.push(Item::action(DELETE, "Delete quest"));
+    }
     items.push(Item::action(EDIT, "Edit the quest log"));
     // Outside the app's borrow: the menu's loop dispatches its messages.
     let picked = menu::popup(&items);
@@ -1194,6 +1226,11 @@ fn item_menu(key: &str, line: usize, title: &str) {
             tomb::ask_pick(id);
         }
         return;
+    }
+    match picked {
+        Some(REWRITE) => return rewrite(key, &t),
+        Some(DELETE) if !confirm_delete(title) => return,
+        _ => {}
     }
     with_app(|app| match picked {
         Some(START) => app.task_clicked(key, line, title),
@@ -1210,8 +1247,62 @@ fn item_menu(key: &str, line: usize, title: &str) {
         Some(APPROVE | DONE) => app.set_task(key, line, title, Mark::Done),
         Some(BACK) => app.put_back(key, line, title),
         Some(EDIT) => app.edit_list(key),
+        Some(UP) => app.change_list(key, |text| tasks::shift(text, line, title, true)),
+        Some(DOWN) => app.change_list(key, |text| tasks::shift(text, line, title, false)),
+        Some(DELETE) => app.change_list(key, |text| tasks::remove(text, line, title)),
         _ => {}
     });
+}
+
+/// Asks for a quest's new title and notes, the old ones filled in.
+fn rewrite(key: &str, t: &Task) {
+    let question = ask::Ask {
+        title: "Edit quest",
+        prompt: "What should be done? The notes go to the agent with it.",
+        initial: &t.title,
+        placeholder: "A title for the quest",
+        verb: "save it",
+        notes: true,
+        pick: None,
+    };
+    let Some((shared, beside)) = with_app(|app| {
+        let beside = app.clusters.iter().find(|c| c.key == key).map(|c| c.hwnd);
+        (Rc::clone(&app.shared), beside)
+    }) else {
+        return;
+    };
+    let Some(a) = ask::ask_with_notes(
+        shared,
+        beside,
+        &question,
+        &t.notes.join(
+            "
+",
+        ),
+    ) else {
+        return;
+    };
+    with_app(|app| {
+        app.change_list(key, |text| {
+            tasks::edit(text, t.line, &t.title, &a.text, &a.notes)
+        })
+    });
+}
+
+/// Whether the human really means to delete a quest. Its notes go with
+/// it, and the log may not be committed.
+fn confirm_delete(title: &str) -> bool {
+    let pressed = super::ask(&crate::dialog::Dialog {
+        tone: crate::dialog::Tone::Warning,
+        title: "Delete quest",
+        text: &format!(
+            "Delete \"{}\" and its notes from the quest log?",
+            tasks::one_line(title)
+        ),
+        buttons: &["Delete", "Keep it"],
+        default: 1,
+    });
+    pressed == Some(0)
 }
 
 /// How many at once the mode menu offers. The config takes up to

@@ -291,6 +291,135 @@ pub fn set_mark(text: &str, line: usize, title: &str, mark: Mark) -> Option<Stri
     replace_line(text, line, &item_line(mark, title, holder, reason))
 }
 
+/// The file cut into lines, each keeping its ending, and the ending the
+/// file uses, for lines that move to where one is needed.
+fn cut(text: &str) -> (Vec<String>, &'static str) {
+    let ending = if text.contains("\r\n") { "\r\n" } else { "\n" };
+    (
+        text.split_inclusive('\n').map(String::from).collect(),
+        ending,
+    )
+}
+
+/// The lines put back together. A moved last line gains an ending, so it
+/// is taken off again when the file had none at its end.
+fn join(mut lines: Vec<String>, ending: &str, ended: bool) -> String {
+    if let Some(last) = lines.last_mut() {
+        if !last.ends_with('\n') {
+            last.push_str(ending);
+        }
+    }
+    let mut out = lines.concat();
+    if !ended {
+        let kept = out.trim_end_matches(['\r', '\n']).len();
+        out.truncate(kept);
+    }
+    out
+}
+
+/// Which lines the item on `line` covers: itself and its notes, as
+/// `parse` reads them, without the blank lines after the last note.
+fn span(lines: &[String], line: usize) -> std::ops::Range<usize> {
+    let mut end = line + 1;
+    for (i, raw) in lines.iter().enumerate().skip(line + 1) {
+        let raw = raw.trim_end_matches(['\r', '\n']);
+        if raw.trim().is_empty() {
+            continue;
+        }
+        if parse_item(raw, i).is_some() || !raw.starts_with([' ', '\t']) {
+            break;
+        }
+        end = i + 1;
+    }
+    line..end
+}
+
+/// The item on `line` if it is still titled `title`.
+fn found(text: &str, line: usize, title: &str) -> Option<Task> {
+    parse(text)
+        .into_iter()
+        .find(|t| t.line == line && t.title == title)
+}
+
+/// Gives the item on `line` titled `title` a new title and notes, keeping
+/// its mark and holder. None when the line holds something else now or
+/// the new title is empty. Blank lines in the notes would end the item,
+/// so they are left out.
+pub fn edit(text: &str, line: usize, title: &str, new_title: &str, notes: &str) -> Option<String> {
+    let task = found(text, line, title)?;
+    let new_title = one_line(new_title);
+    if new_title.is_empty() {
+        return None;
+    }
+    let (mut lines, ending) = cut(text);
+    let covered = span(&lines, line);
+    let mut item = vec![
+        item_line(
+            task.mark,
+            &new_title,
+            task.holder.as_deref(),
+            task.reason.as_deref(),
+        ) + ending,
+    ];
+    item.extend(
+        notes
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(|l| format!("  {l}{ending}")),
+    );
+    lines.splice(covered, item);
+    Some(join(lines, ending, text.ends_with('\n')))
+}
+
+/// The file without the item on `line` titled `title` and its notes. None
+/// when the line holds something else now.
+pub fn remove(text: &str, line: usize, title: &str) -> Option<String> {
+    found(text, line, title)?;
+    let (mut lines, ending) = cut(text);
+    let covered = span(&lines, line);
+    lines.drain(covered);
+    Some(join(lines, ending, text.ends_with('\n')))
+}
+
+/// The item on `line` titled `title` swapped with the item above it, or
+/// below, notes and all. Whatever lies between the two, a heading say,
+/// stays where it is, so an item can move from one section to the next.
+/// None at the top or bottom of the list, or when the line holds
+/// something else now.
+pub fn shift(text: &str, line: usize, title: &str, up: bool) -> Option<String> {
+    found(text, line, title)?;
+    let list = parse(text);
+    let at = list.iter().position(|t| t.line == line)?;
+    let other = if up {
+        list.get(at.checked_sub(1)?)?
+    } else {
+        list.get(at + 1)?
+    };
+    let (first, second) = if up {
+        (other.line, line)
+    } else {
+        (line, other.line)
+    };
+    let (lines, ending) = cut(text);
+    let a = span(&lines, first);
+    let b = span(&lines, second);
+    let mut out = lines[..a.start].to_vec();
+    out.extend_from_slice(&lines[b.clone()]);
+    out.extend_from_slice(&lines[a.end..b.start]);
+    out.extend_from_slice(&lines[a.clone()]);
+    out.extend_from_slice(&lines[b.end..]);
+    // The first item's last line may have been the file's last: it needs
+    // an ending now that something follows it.
+    let last = out.len() - 1;
+    for l in &mut out[..last] {
+        if !l.ends_with('\n') {
+            l.push_str(ending);
+        }
+    }
+    Some(join(out, ending, text.ends_with('\n')))
+}
+
 /// How a project's list gets worked through.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Mode {
@@ -918,5 +1047,91 @@ mod tests {
         assert_eq!(Mode::Auto.finished(), Mark::Done);
         assert_eq!(Mode::Review.finished(), Mark::Review);
         assert_eq!(Mode::Manual.finished(), Mark::Review);
+    }
+
+    const LOG: &str = "# Quests\n\
+        - [ ] First\n\
+        \x20 a note\n\
+        \n\
+        \x20 after a blank\n\
+        \n\
+        ## Later\n\
+        - [/] Second @second-1\n\
+        - [ ] Third\n";
+
+    #[test]
+    fn an_edit_keeps_the_mark_and_holder_and_replaces_the_notes() {
+        let out = edit(LOG, 7, "Second", "Second,  renamed", "one\n\n two ").unwrap();
+        assert_eq!(
+            out,
+            "# Quests\n- [ ] First\n  a note\n\n  after a blank\n\n## Later\n\
+             - [/] Second, renamed @second-1\n  one\n  two\n- [ ] Third\n"
+        );
+        let out = edit(LOG, 1, "First", "First", "").unwrap();
+        assert_eq!(
+            out,
+            "# Quests\n- [ ] First\n\n## Later\n- [/] Second @second-1\n- [ ] Third\n"
+        );
+    }
+
+    #[test]
+    fn an_edit_refuses_a_moved_line_or_an_empty_title() {
+        assert_eq!(edit(LOG, 7, "Other", "x", ""), None);
+        assert_eq!(edit(LOG, 7, "Second", "   ", ""), None);
+        assert_eq!(edit(LOG, 0, "# Quests", "x", ""), None);
+    }
+
+    #[test]
+    fn an_edit_keeps_crlf_and_a_file_without_a_last_ending() {
+        let text = "- [ ] One\r\n  n\r\n- [ ] Two";
+        assert_eq!(
+            edit(text, 0, "One", "Uno", "m").unwrap(),
+            "- [ ] Uno\r\n  m\r\n- [ ] Two"
+        );
+        assert_eq!(
+            edit(text, 2, "Two", "Dos", "x").unwrap(),
+            "- [ ] One\r\n  n\r\n- [ ] Dos\r\n  x"
+        );
+    }
+
+    #[test]
+    fn removing_takes_the_item_and_its_notes() {
+        assert_eq!(
+            remove(LOG, 1, "First").unwrap(),
+            "# Quests\n\n## Later\n- [/] Second @second-1\n- [ ] Third\n"
+        );
+        assert_eq!(
+            remove(LOG, 8, "Third").unwrap(),
+            "# Quests\n- [ ] First\n  a note\n\n  after a blank\n\n## Later\n- [/] Second @second-1\n"
+        );
+        assert_eq!(remove(LOG, 8, "Second"), None);
+    }
+
+    #[test]
+    fn shifting_swaps_with_the_next_item_and_leaves_what_is_between() {
+        assert_eq!(
+            shift(LOG, 7, "Second", true).unwrap(),
+            "# Quests\n- [/] Second @second-1\n\n## Later\n- [ ] First\n  a note\n\n  after a blank\n- [ ] Third\n"
+        );
+        assert_eq!(
+            shift(LOG, 7, "Second", false).unwrap(),
+            "# Quests\n- [ ] First\n  a note\n\n  after a blank\n\n## Later\n- [ ] Third\n- [/] Second @second-1\n"
+        );
+        assert_eq!(shift(LOG, 1, "First", true), None);
+        assert_eq!(shift(LOG, 8, "Third", false), None);
+        assert_eq!(shift(LOG, 8, "First", true), None);
+    }
+
+    #[test]
+    fn shifting_the_last_line_of_a_file_without_an_ending() {
+        let text = "- [ ] One\r\n- [ ] Two";
+        assert_eq!(
+            shift(text, 1, "Two", true).unwrap(),
+            "- [ ] Two\r\n- [ ] One"
+        );
+        assert_eq!(
+            shift(text, 0, "One", false).unwrap(),
+            "- [ ] Two\r\n- [ ] One"
+        );
     }
 }

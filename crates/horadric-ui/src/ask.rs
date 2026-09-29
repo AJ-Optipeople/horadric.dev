@@ -134,7 +134,18 @@ pub fn register_class() -> Result<()> {
 /// the mouse. With no cluster on screen it goes by the mouse alone. None
 /// when cancelled.
 pub fn ask(shared: Rc<Shared>, beside: Option<HWND>, a: &Ask) -> Option<Answer> {
-    let popup = Popup::open(shared, beside, a)
+    ask_with_notes(shared, beside, a, "")
+}
+
+/// [`ask`] with the notes field filled in, for editing what was written
+/// before. Only when `a.notes` asks for notes.
+pub fn ask_with_notes(
+    shared: Rc<Shared>,
+    beside: Option<HWND>,
+    a: &Ask,
+    notes: &str,
+) -> Option<Answer> {
+    let popup = Popup::open(shared, beside, a, notes)
         .map_err(|e| eprintln!("horadric: cannot ask {}: {e}", a.title))
         .ok()?;
     let mut msg = MSG::default();
@@ -208,7 +219,12 @@ struct Popup<'a> {
 }
 
 impl<'a> Popup<'a> {
-    fn open(shared: Rc<Shared>, beside: Option<HWND>, a: &Ask<'a>) -> Result<Box<Self>> {
+    fn open(
+        shared: Rc<Shared>,
+        beside: Option<HWND>,
+        a: &Ask<'a>,
+        notes: &str,
+    ) -> Result<Box<Self>> {
         let beside = beside.filter(|h| unsafe { IsWindowVisible(*h) }.as_bool());
         let dpi = match beside {
             Some(h) => unsafe { GetDpiForWindow(h) },
@@ -227,7 +243,11 @@ impl<'a> Popup<'a> {
         }
         let mut fields = vec![first];
         if a.notes {
-            fields.push(Field::new("", true, MAX_NOTES));
+            // Notes written before are gone on from, not replaced by the
+            // first key, which is what a selection would do.
+            let mut below = Field::new(notes, true, MAX_NOTES);
+            below.end(true, false);
+            fields.push(below);
         }
         let hint = if a.notes {
             format!(
