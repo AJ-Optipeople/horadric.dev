@@ -1748,7 +1748,8 @@ pub fn dock(size: (i32, i32), area: [i32; 4], tiles_left: bool) -> [i32; 4] {
     }
 }
 
-/// Where a new session puts the stage: a square as tall as `area`, against
+/// Where the stage opens the first time, and where it docks when a screen
+/// change leaves it lost: a square as tall as `area`, against
 /// the tiles, narrower only where the area is. Square because a grid of
 /// panes splits it evenly both ways.
 pub fn square(area: [i32; 4], tiles_left: bool) -> [i32; 4] {

@@ -145,7 +145,7 @@ impl App {
         }
         if show {
             let key = self.project_of(&id);
-            if key.is_some_and(|k| self.fill_stage(&k, true)) {
+            if key.is_some_and(|k| self.fill_stage(&k)) {
                 if let Some(stage) = &self.stage {
                     stage.focus_session(&id);
                 }

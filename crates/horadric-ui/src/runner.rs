@@ -446,7 +446,7 @@ impl App {
                 s.loot.batch = true;
             }
         }
-        if show && self.fill_stage(key, true) {
+        if show && self.fill_stage(key) {
             if let Some(stage) = &self.stage {
                 stage.focus_session(&id);
             }

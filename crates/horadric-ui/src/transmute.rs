@@ -201,7 +201,7 @@ impl App {
             return;
         };
         if let Some(key) = self.project_of(&id) {
-            if self.fill_stage(&key, true) {
+            if self.fill_stage(&key) {
                 if let Some(stage) = &self.stage {
                     stage.focus_session(&id);
                 }

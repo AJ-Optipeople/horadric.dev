@@ -2752,10 +2752,10 @@ impl App {
             }
             return Err(e);
         }
-        // A new session is where the eye already is: against the tiles, not
-        // wherever the stage was left.
+        // A new session joins the stage where it stands, at the size it was
+        // given. Docking it again each time threw away that size.
         if let Some(key) = self.project_of(&id) {
-            if self.fill_stage(&key, true) {
+            if self.fill_stage(&key) {
                 if let Some(stage) = &self.stage {
                     stage.focus_session(&id);
                 }
@@ -3236,7 +3236,7 @@ impl App {
             eprintln!("horadric: cannot open a terminal: {e}");
             return;
         }
-        if self.fill_stage(key, false) {
+        if self.fill_stage(key) {
             if let Some(stage) = &self.stage {
                 stage.focus_session(&id);
             }
@@ -3267,7 +3267,7 @@ impl App {
             eprintln!("horadric: cannot open ssh to {host}: {e}");
             return;
         }
-        if self.fill_stage(key, false) {
+        if self.fill_stage(key) {
             if let Some(stage) = &self.stage {
                 stage.focus_session(&id);
             }
@@ -4094,7 +4094,7 @@ impl App {
         let Some(key) = self.project_of(id) else {
             return;
         };
-        if self.fill_stage(&key, false) {
+        if self.fill_stage(&key) {
             if let Some(stage) = &self.stage {
                 stage.focus_session(id);
             }
@@ -4167,10 +4167,11 @@ impl App {
         ids
     }
 
-    /// Puts a project's sessions on the stage, opening it when closed.
-    /// With `dock`, the stage moves against the tiles as a square filling
-    /// top to bottom. False when the project has nothing to show.
-    fn fill_stage(&mut self, key: &str, dock: bool) -> bool {
+    /// Puts a project's sessions on the stage, opening it when closed:
+    /// where it was last, or else against the tiles as a square filling top
+    /// to bottom. An open stage keeps its place and size. False when the
+    /// project has nothing to show.
+    fn fill_stage(&mut self, key: &str) -> bool {
         let ids = self.grid_of(key);
         let sessions: Vec<(Arc<Console>, String)> = ids
             .iter()
@@ -4180,15 +4181,13 @@ impl App {
             return false;
         }
         let switched = self.stage.as_ref().map(|s| s.project()).as_deref() != Some(key);
-        let (area, tiles_left) = self.stage_area();
-        let docked = layout::square(area, tiles_left);
-        if let Some(stage) = self.stage.as_ref().filter(|_| dock) {
-            stage.set_visible_rect(docked);
-        }
         if self.stage.is_none() {
             let place = match self.stage_rect {
-                Some(r) if !dock => Place::Rect(r),
-                _ => Place::Visible(docked),
+                Some(r) => Place::Rect(r),
+                None => {
+                    let (area, tiles_left) = self.stage_area();
+                    Place::Visible(layout::square(area, tiles_left))
+                }
             };
             match TerminalWindow::open(Rc::clone(&self.shared), place) {
                 Ok(t) => self.stage = Some(t),
@@ -4333,7 +4332,7 @@ impl App {
         let Some(key) = self.stage.as_ref().map(|s| s.project()) else {
             return;
         };
-        if !self.fill_stage(&key, false) {
+        if !self.fill_stage(&key) {
             self.close_stage();
         }
     }
@@ -4561,7 +4560,7 @@ impl App {
                 self.views.insert(key.to_string(), view);
             }
         }
-        if self.fill_stage(key, false) {
+        if self.fill_stage(key) {
             if let Some(stage) = &self.stage {
                 stage.focus_session(&id);
             }
@@ -4586,7 +4585,7 @@ impl App {
             self.webs.insert(key.to_string(), page);
         }
         web::open(key, url);
-        if self.fill_stage(key, false) {
+        if self.fill_stage(key) {
             if let Some(stage) = &self.stage {
                 stage.focus_session(&id);
             }
@@ -4728,7 +4727,7 @@ impl App {
         let keys: Vec<String> = self.clusters.iter().map(|c| c.key.clone()).collect();
         let order = stage_order(self.stage_key.as_deref(), &keys);
         for key in order {
-            if self.fill_stage(&key, false) {
+            if self.fill_stage(&key) {
                 if let Some(stage) = &self.stage {
                     stage.bring_to_front();
                 }
