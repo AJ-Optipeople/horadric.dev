@@ -2,8 +2,9 @@
 //! grid and takes its keyboard and mouse.
 //!
 //! The stage lays its panes out in a grid, one per session of the project
-//! it shows. With more than one, each pane has a header naming its session,
-//! and dragging a header onto another pane swaps the two. The drag itself is
+//! it shows. Each pane has a header naming its session, with buttons to
+//! stash, zoom and end it, and dragging a header onto another pane swaps
+//! the two. The drag itself is
 //! the stage's: a pane only says it was grabbed.
 //!
 //! A pane can also show a file instead of a session (see
@@ -167,7 +168,6 @@ pub struct Pane {
     shared: Rc<Shared>,
     /// The session's name, for the header.
     name: RefCell<String>,
-    header: Cell<bool>,
     lifted: Cell<bool>,
     /// The grid keeps its size while the window's changes, until let go.
     held: Cell<bool>,
@@ -282,7 +282,6 @@ impl Pane {
             console,
             shared,
             name: RefCell::new(name),
-            header: Cell::new(false),
             lifted: Cell::new(false),
             held: Cell::new(false),
             floating: Cell::new(None),
@@ -341,7 +340,6 @@ impl Pane {
             DragAcceptFiles(hwnd, !pane.console.is_view());
         }
         if let Some(key) = &pane.console.web {
-            pane.header.set(true);
             let (bounds, zoom) = pane.page_place();
             web::attach(key, pane.hwnd, bounds, zoom);
         }
@@ -464,16 +462,6 @@ impl Pane {
         }
     }
 
-    /// Shows or hides the header. The grid gives up or takes back its rows.
-    pub fn set_header(&self, on: bool) {
-        // A page has no other place for its title and address.
-        let on = on || self.console.web.is_some();
-        if self.header.replace(on) != on {
-            self.fit_grid();
-            self.invalidate();
-        }
-    }
-
     pub fn set_accent(&self, c: Color) {
         if self.accent.replace(c) != c {
             self.invalidate();
@@ -582,7 +570,7 @@ impl Pane {
         let scale = self.dpi_now() as f32 / 96.0;
         [
             glyphs::BEZEL,
-            glyphs::screen_top(self.header.get()),
+            glyphs::SCREEN_TOP,
             (r.right as f32 / scale - glyphs::BEZEL).max(glyphs::BEZEL),
             (r.bottom as f32 / scale - glyphs::BEZEL).max(glyphs::BEZEL),
         ]
@@ -679,11 +667,7 @@ impl Pane {
         }
         let scale = self.dpi_now() as f32 / 96.0;
         let cell = self.cell();
-        let (w, h) = glyphs::grid_room(
-            r.right as f32 / scale,
-            r.bottom as f32 / scale,
-            self.header.get(),
-        );
+        let (w, h) = glyphs::grid_room(r.right as f32 / scale, r.bottom as f32 / scale);
         let cols = (w / cell.w).floor().max(2.0);
         let rows = (h / cell.h).floor().max(1.0);
         self.console.resize(GridSize {
@@ -796,7 +780,7 @@ impl Pane {
                 label,
                 dragging: self.resizing.get().is_some(),
             });
-        let header = self.header.get().then(|| Header {
+        let header = Header {
             name: &name,
             detail: &detail,
             phase,
@@ -807,7 +791,7 @@ impl Pane {
             stash: self.stashes(),
             zoom: self.zoom.get(),
             bar,
-        });
+        };
         let search = self.search.borrow();
         let find = search.as_ref().map(|s| FindBar {
             query: &s.query,
@@ -859,7 +843,7 @@ impl Pane {
             }
         }
         if let (true, Some((row, col))) = (self.focused.get(), at) {
-            let rect = glyphs::cell_rect(self.header.get(), &cell, row, col, dpi as f32 / 96.0);
+            let rect = glyphs::cell_rect(&cell, row, col, dpi as f32 / 96.0);
             if self.ime_at.replace(Some(rect)) != Some(rect) {
                 self.place_ime(rect);
             }
@@ -870,7 +854,7 @@ impl Pane {
                 font,
                 &cell,
                 &frame,
-                header.as_ref(),
+                &header,
                 find.as_ref(),
                 page.as_ref(),
                 veil,
@@ -1552,7 +1536,7 @@ impl Pane {
     }
 
     fn in_header(&self, lparam: LPARAM) -> bool {
-        self.header.get() && self.dip(lparam).1 < HEADER_H
+        self.dip(lparam).1 < HEADER_H
     }
 
     /// Where the header's buttons start: the stash button's, the zoom
@@ -1786,7 +1770,7 @@ impl Pane {
         let (x, y) = self.dip(lparam);
         let cell = self.cell();
         let size = self.console.size();
-        let (ox, oy) = glyphs::grid_origin(self.header.get());
+        let (ox, oy) = glyphs::grid_origin();
         let colf = ((x - ox) / cell.w).max(0.0);
         let col = (colf as usize).min(size.cols as usize - 1);
         let side = if colf.fract() < 0.5 && (colf as usize) < size.cols as usize {

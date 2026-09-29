@@ -61,25 +61,19 @@ const PANE_RADIUS: f32 = SCREEN_RADIUS + BEZEL;
 /// name is printed on.
 pub const HEADER_H: f32 = 26.0;
 
-/// Where the glass starts, below the header when there is one.
-pub fn screen_top(header: bool) -> f32 {
-    if header {
-        HEADER_H
-    } else {
-        BEZEL
-    }
-}
+/// Where the glass starts, below the header.
+pub const SCREEN_TOP: f32 = HEADER_H;
 
 /// Where the first cell of the grid is drawn, in DIPs from the pane's top
 /// left.
-pub fn grid_origin(header: bool) -> (f32, f32) {
-    (BEZEL + PAD, screen_top(header) + PAD)
+pub fn grid_origin() -> (f32, f32) {
+    (BEZEL + PAD, SCREEN_TOP + PAD)
 }
 
 /// The pixel rectangle of the cell at `row` and `col`, from the pane's top
 /// left, at `scale` pixels per DIP.
-pub fn cell_rect(header: bool, cell: &CellSize, row: usize, col: usize, scale: f32) -> [i32; 4] {
-    let (ox, oy) = grid_origin(header);
+pub fn cell_rect(cell: &CellSize, row: usize, col: usize, scale: f32) -> [i32; 4] {
+    let (ox, oy) = grid_origin();
     let x = ox + col as f32 * cell.w;
     let y = oy + row as f32 * cell.h;
     [
@@ -91,13 +85,13 @@ pub fn cell_rect(header: bool, cell: &CellSize, row: usize, col: usize, scale: f
 }
 
 /// How much of a pane `width` by `height` DIPs the grid can have.
-pub fn grid_room(width: f32, height: f32, header: bool) -> (f32, f32) {
-    let (x, y) = grid_origin(header);
+pub fn grid_room(width: f32, height: f32) -> (f32, f32) {
+    let (x, y) = grid_origin();
     (width - 2.0 * x, height - y - PAD - BEZEL)
 }
 
-/// The strip above a pane's grid when the stage shows more than one: which
-/// session it is, and the handle it is dragged by.
+/// The strip above a pane's grid: which session it is, its buttons, and
+/// the handle it is dragged by.
 pub struct Header<'a> {
     pub name: &'a str,
     /// What the agent says it is doing, dimmer, after the name.
@@ -626,7 +620,7 @@ impl GridTarget {
         }
     }
 
-    /// Draws a frame, below `header` when there is one, and the search bar
+    /// Draws a frame, below `header`, and the search bar
     /// over it when open. `veil` from 0 to 1 lays the background over the
     /// glass: a pane without the keyboard steps back, a pane just shown
     /// fades in. `plate` is where the pane's top is in the stage and how
@@ -639,13 +633,13 @@ impl GridTarget {
         font: &Font,
         cell: &CellSize,
         frame: &Frame,
-        header: Option<&Header>,
+        header: &Header,
         find: Option<&FindBar>,
         page: Option<&PageFrame>,
         veil: f32,
         plate: (f32, f32),
     ) -> Result<()> {
-        let (ox, oy) = grid_origin(header.is_some());
+        let (ox, oy) = grid_origin();
         let x = |col: usize| ox + col as f32 * cell.w;
         let y = |row: usize| oy + row as f32 * cell.h;
         let rect = |row: usize, col: usize, cells: usize| D2D_RECT_F {
@@ -658,7 +652,7 @@ impl GridTarget {
             let size = self.rt.GetSize();
             let screen = D2D_RECT_F {
                 left: BEZEL,
-                top: screen_top(header.is_some()),
+                top: SCREEN_TOP,
                 right: size.width - BEZEL,
                 bottom: size.height - BEZEL,
             };
@@ -793,9 +787,7 @@ impl GridTarget {
             if let Some(p) = page {
                 self.page_frame(gpu, p);
             }
-            if let Some(h) = header {
-                self.header(gpu, h);
-            }
+            self.header(gpu, header);
             if let Some(f) = find {
                 self.find_bar(gpu, f, &screen);
             }
@@ -982,7 +974,7 @@ impl GridTarget {
     /// What makes the glass look sunk: shade falling from its top edge,
     /// and its rim, lit in the project's colour on the pane with the
     /// keyboard.
-    unsafe fn glass(&self, gpu: &Gpu, screen: &D2D_RECT_F, header: Option<&Header>) {
+    unsafe fn glass(&self, gpu: &Gpu, screen: &D2D_RECT_F, header: &Header) {
         if let Ok(mask) = gpu
             .d2d
             .CreateRoundedRectangleGeometry(&rounded(screen, SCREEN_RADIUS))
@@ -1016,9 +1008,10 @@ impl GridTarget {
                 drop(ManuallyDrop::into_inner(params.geometricMask));
             }
         }
-        let rim = match header {
-            Some(h) if h.active && !h.lifted => h.accent.with_alpha(0.55),
-            _ => theme::ENGRAVE_DARK,
+        let rim = if header.active && !header.lifted {
+            header.accent.with_alpha(0.55)
+        } else {
+            theme::ENGRAVE_DARK
         };
         let edge = D2D_RECT_F {
             left: screen.left + 0.5,
@@ -1543,15 +1536,11 @@ mod tests {
 
     #[test]
     fn the_grid_sits_inside_the_glass_inside_the_bezel() {
-        let (x, y) = grid_origin(false);
-        assert_eq!((x, y), (BEZEL + PAD, BEZEL + PAD));
-        assert_eq!(grid_origin(true).1, HEADER_H + PAD);
-        let (w, h) = grid_room(400.0, 300.0, false);
+        assert_eq!(grid_origin(), (BEZEL + PAD, HEADER_H + PAD));
+        let (w, h) = grid_room(400.0, 300.0);
         assert_eq!(w, 400.0 - 2.0 * (BEZEL + PAD));
-        assert_eq!(h, 300.0 - 2.0 * (BEZEL + PAD));
         // The header takes the top bezel's place, not room on top of it.
-        let (_, with_header) = grid_room(400.0, 300.0, true);
-        assert_eq!(h - with_header, HEADER_H - BEZEL);
+        assert_eq!(h, 300.0 - HEADER_H - PAD - BEZEL - PAD);
     }
 
     #[test]
@@ -1564,8 +1553,8 @@ mod tests {
             strike: 8.0,
             stroke: 1.0,
         };
-        let (ox, oy) = grid_origin(true);
-        let r = cell_rect(true, &cell, 2, 3, 1.5);
+        let (ox, oy) = grid_origin();
+        let r = cell_rect(&cell, 2, 3, 1.5);
         assert_eq!(r[0], ((ox + 24.0) * 1.5).round() as i32);
         assert_eq!(r[1], ((oy + 32.0) * 1.5).round() as i32);
         assert_eq!(r[2] - r[0], 12);

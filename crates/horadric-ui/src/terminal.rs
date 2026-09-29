@@ -404,7 +404,6 @@ impl TerminalWindow {
             }
             let cell = &grid[layout::swapped_cell(i, swap)];
             let shown = !zoomed || Some(p.session()) == active.as_deref();
-            p.set_header(many);
             p.set_zoom(many.then_some(zoomed));
             if shown {
                 let rect = if zoomed {

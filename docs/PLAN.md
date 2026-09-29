@@ -542,12 +542,13 @@ piece of work, with less freedom and more structure.
   and an empty stage closes. `TerminalWindow::show` keeps the panes it
   already has, with their selection and scroll, and lays out again only
   when the set changed.
-- **Headers.** With more than one pane, each has a header: the session
-  name and what the agent says it is doing, with a line of the phase's
-  colour along its top. No dot before the name: every app has one, and
-  the line already says it. The one with the keyboard is underlined in
-  the project's colour and the others step back. One pane alone has no
-  header; the title bar says it all.
+- **Headers.** Every pane has a header: the session name and what the
+  agent says it is doing, with a line of the phase's colour along its
+  top. No dot before the name: every app has one, and the line already
+  says it. The one with the keyboard is underlined in the project's
+  colour and the others step back. At its right end sit stash, zoom and
+  a cross that ends the session (asking first while an agent runs). A
+  pane alone has one too, for those buttons, but no zoom.
 - **Drag to swap, live.** Pressing a header gives the stage the mouse
   (`WM_PANE_GRAB`, then `SetCapture` on the stage). Past 4 pixels the pane
   lifts and follows the cursor, and the pane whose cell it comes over

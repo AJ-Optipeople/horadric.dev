@@ -39,7 +39,7 @@ pub fn dock_size(side: Side, page: Option<(u32, u32)>) -> f32 {
         (Side::Left | Side::Right, Some((w, _))) => w as f32 + bezels,
         (Side::Left | Side::Right, None) => 640.0,
         (Side::Top, Some((_, h))) => {
-            h as f32 + 2.0 * GRIP + LABEL_H + glyphs::screen_top(true) + glyphs::BEZEL
+            h as f32 + 2.0 * GRIP + LABEL_H + glyphs::SCREEN_TOP + glyphs::BEZEL
         }
         (Side::Top, None) => 420.0,
     }
@@ -206,7 +206,7 @@ mod tests {
             assert_eq!(dock_size(side, None), 640.0);
         }
         let h = dock_size(Side::Top, Some((1280, 400)));
-        let glass = [0.0, glyphs::screen_top(true), 3000.0, h - glyphs::BEZEL];
+        let glass = [0.0, glyphs::SCREEN_TOP, 3000.0, h - glyphs::BEZEL];
         assert_eq!(fit(glass, Some((1280, 400))).zoom, 1.0);
     }
 
