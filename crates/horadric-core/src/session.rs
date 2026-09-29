@@ -205,12 +205,24 @@ impl Session {
             self.phase,
             Phase::Idle | Phase::Done | Phase::Waiting(WaitReason::Input)
         );
-        let no_draft = match (typed, self.prompted_at) {
+        !self.shell && at_prompt && self.status.is_some() && self.no_draft(typed)
+    }
+
+    /// Whether the agent can be stopped and resumed, as switching accounts
+    /// does, without losing anything: it is not in the middle of a turn,
+    /// and nothing was typed since its last prompt went in. A question it
+    /// waits on comes back with the resume.
+    pub fn free_to_restart(&self, typed: Option<SystemTime>) -> bool {
+        !self.shell && !self.phase.mid_turn() && self.no_draft(typed)
+    }
+
+    /// Nothing typed into its terminal since the last prompt went in.
+    fn no_draft(&self, typed: Option<SystemTime>) -> bool {
+        match (typed, self.prompted_at) {
             (None, _) => true,
             (Some(t), Some(p)) => t <= p,
             (Some(_), None) => false,
-        };
-        !self.shell && at_prompt && self.status.is_some() && no_draft
+        }
     }
 
     /// A finished turn nobody has looked at. Its lamp stays lit until then.
@@ -848,6 +860,23 @@ mod tests {
         s.shell = true;
         s.phase = Phase::Idle;
         assert!(!s.free_for_command(None));
+    }
+
+    #[test]
+    fn a_restart_waits_for_the_turn_and_any_draft_but_not_a_question() {
+        let t = |secs| SystemTime::UNIX_EPOCH + Duration::from_secs(secs);
+        let mut s = Session::new("g1", "x", "");
+        s.apply(&ev("SessionStart"), t(1));
+        assert!(s.free_to_restart(None), "no status line needed");
+        assert!(!s.free_to_restart(Some(t(2))), "typed, never sent");
+        s.apply(&ev("UserPromptSubmit"), t(3));
+        assert!(!s.free_to_restart(None), "mid turn");
+        s.apply(&ev("PermissionRequest"), t(4));
+        assert!(s.free_to_restart(Some(t(2))), "the question comes back");
+        s.apply(&ev("Stop"), t(5));
+        assert!(!s.free_to_restart(Some(t(6))), "a draft since");
+        s.shell = true;
+        assert!(!s.free_to_restart(None));
     }
 
     #[test]

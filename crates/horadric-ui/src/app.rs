@@ -46,6 +46,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
+use horadric_core::accounts::{Account, Accounts};
 use horadric_core::background::Asked;
 use horadric_core::diff::{self as changes, Diff, FileDiff, Recount};
 use horadric_core::fleet::{self, Device};
@@ -91,6 +92,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_SETTINGCHANGE, WM_TIMER, WNDCLASSW, WS_EX_TOOLWINDOW, WS_POPUP,
 };
 
+use crate::accounts;
 use crate::agents;
 use crate::appear;
 use crate::caption;
@@ -172,6 +174,8 @@ const WM_HORADRIC_KEPT: u32 = WM_APP + 18;
 const WM_HORADRIC_STASH_MENU: u32 = WM_APP + 19;
 /// Show the usage window's own menu.
 const WM_HORADRIC_USAGE_MENU: u32 = WM_APP + 23;
+/// Show the list of Claude accounts, from the usage window's Account row.
+const WM_HORADRIC_ACCOUNT_MENU: u32 = WM_APP + 24;
 
 const APP_CLASS: PCWSTR = w!("HoradricApp");
 /// Runs a console program without giving it a console window.
@@ -273,6 +277,8 @@ pub(crate) enum Input {
     SettingMenu(Setting, RECT),
     /// The usage window right clicked: its own menu.
     UsageMenu,
+    /// The usage window's Account row clicked: the accounts to switch to.
+    AccountMenu,
     /// A setting's list closed, with the value picked, if one was.
     Picked(Setting, Option<Option<String>>),
     /// A slider in the usage window let go at a new value.
@@ -517,6 +523,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
         active: RefCell::new(None),
         browsing: RefCell::new(HashSet::new()),
         usage,
+        account: RefCell::new(None),
         defaults: RefCell::new(saved.defaults.clone()),
         boards: RefCell::new(HashMap::new()),
         cube: Cell::new(None),
@@ -552,6 +559,13 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             dropdown: None,
             switches: HashMap::new(),
             settings_before: None,
+            accounts: accounts::load(),
+            account: None,
+            login_seen: None,
+            login_read: None,
+            switch: None,
+            adding: None,
+            settling: None,
             clusters: Vec::new(),
             consoles: HashMap::new(),
             views: HashMap::new(),
@@ -622,6 +636,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             experience: Arc::new(Mutex::new(None)),
             counting_xp: Arc::new(AtomicBool::new(false)),
         };
+        app.read_login();
         app.reconcile(false);
         app.count_experience();
         app.attach_hosts();
@@ -844,6 +859,10 @@ unsafe extern "system" fn app_proc(
         }
         WM_HORADRIC_USAGE_MENU => {
             usage_menu();
+            return LRESULT(0);
+        }
+        WM_HORADRIC_ACCOUNT_MENU => {
+            account_menu();
             return LRESULT(0);
         }
         WM_HORADRIC_RECENT_MENU => {
@@ -1789,6 +1808,68 @@ fn usage_menu() {
     }
 }
 
+/// The Claude accounts: a pick switches to it, and Add account logs in to
+/// another.
+fn account_menu() {
+    const ADD: usize = 1;
+    const NOW: usize = 2;
+    const PICK: usize = 100;
+    const FORGET: usize = 200;
+    let Some((all, live, switching)) = with_app(|app| app.account_choices()) else {
+        return;
+    };
+    let mut items: Vec<Item> = all
+        .list
+        .iter()
+        .enumerate()
+        .map(|(i, a)| Item::Action {
+            id: PICK + i,
+            label: a.label(),
+            checked: live.as_deref() == Some(a.id.as_str()),
+        })
+        .collect();
+    if items.is_empty() {
+        items.push(Item::Disabled("Not logged in to Claude".into()));
+    }
+    if let Some((to, waiting)) = &switching {
+        let email = all.get(to).map_or("", |a| a.email.as_str());
+        let turns = if *waiting == 1 { "turn" } else { "turns" };
+        items.push(Item::Separator);
+        items.push(Item::Disabled(format!(
+            "Switching to {email} after {waiting} {turns}"
+        )));
+        items.push(Item::action(NOW, "Switch now"));
+    }
+    items.push(Item::Separator);
+    items.push(Item::action(ADD, "Add account"));
+    let others: Vec<Item> = all
+        .list
+        .iter()
+        .enumerate()
+        .filter(|(_, a)| live.as_deref() != Some(a.id.as_str()))
+        .map(|(i, a)| Item::action(FORGET + i, a.email.clone()))
+        .collect();
+    if !others.is_empty() {
+        items.push(Item::Submenu("Forget".into(), others));
+    }
+    let picked = menu::popup(&items);
+    with_app(|app| match picked {
+        Some(ADD) => app.add_account(),
+        Some(NOW) => {
+            if let Some((to, _)) = switching {
+                app.switch_account(to, true);
+            }
+        }
+        Some(i) if (FORGET..FORGET + all.list.len()).contains(&i) => {
+            app.forget_account(&all.list[i - FORGET].id);
+        }
+        Some(i) if (PICK..PICK + all.list.len()).contains(&i) => {
+            app.switch_account(all.list[i - PICK].id.clone(), false);
+        }
+        _ => {}
+    });
+}
+
 fn recent_menu(dir: PathBuf) {
     const ADD: usize = 1;
     const PAST: usize = 100;
@@ -1967,6 +2048,24 @@ struct App {
     /// what they pick as the default for every new session, even outside
     /// Horadric, so these go back once it has.
     settings_before: Option<(Vec<Option<serde_json::Value>>, Instant)>,
+    /// Every Claude account logged in to, kept for switching between.
+    accounts: Accounts,
+    /// Who Claude Code is logged in as, by account id, as last read.
+    account: Option<String>,
+    /// When the login files last changed, as last seen and as last read.
+    /// A change is read once it has held still for a tick, since a login
+    /// writes two files one after the other.
+    login_seen: Option<(SystemTime, SystemTime)>,
+    login_read: Option<(SystemTime, SystemTime)>,
+    /// An account switch waiting for sessions to finish their turns.
+    switch: Option<AccountSwitch>,
+    /// A login opened by Add account, with the account in use before it,
+    /// which goes back once the new login is kept.
+    adding: Option<(Option<String>, Instant)>,
+    /// A login just put in, and when. A `claude` that read `.claude.json`
+    /// before can write it back after, with the old profile, so for a
+    /// while the login is put in again if it is found changed.
+    settling: Option<(String, Instant)>,
     // Boxed on purpose: the window procedures hold a raw pointer to each
     // window struct, so it must not move when the Vec grows.
     #[allow(clippy::vec_box)]
@@ -2122,6 +2221,26 @@ type Looked = Result<Option<Manifest>, String>;
 /// A session's worktree changes, and whether its work landed when asked.
 type Counted = (String, Option<Diff>, Option<bool>);
 
+/// Switching Claude accounts. Every running agent holds its login in
+/// memory, so each stops once it is free and all resume on the new
+/// login together. None may run on while the files change: one still on
+/// the old login would write its token back when it refreshes it.
+struct AccountSwitch {
+    to: String,
+    /// Still running, to stop once free.
+    running: Vec<String>,
+    /// Stopped, to resume once the login is in.
+    stopped: Vec<String>,
+    /// Stop them now, mid turn or not.
+    now: bool,
+}
+
+/// How long a login just put in is watched for being written over.
+const SETTLES_IN: Duration = Duration::from_secs(15);
+
+/// How long a login opened by Add account is waited for.
+const ADDING_FOR: Duration = Duration::from_secs(15 * 60);
+
 /// A browser window a session opened.
 struct Browser {
     session: String,
@@ -2140,6 +2259,7 @@ impl App {
                 }
                 self.reconcile(events & EVENTS_PHASE != 0);
                 self.switch_free();
+                self.switch_step();
                 self.run_tasks();
                 self.recount();
                 self.mark_sweeps();
@@ -2199,6 +2319,8 @@ impl App {
                 }
                 self.sweep();
                 self.switch_free();
+                self.watch_login();
+                self.switch_step();
                 self.tick_tasks();
                 self.reload_when_ready();
                 if self
@@ -3268,6 +3390,289 @@ impl App {
             }
             !queue.is_empty()
         });
+    }
+
+    /// Reads who is logged in, keeps that login, and shows it. At start
+    /// and whenever the login files change: a refreshed token replaces the
+    /// kept one, and a `/login` in any terminal adds an account.
+    fn read_login(&mut self) {
+        self.login_read = accounts::stamp();
+        self.login_seen = self.login_read;
+        if let Some((to, at)) = self.settling.clone() {
+            if at.elapsed() > SETTLES_IN {
+                self.settling = None;
+            } else if accounts::live_id().as_ref() != Some(&to) {
+                eprintln!("horadric: the login was written over, putting it back");
+                if let Some(a) = self.accounts.get(&to).cloned() {
+                    if let Err(e) = self.put_file(&a) {
+                        eprintln!("horadric: cannot put the login back: {e}");
+                    }
+                }
+                // From the first put, so a writer that never stops is not
+                // fought for ever.
+                self.settling = Some((to, at));
+                return;
+            }
+        }
+        let Some(live) = accounts::live() else {
+            // Mid write, or no Claude login. Who it was stays shown then.
+            if accounts::live_id().is_none() {
+                self.account = None;
+                self.show_account(None);
+            }
+            return;
+        };
+        let id = live.id.clone();
+        let changed = self.accounts.remember(live);
+        let added = self
+            .adding
+            .as_ref()
+            .is_some_and(|(before, _)| before.as_ref() != Some(&id));
+        if added {
+            let before = self.adding.take().and_then(|(b, _)| b);
+            let email = self.accounts.get(&id).map(|a| a.email.clone());
+            self.save_accounts();
+            // Back to the account the sessions run on, so adding one stops
+            // nothing. The new one is a pick away.
+            match before.and_then(|b| self.accounts.get(&b).cloned()) {
+                Some(back) => {
+                    if let Err(e) = self.put_file(&back) {
+                        eprintln!("horadric: cannot put the login back: {e}");
+                    }
+                }
+                None => self.adopt(id),
+            }
+            self.toasts.show(
+                Kind::Done,
+                &format!("Added {}", email.unwrap_or_default()),
+                "Pick it under Account in the usage window to switch to it.",
+            );
+            return;
+        }
+        if changed {
+            self.save_accounts();
+        }
+        if self.account.as_ref() != Some(&id) {
+            self.adopt(id);
+        }
+    }
+
+    /// Reads the login again once its files changed and held still.
+    fn watch_login(&mut self) {
+        if self
+            .adding
+            .as_ref()
+            .is_some_and(|(_, at)| at.elapsed() > ADDING_FOR)
+        {
+            self.adding = None;
+        }
+        let stamp = accounts::stamp();
+        if stamp != self.login_seen {
+            self.login_seen = stamp;
+            return;
+        }
+        if stamp != self.login_read {
+            self.read_login();
+        }
+    }
+
+    /// Account `id` is the one in use now: its limits come back and the
+    /// usage window names it. The limits heard until now were the
+    /// account's before it.
+    fn adopt(&mut self, id: String) {
+        if let (Some(before), Ok(mut u)) = (&self.account, self.shared.usage.lock()) {
+            self.accounts.set_usage(before, u.clone());
+            *u = self.accounts.get(&id).and_then(|a| a.usage.clone());
+        }
+        let email = self.accounts.get(&id).map(|a| a.email.clone());
+        self.account = Some(id);
+        self.save_accounts();
+        self.show_account(email);
+    }
+
+    fn show_account(&mut self, email: Option<String>) {
+        if *self.shared.account.borrow() == email {
+            return;
+        }
+        *self.shared.account.borrow_mut() = email;
+        if let Some(u) = &self.usage_window {
+            if u.fit() {
+                self.arrange();
+            }
+        }
+    }
+
+    fn save_accounts(&self) {
+        if let Err(e) = accounts::save(&self.accounts) {
+            eprintln!("horadric: cannot save the accounts: {e}");
+        }
+    }
+
+    /// The accounts for the Account menu, the one in use, and the one a
+    /// switch is on its way to with how many sessions it waits for.
+    fn account_choices(&self) -> (Accounts, Option<String>, Option<(String, usize)>) {
+        let switching = self
+            .switch
+            .as_ref()
+            .map(|s| (s.to.clone(), s.running.len()));
+        (self.accounts.clone(), self.account.clone(), switching)
+    }
+
+    /// Opens a login for another account. The sessions keep running on
+    /// this one: the new login is kept and this one put back.
+    fn add_account(&mut self) {
+        if let Some(why) = accounts::refused() {
+            self.toasts.show(Kind::Failed, "Cannot add an account", why);
+            return;
+        }
+        self.read_login();
+        match accounts::log_in() {
+            Ok(()) => {
+                self.adding = Some((self.account.clone(), Instant::now()));
+                self.toasts.show(
+                    Kind::Info,
+                    "Log in to Claude",
+                    "Log in with the other account in the window that opened. \
+                     The sessions carry on with this one.",
+                );
+            }
+            Err(e) => self
+                .toasts
+                .show(Kind::Failed, "Cannot open the login", &e.to_string()),
+        }
+    }
+
+    fn forget_account(&mut self, id: &str) {
+        if self.account.as_deref() == Some(id) {
+            return;
+        }
+        self.accounts.forget(id);
+        self.save_accounts();
+    }
+
+    /// Switches Claude Code to account `to`. The agents Horadric runs stop
+    /// as each finishes its turn and resume on the new login together, see
+    /// [`AccountSwitch`]. With `now` they stop at once.
+    fn switch_account(&mut self, to: String, now: bool) {
+        if let Some(why) = accounts::refused() {
+            self.toasts
+                .show(Kind::Failed, "Cannot switch accounts", why);
+            return;
+        }
+        if let Some(s) = &mut self.switch {
+            s.to = to;
+            s.now |= now;
+            self.switch_step();
+            return;
+        }
+        if self.account.as_ref() == Some(&to) {
+            return;
+        }
+        let running: Vec<String> = self
+            .consoles
+            .iter()
+            .filter(|(id, c)| {
+                c.claude && c.exit_code().is_none() && self.background_of(id).is_none()
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        if let (false, Some(a)) = (running.is_empty(), self.accounts.get(&to)) {
+            self.toasts.show(
+                Kind::Info,
+                &format!("Switching to {}", a.email),
+                "Each session stops once its turn is done, and all resume on the new account together.",
+            );
+        }
+        self.switch = Some(AccountSwitch {
+            to,
+            running,
+            stopped: Vec::new(),
+            now,
+        });
+        self.switch_step();
+    }
+
+    /// Moves a switch on: stops each agent free to stop, and once every one
+    /// has, puts the new login in and resumes them all.
+    fn switch_step(&mut self) {
+        let Some(mut s) = self.switch.take() else {
+            return;
+        };
+        if let Ok(r) = self.shared.registry.lock() {
+            let consoles = &self.consoles;
+            let stopped = &mut s.stopped;
+            let now = s.now;
+            s.running.retain(|id| {
+                let Some(c) = consoles.get(id).filter(|c| c.exit_code().is_none()) else {
+                    // Gone on its own, ended or crashed: nothing to carry.
+                    return false;
+                };
+                let free = now || r.get(id).is_some_and(|x| x.free_to_restart(c.typed_at()));
+                if free {
+                    c.kill();
+                    stopped.push(id.clone());
+                }
+                !free
+            });
+        }
+        let stopping = s.stopped.iter().any(|id| {
+            self.consoles
+                .get(id)
+                .is_some_and(|c| c.exit_code().is_none())
+        });
+        if !s.running.is_empty() || stopping {
+            self.switch = Some(s);
+            return;
+        }
+        let email = self.accounts.get(&s.to).map(|a| a.email.clone());
+        match self.put_login(&s.to) {
+            Ok(()) => self.toasts.show(
+                Kind::Done,
+                &format!("Switched to {}", email.unwrap_or_default()),
+                "The sessions carry on with this account.",
+            ),
+            Err(e) => self.toasts.show(Kind::Failed, "Cannot switch accounts", &e),
+        }
+        // Once each, whatever happened: on the old login if the switch failed.
+        let on_stage = self.shared.active.borrow().clone();
+        for id in &s.stopped {
+            if self.paused.contains_key(id) {
+                if let Err(e) = self.resume(id, false) {
+                    eprintln!("horadric: cannot resume {id}: {e}");
+                }
+            }
+        }
+        if let Some(id) = on_stage.filter(|id| s.stopped.contains(id)) {
+            if self.consoles.contains_key(&id) {
+                self.reveal(&id, false);
+            }
+        }
+    }
+
+    /// Logs Claude Code in as account `to`, keeping the leaving login as
+    /// it is now first, since it may have been refreshed since it was kept.
+    fn put_login(&mut self, to: &str) -> Result<(), String> {
+        if let Some(live) = accounts::live() {
+            self.accounts.remember(live);
+        }
+        let target = self
+            .accounts
+            .get(to)
+            .cloned()
+            .ok_or("that account is no longer kept")?;
+        self.put_file(&target).map_err(|e| e.to_string())?;
+        self.adopt(to.to_string());
+        Ok(())
+    }
+
+    /// Writes `account`'s login into Claude Code's files, and watches for
+    /// a while that it stays.
+    fn put_file(&mut self, account: &Account) -> std::io::Result<()> {
+        accounts::put(account)?;
+        self.login_read = accounts::stamp();
+        self.login_seen = self.login_read;
+        self.settling = Some((account.id.clone(), Instant::now()));
+        Ok(())
     }
 
     /// A setting's list opened. Its row in the usage window stays lit
@@ -4785,6 +5190,7 @@ impl App {
                     }
                 }
                 Input::UsageMenu => post(self.notify.0 as isize, WM_HORADRIC_USAGE_MENU, 0),
+                Input::AccountMenu => post(self.notify.0 as isize, WM_HORADRIC_ACCOUNT_MENU, 0),
                 Input::SettingMenu(s, row) => {
                     self.setting_menu_for = Some((s, row));
                     post(self.notify.0 as isize, WM_HORADRIC_SETTING_MENU, 0);

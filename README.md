@@ -89,6 +89,10 @@ work. Worktrees are next.
   resumes. Each tile shows how full its session's context is. The numbers
   come from Claude Code's status line, which Horadric sets for its own
   sessions only.
+- With more than one Claude subscription, the Account row in that window
+  switches between them. Add account opens `claude auth login` once per
+  account. A switch waits for each session to finish its turn, then
+  resumes them all on the new account, conversations and all.
 - `horadric hooks install` adds Claude Code hooks to `~/.claude/settings.json`.
   They are `http` hooks: Claude Code posts each lifecycle event to Horadric on
   localhost. No script runs, no process is spawned per event.

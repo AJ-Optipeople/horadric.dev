@@ -62,6 +62,8 @@ pub mod theme;
 pub mod viewer;
 
 #[cfg(windows)]
+mod accounts;
+#[cfg(windows)]
 mod agents;
 #[cfg(windows)]
 pub mod app;

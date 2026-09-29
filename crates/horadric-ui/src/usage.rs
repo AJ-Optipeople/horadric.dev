@@ -7,7 +7,8 @@
 //! another place in the columns the same way. A click on the limits folds
 //! it down to the session's budget alone. A list setting drops its list,
 //! which the app opens, since it owns the defaults. Effort is a slider in
-//! the window itself.
+//! the window itself. Under the settings, the Claude account in use, whose
+//! row opens the accounts to switch to.
 
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
@@ -65,16 +66,35 @@ pub struct UsageWindow {
     slide: Cell<Option<(usize, usize)>>,
 }
 
-/// Which settings are sliders, in the order the window shows them.
+/// Which rows of settings are sliders, in the order the window shows
+/// them: the settings, then the account.
 fn scales() -> Vec<bool> {
-    Setting::ALL.iter().map(|s| s.is_scale()).collect()
+    Setting::ALL
+        .iter()
+        .map(|s| s.is_scale())
+        .chain([false])
+        .collect()
 }
+
+/// The row after the settings, which names the account.
+const ACCOUNT_ROW: usize = Setting::ALL.len();
 
 /// What each stop of a scale sets: the default, then its values.
 fn stops(setting: Setting) -> Vec<Option<&'static str>> {
     std::iter::once(None)
         .chain(setting.choices().iter().map(|(v, _)| Some(*v)))
         .collect()
+}
+
+/// What the Account row says: the address, or only the part before its @
+/// when the whole would crowd the label.
+fn account_name(email: Option<&str>) -> String {
+    const ROOM: usize = 20;
+    match email {
+        Some(e) if e.chars().count() > ROOM => e.split('@').next().unwrap_or(e).to_string(),
+        Some(e) => e.to_string(),
+        None => "Not logged in".to_string(),
+    }
 }
 
 struct Drag {
@@ -291,13 +311,18 @@ impl UsageWindow {
                     let all = stops(s);
                     SettingLook {
                         label: s.label(),
-                        value: s.name_of(value),
+                        value: s.name_of(value).to_string(),
                         stop: s.is_scale().then(|| {
                             let at = all.iter().position(|v| *v == value).unwrap_or(0);
                             (at, all.len())
                         }),
                     }
                 })
+                .chain([SettingLook {
+                    label: "Account",
+                    value: account_name(self.shared.account.borrow().as_deref()),
+                    stop: None,
+                }])
                 .collect(),
             hot: self.hot.get(),
             pressed: self.pressed.get(),
@@ -352,6 +377,7 @@ impl UsageWindow {
                 self.fit();
                 app::push(Input::Arrange);
             }
+            UsageHit::Setting(ACCOUNT_ROW) => app::push(Input::AccountMenu),
             UsageHit::Setting(i) => {
                 if let (Some(&s), Some(row)) = (Setting::ALL.get(i), self.row_on_screen(i)) {
                     app::push(Input::SettingMenu(s, row));
@@ -627,6 +653,16 @@ mod tests {
         assert_eq!(all.first(), Some(&None));
         assert_eq!(all.last(), Some(&Some("max")));
         assert_eq!(all.len(), Setting::Effort.choices().len() + 1);
-        assert_eq!(scales(), [false, true, false]);
+        assert_eq!(scales(), [false, true, false, false]);
+    }
+
+    #[test]
+    fn an_account_is_named_by_its_address_short_enough_to_fit() {
+        assert_eq!(account_name(Some("a@x.dk")), "a@x.dk");
+        assert_eq!(
+            account_name(Some("someone.long@example.com")),
+            "someone.long"
+        );
+        assert_eq!(account_name(None), "Not logged in");
     }
 }

@@ -332,7 +332,7 @@ pub struct UsageScene<'a> {
 pub struct SettingLook {
     pub label: &'static str,
     /// What it is set to, "Default" for nothing.
-    pub value: &'static str,
+    pub value: String,
     /// For a scale, the stop it is at and how many there are.
     pub stop: Option<(usize, usize)>,
 }
@@ -1266,11 +1266,11 @@ impl Painter<'_> {
                 Rect::new(inner.right() - chevron, inner.y + 1.0, chevron, inner.h),
             );
             let value_r = Rect::new(inner.x, inner.y, inner.w - chevron - 6.0, inner.h);
-            self.text(&gpu.small_right, ink, look.value, value_r);
+            self.text(&gpu.small_right, ink, &look.value, value_r);
             return;
         };
         self.text(&gpu.small, theme::TEXT_DIM, look.label, inner);
-        self.text(&gpu.small_right, ink, look.value, inner);
+        self.text(&gpu.small_right, ink, &look.value, inner);
         let (stop, n) = look.stop.unwrap_or((0, 1));
         self.slider(gpu, &track, stop, n, b);
     }

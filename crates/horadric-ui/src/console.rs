@@ -56,7 +56,7 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 /// every tile, and the agent there believes it is someone's child: it stops
 /// saving its transcript, among other things. User preferences such as
 /// `CLAUDE_EFFORT` are left alone.
-const PARENT_SESSION_ENV: [&str; 11] = [
+pub(crate) const PARENT_SESSION_ENV: [&str; 11] = [
     "CLAUDECODE",
     "CLAUDE_CODE_CHILD_SESSION",
     "CLAUDE_CODE_SESSION_ID",
