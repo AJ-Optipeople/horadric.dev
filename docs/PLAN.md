@@ -2350,19 +2350,23 @@ switching included. API keys wait. The concept left other agents out of
 v1 because hooks were Claude Code's alone. That has changed: both now have
 hooks close to Claude Code's, and one of them even reads Claude Code's.
 
-**What each gives**, read from their docs and this machine (Grok Build
-0.2.22 is installed and logged in, `~/.codex` holds a ChatGPT login and
-sessions from the desktop app, but no `codex` is on PATH):
+**What each gives**, read from their docs, their source and this machine.
+The spike (2026-09-29) installed Codex CLI 0.159.0 from npm. Both logins
+here have expired: Codex's refresh token is refused ("could not be
+refreshed, sign in again") and Grok's gives `invalid_grant`, so no model
+turn ran on either. What needed a live turn is marked unverified below.
+Grok Build here is 0.2.22 from June while 1.0.44 is out, and it was
+never used, so every Grok answer is 0.2.22's.
 
 | | Claude Code | Codex CLI (ChatGPT) | Grok Build (xAI) |
 |---|---|---|---|
-| Program | `claude` | `codex` | `grok`, in `~/.grok/bin` |
-| Login | `.credentials.json` + `.claude.json` | `$CODEX_HOME/auth.json`: `tokens` (`id_token`, `access_token`, `refresh_token`, `account_id`) | `$GROK_HOME/auth.json`: one entry per `issuer::user`, with `email`, `key`, `refresh_token` |
-| Login read again while running | no | not known | yes, on the next call |
-| Hooks | `http`, headers from env | `command` only, in `~/.codex/hooks.json`, on by default | `command` and `http`, in `~/.grok/hooks/*.json`, no headers, `$VAR` expanded in the URL |
-| Events | the set Horadric uses | `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, `Stop`, `Interrupt`, `SessionEnd` and more | the same names, plus `Notification` with `permission_prompt` and `idle_prompt` |
-| Payload | `session_id`, `cwd` | `session_id`, `cwd`, `transcript_path`, `model`, `turn_id` | `sessionId`, `hookEventName` (snake case) and `hook_event_name` (Pascal case), `cwd` |
-| Resume | `--resume <id>` | `codex resume <id>` | `--resume <id>`, `-c` |
+| Program | `claude` | `codex`, from npm `@openai/codex` | `grok`, in `~/.grok/bin` |
+| Login | `.credentials.json` + `.claude.json` | `$CODEX_HOME/auth.json`: `auth_mode`, `tokens` (`id_token`, `access_token`, `refresh_token`, `account_id`), `last_refresh` | `$GROK_HOME/auth.json`: one entry per `issuer::client_id`, with `email`, `key`, `refresh_token`, `expires_at` |
+| Login read again while running | no | only on a 401 and before a refresh, never watched; refreshed tokens are written back; a different `account_id` on disk is a permanent error (from the source) | on the next auth, by its log (unverified live) |
+| Hooks | `http`, headers from env | `command` only, in `~/.codex/hooks.json`, `config.toml` or `-c hooks.<Event>=[...]`; the parent's environment reaches it (seen); an unreviewed hook is skipped silently unless trusted in `/hooks` or run with `--dangerously-bypass-hook-trust` (seen) | `command` and `http`, in `~/.grok/hooks/*.json`; the `http` fields are `type`, `url`, `timeout`, `env`, `matcher`, no headers; `https://` only, private and loopback addresses refused (read from the 0.2.22 binary); a hook whose `$VAR` is unset is not run |
+| Events | the set Horadric uses | `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, `Stop`, `Interrupt`, `SessionEnd` and more; no `Stop` for a turn that failed (seen) | `session_start`, `user_prompt_submit`, `pre_tool_use`, `post_tool_use`, `post_tool_use_failure`, `permission_denied`, `notification` (with `notificationType`), `stop`, `stop_failure`, `session_end`, subagent and compact events; no `idle_prompt` in the binary |
+| Payload | `session_id`, `cwd` | `session_id`, `hook_event_name` (Pascal case), `cwd`, `transcript_path`, `model`, `permission_mode`, plus `turn_id` and `prompt` on a turn, `source` on start (seen) | `sessionId`, `hookEventName` (snake case), `cwd`, `workspaceRoot`, `transcriptPath`, `timestamp` |
+| Resume | `--resume <id>` | `codex resume <id>` and `codex exec resume <id>`, any session in `$CODEX_HOME/sessions`, the desktop app's too and from another cwd (seen) | `--resume <id>`, `-c` |
 | Limits | status line JSON | `token_count` events in `sessions/**/rollout-*.jsonl`: `rate_limits.primary` (300 min) and `secondary` (weekly), `used_percent`, `resets_at` | none found; `/usage` shows credits in the TUI |
 | Model, effort, permissions | `--model`, `--effort`, `--permission-mode` | `-m`, `-c model_reasoning_effort=`, `--ask-for-approval`, `--sandbox` | `-m`, `--effort`, `--always-approve` |
 
@@ -2373,58 +2377,88 @@ tag it gets, how its hooks are installed, how its events become a
 `HookEvent`, its resume arguments, its flags for the defaults, its login
 files and its limits. Everything downstream, the registry, phases, tiles,
 stage and journal, keeps working on `HookEvent` and does not learn the
-agent's name. No new dependency: both hook files are JSON, so Horadric
-never has to write TOML, and a JWT's payload is base64 and JSON.
+agent's name. No new dependency: the Grok hook file is JSON, Codex's
+hooks go on its command line, so Horadric never has to write a TOML
+file, and a JWT's payload is base64 and JSON.
 
 **Steps**, each landing on its own:
 
-1. **Spike, on this machine, with a dev instance.** Install the Codex CLI
-   and answer what the docs leave open. Does a Codex command hook see the
-   parent's environment, so `HORADRIC_SESSION` reaches it? Does Codex read
-   `auth.json` again while running, and does it write it back when it
-   refreshes? Does `codex resume <id>` take a session started elsewhere?
-   Does a Grok `http` hook expand `$HORADRIC_SESSION` in its URL on
-   Windows? Which Grok event means waiting on you, and does `Stop` come at
-   every turn's end? And one thing already found: Grok scans
-   `~/.claude/settings.json` for hooks by default, so every `grok` on this
-   machine already posts to Horadric's Claude hook, with Grok's payload.
-   Find out whether it sends the header or drops it.
-2. **Grok first.** It is installed, it posts over HTTP like Claude Code,
-   and it reads its login again by itself, so it needs the least. Its hook
-   goes in `~/.grok/hooks/horadric.json` with the tag in the URL
-   (`/horadric/hook?session=$HORADRIC_SESSION&port=$HORADRIC_OWNER_PORT&agent=grok`),
-   and the listener takes the tag from the query when there is no header.
-   A Grok payload read as Claude's is dropped by its shape, so the
-   Claude hook Grok borrows can never move a tile. Phases: `Notification`
-   with `permission_prompt` is waiting on you, `Stop` is done. `install`
-   and `uninstall` add and remove the file, the dev instance never.
-3. **Codex second.** Command hooks only, so `horadric hook` becomes a tiny
-   command: it reads the event on stdin and posts it with the tag from its
-   environment, as `horadric status` does for the status line. It is the
-   one place a process is spawned per event, which Claude Code and Grok
-   do not need, so it must start fast and never block the agent (a short
-   timeout, fail open). `PermissionRequest` is waiting, `Stop` is done,
-   `Interrupt` is idle. `codex resume <id>` carries a paused tile on.
-4. **Starting one.** The plus button and `horadric new --agent codex` start
+1. **Spike, done 2026-09-29.** What it found is in the table. The
+   answers to the questions it was given:
+   - A Codex command hook sees the parent's environment:
+     `HORADRIC_SESSION` and `HORADRIC_OWNER_PORT` reached it.
+   - Codex reads `auth.json` again only when a request gets a 401 and
+     before it refreshes, and writes the refreshed tokens back. If the
+     file now holds another `account_id`, it stops with a permanent
+     error rather than use it. A failed refresh leaves the file alone.
+   - `codex resume <id>` takes a session started elsewhere: a Codex
+     Desktop session (originator "Codex Desktop", another cwd) loaded,
+     and an unknown id says "no rollout found".
+   - A Grok `http` hook cannot reach Horadric at all: 0.2.22 allows
+     `https://` only and refuses private and loopback addresses. Whether
+     `$HORADRIC_SESSION` expands in the URL is moot. Grok needs a
+     command hook, the same `horadric hook` Codex uses.
+   - The Claude hook Grok borrows from `~/.claude/settings.json` is an
+     `http` hook to `127.0.0.1`, so Grok refuses it and posts nothing.
+     There is no header question: nothing arrives. Grok also loads the
+     hooks of installed Claude plugins.
+   - Which Grok event is waiting on you, and whether `stop` comes at
+     every turn's end, needs a live turn and is open. The binary knows a
+     `notification` with a `notificationType` and `permission_prompt`,
+     and has no `idle_prompt`. Codex sent no `Stop` for a turn that
+     failed, so a failed turn has to be read another way (its
+     `SessionEnd`, or a `stop_failure` for Grok).
+   - Still open, for once the human has signed in again (`codex login`,
+     and `grok update` then `grok login`): Codex's `Stop`,
+     `PermissionRequest` and `Interrupt` on real turns, and all of
+     Grok's on 1.x, including whether 1.x still refuses a loopback URL.
+2. **`horadric hook`, the command hook.** Both agents need it, since
+   neither can post to Horadric over HTTP. It reads the event on stdin
+   and posts it with the tag from its environment, as `horadric status`
+   does for the status line, adding which agent sent it. It is the one
+   place a process is spawned per event, which Claude Code does not
+   need, so it must start fast and never block the agent (a short
+   timeout, fail open), and it does nothing when `HORADRIC_SESSION` is
+   unset, so an agent started outside Horadric is not slowed.
+3. **Codex.** Horadric passes its hooks on the command line it starts,
+   `-c hooks.<Event>=[{hooks=[{type="command",command="..."}]}]` for each
+   event, with `--dangerously-bypass-hook-trust`, since a hook nobody has
+   reviewed in `/hooks` is skipped without a word. That keeps
+   `~/.codex` untouched: nothing for `install` to add, a `codex` started
+   outside Horadric runs no Horadric hook, and a dev instance and the
+   installed one each pass their own. The cost is that the bypass also
+   runs any unreviewed hooks of the user's own. `PermissionRequest` is
+   waiting, `Stop` is done, `Interrupt` is idle, and a `SessionEnd`
+   after a turn with no `Stop` is a turn that failed. `codex resume <id>`
+   carries a paused tile on.
+4. **Grok.** A `command` hook calling `horadric hook`, in
+   `~/.grok/hooks/horadric.json`, added and removed by `install` and
+   `uninstall`, the dev instance never. The Claude hook Grok borrows
+   needs nothing: Grok refuses it. If Grok 1.x turns out to accept a
+   loopback URL, the listener must still drop a Grok payload on the
+   Claude path by its shape. Phases wait for the live check in step 1.
+5. **Starting one.** The plus button and `horadric new --agent codex` start
    any agent found on PATH, Claude by default. A tile carries a small mark
    for its agent, so two sessions in one project can be told apart.
    History lists each agent's own conversations: Codex keeps them in
    `sessions/` by date, Grok in `sessions/<cwd>/<id>/summary.json`.
-5. **Limits per provider.** The usage window gets a screen per provider
+6. **Limits per provider.** The usage window gets a screen per provider
    in use, named this time ("Claude", "ChatGPT", "Grok"), since with more
    than one the numbers need saying whose they are. Codex's come from the
    newest `token_count` in the transcript its hooks point at, read on each
    `Stop`, and map straight onto `Limit`: `used_percent` and `resets_at`.
    Grok shows no limits until a source turns up. The settings follow the
    agent: each has its own models and efforts, and Default passes nothing.
-6. **Accounts per provider**, built on the Claude switching above. Codex:
+7. **Accounts per provider**, built on the Claude switching above. Codex:
    the whole `auth.json` is the login, the account is `account_id`, the
    email is in the `id_token`. Horadric forces the file store if a user
-   moved it to the OS keyring. If step 1 finds it does not read the file
-   again, a switch stops and resumes its sessions as a Claude switch does.
+   moved it to the OS keyring. A running Codex treats another account on
+   disk as a permanent error, so a switch stops and resumes its sessions
+   as a Claude switch does.
    Grok: the login is the one entry in `auth.json`, and since Grok reads
-   it again by itself, a switch is only the write. No session stops. A
-   switch touches one provider's sessions and leaves the others running.
+   it again by itself, a switch is only the write. No session stops
+   (check that live first). A switch touches one provider's sessions and
+   leaves the others running.
 
 **Not in this.** Cursor, Gemini and the rest, until one is asked for.
 API keys and OpenRouter, asked to wait. Grok Build on Windows is
