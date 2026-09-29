@@ -350,9 +350,55 @@ pub fn base64_decode(text: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// The start of a release's notes, short enough for a notification: the
+/// first paragraph, cut at a word so it stays within `max` characters.
+pub fn teaser(notes: &str, max: usize) -> String {
+    let first = notes
+        .trim()
+        .split("\n\n")
+        .next()
+        .unwrap_or("")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if first.chars().count() <= max {
+        return first;
+    }
+    let mut out = String::new();
+    for word in first.split(' ') {
+        let gap = usize::from(!out.is_empty());
+        // One character is kept for the ellipsis.
+        if out.chars().count() + gap + word.chars().count() + 1 > max {
+            break;
+        }
+        if gap == 1 {
+            out.push(' ');
+        }
+        out.push_str(word);
+    }
+    out.push('\u{2026}');
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_teaser_is_the_first_paragraph() {
+        assert_eq!(
+            teaser("  One line.\nSame one.\n\nNext.", 80),
+            "One line. Same one."
+        );
+        assert_eq!(teaser("", 80), "");
+    }
+
+    #[test]
+    fn a_long_teaser_is_cut_at_a_word() {
+        let t = teaser("alpha beta gamma delta", 12);
+        assert_eq!(t, "alpha beta\u{2026}");
+        assert!(t.chars().count() <= 12);
+    }
 
     #[test]
     fn the_public_key_is_a_whole_point() {

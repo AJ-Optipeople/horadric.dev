@@ -655,6 +655,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             cube_on: saved.cube,
             font_family: saved.font_family.clone(),
             screen: saved.screen.clone(),
+            update_told: saved.update_told.clone(),
             last_saved: Some(saved),
             frozen: false,
             pick_from: None,
@@ -677,6 +678,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             swept_at: HashMap::new(),
             swept_heads: Arc::new(Mutex::new(HashMap::new())),
             update: None,
+            update_click: false,
             last_check: None,
             checking: false,
             looked: Arc::new(Mutex::new(None)),
@@ -871,7 +873,12 @@ unsafe extern "system" fn app_proc(
             if mouse == WM_LBUTTONUP || mouse == WM_RBUTTONUP {
                 tray_menu(hwnd);
             } else if mouse == NIN_BALLOONUSERCLICK {
-                with_app(App::open_alert);
+                match with_app(App::take_update_click).flatten() {
+                    Some(m) => offer_update(&m),
+                    None => {
+                        with_app(App::open_alert);
+                    }
+                }
             }
             return LRESULT(0);
         }
@@ -1126,7 +1133,9 @@ fn tray_menu(hwnd: HWND) {
             with_app(|app| app.check_update(true));
         }
         Some(Choice::Update) => {
-            with_app(|app| app.install_update());
+            if let Some(m) = with_app(|app| app.update.clone()).flatten() {
+                offer_update(&m);
+            }
         }
         Some(Choice::EndAll) => {
             if confirm_end(None) {
@@ -1516,6 +1525,28 @@ fn rename_session(id: &str) {
     };
     if let Some(a) = ask_beside(Some(&key), &question) {
         with_app(|app| app.rename(id, &a.text));
+    }
+}
+
+/// Shows a release's notes and installs it if asked to, outside the app's
+/// borrow. The notes are the reason to update or wait, so they come
+/// before the download, not after.
+fn offer_update(m: &Manifest) {
+    let notes = m.notes.trim();
+    let text = if notes.is_empty() {
+        "This release came without notes."
+    } else {
+        notes
+    };
+    let pressed = ask(&Dialog {
+        tone: Tone::Question,
+        title: &format!("Horadric {} is out", m.version),
+        text,
+        buttons: &["Update now", "Not now"],
+        default: 0,
+    });
+    if pressed == Some(0) {
+        with_app(|app| app.install_update());
     }
 }
 
@@ -2466,6 +2497,11 @@ struct App {
     swept_heads: Arc<Mutex<HashMap<String, String>>>,
     /// A newer release, verified, that the tray offers.
     update: Option<Manifest>,
+    /// The newest release a notification told of, kept in the saved state.
+    update_told: Option<String>,
+    /// The last notification said a release is out, so a click on it
+    /// shows that release's notes.
+    update_click: bool,
     /// When the last update check started. The first tick checks.
     last_check: Option<Instant>,
     /// An update check is on its thread.
@@ -3132,8 +3168,9 @@ impl App {
         });
     }
 
-    /// What the update check found. A newer release only ever shows in the
-    /// tray menu, unless the tray asked.
+    /// What the update check found. A newer release is told of once, with
+    /// the start of its notes, and a click on that shows them all. After
+    /// that it waits in the tray menu, unless the tray asked again.
     fn take_update(&mut self) {
         let Some((asked, found)) = self.looked.lock().ok().and_then(|mut l| l.take()) else {
             return;
@@ -3142,12 +3179,19 @@ impl App {
         match found {
             Ok(Some(m)) => {
                 eprintln!("horadric: Horadric {} is out", m.version);
-                if asked {
-                    self.toasts.show(
-                        Kind::Done,
-                        &format!("Horadric {} is out", m.version),
-                        &format!("Pick \"Update to {}\" in the tray menu.", m.version),
-                    );
+                if asked || self.update_told.as_deref() != Some(m.version.as_str()) {
+                    let teaser = release::teaser(&m.notes, 120);
+                    let text = if teaser.is_empty() {
+                        "Click to update.".to_string()
+                    } else {
+                        format!("{teaser} Click to see what is new.")
+                    };
+                    self.alert_for = None;
+                    self.tasks.merge_for = None;
+                    self.update_click = true;
+                    self.toasts
+                        .show(Kind::Done, &format!("Horadric {} is out", m.version), &text);
+                    self.update_told = Some(m.version.clone());
                 }
                 self.update = Some(m);
             }
@@ -3181,6 +3225,7 @@ impl App {
             return;
         }
         self.downloading = true;
+        self.update_click = false;
         self.toasts.show(
             Kind::Info,
             &format!("Updating to Horadric {}", manifest.version),
@@ -4596,6 +4641,7 @@ impl App {
         if let Some(a) = alert {
             self.alert_for = about;
             self.tasks.merge_for = None;
+            self.update_click = false;
             self.toasts.show(Kind::Waiting, &a.title, &a.text);
         }
     }
@@ -4620,6 +4666,7 @@ impl App {
         let file = o.file.rsplit(['/', '\\']).next().unwrap_or(&o.file);
         self.alert_for = Some(o.session.clone());
         self.tasks.merge_for = None;
+        self.update_click = false;
         self.toasts.show(
             Kind::Waiting,
             &format!("Two sessions in {file}"),
@@ -4633,6 +4680,14 @@ impl App {
 
     /// The notification was clicked: show the session it was about, or,
     /// for several, the one that has waited longest.
+    /// The release the last notification told of, when it did, for a
+    /// click on it.
+    fn take_update_click(&mut self) -> Option<Manifest> {
+        std::mem::take(&mut self.update_click)
+            .then(|| self.update.clone())
+            .flatten()
+    }
+
     fn open_alert(&mut self) {
         if let Some(m) = self.tasks.merge_for.take() {
             runner::ask_for(self, runner::Menu::Merge(m));
@@ -5072,6 +5127,7 @@ impl App {
             recovering: self.recovering.is_some(),
             page_sizes: web::sizes(),
             page_docks: web::docks(),
+            update_told: self.update_told.clone(),
             ..Default::default()
         }
     }

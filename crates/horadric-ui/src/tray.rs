@@ -272,7 +272,7 @@ pub fn menu(
     }
     items.push(Item::action(CHECK, "Check for updates"));
     if let Some(version) = update {
-        items.push(Item::action(UPDATE, format!("Update to {version}")));
+        items.push(Item::action(UPDATE, format!("Update to {version}\u{2026}")));
     }
     items.push(Item::Separator);
     items.push(Item::action(END_ALL, "End all sessions"));

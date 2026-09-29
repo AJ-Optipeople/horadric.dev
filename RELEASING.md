@@ -53,8 +53,12 @@ happens on this machine.
 
    This hashes `horadric.exe` and `horadricw.exe` and writes
    `target/release/latest.json`: the version, the notes, a SHA-256 per
-   binary and one signature over all of it. The notes are what the tray
-   shows a user deciding whether to update.
+   binary and one signature over all of it. The notes are what a user
+   reads when deciding whether to update, so write them for that user,
+   not for a developer. The first paragraph goes in the notification,
+   cut to about 120 characters, so make it the one line that matters.
+   All of it shows in the dialog before the update. A blank line
+   separates paragraphs; `--notes` takes one argument, so quote it.
 4. Commit the version bump, tag it and push:
 
    ```sh
@@ -62,7 +66,8 @@ happens on this machine.
    git push origin main v0.2.0
    ```
 
-5. Create a **draft** release with the three files:
+5. Create a **draft** release with the three files, and the same notes
+   as the manifest, so the release page and the app say the same thing:
 
    ```sh
    gh release create v0.2.0 --draft --title "Horadric 0.2.0" --notes "What changed" \
@@ -83,8 +88,11 @@ on start, once a day, and from "Check for updates" in the tray. A draft is
 not `latest`, so it is invisible to them. That is the point of the draft.
 
 **Publishing the draft is the moment every install is offered the
-release.** Each one shows "Update to 0.2.0" in its tray. Nothing installs
-on its own: a click downloads both binaries into
+release.** Each one shows a notification, "Horadric 0.2.0 is out", with
+the first paragraph of the notes, once per release (the state remembers
+it was told). A click on it, or on "Update to 0.2.0" in the tray, shows
+all the notes with "Update now" and "Not now". Nothing installs on its
+own: "Update now" downloads both binaries into
 `%LOCALAPPDATA%\Horadric\updates\<version>\`, checks each hash against the
 signed manifest, and only then hands over through `reload`, the same way
 `horadric reload` does from a checkout. Sessions keep running in their

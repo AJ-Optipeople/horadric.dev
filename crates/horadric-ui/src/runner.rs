@@ -967,6 +967,7 @@ impl App {
             let into = crate::worktree::checked_out(&main).unwrap_or_else(|| "main".into());
             if !self.quiet {
                 self.alert_for = None;
+                self.update_click = false;
                 self.toasts.show(
                     Kind::Done,
                     &format!("Finished: {}", tasks::one_line(&title)),

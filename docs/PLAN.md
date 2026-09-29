@@ -2927,8 +2927,13 @@ rebuilt from the parsed fields, so the file's layout and key order do not
 matter. The check is built: `horadric_ui::update::look` over WinHTTP
 (`net.rs`), on the first tick after start, every 24 hours, and from "Check
 for updates" in the tray. A verified newer version adds "Update to
-<version>". A check that finds this build up to date takes the item away
-again; a failed one leaves it. The install is built too:
+<version>" and, once per release (`update_told` in the saved state), a
+notification with the first paragraph of its notes
+(`release::teaser`). The item and a click on the notification both show
+all the notes, and install only on "Update now" (decided 2026-09-29:
+the tray item alone told no one, and the signed notes were never shown).
+A check that finds this build up to date takes the item away again; a
+failed one leaves it. The install is built too:
 `horadric_ui::update::download`, then the app's own `Reload`, as below.
 
 Today a new build reaches this machine through
