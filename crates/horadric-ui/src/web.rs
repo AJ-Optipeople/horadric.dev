@@ -264,7 +264,7 @@ pub fn set_dock(key: &str, dock: Option<Dock>) {
 /// Moves the browser pane to `side`, keeping its size along the same
 /// axis, or back into the grid when it is there already.
 pub fn toggle_dock(key: &str, side: Side) {
-    set_dock(key, viewport::toggled(dock(key), side, size(key)));
+    set_dock(key, viewport::toggled(dock(key), side));
 }
 
 /// Every project's dock, to save.

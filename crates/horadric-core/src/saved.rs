@@ -105,6 +105,10 @@ pub struct SavedState {
     /// the sessions resumed, so it resumes nothing.
     #[serde(default)]
     pub recovering: bool,
+    /// The newest release a notification told of, so each release is told
+    /// of once, not at every start and every daily check.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update_told: Option<String>,
 }
 
 /// The side of the stage a browser pane stands on, beside the grid.
@@ -117,12 +121,14 @@ pub enum Side {
 }
 
 /// A browser pane beside the grid: its side, and its width, or its height
-/// on top, in DIPs.
+/// on top, in DIPs. None shares the stage half and half with the grid,
+/// until the seam is dragged.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(from = "SavedDock")]
 pub struct Dock {
     pub side: Side,
-    pub size: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<f32>,
 }
 
 /// A dock as written, or as the first build that had one wrote it: only
@@ -130,7 +136,11 @@ pub struct Dock {
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum SavedDock {
-    Placed { side: Side, size: f32 },
+    Placed {
+        side: Side,
+        #[serde(default)]
+        size: Option<f32>,
+    },
     Right(f32),
 }
 
@@ -140,7 +150,7 @@ impl From<SavedDock> for Dock {
             SavedDock::Placed { side, size } => Dock { side, size },
             SavedDock::Right(size) => Dock {
                 side: Side::Right,
-                size,
+                size: Some(size),
             },
         }
     }
@@ -402,7 +412,7 @@ mod tests {
             d,
             Dock {
                 side: Side::Top,
-                size: 300.0
+                size: Some(300.0)
             }
         );
         let old: Dock = serde_json::from_str("640.0").unwrap();
@@ -410,11 +420,17 @@ mod tests {
             old,
             Dock {
                 side: Side::Right,
-                size: 640.0
+                size: Some(640.0)
             }
         );
-        let written = serde_json::to_string(&d).unwrap();
-        assert_eq!(serde_json::from_str::<Dock>(&written).unwrap(), d);
+        let half = Dock {
+            side: Side::Left,
+            size: None,
+        };
+        for d in [d, half] {
+            let written = serde_json::to_string(&d).unwrap();
+            assert_eq!(serde_json::from_str::<Dock>(&written).unwrap(), d);
+        }
     }
 
     fn saved(args: &[&str], prompted: bool) -> SavedSession {

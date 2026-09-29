@@ -1666,15 +1666,16 @@ pub fn grid(n: usize, area: (i32, i32, i32, i32), gap: i32) -> Vec<[i32; 4]> {
 }
 
 /// The grid with its last pane docked on `side`: that pane `size` wide,
-/// or tall on top, across the whole of that side, the rest in a grid of
-/// their own beside it. `size` is kept to leave each side at least `min`.
+/// or tall on top, or half the area without one, across the whole of that
+/// side, the rest in a grid of their own beside it. `size` is kept to
+/// leave each side at least `min`.
 /// None where the area is too small for both, so the plain grid is used.
 pub fn docked_grid(
     n: usize,
     area: (i32, i32, i32, i32),
     gap: i32,
     side: Side,
-    size: i32,
+    size: Option<i32>,
     min: i32,
 ) -> Option<Vec<[i32; 4]>> {
     let (left, top, right, bottom) = area;
@@ -1685,7 +1686,9 @@ pub fn docked_grid(
     if n < 2 || span < 2 * min + gap {
         return None;
     }
-    let size = size.clamp(min, span - gap - min);
+    let size = size
+        .unwrap_or((span - gap) / 2)
+        .clamp(min, span - gap - min);
     let (dock, rest) = match side {
         Side::Left => (
             [left, top, left + size, bottom],
@@ -2768,27 +2771,33 @@ mod tests {
     #[test]
     fn a_docked_pane_takes_its_whole_side_and_the_rest_share_the_grid() {
         let area = (10, 40, 1010, 840);
-        let right = docked_grid(3, area, 8, Side::Right, 400, 200).unwrap();
+        let right = docked_grid(3, area, 8, Side::Right, Some(400), 200).unwrap();
         assert_eq!(right[2], [610, 40, 1010, 840]);
         assert_eq!(right[..2], grid(2, (10, 40, 602, 840), 8)[..]);
-        let left = docked_grid(3, area, 8, Side::Left, 400, 200).unwrap();
+        let left = docked_grid(3, area, 8, Side::Left, Some(400), 200).unwrap();
         assert_eq!(left[2], [10, 40, 410, 840]);
         assert_eq!(left[..2], grid(2, (418, 40, 1010, 840), 8)[..]);
-        let top = docked_grid(3, area, 8, Side::Top, 300, 200).unwrap();
+        let top = docked_grid(3, area, 8, Side::Top, Some(300), 200).unwrap();
         assert_eq!(top[2], [10, 40, 1010, 340]);
         assert_eq!(top[..2], grid(2, (10, 348, 1010, 840), 8)[..]);
         // Kept to leave the sessions their minimum, and itself its own.
-        let wide = docked_grid(2, area, 8, Side::Right, 5000, 200).unwrap();
+        let wide = docked_grid(2, area, 8, Side::Right, Some(5000), 200).unwrap();
         assert_eq!(wide[1][0], 218);
-        let narrow = docked_grid(2, area, 8, Side::Right, 10, 200).unwrap();
+        let narrow = docked_grid(2, area, 8, Side::Right, Some(10), 200).unwrap();
         assert_eq!(narrow[1][0], 810);
+        // Without a size of its own it shares the area half and half.
+        let half = docked_grid(2, area, 8, Side::Right, None, 200).unwrap();
+        assert_eq!(half[1], [514, 40, 1010, 840]);
+        assert_eq!(half[0], [10, 40, 506, 840]);
+        let top = docked_grid(2, area, 8, Side::Top, None, 200).unwrap();
+        assert_eq!(top[1], [10, 40, 1010, 436]);
         assert_eq!(
-            docked_grid(1, area, 8, Side::Right, 400, 200),
+            docked_grid(1, area, 8, Side::Right, Some(400), 200),
             None,
             "alone it fills"
         );
         assert_eq!(
-            docked_grid(2, (0, 0, 300, 100), 8, Side::Top, 50, 200),
+            docked_grid(2, (0, 0, 300, 100), 8, Side::Top, Some(50), 200),
             None
         );
     }
@@ -2797,7 +2806,7 @@ mod tests {
     fn dragging_the_seam_sizes_the_docked_pane_from_its_side() {
         let area = (10, 40, 1010, 840);
         for (side, size) in [(Side::Left, 400), (Side::Right, 400), (Side::Top, 300)] {
-            let cells = docked_grid(3, area, 8, side, size, 200).unwrap();
+            let cells = docked_grid(3, area, 8, side, Some(size), 200).unwrap();
             let (at, _) = seam(side, cells[2], 8);
             assert_eq!(seam_size(side, area, 8, at), size, "{side:?}");
         }

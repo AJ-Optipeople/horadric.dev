@@ -385,7 +385,8 @@ impl TerminalWindow {
         let dock = self.dock(&panes);
         let docked = dock.and_then(|d| {
             let px = |dip: f32| (dip * self.dpi() as f32 / 96.0).round() as i32;
-            layout::docked_grid(panes.len(), area, gap, d.side, px(d.size), px(DOCK_MIN_DIP))
+            let size = d.size.map(px);
+            layout::docked_grid(panes.len(), area, gap, d.side, size, px(DOCK_MIN_DIP))
         });
         self.seam.set(
             dock.zip(docked.as_ref().and_then(|g| g.last()))
@@ -482,7 +483,13 @@ impl TerminalWindow {
             .last()
             .and_then(|p| p.console().web.clone());
         if let Some(key) = key {
-            web::set_dock(&key, Some(Dock { side, size }));
+            web::set_dock(
+                &key,
+                Some(Dock {
+                    side,
+                    size: Some(size),
+                }),
+            );
             self.layout();
         }
     }

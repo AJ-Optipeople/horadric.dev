@@ -12,8 +12,6 @@
 
 use horadric_core::saved::{Dock, Side};
 
-use crate::glyphs;
-
 /// The room left round a sized page for its grips, in DIPs.
 pub const GRIP: f32 = 12.0;
 /// The line under a sized page that says its size.
@@ -30,33 +28,16 @@ pub const PRESETS: [(&str, u32, u32); 4] = [
     ("Desktop", 1920, 1080),
 ];
 
-/// How big a browser pane docked on `side` starts: wide enough, or tall
-/// enough on top, to show a sized page unscaled, or else a browser's usual
-/// share. The seam beside it changes it after.
-pub fn dock_size(side: Side, page: Option<(u32, u32)>) -> f32 {
-    let bezels = 2.0 * (GRIP + glyphs::BEZEL);
-    match (side, page) {
-        (Side::Left | Side::Right, Some((w, _))) => w as f32 + bezels,
-        (Side::Left | Side::Right, None) => 640.0,
-        (Side::Top, Some((_, h))) => {
-            h as f32 + 2.0 * GRIP + LABEL_H + glyphs::SCREEN_TOP + glyphs::BEZEL
-        }
-        (Side::Top, None) => 420.0,
-    }
-}
-
 /// Where a place button sends a browser pane docked as `now`: back into
 /// the grid when it is on that side already, across keeping its width
-/// from one side to the other, and anywhere else at its starting size.
-pub fn toggled(now: Option<Dock>, side: Side, page: Option<(u32, u32)>) -> Option<Dock> {
+/// from one side to the other, and anywhere else sharing the stage half
+/// and half with the grid.
+pub fn toggled(now: Option<Dock>, side: Side) -> Option<Dock> {
     let across = |a: Side| a == Side::Top;
     match now {
         Some(d) if d.side == side => None,
         Some(d) if across(d.side) == across(side) => Some(Dock { side, ..d }),
-        _ => Some(Dock {
-            side,
-            size: dock_size(side, page),
-        }),
+        _ => Some(Dock { side, size: None }),
     }
 }
 
@@ -198,45 +179,33 @@ mod tests {
     const GLASS: [f32; 4] = [6.0, 26.0, 1006.0, 1026.0];
 
     #[test]
-    fn a_dock_starts_big_enough_for_a_sized_page_unscaled() {
-        for side in [Side::Left, Side::Right] {
-            let w = dock_size(side, Some((390, 844)));
-            let glass = [0.0, 0.0, w - 2.0 * glyphs::BEZEL, 2000.0];
-            assert_eq!(fit(glass, Some((390, 844))).zoom, 1.0);
-            assert_eq!(dock_size(side, None), 640.0);
-        }
-        let h = dock_size(Side::Top, Some((1280, 400)));
-        let glass = [0.0, glyphs::SCREEN_TOP, 3000.0, h - glyphs::BEZEL];
-        assert_eq!(fit(glass, Some((1280, 400))).zoom, 1.0);
-    }
-
-    #[test]
     fn a_place_button_docks_moves_across_or_puts_back() {
         let right = Some(Dock {
             side: Side::Right,
-            size: 700.0,
+            size: Some(700.0),
         });
-        assert_eq!(toggled(right, Side::Right, None), None, "back in the grid");
+        assert_eq!(toggled(right, Side::Right), None, "back in the grid");
         assert_eq!(
-            toggled(right, Side::Left, None),
+            toggled(right, Side::Left),
             Some(Dock {
                 side: Side::Left,
-                size: 700.0
+                size: Some(700.0)
             }),
             "the width goes across"
         );
         assert_eq!(
-            toggled(right, Side::Top, None),
+            toggled(right, Side::Top),
             Some(Dock {
                 side: Side::Top,
-                size: dock_size(Side::Top, None)
-            })
+                size: None
+            }),
+            "half and half"
         );
         assert_eq!(
-            toggled(None, Side::Right, Some((390, 844))),
+            toggled(None, Side::Right),
             Some(Dock {
                 side: Side::Right,
-                size: dock_size(Side::Right, Some((390, 844)))
+                size: None
             })
         );
     }

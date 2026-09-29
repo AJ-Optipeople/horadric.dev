@@ -863,8 +863,9 @@ settled "no web view" for web pages only: Horadric's own UI stays Direct2D.
   grid, as before. The size menu has the same four. The gap beside it is
   a seam: drag it to change its width, or height on top, kept per project
   with its side (`page_docks`, which still reads the width the first
-  build wrote, as the right). It starts big enough to show a sized page
-  unscaled, or 640 wide or 420 tall, keeps its width going from left to
+  build wrote, as the right). It starts half and half with the grid, and
+  stays half as the stage resizes until the seam is dragged (640 wide
+  was too narrow to work in). It keeps its width going from left to
   right, and each side keeps at least 320. Tested with five `cmd.exe`
   sessions: left, top and right each put the browser along that whole
   side with the grid beside it, the top seam dragged 150 pixels made it
