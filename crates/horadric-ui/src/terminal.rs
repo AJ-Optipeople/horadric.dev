@@ -1121,6 +1121,9 @@ impl TerminalWindow {
             // instead.
             WM_NCACTIVATE => {
                 self.with_caption(|c| c.set_active(wparam.0 != 0));
+                if wparam.0 != 0 {
+                    app::push(Input::StageActive);
+                }
                 Some(unsafe { DefWindowProcW(self.hwnd, msg, wparam, LPARAM(-1)) })
             }
             WM_SIZE => {
