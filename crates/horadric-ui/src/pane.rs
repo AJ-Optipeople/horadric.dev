@@ -42,10 +42,13 @@ use windows::Win32::UI::Input::Ime::{
     ImmSetCompositionWindow, CANDIDATEFORM, CFS_EXCLUDE, CFS_POINT, COMPOSITIONFORM,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
+    GetAsyncKeyState, VK_LBUTTON, VK_MBUTTON, VK_RBUTTON,
+};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, MapVirtualKeyW, ReleaseCapture, SetCapture, SetFocus, TrackMouseEvent,
-    MAPVK_VK_TO_CHAR, TME_LEAVE, TRACKMOUSEEVENT, VIRTUAL_KEY, VK_CONTROL, VK_DELETE, VK_DOWN,
-    VK_END, VK_F1, VK_F12, VK_F3, VK_F4, VK_HOME, VK_INSERT, VK_LEFT, VK_MENU, VK_NEXT, VK_PRIOR,
-    VK_RIGHT, VK_SHIFT, VK_SPACE, VK_UP,
+    MAPVK_VK_TO_CHAR, TME_LEAVE, TRACKMOUSEEVENT, VIRTUAL_KEY, VK_BACK, VK_CONTROL, VK_DELETE,
+    VK_DOWN, VK_END, VK_ESCAPE, VK_F1, VK_F12, VK_F3, VK_F4, VK_HOME, VK_INSERT, VK_LEFT, VK_MENU,
+    VK_NEXT, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_UP,
 };
 use windows::Win32::UI::Shell::{DragAcceptFiles, DragFinish, HDROP};
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -67,12 +70,17 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SWP_NOCOPYBITS, SWP_NOOWNERZORDER, SWP_NOREDRAW, SWP_NOSENDCHANGING, WS_EX_NOACTIVATE,
     WS_EX_TOOLWINDOW, WS_POPUP,
 };
+use windows::Win32::UI::WindowsAndMessaging::{IsChild, PostMessageW};
 
 use crate::app::{self, Input};
 use crate::clipboard;
 use crate::console::{Console, GridSize};
+use crate::field::{self, Field};
 use crate::frame::{Decoration, Stroke};
-use crate::glyphs::{self, CellSize, FindBar, GridTarget, Header, HEADER_H};
+use crate::glyphs::{
+    self, Bar, BarEdit, BarHit, BarLayout, CellSize, FindBar, GridTarget, Header, BAR_INSET,
+    HEADER_H,
+};
 use crate::keys::{
     self, Button, CharAction, Chord, FontStep, Key, KeyEvent, Kitty, Mods, MouseEncoding,
     MouseEvent,
@@ -101,6 +109,11 @@ const WHEEL_LINES: i32 = 3;
 const WHEEL_COL: i32 = 20;
 /// Columns an arrow key scrolls a file view sideways.
 const ARROW_COLS: isize = 4;
+/// Longer than any address worth typing; some sign in links run long.
+const MAX_ADDRESS: usize = 8000;
+/// With `WM_WEB_EDIT`: give the address field back the keyboard it had,
+/// leaving what is typed as it is.
+const RETAKE: usize = 1;
 /// In the Controls part of the Windows API, which is not worth the feature
 /// for one number.
 const WM_MOUSELEAVE: u32 = 0x02A3;
@@ -196,6 +209,9 @@ pub struct Pane {
     /// where its blink starts: a cursor on the move stays lit.
     caret_at: Cell<Option<Point>>,
     caret_since: Cell<Instant>,
+    /// A browser pane's address as it is typed, while its field has the
+    /// keyboard.
+    address: RefCell<Option<Field>>,
     /// The cells of the link under the mouse while Ctrl is held, drawn
     /// underlined.
     link: RefCell<Option<Vec<Point>>>,
@@ -281,6 +297,7 @@ impl Pane {
             search: RefCell::new(None),
             caret_at: Cell::new(None),
             caret_since: Cell::new(Instant::now()),
+            address: RefCell::new(None),
         });
         // A browser pane's page is a window inside it, which its own
         // drawing must leave alone.
@@ -679,6 +696,27 @@ impl Pane {
             .and_then(|r| r.get(&self.console.id).map(|s| s.phase.clone()));
         let phase =
             phase.and_then(|p| (theme::edge_strength(&p) > 0.0).then(|| theme::phase_color(&p)));
+        let edit = self.address.borrow().clone();
+        let shown = match &edit {
+            Some(f) => f.text.clone(),
+            None if detail == "about:blank" => String::new(),
+            None => detail.clone(),
+        };
+        let bar = self.console.web.as_deref().map(|key| {
+            let (back, forward) = web::history(key);
+            Bar {
+                text: &shown,
+                edit: edit.as_ref().map(|f| {
+                    let (a, b) = f.selection();
+                    BarEdit {
+                        caret: field::utf16_at(&f.text, f.caret),
+                        selection: (field::utf16_at(&f.text, a), field::utf16_at(&f.text, b)),
+                    }
+                }),
+                back,
+                forward,
+            }
+        });
         let header = self.header.get().then(|| Header {
             name: &name,
             detail: &detail,
@@ -688,6 +726,7 @@ impl Pane {
             lifted: self.lifted.get(),
             close: self.closes(),
             zoom: self.zoom.get(),
+            bar,
         });
         let search = self.search.borrow();
         let find = search.as_ref().map(|s| FindBar {
@@ -1444,6 +1483,180 @@ impl Pane {
         self.in_header(lparam) && at.is_some_and(|a| x >= a && x < a + HEADER_H)
     }
 
+    fn bar_layout(&self) -> BarLayout {
+        let mut r = RECT::default();
+        unsafe {
+            let _ = GetClientRect(self.hwnd, &mut r);
+        }
+        let width = r.right as f32 * 96.0 / self.dpi_now() as f32;
+        glyphs::bar_layout(width, self.zoom.get().is_some(), self.closes())
+    }
+
+    /// What in a browser pane's address bar is under a client point.
+    fn bar_at(&self, lparam: LPARAM) -> Option<BarHit> {
+        if self.console.web.is_none() || !self.in_header(lparam) {
+            return None;
+        }
+        glyphs::bar_hit(&self.bar_layout(), self.dip(lparam).0)
+    }
+
+    /// A press on a browser pane's back, forward or reload, or in its
+    /// address field. False anywhere else.
+    fn on_bar(&self, lparam: LPARAM, double: bool) -> bool {
+        let Some(key) = &self.console.web else {
+            return false;
+        };
+        let step = match self.bar_at(lparam) {
+            None => return false,
+            Some(BarHit::Field) => {
+                if self.address.borrow().is_some() {
+                    let l = self.bar_layout();
+                    self.place_caret(self.dip(lparam).0 - l.field.0 - BAR_INSET, double);
+                } else {
+                    self.edit_address();
+                }
+                return true;
+            }
+            Some(BarHit::Back) => web::Step::Back,
+            Some(BarHit::Forward) => web::Step::Forward,
+            Some(BarHit::Reload) => web::Step::Reload,
+        };
+        // What was typed is for where the page was, not where it goes.
+        if self.address.take().is_some() {
+            self.invalidate();
+        }
+        web::go(key, step);
+        true
+    }
+
+    /// Gives the address field the keyboard, the address in it selected so
+    /// typing replaces it. Again while it has the keyboard selects it all.
+    pub fn edit_address(&self) {
+        let Some(key) = &self.console.web else {
+            return;
+        };
+        let mut slot = self.address.borrow_mut();
+        match slot.as_mut() {
+            Some(f) => f.select_all(),
+            None => {
+                let url = web::label(key)
+                    .map(|(_, u)| u)
+                    .filter(|u| u != "about:blank")
+                    .unwrap_or_default();
+                *slot = Some(Field::new(&url, false, MAX_ADDRESS));
+            }
+        }
+        drop(slot);
+        unsafe {
+            let _ = SetFocus(Some(self.hwnd));
+        }
+        self.invalidate();
+    }
+
+    /// Whether the keyboard went from the address field to this pane's
+    /// page with no click to send it there, so the page took it.
+    fn page_took(&self, to: HWND) -> bool {
+        let down = |vk: VIRTUAL_KEY| unsafe { GetAsyncKeyState(vk.0 as i32) } < 0;
+        let clicked = down(VK_LBUTTON) || down(VK_RBUTTON) || down(VK_MBUTTON);
+        !to.is_invalid() && unsafe { IsChild(self.hwnd, to) }.as_bool() && !clicked
+    }
+
+    /// A click in the field while it has the keyboard: the caret goes where
+    /// it landed, `x` DIPs into the text's view, or a double click takes it
+    /// all, as an address is copied whole.
+    fn place_caret(&self, x: f32, double: bool) {
+        let mut slot = self.address.borrow_mut();
+        let Some(f) = slot.as_mut() else {
+            return;
+        };
+        if double {
+            f.select_all();
+        } else if let Ok(l) = glyphs::bar_text(&self.shared.gpu, &f.text) {
+            let view = glyphs::bar_view(&self.bar_layout());
+            let caret = crate::render::caret_at(&l, field::utf16_at(&f.text, f.caret));
+            let scroll = glyphs::bar_scroll(caret.x, view);
+            let at = crate::render::offset_at(&l, x + scroll, HEADER_H / 2.0);
+            f.set_caret(field::byte_at(&f.text, at), Self::mods().shift);
+        }
+        drop(slot);
+        self.invalidate();
+    }
+
+    /// Enter goes to what was typed and Esc leaves the page where it is.
+    /// Either way the page has the keyboard again.
+    fn end_edit(&self, go: bool) {
+        let Some(f) = self.address.take() else {
+            return;
+        };
+        self.invalidate();
+        if let (true, Some(key)) = (go, &self.console.web) {
+            if let Some(url) = web::address(&f.text) {
+                web::open(key, Some(&url));
+            }
+        }
+        self.focus();
+    }
+
+    /// A key while the address field has the keyboard. False for what it
+    /// leaves to the pane: Alt, and the chords with Ctrl it has no use for.
+    fn bar_key(&self, vk: VIRTUAL_KEY, mods: Mods) -> bool {
+        if mods.alt {
+            return false;
+        }
+        let mut slot = self.address.borrow_mut();
+        let Some(f) = slot.as_mut() else {
+            return false;
+        };
+        let (word, extend) = (mods.ctrl, mods.shift);
+        let mut copy = None;
+        match vk {
+            VK_RETURN | VK_ESCAPE => {
+                drop(slot);
+                self.drop_char();
+                self.end_edit(vk == VK_RETURN);
+                return true;
+            }
+            VK_LEFT => f.left(word, extend),
+            VK_RIGHT => f.right(word, extend),
+            VK_HOME => f.home(true, extend),
+            VK_END => f.end(true, extend),
+            VK_BACK => f.backspace(word),
+            VK_DELETE => f.delete(word),
+            _ if mods.ctrl && !mods.shift => match vk.0 as u8 {
+                b'A' | b'L' => f.select_all(),
+                b'C' => copy = Some(f.selected().to_string()),
+                b'X' => copy = Some(f.cut()),
+                b'V' => {
+                    if let Some(t) = clipboard::get_text() {
+                        f.insert(&t);
+                    }
+                }
+                _ => return false,
+            },
+            _ if mods.ctrl => return false,
+            // A character comes as WM_CHAR.
+            _ => return true,
+        }
+        drop(slot);
+        if let Some(t) = copy.filter(|t| !t.is_empty()) {
+            clipboard::set_text(&t);
+        }
+        self.drop_char();
+        self.invalidate();
+        true
+    }
+
+    /// A character typed into the address field.
+    fn bar_char(&self, unit: u16) {
+        let Some(c) = char::from_u32(unit as u32).filter(|c| !c.is_control()) else {
+            return;
+        };
+        if let Some(f) = self.address.borrow_mut().as_mut() {
+            f.insert(c.encode_utf8(&mut [0; 4]));
+        }
+        self.invalidate();
+    }
+
     fn on_close(&self, lparam: LPARAM) -> bool {
         self.on_button(lparam, self.buttons().1)
     }
@@ -1809,6 +2022,23 @@ impl Pane {
                 Some(LRESULT(0))
             }
             WM_KILLFOCUS => {
+                if self.address.borrow().is_some() && self.page_took(HWND(wparam.0 as *mut _)) {
+                    // A page takes the keyboard as it first loads, while
+                    // the address for it may be being typed.
+                    unsafe {
+                        let _ = PostMessageW(
+                            Some(self.hwnd),
+                            web::WM_WEB_EDIT,
+                            WPARAM(RETAKE),
+                            LPARAM(0),
+                        );
+                    }
+                } else if self.address.take().is_some() {
+                    // Anywhere else, a click in the page, a menu, another
+                    // window, leaves the address as it was, as a browser
+                    // does.
+                    self.invalidate();
+                }
                 self.set_focus(false);
                 Some(LRESULT(0))
             }
@@ -1828,8 +2058,13 @@ impl Pane {
                 }
                 let at = LPARAM(((p.y as u16 as isize) << 16) | p.x as u16 as isize);
                 if self.in_header(at) {
+                    let cursor = if self.bar_at(at) == Some(BarHit::Field) {
+                        IDC_IBEAM
+                    } else {
+                        IDC_ARROW
+                    };
                     unsafe {
-                        SetCursor(LoadCursorW(None, IDC_ARROW).ok());
+                        SetCursor(LoadCursorW(None, cursor).ok());
                     }
                     Some(LRESULT(1))
                 } else if self.link.borrow().is_some() {
@@ -1840,6 +2075,10 @@ impl Pane {
                 } else {
                     None
                 }
+            }
+            WM_CHAR if self.address.borrow().is_some() => {
+                self.bar_char(wparam.0 as u16);
+                Some(LRESULT(0))
             }
             WM_CHAR => {
                 // AltGr is Ctrl+Alt, so Alt here is never Meta. Meta comes as
@@ -1869,7 +2108,9 @@ impl Pane {
                 if wparam.0 == VK_CONTROL.0 as usize && !repeat {
                     self.hover(self.mouse_here());
                 }
-                if self.on_key(wparam.0 as u16, Self::mods(), repeat) {
+                if self.bar_key(VIRTUAL_KEY(wparam.0 as u16), Self::mods())
+                    || self.on_key(wparam.0 as u16, Self::mods(), repeat)
+                {
                     Some(LRESULT(0))
                 } else {
                     None
@@ -1883,6 +2124,9 @@ impl Pane {
                 None
             }
             WM_LBUTTONDOWN | WM_LBUTTONDBLCLK => {
+                if self.on_bar(lparam, msg == WM_LBUTTONDBLCLK) {
+                    return Some(LRESULT(0));
+                }
                 self.focus();
                 if self.on_close(lparam) {
                     self.close();
@@ -2003,6 +2247,18 @@ impl Pane {
             }
             web::WM_WEB_CHANGED => {
                 self.invalidate();
+                Some(LRESULT(0))
+            }
+            web::WM_WEB_EDIT if wparam.0 == RETAKE => {
+                if self.address.borrow().is_some() {
+                    unsafe {
+                        let _ = SetFocus(Some(self.hwnd));
+                    }
+                }
+                Some(LRESULT(0))
+            }
+            web::WM_WEB_EDIT => {
+                self.edit_address();
                 Some(LRESULT(0))
             }
             // Before the page's own window goes with this one.

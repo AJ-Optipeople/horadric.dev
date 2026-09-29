@@ -797,10 +797,17 @@ settled "no web view" for web pages only: Horadric's own UI stays Direct2D.
   in a pane (`CharAction::Browse`, plain Ctrl+B stays the program's) or
   "Browser" in the project menu opens it and, when new, asks for an
   address (`web::address`, pure: a scheme kept, a local server over http,
-  a host over https, anything else a search). The header shows the page's
-  title and address and ends in a cross. Ctrl+L asks again; a right click
-  on the header has Go to, Back, Forward, Reload, Open in your browser and
-  Close. Ctrl+Shift+T in the page still opens a terminal: the page has the
+  a host over https, anything else a search). The header is an address
+  bar, as in any browser (`glyphs::bar_layout`, pure): back and forward,
+  dim with nowhere to go (WebView2's `HistoryChanged`), reload, then the
+  address in a field up to the cross. A click or Ctrl+L puts the keyboard
+  in the field with the address selected (`Pane::address`, a
+  `field::Field`); Enter goes, Esc or a click anywhere else leaves it. A
+  page that takes the keyboard as it first loads, with no click to send
+  it there, gives it back (`Pane::page_took`). With no pane on the stage,
+  Go to still asks in a prompt. A right click on the header has Go to,
+  Back, Forward, Reload, Open in your browser and Close. Ctrl+Shift+T in
+  the page still opens a terminal: the page has the
   keyboard, so those two are caught by `AcceleratorKeyPressed` first.
 - **WebView2**, through `webview2-com`. It is Edge's engine, part of
   Windows 11. The loader is linked statically, so there is no DLL to ship.

@@ -28,8 +28,8 @@ use windows::Win32::Graphics::Direct2D::{
 };
 use windows::Win32::Graphics::DirectWrite::{
     IDWriteFactory, IDWriteFont1, IDWriteFontCollection, IDWriteFontFace, IDWriteFontFamily,
-    IDWriteTextFormat, DWRITE_FONT_METRICS, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE,
-    DWRITE_FONT_STYLE_ITALIC, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT,
+    IDWriteTextFormat, IDWriteTextLayout, DWRITE_FONT_METRICS, DWRITE_FONT_STRETCH_NORMAL,
+    DWRITE_FONT_STYLE, DWRITE_FONT_STYLE_ITALIC, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT,
     DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_GLYPH_METRICS, DWRITE_GLYPH_RUN,
     DWRITE_MEASURING_MODE_NATURAL, DWRITE_WORD_WRAPPING_NO_WRAP,
 };
@@ -114,6 +114,109 @@ pub struct Header<'a> {
     /// Has the button that zooms it, a square left of the cross, and
     /// whether it is zoomed now.
     pub zoom: Option<bool>,
+    /// A browser pane's back, forward and reload and its address, in
+    /// place of the name.
+    pub bar: Option<Bar<'a>>,
+}
+
+/// A browser pane's address bar, as a browser has one.
+pub struct Bar<'a> {
+    /// The page's address, or what is being typed over it.
+    pub text: &'a str,
+    /// While it is being typed in: the caret and the selection, in UTF-16
+    /// offsets.
+    pub edit: Option<BarEdit>,
+    pub back: bool,
+    pub forward: bool,
+}
+
+#[derive(Clone, Copy)]
+pub struct BarEdit {
+    pub caret: u32,
+    pub selection: (u32, u32),
+}
+
+/// Shown in an empty address field.
+pub const BAR_PLACEHOLDER: &str = "Search or type an address";
+
+/// Where a browser pane's header puts its parts, in DIPs from its left.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BarLayout {
+    pub back: f32,
+    pub forward: f32,
+    pub reload: f32,
+    /// The field's left and right edges.
+    pub field: (f32, f32),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BarHit {
+    Back,
+    Forward,
+    Reload,
+    Field,
+}
+
+/// Room between the field's edge and its text.
+pub const BAR_INSET: f32 = 8.0;
+/// Between the field and the header's top and bottom.
+const BAR_MARGIN: f32 = 3.0;
+
+/// The buttons after the lamp, one square each, then the field up to the
+/// zoom button or the cross.
+pub fn bar_layout(width: f32, zoom: bool, close: bool) -> BarLayout {
+    let back = BEZEL + 14.0;
+    let forward = back + HEADER_H;
+    let reload = forward + HEADER_H;
+    let (zoom_at, close_at) = header_buttons(width, zoom, close);
+    let end = zoom_at.or(close_at).unwrap_or(width - BEZEL);
+    let left = reload + HEADER_H + 4.0;
+    BarLayout {
+        back,
+        forward,
+        reload,
+        field: (left, (end - 4.0).max(left)),
+    }
+}
+
+/// What in the address bar is under `x`, a point in the header.
+pub fn bar_hit(l: &BarLayout, x: f32) -> Option<BarHit> {
+    let on = |at: f32| x >= at && x < at + HEADER_H;
+    if on(l.back) {
+        Some(BarHit::Back)
+    } else if on(l.forward) {
+        Some(BarHit::Forward)
+    } else if on(l.reload) {
+        Some(BarHit::Reload)
+    } else if x >= l.field.0 && x < l.field.1 {
+        Some(BarHit::Field)
+    } else {
+        None
+    }
+}
+
+/// How far the field's text is scrolled left so the caret at `caret_x`
+/// shows in a field `view` wide: not at all until it runs past the end.
+pub fn bar_scroll(caret_x: f32, view: f32) -> f32 {
+    (caret_x + 2.0 - view).max(0.0)
+}
+
+/// The width the field's text is laid out in, for drawing and for where a
+/// click lands.
+pub fn bar_view(l: &BarLayout) -> f32 {
+    (l.field.1 - l.field.0 - 2.0 * BAR_INSET).max(0.0)
+}
+
+/// The address laid out on one line, as the field draws it.
+pub fn bar_text(gpu: &Gpu, text: &str) -> Result<IDWriteTextLayout> {
+    let wide: Vec<u16> = text.encode_utf16().collect();
+    unsafe {
+        let l = gpu
+            .dw
+            .CreateTextLayout(&wide, &gpu.small, 100_000.0, HEADER_H)?;
+        l.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;
+        Ok(l)
+    }
 }
 
 /// Where a header's buttons start, from its left, in a pane `width` DIPs
@@ -832,6 +935,10 @@ impl GridTarget {
         if let (Some(at), Some(zoomed)) = (zoom_at, h.zoom) {
             button(if zoomed { "\u{E73F}" } else { "\u{E740}" }, at);
         }
+        if let Some(bar) = &h.bar {
+            self.bar(gpu, bar, &bar_layout(width, h.zoom.is_some(), h.close));
+            return;
+        }
         let name: Vec<u16> = h.name.encode_utf16().collect();
         let name_w = gpu
             .dw
@@ -879,6 +986,135 @@ impl GridTarget {
                 DWRITE_MEASURING_MODE_NATURAL,
             );
         }
+    }
+
+    /// Back, forward and reload, dim when there is nowhere to go, then the
+    /// address in a sunk field, lit while it is typed in.
+    unsafe fn bar(&self, gpu: &Gpu, bar: &Bar, l: &BarLayout) {
+        let button = |glyph: &str, at: f32, on: bool| {
+            let glyph: Vec<u16> = glyph.encode_utf16().collect();
+            let ink = if on {
+                theme::TEXT_DIM
+            } else {
+                theme::TEXT_DIM.with_alpha(0.35)
+            };
+            self.brush.SetColor(&render::color(ink));
+            self.rt.DrawText(
+                &glyph,
+                &gpu.icon_small,
+                &D2D_RECT_F {
+                    left: at,
+                    top: 0.0,
+                    right: at + HEADER_H,
+                    bottom: HEADER_H,
+                },
+                &self.brush,
+                D2D1_DRAW_TEXT_OPTIONS_NONE,
+                DWRITE_MEASURING_MODE_NATURAL,
+            );
+        };
+        button("\u{E72B}", l.back, bar.back);
+        button("\u{E72A}", l.forward, bar.forward);
+        button("\u{E72C}", l.reload, true);
+
+        let field = D2D_RECT_F {
+            left: l.field.0,
+            top: BAR_MARGIN,
+            right: l.field.1,
+            bottom: HEADER_H - BAR_MARGIN,
+        };
+        if field.right - field.left < 2.0 * BAR_INSET {
+            return;
+        }
+        let radius = (HEADER_H - 2.0 * BAR_MARGIN) / 2.0;
+        self.brush.SetColor(&render::color(theme::WELL));
+        self.rt
+            .FillRoundedRectangle(&rounded(&field, radius), &self.brush);
+        let rim = if bar.edit.is_some() {
+            theme::WORKING.with_alpha(0.55)
+        } else {
+            theme::ENGRAVE_DARK
+        };
+        let edge = D2D_RECT_F {
+            left: field.left + 0.5,
+            top: field.top + 0.5,
+            right: field.right - 0.5,
+            bottom: field.bottom - 0.5,
+        };
+        self.brush.SetColor(&render::color(rim));
+        self.rt
+            .DrawRoundedRectangle(&rounded(&edge, radius - 0.5), &self.brush, 1.0, None);
+
+        let left = field.left + BAR_INSET;
+        let view = bar_view(l);
+        self.rt.PushAxisAlignedClip(
+            &D2D_RECT_F {
+                left: left - 1.0,
+                top: field.top,
+                right: left + view + 1.0,
+                bottom: field.bottom,
+            },
+            D2D1_ANTIALIAS_MODE_ALIASED,
+        );
+        let placeholder = bar.text.is_empty();
+        let shown = if placeholder {
+            BAR_PLACEHOLDER
+        } else {
+            bar.text
+        };
+        if let Ok(layout) = bar_text(gpu, shown) {
+            let caret = bar
+                .edit
+                .filter(|_| !placeholder)
+                .map(|e| render::caret_at(&layout, e.caret));
+            let x = left - caret.map_or(0.0, |c| bar_scroll(c.x, view));
+            if let Some(e) = bar.edit.filter(|_| !placeholder) {
+                let (a, b) = e.selection;
+                for r in render::range_rects(&layout, a, b - a) {
+                    self.brush
+                        .SetColor(&render::color(theme::WORKING.with_alpha(0.4)));
+                    self.rt.FillRectangle(
+                        &D2D_RECT_F {
+                            left: x + r.x,
+                            top: r.y,
+                            right: x + r.x + r.w.max(3.0),
+                            bottom: r.y + r.h,
+                        },
+                        &self.brush,
+                    );
+                }
+            }
+            let ink = match (placeholder, bar.edit.is_some()) {
+                (true, _) => theme::TEXT_DIM.with_alpha(0.55),
+                (false, true) => theme::TEXT,
+                (false, false) => theme::TEXT_DIM,
+            };
+            self.brush.SetColor(&render::color(ink));
+            self.rt.DrawTextLayout(
+                Vector2 { X: x, Y: 0.0 },
+                &layout,
+                &self.brush,
+                D2D1_DRAW_TEXT_OPTIONS_NONE,
+            );
+            let caret = match (bar.edit, caret) {
+                (Some(_), Some(c)) => Some(x + c.x),
+                (Some(_), None) => Some(left),
+                _ => None,
+            };
+            if let Some(cx) = caret {
+                self.brush.SetColor(&render::color(theme::TEXT));
+                self.rt.FillRectangle(
+                    &D2D_RECT_F {
+                        left: cx.round() - 0.5,
+                        top: field.top + 4.0,
+                        right: cx.round() + 1.0,
+                        bottom: field.bottom - 4.0,
+                    },
+                    &self.brush,
+                );
+            }
+        }
+        self.rt.PopAxisAlignedClip();
     }
 
     /// The search bar, in the top right corner of the glass: a magnifier,
@@ -1048,6 +1284,37 @@ mod tests {
             header_buttons(400.0, true, true),
             (Some(end - 2.0 * HEADER_H), Some(end - HEADER_H))
         );
+    }
+
+    #[test]
+    fn the_address_field_runs_from_the_buttons_to_the_cross() {
+        let l = bar_layout(600.0, false, true);
+        let (_, close) = header_buttons(600.0, false, true);
+        assert_eq!(l.forward, l.back + HEADER_H);
+        assert_eq!(l.reload, l.forward + HEADER_H);
+        assert!(l.field.0 >= l.reload + HEADER_H);
+        assert!(l.field.1 <= close.unwrap());
+        let zoomed = bar_layout(600.0, true, true);
+        assert_eq!(zoomed.field.1, l.field.1 - HEADER_H, "the zoom button");
+        let narrow = bar_layout(50.0, true, true);
+        assert_eq!(narrow.field.0, narrow.field.1, "no room is an empty field");
+    }
+
+    #[test]
+    fn a_click_in_the_bar_finds_its_button_or_the_field() {
+        let l = bar_layout(600.0, false, true);
+        assert_eq!(bar_hit(&l, l.back + 1.0), Some(BarHit::Back));
+        assert_eq!(bar_hit(&l, l.forward + 1.0), Some(BarHit::Forward));
+        assert_eq!(bar_hit(&l, l.reload + HEADER_H - 1.0), Some(BarHit::Reload));
+        assert_eq!(bar_hit(&l, l.field.0 + 50.0), Some(BarHit::Field));
+        assert_eq!(bar_hit(&l, 2.0), None, "the lamp is for dragging");
+        assert_eq!(bar_hit(&l, l.field.1 + 1.0), None);
+    }
+
+    #[test]
+    fn the_address_scrolls_only_once_the_caret_runs_past_the_end() {
+        assert_eq!(bar_scroll(40.0, 200.0), 0.0);
+        assert_eq!(bar_scroll(300.0, 200.0), 102.0);
     }
 
     #[test]

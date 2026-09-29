@@ -36,9 +36,9 @@ use webview2_com::Microsoft::Web::WebView2::Win32::{
 use webview2_com::{
     AcceleratorKeyPressedEventHandler, CoreWebView2EnvironmentOptions,
     CreateCoreWebView2ControllerCompletedHandler, CreateCoreWebView2EnvironmentCompletedHandler,
-    DocumentTitleChangedEventHandler, SourceChangedEventHandler,
+    DocumentTitleChangedEventHandler, HistoryChangedEventHandler, SourceChangedEventHandler,
 };
-use windows::core::{HSTRING, PCWSTR, PWSTR};
+use windows::core::{BOOL, HSTRING, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, RECT, WPARAM};
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -53,6 +53,10 @@ use crate::app::{self, Input, WebAsk};
 /// Posted to the pane showing a project's page when its title or address
 /// changed, so the header is drawn again.
 pub const WM_WEB_CHANGED: u32 = windows::Win32::UI::WindowsAndMessaging::WM_USER + 5;
+
+/// Posted to the pane showing a project's page to put the keyboard in its
+/// address field, for Ctrl+L.
+pub const WM_WEB_EDIT: u32 = windows::Win32::UI::WindowsAndMessaging::WM_USER + 6;
 
 /// A project's page.
 #[derive(Default)]
@@ -70,6 +74,8 @@ struct Web {
     focus: bool,
     title: String,
     url: String,
+    back: bool,
+    forward: bool,
 }
 
 enum Env {
@@ -239,6 +245,31 @@ pub fn label(key: &str) -> Option<(String, String)> {
         let w = w.borrow();
         let web = w.get(key)?;
         Some((web.title.clone(), web.url.clone()))
+    })
+}
+
+/// Whether the page has somewhere to go back and forward to.
+pub fn history(key: &str) -> (bool, bool) {
+    WEBS.with(|w| {
+        w.borrow()
+            .get(key)
+            .map_or((false, false), |w| (w.back, w.forward))
+    })
+}
+
+/// Puts the keyboard in the address field of the pane showing the page.
+/// False when no pane shows it, so the caller asks another way.
+pub fn edit(key: &str) -> bool {
+    // A page still being made must not take the keyboard from the field
+    // when it arrives.
+    let pane = WEBS.with(|w| {
+        let mut w = w.borrow_mut();
+        let web = w.get_mut(key)?;
+        web.focus = false;
+        web.pane
+    });
+    pane.is_some_and(|p| {
+        unsafe { PostMessageW(Some(p), WM_WEB_EDIT, WPARAM(0), LPARAM(0)) }.is_ok()
     })
 }
 
@@ -430,10 +461,26 @@ fn listen(key: &str, view: &ICoreWebView2) {
         }
         Ok(())
     }));
+    let owned = key.to_string();
+    let history = HistoryChangedEventHandler::create(Box::new(move |view, _| {
+        if let Some(v) = view {
+            let (mut back, mut forward) = (BOOL(0), BOOL(0));
+            unsafe {
+                let _ = v.CanGoBack(&mut back);
+                let _ = v.CanGoForward(&mut forward);
+            }
+            changed(&owned, |w| {
+                w.back = back.as_bool();
+                w.forward = forward.as_bool();
+            });
+        }
+        Ok(())
+    }));
     let mut token = Default::default();
     unsafe {
         let _ = view.add_DocumentTitleChanged(&title, &mut token);
         let _ = view.add_SourceChanged(&source, &mut token);
+        let _ = view.add_HistoryChanged(&history, &mut token);
     }
 }
 

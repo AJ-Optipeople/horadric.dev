@@ -892,7 +892,7 @@ unsafe extern "system" fn app_proc(
         WM_HORADRIC_WEB => {
             if let Some((key, what)) = with_app(|app| app.web_ask.take()).flatten() {
                 match what {
-                    WebAsk::Address => ask_address(&key),
+                    WebAsk::Address => go_to(&key),
                     WebAsk::Menu => web_menu(&key),
                 }
             }
@@ -1508,6 +1508,14 @@ pub(crate) enum Run {
     Attach(String),
 }
 
+/// Puts the keyboard in the address bar of the project's browser pane,
+/// or asks in a prompt when the pane is not on the stage.
+fn go_to(key: &str) {
+    if !web::edit(key) {
+        ask_address(key);
+    }
+}
+
 /// Asks where the project's browser pane should go.
 fn ask_address(key: &str) {
     let current = web::label(key).map(|(_, url)| url).unwrap_or_default();
@@ -1552,7 +1560,7 @@ fn web_menu(key: &str) {
         Item::action(CLOSE, "Close"),
     ];
     match menu::popup(&items) {
-        Some(ADDRESS) => ask_address(key),
+        Some(ADDRESS) => go_to(key),
         Some(BACK) => web::go(key, web::Step::Back),
         Some(FORWARD) => web::go(key, web::Step::Forward),
         Some(RELOAD) => web::go(key, web::Step::Reload),
