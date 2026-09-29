@@ -15,6 +15,12 @@
 //! Horadric started from inside one, whose windows are in that session's job
 //! too.
 //!
+//! A project can have a browser of its own too, asked for from the stage
+//! or the project menu instead of started by an agent: Edge, with a profile
+//! folder for the project, in a job object Horadric makes. Its windows are
+//! then known the same way, by their job, and placed and hidden with their
+//! project like a session's.
+//!
 //! Every call on a browser window is asynchronous. The window belongs to
 //! another process, a synchronous call waits for that process to answer,
 //! and a hung browser would freeze Horadric.
@@ -22,11 +28,18 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::ffi::c_void;
+use std::io;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
-use std::path::Path;
+use std::os::windows::process::CommandExt;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
-use windows::core::PWSTR;
+use windows::core::BOOL;
+use windows::core::{HSTRING, PWSTR};
 use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, WPARAM};
+use windows::Win32::System::JobObjects::{
+    AssignProcessToJobObject, CreateJobObjectW, IsProcessInJob,
+};
 use windows::Win32::System::Threading::{
     OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
 };
@@ -54,6 +67,10 @@ const BROWSERS: [&str; 8] = [
     "opera.exe",
     "playwright.exe",
 ];
+
+/// Leaves a session's job, when Horadric itself runs in one (a dev build
+/// started from a session), so that session does not take the browser.
+const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
 
 thread_local! {
     /// The app window and the messages it hears: shown, then gone.
@@ -250,9 +267,108 @@ pub fn bring_to_front(hwnd: HWND) {
     }
 }
 
+/// A project's own browser: the job its Edge runs in.
+pub struct Owned {
+    job: OwnedHandle,
+}
+
+impl Owned {
+    pub fn contains(&self, process: HANDLE) -> bool {
+        let mut inside = BOOL(0);
+        let job = HANDLE(self.job.as_raw_handle());
+        unsafe { IsProcessInJob(process, Some(job), &mut inside) }.is_ok() && inside.as_bool()
+    }
+}
+
+/// Starts Edge for a project, on a profile in `profiles`, with `url` in a
+/// new tab, or a new window when there is none. A second start for the
+/// same project hands over to the Edge already running on its profile,
+/// which is in the job already, and ends.
+///
+/// The job is named, so a reloaded Horadric opens the one its Edge is in
+/// instead of making an empty one.
+pub fn open(key: &str, profiles: &Path, url: Option<&str>) -> io::Result<Owned> {
+    let edge = edge().ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no Edge"))?;
+    let name = profile_name(key);
+    let job_name = HSTRING::from(job_name(&horadric_hooks::instance(), &name));
+    let job = unsafe { CreateJobObjectW(None, &job_name) }?;
+    let job = unsafe { OwnedHandle::from_raw_handle(job.0) };
+    let mut cmd = Command::new(edge);
+    cmd.arg(format!(
+        "--user-data-dir={}",
+        profiles.join(&name).display()
+    ))
+    .args(["--no-first-run", "--no-default-browser-check"])
+    .arg(url.unwrap_or("--new-window"))
+    .stdin(Stdio::null())
+    .stdout(Stdio::null())
+    .stderr(Stdio::null());
+    // A job that does not allow leaving refuses the start. Then it starts
+    // inside it.
+    let child = match cmd.creation_flags(CREATE_BREAKAWAY_FROM_JOB).spawn() {
+        Ok(c) => c,
+        Err(_) => cmd.creation_flags(0).spawn()?,
+    };
+    // Edge's window comes a good while after its process, so joining the
+    // job now rather than from its first instruction is soon enough.
+    unsafe {
+        AssignProcessToJobObject(HANDLE(job.as_raw_handle()), HANDLE(child.as_raw_handle()))
+    }?;
+    Ok(Owned { job })
+}
+
+/// Edge, where its installer puts it. It comes with Windows.
+fn edge() -> Option<PathBuf> {
+    ["ProgramFiles(x86)", "ProgramFiles", "LOCALAPPDATA"]
+        .iter()
+        .filter_map(std::env::var_os)
+        .map(|base| PathBuf::from(base).join(r"Microsoft\Edge\Application\msedge.exe"))
+        .find(|p| p.is_file())
+}
+
+/// The profile folder's name for a project: its folder's name, to be
+/// readable in Explorer, and a hash of the whole key, since two projects
+/// can share a folder name.
+pub fn profile_name(key: &str) -> String {
+    let hash = key.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| {
+        (h ^ b as u64).wrapping_mul(0x0100_0000_01b3)
+    });
+    let folder: String = key
+        .rsplit(['\\', '/'])
+        .find(|s| !s.is_empty())
+        .unwrap_or("project")
+        .chars()
+        .map(|c| match c {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' => c,
+            _ => '_',
+        })
+        .take(40)
+        .collect();
+    format!("{folder}-{:08x}", hash as u32)
+}
+
+fn job_name(instance: &str, profile: &str) -> String {
+    format!(r"Local\horadric-{instance}-browser-{profile}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn profiles_are_named_by_folder_and_hash() {
+        let a = profile_name(r"c:\users\x\github\horadric.dev");
+        assert!(a.starts_with("horadric_dev-"), "{a}");
+        assert_eq!(a, profile_name(r"c:\users\x\github\horadric.dev"));
+        // Same folder name, another project.
+        assert_ne!(a, profile_name(r"c:\work\horadric.dev"));
+        assert!(profile_name(r"c:\").starts_with("c_-"));
+        assert!(profile_name("").starts_with("project-"));
+        assert_eq!(
+            job_name("43118", "x-1"),
+            r"Local\horadric-43118-browser-x-1"
+        );
+    }
 
     #[test]
     fn browsers_are_known_by_their_executable() {

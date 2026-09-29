@@ -21,6 +21,7 @@
 //! A browser window a session opens is placed beside the stage when it
 //! first appears, and follows its project: switching the stage to another
 //! project minimises the browsers of the rest and brings back that one's.
+//! A project's own browser, asked for with Ctrl+Shift+B, does the same.
 //!
 //! Every console runs in a session host of its own, so the sessions outlive
 //! the app: a start finds the hosts still running and attaches to them,
@@ -255,6 +256,12 @@ pub(crate) enum Input {
     Reorder(String, Vec<String>),
     /// A tile's browser button clicked: bring up this session's browsers.
     Browser(String),
+    /// Ctrl+Shift+B in a pane: the browser of the project on the stage,
+    /// opened or brought up.
+    Browse,
+    /// A web address Ctrl+clicked in a pane: to the browser of the project
+    /// on the stage when it has one open, otherwise to the user's own.
+    Link(String),
     /// A file in a files tile clicked: show it on the stage beside the
     /// sessions of the project with this key. The folder, then the file's
     /// path inside it.
@@ -618,6 +625,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             stop_on_exit: false,
             recovering: (how == Carry::Crash).then(Instant::now),
             browsers: HashMap::new(),
+            project_browsers: HashMap::new(),
             waiting: HashSet::new(),
             alert_for: None,
             tasks: runner::State::default(),
@@ -1485,6 +1493,7 @@ fn project_menu(key: &str) {
     const SSH_FIND: usize = 11;
     const CLOSE: usize = 12;
     const BRANCHES: usize = 13;
+    const BROWSE: usize = 14;
     const SSH: usize = 20;
     const PAST: usize = 100;
     const SUGGEST: usize = 200;
@@ -1537,6 +1546,7 @@ fn project_menu(key: &str) {
         Item::action(START_OVER, format!("Start over with {BATCH} sessions")),
         Item::Separator,
         Item::action(SHELL, "New terminal\tCtrl+Shift+T"),
+        Item::action(BROWSE, "Browser\tCtrl+Shift+B"),
     ]);
     for (i, host) in listed.iter().enumerate() {
         items.push(Item::action(SSH + i, format!("SSH to {host}")));
@@ -1637,6 +1647,7 @@ fn project_menu(key: &str) {
         Some(END_ALL) => app.end_all(Some(key)),
         Some(CLOSE) => app.close_project(key),
         Some(SHELL) => app.open_shell(key),
+        Some(BROWSE) => app.browse(key, None),
         Some(i) if (SSH..PAST).contains(&i) => app.open_ssh(key, &listed[i - SSH], None),
         Some(i) if (MERGE..MERGE_END).contains(&i) => {
             app.merge(&merges[i - MERGE]);
@@ -2154,8 +2165,10 @@ struct App {
     /// When this start resumed sessions after a crash, until it has run
     /// long enough not to count as the same crash again.
     recovering: Option<Instant>,
-    /// Browser windows sessions opened, by window handle.
+    /// Browser windows sessions or projects opened, by window handle.
     browsers: HashMap<isize, Browser>,
+    /// The jobs of projects' own browsers, by project key.
+    project_browsers: HashMap<String, browsers::Owned>,
     /// The sessions waiting on you as last seen, so only one that starts
     /// waiting is announced.
     waiting: HashSet<String>,
@@ -2241,12 +2254,29 @@ const SETTLES_IN: Duration = Duration::from_secs(15);
 /// How long a login opened by Add account is waited for.
 const ADDING_FOR: Duration = Duration::from_secs(15 * 60);
 
-/// A browser window a session opened.
+/// A browser window a session or a project opened.
 struct Browser {
-    session: String,
+    owner: Owner,
     /// Minimised by a project switch, so switching back restores it. One
     /// the user minimised stays minimised.
     hidden: bool,
+}
+
+#[derive(PartialEq, Eq)]
+enum Owner {
+    /// Started by this session's agent.
+    Session(String),
+    /// The project's own, with this key.
+    Project(String),
+}
+
+impl Browser {
+    fn session(&self) -> Option<&str> {
+        match &self.owner {
+            Owner::Session(s) => Some(s),
+            Owner::Project(_) => None,
+        }
+    }
 }
 
 impl App {
@@ -3723,7 +3753,7 @@ impl App {
         self.paused.remove(id);
         self.journaled.remove(id);
         self.browsers.retain(|&hwnd, b| {
-            let keep = b.session != id;
+            let keep = b.session() != Some(id);
             if !keep {
                 browsers::untrack(hwnd_of(hwnd));
             }
@@ -3915,7 +3945,7 @@ impl App {
         }
         self.paused.remove(id);
         self.browsers.retain(|&hwnd, b| {
-            let keep = b.session != id;
+            let keep = b.session() != Some(id);
             if !keep {
                 browsers::untrack(hwnd_of(hwnd));
             }
@@ -4111,19 +4141,25 @@ impl App {
             return;
         };
         let process = HANDLE(process.as_raw_handle());
-        let Some(session) = self
+        let owner = self
             .consoles
             .iter()
             .find(|(_, c)| c.contains(process))
-            .map(|(id, _)| id.clone())
-        else {
+            .map(|(id, _)| Owner::Session(id.clone()))
+            .or_else(|| {
+                self.project_browsers
+                    .iter()
+                    .find(|(_, b)| b.contains(process))
+                    .map(|(key, _)| Owner::Project(key.clone()))
+            });
+        let Some(owner) = owner else {
             return;
         };
         browsers::track(hwnd);
         self.browsers.insert(
             id,
             Browser {
-                session,
+                owner,
                 hidden: false,
             },
         );
@@ -4172,17 +4208,23 @@ impl App {
         let Some(stage) = self.stage.as_ref().map(|s| s.hwnd) else {
             return;
         };
-        let projects: HashMap<String, String> = match self.shared.registry.lock() {
+        let projects: HashMap<isize, String> = match self.shared.registry.lock() {
             Ok(r) => self
                 .browsers
-                .values()
-                .filter_map(|b| Some((b.session.clone(), project_key(r.get(&b.session)?))))
+                .iter()
+                .filter_map(|(&id, b)| {
+                    let key = match &b.owner {
+                        Owner::Session(s) => project_key(r.get(s)?),
+                        Owner::Project(key) => key.clone(),
+                    };
+                    Some((id, key))
+                })
                 .collect(),
             Err(_) => return,
         };
         for (&id, b) in self.browsers.iter_mut() {
             let hwnd = hwnd_of(id);
-            match projects.get(&b.session) {
+            match projects.get(&id) {
                 // One the user minimised stays down.
                 Some(p) if p == key => {
                     if b.hidden || !browsers::minimised(hwnd) {
@@ -4199,17 +4241,60 @@ impl App {
     /// Brings up a session's browser windows, from a click on its tile.
     fn show_browsers(&mut self, id: &str) {
         for (&hwnd, b) in self.browsers.iter_mut() {
-            if b.session == id {
+            if b.session() == Some(id) {
                 browsers::bring_to_front(hwnd_of(hwnd));
                 b.hidden = false;
             }
         }
     }
 
+    /// Brings up the project's own browser, or starts it when it has no
+    /// window open. With a url, the page opens in a new tab of it.
+    fn browse(&mut self, key: &str, url: Option<&str>) {
+        let open: Vec<HWND> = self
+            .browsers
+            .iter_mut()
+            .filter(|(_, b)| b.owner == Owner::Project(key.to_string()))
+            .map(|(&id, b)| {
+                b.hidden = false;
+                hwnd_of(id)
+            })
+            .collect();
+        if url.is_none() {
+            if let Some(&hwnd) = open.first() {
+                browsers::bring_to_front(hwnd);
+                return;
+            }
+        }
+        let Some(profiles) = store::local_dir().map(|d| d.join("browsers")) else {
+            return;
+        };
+        match browsers::open(key, &profiles, url) {
+            Ok(b) => {
+                self.project_browsers.insert(key.to_string(), b);
+                if let Some(&hwnd) = open.first() {
+                    browsers::bring_to_front(hwnd);
+                }
+            }
+            Err(e) => eprintln!("horadric: cannot open a browser: {e}"),
+        }
+    }
+
+    /// Whether the project has a window of its own browser open.
+    fn browsing(&self, key: &str) -> bool {
+        self.browsers
+            .values()
+            .any(|b| b.owner == Owner::Project(key.to_string()))
+    }
+
     /// Tells the tiles which sessions have a browser open.
     fn mark_browsers(&mut self) {
         self.browsers.retain(|&id, _| browsers::exists(hwnd_of(id)));
-        let now: HashSet<String> = self.browsers.values().map(|b| b.session.clone()).collect();
+        let now: HashSet<String> = self
+            .browsers
+            .values()
+            .filter_map(|b| b.session().map(str::to_string))
+            .collect();
         if *self.shared.browsing.borrow() != now {
             *self.shared.browsing.borrow_mut() = now;
             for c in &self.clusters {
@@ -5178,6 +5263,15 @@ impl App {
                 Input::Swap(a, b) => self.swap(&a, &b),
                 Input::Reorder(key, shown) => self.reorder(&key, &shown),
                 Input::Browser(id) => self.show_browsers(&id),
+                Input::Browse => {
+                    if let Some(key) = self.stage.as_ref().map(|s| s.project()) {
+                        self.browse(&key, None);
+                    }
+                }
+                Input::Link(url) => match self.stage.as_ref().map(|s| s.project()) {
+                    Some(key) if self.browsing(&key) => self.browse(&key, Some(&url)),
+                    _ => watch::open_link(&crate::links::Target::Web(url), None),
+                },
                 Input::View(key, dir, rel) => self.open_view(&key, &dir, &rel),
                 Input::CloseView(serial) => self.close_view(serial),
                 Input::Font(step) => self.set_font(step),

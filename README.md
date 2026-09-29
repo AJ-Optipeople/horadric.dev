@@ -64,7 +64,12 @@ work. Worktrees are next.
   and plus, minus or the wheel sizes the font, Ctrl+0 puts it back.
 - Ctrl+Shift+F searches a pane's history, which keeps 10,000 lines. Enter
   finds the next match up, Shift+Enter the next one down, Esc closes it.
-- Ctrl+click opens what a pane shows: a web address in the browser, a
+- A browser per project: Ctrl+Shift+B in any pane, or "Browser" in the
+  project menu, opens Edge on a profile of the project's own, beside the
+  stage. It hides when the stage shows another project and comes back
+  with its own. Pressed again, it brings that window to the front.
+- Ctrl+click opens what a pane shows: a web address in the browser (the
+  project's own when it has one open), a
   file in VS Code at its line (`src/main.rs:12`, relative to the session's
   folder), a folder in Explorer, a program by running it. Hold Ctrl and
   the link under the mouse is underlined.

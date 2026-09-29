@@ -273,14 +273,19 @@ impl Session {
         }
     }
 
-    /// Named after its folder, or after its id when adopted.
+    /// Named after its folder, or after its id when adopted. A session in
+    /// a worktree of its own is named after the project it was added
+    /// from, which the cluster shows just the same.
     fn name_is_default(&self) -> bool {
-        let folder = self
-            .cwd
-            .trim_end_matches(['/', '\\'])
-            .rsplit(['/', '\\'])
-            .next();
-        self.name == self.id || folder.is_some_and(|f| f.eq_ignore_ascii_case(&self.name))
+        let named_after = |path: &str| {
+            path.trim_end_matches(['/', '\\'])
+                .rsplit(['/', '\\'])
+                .next()
+                .is_some_and(|f| f.eq_ignore_ascii_case(&self.name))
+        };
+        self.name == self.id
+            || named_after(&self.cwd)
+            || self.worktree.as_ref().is_some_and(|w| named_after(&w.main))
     }
 
     /// Applies a hook event. Returns true when the phase changed.
@@ -911,6 +916,19 @@ mod tests {
         let mut s = Session::new("g9", "g9", "C:/elsewhere");
         s.apply(&titled("Tile naming", false), now());
         assert_eq!(s.label(), "Tile naming");
+    }
+
+    #[test]
+    fn a_worktree_named_after_its_project_takes_claudes_title() {
+        let mut s = Session::new("h-1", "horadric.dev", "C:/Github/horadric.dev.session-3");
+        s.worktree = Some(Worktree {
+            path: "C:/Github/horadric.dev.session-3".into(),
+            main: "C:/Github/horadric.dev".into(),
+            branch: "session-3".into(),
+            ports: None,
+        });
+        s.apply(&titled("Account switching", false), now());
+        assert_eq!(s.label(), "Account switching");
     }
 
     #[test]

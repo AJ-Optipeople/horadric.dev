@@ -934,6 +934,7 @@ impl Pane {
                     self.copy();
                 }
                 CharAction::NewShell => app::push(Input::Shell(None)),
+                CharAction::Browse => app::push(Input::Browse),
                 _ => {}
             }
             return;
@@ -950,6 +951,7 @@ impl Pane {
                 }
             }
             CharAction::NewShell => app::push(Input::Shell(None)),
+            CharAction::Browse => app::push(Input::Browse),
         }
     }
 
@@ -1404,8 +1406,13 @@ impl Pane {
     }
 
     /// Opens a link. VS Code gets the project, so the file opens in the
-    /// window that has it; a view's folder is no project.
+    /// window that has it; a view's folder is no project. A web address is
+    /// the app's to route, to the project's browser when one is open.
     fn open_link(&self, target: &Target) {
+        if let Target::Web(url) = target {
+            app::push(Input::Link(url.clone()));
+            return;
+        }
         let root = self
             .console
             .cwd
