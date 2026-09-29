@@ -766,6 +766,40 @@ Edge to the front, and closing an Edge took the mark off its tile. The user's
 own Chrome was never touched. The hook costs no CPU to speak of: 16 ms in 5
 idle seconds.
 
+**A project's own browser.** Asked for because a browser the user opened
+by hand never snapped or followed the sessions. Still no web view: it is
+Edge, in a window Horadric manages the way it manages an agent's.
+
+- **Opening it.** Ctrl+Shift+B in any pane (`CharAction::Browse`, plain
+  Ctrl+B stays the program's) or "Browser" in the project menu. When the
+  project has a window of it open, that window comes to the front
+  instead.
+- **Which project.** Edge runs in a job Horadric makes for the project
+  (`browsers::open`), named after the instance and the profile so a
+  reloaded Horadric opens the same job instead of an empty one. The job
+  is joined right after the start rather than from the first
+  instruction: Edge's window comes long after. It leaves a session's job
+  when Horadric runs in one (a dev build started from a session), so that
+  session's Horadric does not take it.
+- **Its own profile**, in `%LOCALAPPDATA%\Horadric\browsers\<folder>-<hash>`.
+  Without one, Edge hands the start over to the Edge already running,
+  outside the job, and ends. With one, a second start for the project
+  hands over to the project's Edge, which is in the job, so the tab lands
+  there. The price is that logins are the profile's, not the user's own
+  Edge's. Edge signs in the Windows account by itself.
+- **Links.** A web address Ctrl+clicked in a pane opens as a tab in the
+  project's browser when it has one open, otherwise in the user's own.
+- It is placed and follows its project like an agent's, and has no tile
+  mark: it belongs to no one session.
+
+Tested on screen with a dev instance on its own port and `cmd.exe` sessions
+in two projects: Ctrl+Shift+B opened Edge beside the stage, again brought
+it forward without a second window, switching to the other project
+minimised it and a tile click brought it back, the other project got an
+Edge of its own on its own profile, and an `https://example.com` Ctrl+clicked
+there opened as a tab in it. Ctrl+Shift+B in a pane whose session had
+exited did nothing; not looked into.
+
 ### Plain terminals
 
 A project needs terminals that are not an agent: a dev server, a log, a
