@@ -579,6 +579,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
                 .iter()
                 .map(|c| (c.key.clone(), c.clone()))
                 .collect(),
+            open: saved.clusters.iter().map(|c| c.key.clone()).collect(),
             columns: Columns::from_keys(&saved.columns),
             recent: saved.recent.clone(),
             autostart_offered,
@@ -1458,6 +1459,7 @@ fn project_menu(key: &str) {
     const OTHER_HOST: usize = 9;
     const WORKTREES: usize = 10;
     const SSH_FIND: usize = 11;
+    const CLOSE: usize = 12;
     const SSH: usize = 20;
     const PAST: usize = 100;
     const SUGGEST: usize = 200;
@@ -1559,6 +1561,7 @@ fn project_menu(key: &str) {
         Item::action(EXPLORE, "Open in Explorer"),
         Item::Separator,
         Item::action(END_ALL, "End all sessions"),
+        Item::action(CLOSE, "Close project"),
     ]);
     let picked = menu::popup(&items);
     match (picked, &dir) {
@@ -1578,7 +1581,7 @@ fn project_menu(key: &str) {
         }
         _ => {}
     }
-    let ending = matches!(picked, Some(START_OVER | END_ALL));
+    let ending = matches!(picked, Some(START_OVER | END_ALL | CLOSE));
     if ending && !confirm_end(Some(key)) {
         return;
     }
@@ -1587,6 +1590,7 @@ fn project_menu(key: &str) {
         Some(START_BATCH) => app.add_sessions(key, BATCH),
         Some(START_OVER) => app.start_over(key, BATCH),
         Some(END_ALL) => app.end_all(Some(key)),
+        Some(CLOSE) => app.close_project(key),
         Some(SHELL) => app.open_shell(key),
         Some(i) if (SSH..PAST).contains(&i) => app.open_ssh(key, &listed[i - SSH], None),
         Some(i) if (MERGE..MERGE_END).contains(&i) => {
@@ -1989,6 +1993,10 @@ struct App {
     paused: HashMap<String, SavedSession>,
     /// How each project's cluster was folded, applied when it appears.
     cluster_places: HashMap<String, SavedCluster>,
+    /// Projects whose cluster stays up with no session left, until closed
+    /// from the project menu. Ending every session is often a fresh start
+    /// in the same project, not leaving it.
+    open: HashSet<String>,
     /// Which column each cluster and the usage window stand in.
     columns: Columns,
     /// Projects sessions were started in, newest first, for the tray menu.
@@ -3383,6 +3391,13 @@ impl App {
         self.reconcile(false);
     }
 
+    /// Ends the project's sessions and takes its cluster down. One with
+    /// unfinished tasks stays up for them.
+    fn close_project(&mut self, key: &str) {
+        self.open.remove(key);
+        self.end_all(Some(key));
+    }
+
     /// Starts `n` more sessions in the project with this key.
     fn add_sessions(&mut self, key: &str, n: usize) {
         let Some(dir) = self.project_dir(key) else {
@@ -4309,6 +4324,9 @@ impl App {
             .lock()
             .map(|r| r.all().map(project_key).collect())
             .unwrap_or_default();
+        self.open
+            .extend(projects.iter().filter(|k| !k.is_empty()).cloned());
+        projects.extend(self.open.iter().cloned());
         projects.extend(self.listed());
 
         // Remove clusters whose project is gone.
@@ -4795,12 +4813,17 @@ impl App {
                 dirs.find(spelled).unwrap_or_else(|| key.to_string())
             })
         });
-        from_session.map(PathBuf::from).or_else(|| {
-            self.recent
-                .iter()
-                .find(|p| folder_key(p) == key)
-                .map(PathBuf::from)
-        })
+        from_session
+            .map(PathBuf::from)
+            .or_else(|| {
+                self.recent
+                    .iter()
+                    .find(|p| folder_key(p) == key)
+                    .map(PathBuf::from)
+            })
+            // A project kept open after it left the recent list: the key is
+            // its folder, spelled in lower case.
+            .or_else(|| Some(PathBuf::from(key)).filter(|d| !key.is_empty() && d.is_dir()))
     }
 
     /// Brings every tile window above the other windows.

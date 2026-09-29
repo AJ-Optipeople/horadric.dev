@@ -279,6 +279,16 @@ resumes one with `claude --resume <id>`, and every hook carries the id.
   start before the old ones end, so the cluster keeps its place), and End
   all sessions. The tray has End all sessions for every project. Ending
   asks first when a session is running and says how many are mid turn.
+- **A project stays open with no session left.** Ending every session is
+  often a fresh start in the same project, and the cluster going with the
+  last one meant opening the project again. So a cluster stays, with its
+  bottom `+`, until Close project in the project menu, which ends its
+  sessions (asking first, as End all does) and takes it down. The open
+  projects are the `clusters` in `state.json`, so they come back after a
+  restart. One with unfinished tasks stays up for them, as before. Tested
+  on screen with a dev instance: the last session exited, the cluster
+  stayed and came back after a restart, and Close project brought back
+  the start window.
 - On `WM_QUERYENDSESSION` and on Quit the state is written once more and
   then frozen, so sessions dying on the way out are not saved as gone.
 - Claude's session id is the latest non empty one from any hook. Horadric's
@@ -316,8 +326,8 @@ closed session can be picked up where it was left.
   still resumes that conversation. "All conversations..." at the bottom
   starts `claude --resume` with no id, and Claude Code's own picker lists
   the rest in the pane.
-- **A project with no tiles left** has no cluster and so no project menu.
-  Two more ways in: History in the tray menu, with a submenu for each
+- **A project closed** has no cluster and so no project menu. Two more
+  ways in: History in the tray menu, with a submenu for each
   recent project, and a right click on a recent project in the start
   window, which offers New session and that project's History. Menu ids
   are spans of `history::SPAN` per list (`history::pick`,
