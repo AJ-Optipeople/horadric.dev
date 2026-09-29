@@ -1386,11 +1386,11 @@ fn confirm_stash(id: &str) -> bool {
     pressed == Some(0)
 }
 
-/// A session pane's cross or stash button, asked about first where
-/// something would be lost.
+/// A session pane's cross or stash button. The cross ends at once, as the
+/// tile menu's End does; only a stash mid turn is asked about.
 fn pane_ask(id: &str, what: PaneAsk) {
     match what {
-        PaneAsk::End if confirm_end_session(id) => {
+        PaneAsk::End => {
             with_app(|app| app.end(id));
         }
         PaneAsk::Stash if stash_has_room() && confirm_stash(id) => {
@@ -1398,42 +1398,6 @@ fn pane_ask(id: &str, what: PaneAsk) {
         }
         _ => {}
     }
-}
-
-/// Asks before the cross ends an agent that is still running: it sits
-/// beside the zoom button and is easy to hit. A plain shell or a program
-/// that has exited goes at once.
-fn confirm_end_session(id: &str) -> bool {
-    let running = with_app(|app| {
-        let live = app
-            .consoles
-            .get(id)
-            .is_some_and(|c| !c.shell && c.exit_code().is_none());
-        let working = app
-            .shared
-            .registry
-            .lock()
-            .is_ok_and(|r| r.get(id).is_some_and(|s| s.phase.mid_turn()));
-        live.then_some(working)
-    })
-    .flatten();
-    let Some(working) = running else {
-        return true;
-    };
-    let text = if working {
-        "It is mid turn. Ending it stops it now, the turn is cut short and its tile goes. \
-         The conversation stays on disk for claude --resume."
-    } else {
-        "It stops and its tile goes. The conversation stays on disk for claude --resume."
-    };
-    let pressed = ask(&Dialog {
-        tone: Tone::Warning,
-        title: "End session",
-        text,
-        buttons: &["End", "Cancel"],
-        default: 1,
-    });
-    pressed == Some(0)
 }
 
 /// Says so when the stash is full, as the tile menu's greyed Stash does.
