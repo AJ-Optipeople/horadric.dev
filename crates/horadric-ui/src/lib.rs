@@ -60,6 +60,7 @@ pub mod screens;
 pub mod shell;
 pub mod theme;
 pub mod viewer;
+pub mod viewport;
 
 #[cfg(windows)]
 mod accounts;

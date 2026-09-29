@@ -120,7 +120,7 @@ use crate::usage::{self, UsageWindow};
 use crate::window::{self, folder_key, project_key, project_name, Cluster, Shared};
 use crate::{
     ask, autostart, browsers, history, inbox, paths, picker, recent, shell, snapping, store, theme,
-    update, watch, web, worktree,
+    update, viewport, watch, web, worktree,
 };
 
 #[path = "runner.rs"]
@@ -186,6 +186,8 @@ pub enum WebAsk {
     Address,
     /// The header's menu.
     Menu,
+    /// The size the page lays out at.
+    Size,
 }
 
 const APP_CLASS: PCWSTR = w!("HoradricApp");
@@ -432,6 +434,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
     browsers::watch(notify, WM_HORADRIC_WINDOW_SHOWN, WM_HORADRIC_WINDOW_GONE);
 
     let saved = store::load();
+    web::set_sizes(&saved.page_sizes);
     let mut registry = Registry::new();
     let now = SystemTime::now();
     for s in &saved.sessions {
@@ -894,6 +897,7 @@ unsafe extern "system" fn app_proc(
                 match what {
                     WebAsk::Address => go_to(&key),
                     WebAsk::Menu => web_menu(&key),
+                    WebAsk::Size => size_menu(&key),
                 }
             }
             return LRESULT(0);
@@ -1541,6 +1545,78 @@ fn ask_address(key: &str) {
     }
 }
 
+/// The menu lines for the page's size, numbered from `base`: fit, each
+/// preset, resize by hand, and a size typed in.
+fn size_items(key: &str, base: usize) -> Vec<Item> {
+    let now = web::size(key);
+    let check = |id: usize, label: String, on: bool| Item::Action {
+        id,
+        label,
+        checked: on,
+    };
+    let mut items = vec![check(base, "Fit to pane".into(), now.is_none())];
+    for (i, (name, w, h)) in viewport::PRESETS.iter().enumerate() {
+        let label = format!("{name}\t{w} × {h}");
+        items.push(check(base + 1 + i, label, now == Some((*w, *h))));
+    }
+    let custom = now.filter(|s| !viewport::PRESETS.iter().any(|(_, w, h)| (*w, *h) == *s));
+    items.push(Item::Separator);
+    items.push(check(base + 10, "Resize by hand".into(), custom.is_some()));
+    items.push(Item::action(base + 11, "Size..."));
+    items
+}
+
+/// Does what a line from [`size_items`] says. False for another line.
+fn pick_size(key: &str, base: usize, picked: usize) -> bool {
+    let Some(i) = picked.checked_sub(base).filter(|i| *i <= 11) else {
+        return false;
+    };
+    match i {
+        0 => web::set_size(key, None),
+        10 => {
+            // From the size it shows at now, so the grips start where the
+            // page already is.
+            if web::size(key).is_none() {
+                web::set_size(key, Some(web::room(key).unwrap_or((1280, 800))));
+            }
+        }
+        11 => ask_size(key),
+        n => {
+            if let Some((_, w, h)) = viewport::PRESETS.get(n - 1) {
+                web::set_size(key, Some((*w, *h)));
+            }
+        }
+    }
+    true
+}
+
+/// The size button's menu.
+fn size_menu(key: &str) {
+    if let Some(picked) = menu::popup(&size_items(key, 1)) {
+        pick_size(key, 1, picked);
+    }
+}
+
+/// Asks for a size to lay the page out at.
+fn ask_size(key: &str) {
+    let current = web::size(key).map_or(String::new(), |(w, h)| format!("{w} × {h}"));
+    let question = ask::Ask {
+        title: "Page size",
+        prompt: "The width and height to lay the page out at, in CSS pixels.",
+        initial: &current,
+        placeholder: "1024 × 768",
+        verb: "resize",
+        notes: false,
+        pick: None,
+    };
+    let Some(a) = ask_beside(Some(key), &question) else {
+        return;
+    };
+    if let Some(size) = viewport::parse(&a.text) {
+        web::set_size(key, Some(size));
+    }
+}
+
 /// What can be done with the project's browser pane.
 fn web_menu(key: &str) {
     const ADDRESS: usize = 1;
@@ -1549,12 +1625,14 @@ fn web_menu(key: &str) {
     const RELOAD: usize = 4;
     const OUTSIDE: usize = 5;
     const CLOSE: usize = 6;
+    const SIZE: usize = 100;
     let items = vec![
         Item::action(ADDRESS, "Go to...\tCtrl+L"),
         Item::action(BACK, "Back\tAlt+Left"),
         Item::action(FORWARD, "Forward\tAlt+Right"),
         Item::action(RELOAD, "Reload\tF5"),
         Item::Separator,
+        Item::Submenu("Page size".into(), size_items(key, SIZE)),
         Item::action(OUTSIDE, "Open in your browser"),
         Item::Separator,
         Item::action(CLOSE, "Close"),
@@ -1572,7 +1650,10 @@ fn web_menu(key: &str) {
         Some(CLOSE) => {
             with_app(|app| app.close_web(key));
         }
-        _ => {}
+        Some(picked) => {
+            pick_size(key, SIZE, picked);
+        }
+        None => {}
     }
 }
 
@@ -4911,6 +4992,7 @@ impl App {
             screen: self.screen.clone(),
             live: !self.quit,
             recovering: self.recovering.is_some(),
+            page_sizes: web::sizes(),
             ..Default::default()
         }
     }

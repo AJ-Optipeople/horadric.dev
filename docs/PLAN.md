@@ -838,6 +838,21 @@ settled "no web view" for web pages only: Horadric's own UI stays Direct2D.
   logged in browser. Loopback only is the whole of the protection so far.
 - Popups a page opens (an OAuth login, say) are WebView2's default: a
   window of their own. Not yet caught.
+- **A size of its own** (`viewport.rs`, pure). Fitted, the page is the
+  glass and changes size with the grid. Sized, from the size button after
+  reload or Page size in the header's menu (Phone, Tablet, Laptop,
+  Desktop, Resize by hand, or typed), it lays out at that many CSS pixels
+  whatever the grid does, centred in the glass with its size under it.
+  Where the pane is too small it is scaled down with WebView2's zoom
+  factor, which divides the page's bounds to get the CSS viewport, so it
+  still lays out at its own size; the zoom is worked out from the rounded
+  pixel bounds so the width comes out exact. Grips just outside its right
+  and bottom edges and at the corner resize it. Ctrl and the wheel stop
+  zooming a sized page, since that would change the size it lays out at.
+  Kept per project in the saved state (`page_sizes`). Only the size is
+  kept: the pane still moves between cells as sessions come and go.
+  Checked over DevTools: Phone gave `innerWidth` 390, a drag 680 × 497,
+  Desktop scaled to 54% still 1920 × 1080, and Fit the whole glass.
 
 Tested on screen with a dev instance on its own port and `cmd.exe`
 sessions in two projects: Ctrl+Shift+B put the pane in the grid and asked

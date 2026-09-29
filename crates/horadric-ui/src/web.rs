@@ -68,6 +68,11 @@ struct Web {
     pane: Option<HWND>,
     /// Where it goes in the pane, in the pane's pixels.
     bounds: RECT,
+    /// The largest size its pane shows unscaled, in CSS pixels.
+    room: Option<(u32, u32)>,
+    /// The zoom factor it was last given, so a zoom the user made with
+    /// Ctrl and the wheel in a fitted page is not undone by every resize.
+    zoom: f64,
     /// The address to open once it is made.
     pending: Option<String>,
     /// Wants the keyboard once it is made.
@@ -89,6 +94,9 @@ enum Env {
 thread_local! {
     static ENV: RefCell<Env> = const { RefCell::new(Env::None) };
     static WEBS: RefCell<HashMap<String, Web>> = RefCell::new(HashMap::new());
+    /// Each project's page size in CSS pixels, where it has one. Kept
+    /// apart from the pages, since a size outlives a page closed.
+    static SIZES: RefCell<HashMap<String, (u32, u32)>> = RefCell::new(HashMap::new());
     /// The app's hidden window, where a page not on the stage waits.
     static PARK: Cell<isize> = const { Cell::new(0) };
 }
@@ -144,6 +152,7 @@ pub fn open(key: &str, url: Option<&str>) {
             key.to_string(),
             Web {
                 pending: url.map(str::to_string),
+                zoom: 1.0,
                 ..Web::default()
             },
         );
@@ -174,34 +183,117 @@ pub fn close(key: &str) {
     }
 }
 
-/// The pane `hwnd` shows the project's page now, at `bounds`.
-pub fn attach(key: &str, hwnd: HWND, bounds: RECT) {
-    let controller = WEBS.with(|w| {
+/// The size the project's page lays out at, in CSS pixels, or None when
+/// it fills its pane.
+pub fn size(key: &str) -> Option<(u32, u32)> {
+    SIZES.with(|s| s.borrow().get(key).copied())
+}
+
+/// Gives the project's page a size, or fits it to its pane with None. The
+/// pane showing it places it again.
+pub fn set_size(key: &str, size: Option<(u32, u32)>) {
+    let old = SIZES.with(|s| {
+        let mut s = s.borrow_mut();
+        match size {
+            Some(v) => s.insert(key.to_string(), v),
+            None => s.remove(key),
+        }
+    });
+    if old != size {
+        changed(key, |_| {});
+    }
+}
+
+/// Every project's page size, to save.
+pub fn sizes() -> std::collections::BTreeMap<String, [u32; 2]> {
+    SIZES.with(|s| {
+        s.borrow()
+            .iter()
+            .map(|(k, &(w, h))| (k.clone(), [w, h]))
+            .collect()
+    })
+}
+
+/// The sizes saved last time.
+pub fn set_sizes(saved: &std::collections::BTreeMap<String, [u32; 2]>) {
+    SIZES.with(|s| {
+        *s.borrow_mut() = saved
+            .iter()
+            .map(|(k, &[w, h])| (k.clone(), (w, h)))
+            .collect()
+    });
+}
+
+/// The pane showing the page has room for this size unscaled.
+pub fn set_room(key: &str, room: (u32, u32)) {
+    WEBS.with(|w| {
+        if let Some(web) = w.borrow_mut().get_mut(key) {
+            web.room = Some(room);
+        }
+    });
+}
+
+/// The largest size the page's pane shows unscaled, once one has.
+pub fn room(key: &str) -> Option<(u32, u32)> {
+    WEBS.with(|w| w.borrow().get(key).and_then(|w| w.room))
+}
+
+/// The pane `hwnd` shows the project's page now, at `bounds` and `zoom`.
+pub fn attach(key: &str, hwnd: HWND, bounds: RECT, zoom: f64) {
+    let placed = WEBS.with(|w| {
         let mut w = w.borrow_mut();
         let web = w.get_mut(key)?;
         web.pane = Some(hwnd);
-        web.bounds = bounds;
-        web.controller.clone()
+        // Kept before the page is made too: it takes them when it is.
+        let zoom = place(web, bounds, zoom);
+        Some((web.controller.clone()?, zoom))
     });
-    if let Some(c) = controller {
+    if let Some((c, zoom)) = placed {
         unsafe {
             let _ = c.SetParentWindow(hwnd);
-            let _ = c.SetBounds(bounds);
+        }
+        apply(&c, bounds, zoom, size(key).is_none());
+        unsafe {
             let _ = c.SetIsVisible(true);
         }
     }
 }
 
-/// The pane changed size.
-pub fn set_bounds(key: &str, bounds: RECT) {
-    let controller = WEBS.with(|w| {
+/// The pane changed size, or the page did.
+pub fn set_bounds(key: &str, bounds: RECT, zoom: f64) {
+    let placed = WEBS.with(|w| {
         let mut w = w.borrow_mut();
         let web = w.get_mut(key)?;
-        web.bounds = bounds;
-        web.controller.clone()
+        // Kept before the page is made too: it takes them when it is.
+        let zoom = place(web, bounds, zoom);
+        Some((web.controller.clone()?, zoom))
     });
-    if let Some(c) = controller {
-        let _ = unsafe { c.SetBounds(bounds) };
+    if let Some((c, zoom)) = placed {
+        apply(&c, bounds, zoom, size(key).is_none());
+    }
+}
+
+/// Keeps where the page goes, and says the zoom to set when it is not the
+/// one set last.
+fn place(web: &mut Web, bounds: RECT, zoom: f64) -> Option<f64> {
+    web.bounds = bounds;
+    let changed = (web.zoom - zoom).abs() > 1e-6;
+    web.zoom = zoom;
+    changed.then_some(zoom)
+}
+
+/// Bounds, then zoom, so the page lays out once at its size. A sized page
+/// keeps its zoom: Ctrl and the wheel would change the size it lays out
+/// at.
+fn apply(c: &ICoreWebView2Controller, bounds: RECT, zoom: Option<f64>, fitted: bool) {
+    unsafe {
+        let _ = c.SetBounds(bounds);
+        if let Some(z) = zoom {
+            let _ = c.SetZoomFactor(z);
+        }
+        if let Ok(settings) = c.CoreWebView2().and_then(|v| v.Settings()) {
+            let _ = settings.SetIsZoomControlEnabled(fitted);
+        }
     }
 }
 
@@ -413,11 +505,12 @@ fn ready(key: &str, controller: ICoreWebView2Controller) {
         Some((
             web.pane,
             web.bounds,
+            web.zoom,
             web.pending.take(),
             std::mem::take(&mut web.focus),
         ))
     });
-    let Some((pane, bounds, pending, focus)) = state else {
+    let Some((pane, bounds, zoom, pending, focus)) = state else {
         let _ = unsafe { controller.Close() };
         return;
     };
@@ -425,7 +518,7 @@ fn ready(key: &str, controller: ICoreWebView2Controller) {
         match pane {
             Some(p) => {
                 let _ = controller.SetParentWindow(p);
-                let _ = controller.SetBounds(bounds);
+                apply(&controller, bounds, Some(zoom), size(key).is_none());
                 let _ = controller.SetIsVisible(true);
             }
             None => {

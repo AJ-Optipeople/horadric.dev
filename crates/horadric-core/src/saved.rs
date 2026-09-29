@@ -56,6 +56,10 @@ pub struct SavedState {
     /// The order of each project's sessions on the stage, by project key.
     #[serde(default)]
     pub grids: BTreeMap<String, Vec<String>>,
+    /// The size each project's browser pane lays its page out at, in CSS
+    /// pixels, when it is not fitted to the pane.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub page_sizes: BTreeMap<String, [u32; 2]>,
     /// Model, effort and permission mode for the sessions Horadric starts.
     #[serde(default)]
     pub defaults: Defaults,

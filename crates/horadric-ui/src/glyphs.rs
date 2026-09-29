@@ -38,6 +38,7 @@ use windows_numerics::{Matrix3x2, Vector2};
 use crate::frame::{Decoration, Frame, BOLD, ITALIC};
 use crate::render::{self, hwnd_target, Gpu};
 use crate::theme::{self, Color};
+use crate::viewport;
 
 /// Cascadia ships with Windows 11. Consolas is on every Windows since Vista.
 const FAMILIES: [&str; 2] = ["Cascadia Mono", "Consolas"];
@@ -128,6 +129,18 @@ pub struct Bar<'a> {
     pub edit: Option<BarEdit>,
     pub back: bool,
     pub forward: bool,
+    /// The page has a size of its own, so the size button is lit.
+    pub sized: bool,
+}
+
+/// A browser pane's page laid out at a size of its own: a rim round it,
+/// grips on its right and bottom edges, and its size under it.
+pub struct PageFrame<'a> {
+    /// Left, top, right, bottom in DIPs.
+    pub page: [f32; 4],
+    pub label: &'a str,
+    /// Being resized, so the grips and the label are lit.
+    pub dragging: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -145,6 +158,8 @@ pub struct BarLayout {
     pub back: f32,
     pub forward: f32,
     pub reload: f32,
+    /// The button for the page's size.
+    pub size: f32,
     /// The field's left and right edges.
     pub field: (f32, f32),
 }
@@ -154,6 +169,7 @@ pub enum BarHit {
     Back,
     Forward,
     Reload,
+    Size,
     Field,
 }
 
@@ -162,19 +178,22 @@ pub const BAR_INSET: f32 = 8.0;
 /// Between the field and the header's top and bottom.
 const BAR_MARGIN: f32 = 3.0;
 
-/// The buttons after the lamp, one square each, then the field up to the
+/// Back, forward, reload and size after the lamp, one square each, then
+/// the field up to the
 /// zoom button or the cross.
 pub fn bar_layout(width: f32, zoom: bool, close: bool) -> BarLayout {
     let back = BEZEL + 14.0;
     let forward = back + HEADER_H;
     let reload = forward + HEADER_H;
+    let size = reload + HEADER_H;
     let (zoom_at, close_at) = header_buttons(width, zoom, close);
     let end = zoom_at.or(close_at).unwrap_or(width - BEZEL);
-    let left = reload + HEADER_H + 4.0;
+    let left = size + HEADER_H + 4.0;
     BarLayout {
         back,
         forward,
         reload,
+        size,
         field: (left, (end - 4.0).max(left)),
     }
 }
@@ -188,6 +207,8 @@ pub fn bar_hit(l: &BarLayout, x: f32) -> Option<BarHit> {
         Some(BarHit::Forward)
     } else if on(l.reload) {
         Some(BarHit::Reload)
+    } else if on(l.size) {
+        Some(BarHit::Size)
     } else if x >= l.field.0 && x < l.field.1 {
         Some(BarHit::Field)
     } else {
@@ -577,6 +598,7 @@ impl GridTarget {
         frame: &Frame,
         header: Option<&Header>,
         find: Option<&FindBar>,
+        page: Option<&PageFrame>,
         veil: f32,
         plate: (f32, f32),
     ) -> Result<()> {
@@ -725,6 +747,9 @@ impl GridTarget {
             self.rt.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
 
             self.glass(gpu, &screen, header);
+            if let Some(p) = page {
+                self.page_frame(gpu, p);
+            }
             if let Some(h) = header {
                 self.header(gpu, h);
             }
@@ -745,6 +770,80 @@ impl GridTarget {
             }
             self.rt.EndDraw(None, None)
         }
+    }
+
+    /// A rim round a sized page, a grip in the middle of its right and
+    /// bottom edges and one at the corner, and its size under it. The page
+    /// is a window over the glass, so all of this is drawn round it.
+    unsafe fn page_frame(&self, gpu: &Gpu, p: &PageFrame) {
+        let [l, t, r, b] = p.page;
+        let lit = if p.dragging {
+            theme::TEXT
+        } else {
+            theme::TEXT_DIM
+        };
+        self.brush
+            .SetColor(&render::color(theme::TEXT_DIM.with_alpha(0.35)));
+        self.rt.DrawRectangle(
+            &D2D_RECT_F {
+                left: l - 0.5,
+                top: t - 0.5,
+                right: r + 0.5,
+                bottom: b + 0.5,
+            },
+            &self.brush,
+            1.0,
+            None,
+        );
+        self.brush.SetColor(&render::color(lit));
+        let g = viewport::GRIP;
+        let (mx, my) = ((l + r) / 2.0, (t + b) / 2.0);
+        let bar = |rect: D2D_RECT_F| {
+            self.rt
+                .FillRoundedRectangle(&rounded(&rect, 1.5), &self.brush);
+        };
+        bar(D2D_RECT_F {
+            left: r + g / 2.0 - 1.5,
+            top: my - 12.0,
+            right: r + g / 2.0 + 1.5,
+            bottom: my + 12.0,
+        });
+        bar(D2D_RECT_F {
+            left: mx - 12.0,
+            top: b + g / 2.0 - 1.5,
+            right: mx + 12.0,
+            bottom: b + g / 2.0 + 1.5,
+        });
+        for step in [3.0, 7.0] {
+            self.rt.DrawLine(
+                Vector2 {
+                    X: r + step,
+                    Y: b + g - 2.0,
+                },
+                Vector2 {
+                    X: r + g - 2.0,
+                    Y: b + step,
+                },
+                &self.brush,
+                1.5,
+                None,
+            );
+        }
+        let text: Vec<u16> = p.label.encode_utf16().collect();
+        self.brush.SetColor(&render::color(lit));
+        self.rt.DrawText(
+            &text,
+            &gpu.small_centre,
+            &D2D_RECT_F {
+                left: l - 100.0,
+                top: b + g,
+                right: r + 100.0,
+                bottom: b + g + viewport::LABEL_H,
+            },
+            &self.brush,
+            D2D1_DRAW_TEXT_OPTIONS_NONE,
+            DWRITE_MEASURING_MODE_NATURAL,
+        );
     }
 
     /// The plate round the glass and the glass itself, with the plate's lit
@@ -936,7 +1035,12 @@ impl GridTarget {
             button(if zoomed { "\u{E73F}" } else { "\u{E740}" }, at);
         }
         if let Some(bar) = &h.bar {
-            self.bar(gpu, bar, &bar_layout(width, h.zoom.is_some(), h.close));
+            self.bar(
+                gpu,
+                bar,
+                &bar_layout(width, h.zoom.is_some(), h.close),
+                h.accent,
+            );
             return;
         }
         let name: Vec<u16> = h.name.encode_utf16().collect();
@@ -988,16 +1092,12 @@ impl GridTarget {
         }
     }
 
-    /// Back, forward and reload, dim when there is nowhere to go, then the
-    /// address in a sunk field, lit while it is typed in.
-    unsafe fn bar(&self, gpu: &Gpu, bar: &Bar, l: &BarLayout) {
-        let button = |glyph: &str, at: f32, on: bool| {
+    /// Back, forward and reload, dim when there is nowhere to go, the size
+    /// button, lit when the page has a size, then the address in a sunk
+    /// field, lit while it is typed in.
+    unsafe fn bar(&self, gpu: &Gpu, bar: &Bar, l: &BarLayout, accent: Color) {
+        let button = |glyph: &str, at: f32, ink: Color| {
             let glyph: Vec<u16> = glyph.encode_utf16().collect();
-            let ink = if on {
-                theme::TEXT_DIM
-            } else {
-                theme::TEXT_DIM.with_alpha(0.35)
-            };
             self.brush.SetColor(&render::color(ink));
             self.rt.DrawText(
                 &glyph,
@@ -1013,9 +1113,24 @@ impl GridTarget {
                 DWRITE_MEASURING_MODE_NATURAL,
             );
         };
-        button("\u{E72B}", l.back, bar.back);
-        button("\u{E72A}", l.forward, bar.forward);
-        button("\u{E72C}", l.reload, true);
+        let dim = |on: bool| {
+            if on {
+                theme::TEXT_DIM
+            } else {
+                theme::TEXT_DIM.with_alpha(0.35)
+            }
+        };
+        button("\u{E72B}", l.back, dim(bar.back));
+        button("\u{E72A}", l.forward, dim(bar.forward));
+        button("\u{E72C}", l.reload, dim(true));
+        // A phone for a page at a size of its own, a screen for one that
+        // fills the pane.
+        let (glyph, ink) = if bar.sized {
+            ("\u{E8EA}", accent.mix(theme::TEXT, 0.35))
+        } else {
+            ("\u{E7F4}", theme::TEXT_DIM)
+        };
+        button(glyph, l.size, ink);
 
         let field = D2D_RECT_F {
             left: l.field.0,
@@ -1292,7 +1407,8 @@ mod tests {
         let (_, close) = header_buttons(600.0, false, true);
         assert_eq!(l.forward, l.back + HEADER_H);
         assert_eq!(l.reload, l.forward + HEADER_H);
-        assert!(l.field.0 >= l.reload + HEADER_H);
+        assert_eq!(l.size, l.reload + HEADER_H);
+        assert!(l.field.0 >= l.size + HEADER_H);
         assert!(l.field.1 <= close.unwrap());
         let zoomed = bar_layout(600.0, true, true);
         assert_eq!(zoomed.field.1, l.field.1 - HEADER_H, "the zoom button");
@@ -1306,6 +1422,7 @@ mod tests {
         assert_eq!(bar_hit(&l, l.back + 1.0), Some(BarHit::Back));
         assert_eq!(bar_hit(&l, l.forward + 1.0), Some(BarHit::Forward));
         assert_eq!(bar_hit(&l, l.reload + HEADER_H - 1.0), Some(BarHit::Reload));
+        assert_eq!(bar_hit(&l, l.size + 1.0), Some(BarHit::Size));
         assert_eq!(bar_hit(&l, l.field.0 + 50.0), Some(BarHit::Field));
         assert_eq!(bar_hit(&l, 2.0), None, "the lamp is for dragging");
         assert_eq!(bar_hit(&l, l.field.1 + 1.0), None);

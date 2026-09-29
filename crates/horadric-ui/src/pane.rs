@@ -55,15 +55,15 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetCaretBlinkTime, GetClientRect, GetCursorPos,
     GetParent, GetWindowLongPtrW, KillTimer, LoadCursorW, PeekMessageW, RegisterClassW,
     SendMessageW, SetCursor, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, CREATESTRUCTW,
-    CS_DBLCLKS, GWLP_USERDATA, HTCLIENT, IDC_ARROW, IDC_HAND, IDC_IBEAM, MSG, PM_NOREMOVE,
-    PM_REMOVE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOWNA,
-    WINDOW_EX_STYLE, WINDOW_STYLE, WM_CAPTURECHANGED, WM_CHAR, WM_DEADCHAR, WM_DESTROY,
-    WM_DPICHANGED_AFTERPARENT, WM_DROPFILES, WM_ERASEBKGND, WM_IME_STARTCOMPOSITION, WM_KEYDOWN,
-    WM_KEYUP, WM_KILLFOCUS, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
-    WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY, WM_PAINT,
-    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SETFOCUS, WM_SIZE, WM_SYSCHAR, WM_SYSDEADCHAR,
-    WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WM_USER, WNDCLASSW, WS_CHILD, WS_CLIPCHILDREN,
-    WS_CLIPSIBLINGS, WS_VISIBLE,
+    CS_DBLCLKS, GWLP_USERDATA, HTCLIENT, IDC_ARROW, IDC_HAND, IDC_IBEAM, IDC_SIZENS, IDC_SIZENWSE,
+    IDC_SIZEWE, MSG, PM_NOREMOVE, PM_REMOVE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+    SW_HIDE, SW_SHOWNA, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CAPTURECHANGED, WM_CHAR, WM_DEADCHAR,
+    WM_DESTROY, WM_DPICHANGED_AFTERPARENT, WM_DROPFILES, WM_ERASEBKGND, WM_IME_STARTCOMPOSITION,
+    WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE,
+    WM_NCDESTROY, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SETFOCUS, WM_SIZE,
+    WM_SYSCHAR, WM_SYSDEADCHAR, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WM_USER, WNDCLASSW, WS_CHILD,
+    WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_VISIBLE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowRect, SetParent, GWLP_HWNDPARENT, GWL_EXSTYLE, GWL_STYLE, HWND_TOP, SWP_FRAMECHANGED,
@@ -78,8 +78,8 @@ use crate::console::{Console, GridSize};
 use crate::field::{self, Field};
 use crate::frame::{Decoration, Stroke};
 use crate::glyphs::{
-    self, Bar, BarEdit, BarHit, BarLayout, CellSize, FindBar, GridTarget, Header, BAR_INSET,
-    HEADER_H,
+    self, Bar, BarEdit, BarHit, BarLayout, CellSize, FindBar, GridTarget, Header, PageFrame,
+    BAR_INSET, HEADER_H,
 };
 use crate::keys::{
     self, Button, CharAction, Chord, FontStep, Key, KeyEvent, Kitty, Mods, MouseEncoding,
@@ -91,6 +91,7 @@ use crate::motion::{self, REVEAL, SPOTLIGHT};
 use crate::paste::{self, Source};
 use crate::theme::{self, Color};
 use crate::viewer::Hit;
+use crate::viewport::{self, Fit, Grip};
 use crate::web;
 use crate::window::Shared;
 use crate::{find, frame, watch};
@@ -148,6 +149,16 @@ struct Search {
     found: Option<Match>,
     /// In a file view, the same match as it is in the file.
     hit: Option<Hit>,
+}
+
+/// A sized page's grip held down: where it was pressed in DIPs, and the
+/// size and zoom the page had then.
+#[derive(Clone, Copy)]
+struct Resize {
+    grip: Grip,
+    at: (f32, f32),
+    from: (u32, u32),
+    zoom: f32,
 }
 
 pub struct Pane {
@@ -212,6 +223,8 @@ pub struct Pane {
     /// A browser pane's address as it is typed, while its field has the
     /// keyboard.
     address: RefCell<Option<Field>>,
+    /// A sized page's grip, while it is held down.
+    resizing: Cell<Option<Resize>>,
     /// The cells of the link under the mouse while Ctrl is held, drawn
     /// underlined.
     link: RefCell<Option<Vec<Point>>>,
@@ -298,6 +311,7 @@ impl Pane {
             caret_at: Cell::new(None),
             caret_since: Cell::new(Instant::now()),
             address: RefCell::new(None),
+            resizing: Cell::new(None),
         });
         // A browser pane's page is a window inside it, which its own
         // drawing must leave alone.
@@ -328,7 +342,8 @@ impl Pane {
         }
         if let Some(key) = &pane.console.web {
             pane.header.set(true);
-            web::attach(key, pane.hwnd, pane.page_rect());
+            let (bounds, zoom) = pane.page_place();
+            web::attach(key, pane.hwnd, bounds, zoom);
         }
         Ok(pane)
     }
@@ -558,20 +573,67 @@ impl Pane {
         }
     }
 
-    /// Where a browser pane's page goes: the glass, in the pane's pixels.
-    fn page_rect(&self) -> RECT {
+    /// The glass, in DIPs.
+    fn glass(&self) -> [f32; 4] {
         let mut r = RECT::default();
         unsafe {
             let _ = GetClientRect(self.hwnd, &mut r);
         }
         let scale = self.dpi_now() as f32 / 96.0;
-        let px = |dip: f32| (dip * scale).round() as i32;
-        RECT {
-            left: px(glyphs::BEZEL),
-            top: px(glyphs::screen_top(self.header.get())),
-            right: (r.right - px(glyphs::BEZEL)).max(0),
-            bottom: (r.bottom - px(glyphs::BEZEL)).max(0),
+        [
+            glyphs::BEZEL,
+            glyphs::screen_top(self.header.get()),
+            (r.right as f32 / scale - glyphs::BEZEL).max(glyphs::BEZEL),
+            (r.bottom as f32 / scale - glyphs::BEZEL).max(glyphs::BEZEL),
+        ]
+    }
+
+    /// Where a browser pane's page goes in the glass, in DIPs: all of it,
+    /// or its own size when it has one.
+    fn page_fit(&self) -> Option<(Fit, Option<(u32, u32)>)> {
+        let size = web::size(self.console.web.as_deref()?);
+        Some((viewport::fit(self.glass(), size), size))
+    }
+
+    /// The page's bounds in the pane's pixels and its zoom factor.
+    fn page_place(&self) -> (RECT, f64) {
+        let Some((fit, size)) = self.page_fit() else {
+            return (RECT::default(), 1.0);
+        };
+        if let Some(key) = &self.console.web {
+            web::set_room(key, viewport::unscaled(self.glass()));
         }
+        let scale = self.dpi_now() as f32 / 96.0;
+        let ([left, top, right, bottom], zoom) = viewport::pixels(&fit, size, scale);
+        (
+            RECT {
+                left,
+                top,
+                right: right.max(left),
+                bottom: bottom.max(top),
+            },
+            zoom,
+        )
+    }
+
+    /// The grip of a sized page under a client point.
+    fn grip_at(&self, lparam: LPARAM) -> Option<Grip> {
+        let (fit, _) = self.page_fit().filter(|(_, size)| size.is_some())?;
+        let (x, y) = self.dip(lparam);
+        viewport::grip_at(&fit, x, y)
+    }
+
+    /// Resizes a sized page to follow the grip held since the press.
+    fn drag_grip(&self, lparam: LPARAM) {
+        let (Some(key), Some(r)) = (&self.console.web, self.resizing.get()) else {
+            return;
+        };
+        let (x, y) = self.dip(lparam);
+        let (dx, dy) = (x - r.at.0, y - r.at.1);
+        web::set_size(key, Some(viewport::drag(r.from, r.grip, dx, dy, r.zoom)));
+        // At once, not when the message it posts comes round.
+        self.fit_grid();
+        self.invalidate();
     }
 
     /// Ends in a cross: a file view and a browser pane, which close without
@@ -599,7 +661,8 @@ impl Pane {
     /// pane's page to fill its glass.
     fn fit_grid(&self) {
         if let Some(key) = &self.console.web {
-            web::set_bounds(key, self.page_rect());
+            let (bounds, zoom) = self.page_place();
+            web::set_bounds(key, bounds, zoom);
             return;
         }
         let mut r = RECT::default();
@@ -715,8 +778,18 @@ impl Pane {
                 }),
                 back,
                 forward,
+                sized: web::size(key).is_some(),
             }
         });
+        let sized = self.page_fit().and_then(|(fit, size)| Some((fit, size?)));
+        let label = sized.map(|(fit, size)| viewport::label(size, fit.zoom));
+        let page = sized
+            .zip(label.as_deref())
+            .map(|((fit, _), label)| PageFrame {
+                page: fit.page,
+                label,
+                dragging: self.resizing.get().is_some(),
+            });
         let header = self.header.get().then(|| Header {
             name: &name,
             detail: &detail,
@@ -751,6 +824,11 @@ impl Pane {
                 return;
             }
         };
+        // A browser pane's grid is empty and unseen, but a page smaller
+        // than the glass would show its cursor beside it.
+        if self.console.web.is_some() {
+            frame.caret = None;
+        }
         if let Some(cells) = self.link.borrow().as_ref() {
             let rows = self.console.size().rows as i32;
             for p in cells {
@@ -787,6 +865,7 @@ impl Pane {
                 &frame,
                 header.as_ref(),
                 find.as_ref(),
+                page.as_ref(),
                 veil,
                 plate,
             )
@@ -1517,6 +1596,10 @@ impl Pane {
                 }
                 return true;
             }
+            Some(BarHit::Size) => {
+                app::push(Input::WebAsk(key.clone(), app::WebAsk::Size));
+                return true;
+            }
             Some(BarHit::Back) => web::Step::Back,
             Some(BarHit::Forward) => web::Step::Forward,
             Some(BarHit::Reload) => web::Step::Reload,
@@ -2067,6 +2150,17 @@ impl Pane {
                         SetCursor(LoadCursorW(None, cursor).ok());
                     }
                     Some(LRESULT(1))
+                } else if let Some(grip) = self.resizing.get().map(|r| r.grip).or(self.grip_at(at))
+                {
+                    let cursor = match grip {
+                        Grip::Right => IDC_SIZEWE,
+                        Grip::Bottom => IDC_SIZENS,
+                        Grip::Corner => IDC_SIZENWSE,
+                    };
+                    unsafe {
+                        SetCursor(LoadCursorW(None, cursor).ok());
+                    }
+                    Some(LRESULT(1))
                 } else if self.link.borrow().is_some() {
                     unsafe {
                         SetCursor(LoadCursorW(None, IDC_HAND).ok());
@@ -2127,6 +2221,21 @@ impl Pane {
                 if self.on_bar(lparam, msg == WM_LBUTTONDBLCLK) {
                     return Some(LRESULT(0));
                 }
+                if let (Some(grip), Some(key)) = (self.grip_at(lparam), &self.console.web) {
+                    if let (Some((fit, _)), Some(size)) = (self.page_fit(), web::size(key)) {
+                        self.resizing.set(Some(Resize {
+                            grip,
+                            at: self.dip(lparam),
+                            from: size,
+                            zoom: fit.zoom,
+                        }));
+                        unsafe {
+                            SetCapture(self.hwnd);
+                        }
+                        self.invalidate();
+                        return Some(LRESULT(0));
+                    }
+                }
                 self.focus();
                 if self.on_close(lparam) {
                     self.close();
@@ -2154,6 +2263,10 @@ impl Pane {
                 self.hover(None);
                 Some(LRESULT(0))
             }
+            WM_MOUSEMOVE if self.resizing.get().is_some() => {
+                self.drag_grip(lparam);
+                Some(LRESULT(0))
+            }
             WM_MOUSEMOVE => {
                 if !self.selecting.get() {
                     self.hover(Some(lparam));
@@ -2169,6 +2282,15 @@ impl Pane {
                 } else {
                     self.report_move(lparam);
                 }
+                Some(LRESULT(0))
+            }
+            WM_LBUTTONUP if self.resizing.get().is_some() => {
+                self.drag_grip(lparam);
+                self.resizing.set(None);
+                unsafe {
+                    let _ = ReleaseCapture();
+                }
+                self.invalidate();
                 Some(LRESULT(0))
             }
             WM_LBUTTONUP => {
@@ -2210,6 +2332,9 @@ impl Pane {
                 Some(LRESULT(0))
             }
             WM_CAPTURECHANGED => {
+                if self.resizing.take().is_some() {
+                    self.invalidate();
+                }
                 // Capture taken away mid press, by a menu or Alt+Tab: the
                 // program must not think the button is still down.
                 if let Some(held) = self.reported.take() {
@@ -2246,6 +2371,8 @@ impl Pane {
                 Some(LRESULT(0))
             }
             web::WM_WEB_CHANGED => {
+                // The page's size may be what changed.
+                self.fit_grid();
                 self.invalidate();
                 Some(LRESULT(0))
             }
