@@ -212,7 +212,10 @@ new project, so three ways in that need no terminal:
   recent projects one click away, and Quit, which warns when sessions in
   Horadric terminals would end. Recent projects live in
   `%APPDATA%\Horadric\recent.json`. The tooltip counts sessions and waiting
-  ones. The icon is drawn in code (`icon.rs`), so there is no file to ship.
+  ones. The icon is drawn in code (`icon.rs`), so there is no file to ship:
+  a dark cube with its lid lifted and light pouring out. One colour lights
+  it (gold, red for a dev instance), and `icon::lit` takes any other, so
+  the light can later follow what Horadric is doing.
   Pulled forward from step 5.
 - **The full width `+` below a cluster's last tile** starts another session
   in that project at once, no picker. It is outlined, not filled, so it
@@ -431,7 +434,7 @@ a dev instance:
   already live in the installed Horadric.
 - No autostart offer and no switch for it in the tray. The first dev run
   used to point the `Run` key at `target\debug\horadricw.exe`.
-- A red topped tray icon and "Horadric dev" in the tooltip.
+- A red lit tray icon and "Horadric dev" in the tooltip.
 - `install`, `uninstall` and the hook and Explorer installers refuse to run.
 
 The hook URL is fixed at install time, so a `claude` in a dev terminal

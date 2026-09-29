@@ -138,7 +138,7 @@ them") come back as paused tiles, and a click resumes the conversation.
 which is the cheap way to try them.
 
 `HORADRIC_DEV=1` runs a build beside the installed Horadric without touching
-it: its own port and saved state, no autostart, a red topped tray icon. That is how
+it: its own port and saved state, no autostart, a red lit tray icon. That is how
 Horadric is developed from a session inside Horadric.
 
 `target\release\horadric.exe reload` updates a running Horadric to a new build
