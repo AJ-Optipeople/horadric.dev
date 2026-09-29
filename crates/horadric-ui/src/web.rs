@@ -45,10 +45,11 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, VIRTUAL_KEY, VK_CONTROL, VK_MENU, VK_SHIFT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetAncestor, GetForegroundWindow, PostMessageW, GA_ROOT,
+    GetAncestor, GetForegroundWindow, GetParent, PostMessageW, GA_ROOT,
 };
 
 use crate::app::{self, Input, WebAsk};
+use crate::terminal::WM_STAGE_LAYOUT;
 
 /// Posted to the pane showing a project's page when its title or address
 /// changed, so the header is drawn again.
@@ -97,6 +98,9 @@ thread_local! {
     /// Each project's page size in CSS pixels, where it has one. Kept
     /// apart from the pages, since a size outlives a page closed.
     static SIZES: RefCell<HashMap<String, (u32, u32)>> = RefCell::new(HashMap::new());
+    /// Each project's browser pane width in DIPs, where it stands on the
+    /// right of the stage instead of in the grid.
+    static DOCKS: RefCell<HashMap<String, f32>> = RefCell::new(HashMap::new());
     /// The app's hidden window, where a page not on the stage waits.
     static PARK: Cell<isize> = const { Cell::new(0) };
 }
@@ -222,6 +226,45 @@ pub fn set_sizes(saved: &std::collections::BTreeMap<String, [u32; 2]>) {
             .map(|(k, &[w, h])| (k.clone(), (w, h)))
             .collect()
     });
+}
+
+/// How wide the project's browser pane is on the right of the stage, or
+/// None while it takes a place in the grid.
+pub fn dock(key: &str) -> Option<f32> {
+    DOCKS.with(|d| d.borrow().get(key).copied())
+}
+
+/// Puts the project's browser pane on the right of the stage this wide,
+/// or back in the grid with None. The stage showing it lays out again.
+pub fn set_dock(key: &str, width: Option<f32>) {
+    let old = DOCKS.with(|d| {
+        let mut d = d.borrow_mut();
+        match width {
+            Some(w) => d.insert(key.to_string(), w),
+            None => d.remove(key),
+        }
+    });
+    if old == width {
+        return;
+    }
+    let pane = WEBS.with(|w| w.borrow().get(key).and_then(|w| w.pane));
+    if let Some(p) = pane {
+        unsafe {
+            if let Ok(stage) = GetParent(p) {
+                let _ = PostMessageW(Some(stage), WM_STAGE_LAYOUT, WPARAM(0), LPARAM(0));
+            }
+        }
+    }
+}
+
+/// Every project's docked width, to save.
+pub fn docks() -> std::collections::BTreeMap<String, f32> {
+    DOCKS.with(|d| d.borrow().iter().map(|(k, &w)| (k.clone(), w)).collect())
+}
+
+/// The docked widths saved last time.
+pub fn set_docks(saved: &std::collections::BTreeMap<String, f32>) {
+    DOCKS.with(|d| *d.borrow_mut() = saved.iter().map(|(k, &w)| (k.clone(), w)).collect());
 }
 
 /// The pane showing the page has room for this size unscaled.

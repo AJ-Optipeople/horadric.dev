@@ -60,6 +60,10 @@ pub struct SavedState {
     /// pixels, when it is not fitted to the pane.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub page_sizes: BTreeMap<String, [u32; 2]>,
+    /// How wide each project's browser pane is, in DIPs, where it stands
+    /// full height on the right of the stage instead of in the grid.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub page_docks: BTreeMap<String, f32>,
     /// Model, effort and permission mode for the sessions Horadric starts.
     #[serde(default)]
     pub defaults: Defaults,

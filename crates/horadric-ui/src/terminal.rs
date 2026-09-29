@@ -42,15 +42,16 @@ use windows::Win32::UI::WindowsAndMessaging::{
     LoadCursorW, LoadIconW, RegisterClassW, SetCursor, SetForegroundWindow, SetWindowLongPtrW,
     SetWindowPos, SetWindowTextW, ShowWindow, CREATESTRUCTW, CW_USEDEFAULT, GWLP_USERDATA,
     HTCAPTION, HTCLIENT, HTCLOSE, HTMAXBUTTON, HTMINBUTTON, HTTOP, HTTOPLEFT, HTTOPRIGHT,
-    IDC_ARROW, IDC_SIZEALL, NCCALCSIZE_PARAMS, SC_KEYMENU, SM_CXMINTRACK, SM_CXPADDEDBORDER,
-    SM_CYFRAME, SM_CYMINTRACK, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-    SWP_NOZORDER, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOWNOACTIVATE, SW_SHOWNORMAL,
-    WINDOW_EX_STYLE, WMSZ_BOTTOM, WMSZ_BOTTOMLEFT, WMSZ_BOTTOMRIGHT, WMSZ_LEFT, WMSZ_RIGHT,
-    WMSZ_TOP, WMSZ_TOPLEFT, WMSZ_TOPRIGHT, WM_CAPTURECHANGED, WM_CLOSE, WM_DPICHANGED,
-    WM_ENTERSIZEMOVE, WM_ERASEBKGND, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOVING, WM_NCACTIVATE,
-    WM_NCCALCSIZE, WM_NCCREATE, WM_NCDESTROY, WM_NCHITTEST, WM_NCLBUTTONDBLCLK, WM_NCLBUTTONDOWN,
-    WM_NCLBUTTONUP, WM_NCMOUSEMOVE, WM_NCRBUTTONUP, WM_PAINT, WM_SETFOCUS, WM_SIZE, WM_SIZING,
-    WM_SYSCOMMAND, WM_TIMER, WNDCLASSW, WS_CLIPCHILDREN, WS_OVERLAPPEDWINDOW,
+    IDC_ARROW, IDC_SIZEALL, IDC_SIZEWE, NCCALCSIZE_PARAMS, SC_KEYMENU, SM_CXMINTRACK,
+    SM_CXPADDEDBORDER, SM_CYFRAME, SM_CYMINTRACK, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
+    SWP_NOSIZE, SWP_NOZORDER, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOWNOACTIVATE,
+    SW_SHOWNORMAL, WINDOW_EX_STYLE, WMSZ_BOTTOM, WMSZ_BOTTOMLEFT, WMSZ_BOTTOMRIGHT, WMSZ_LEFT,
+    WMSZ_RIGHT, WMSZ_TOP, WMSZ_TOPLEFT, WMSZ_TOPRIGHT, WM_CAPTURECHANGED, WM_CLOSE, WM_DPICHANGED,
+    WM_ENTERSIZEMOVE, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOVING,
+    WM_NCACTIVATE, WM_NCCALCSIZE, WM_NCCREATE, WM_NCDESTROY, WM_NCHITTEST, WM_NCLBUTTONDBLCLK,
+    WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMOUSEMOVE, WM_NCRBUTTONUP, WM_PAINT, WM_SETCURSOR,
+    WM_SETFOCUS, WM_SIZE, WM_SIZING, WM_SYSCOMMAND, WM_TIMER, WNDCLASSW, WS_CLIPCHILDREN,
+    WS_OVERLAPPEDWINDOW,
 };
 
 /// Not in the `windows` crate's WindowsAndMessaging.
@@ -66,7 +67,7 @@ use crate::layout::CaptionHit;
 use crate::menu::{self, Item};
 use crate::pane::{self, Pane, DIRS, WM_PANE_FOCUS, WM_PANE_GRAB, WM_PANE_MOVE, WM_PANE_ZOOM};
 use crate::window::Shared;
-use crate::{layout, snapping, theme};
+use crate::{layout, snapping, theme, web};
 
 pub(crate) const CLASS: PCWSTR = w!("HoradricTerminal");
 /// Between panes, and around them, in DIPs. Each pane has a bezel of its
@@ -80,6 +81,13 @@ const GLIDE_TIMER: usize = 1;
 const DRAG_TIMER: usize = 2;
 /// How far a header has to move before a press becomes a drag.
 const DRAG_THRESHOLD: i32 = 4;
+/// The least a docked browser pane and the grid beside it each keep, in
+/// DIPs.
+const DOCK_MIN_DIP: f32 = 320.0;
+
+/// Posted to the stage when a pane's place changes from outside it: the
+/// browser pane docked on the right or put back in the grid.
+pub const WM_STAGE_LAYOUT: u32 = windows::Win32::UI::WindowsAndMessaging::WM_USER + 7;
 
 /// Where the stage opens, in physical pixels, as left, top, right, bottom.
 pub enum Place {
@@ -143,6 +151,12 @@ pub struct TerminalWindow {
     glides: RefCell<Glides>,
     /// When the glides last moved on, while they move.
     glided: Cell<Option<Instant>>,
+    /// The gap between the grid and a browser pane docked on the right,
+    /// as its left and right in client pixels, while there is one.
+    seam: Cell<Option<(i32, i32)>>,
+    /// The seam is being dragged: how far right of the seam's right edge
+    /// the cursor was taken.
+    seam_drag: Cell<Option<i32>>,
 }
 
 pub fn register_class() -> Result<()> {
@@ -189,6 +203,8 @@ impl TerminalWindow {
             caption: RefCell::new(None),
             tracking: Cell::new(false),
             glides: RefCell::default(),
+            seam: Cell::new(None),
+            seam_drag: Cell::new(None),
             glided: Cell::new(None),
         });
         unsafe {
@@ -364,7 +380,17 @@ impl TerminalWindow {
             c.set_maximized(unsafe { IsZoomed(self.hwnd) }.as_bool());
         }
         let area = (gap, top, r.right - gap, r.bottom - gap);
-        let grid = layout::grid(panes.len(), area, gap);
+        let docked = self.dock_width(&panes).and_then(|w| {
+            let px = |dip: f32| (dip * self.dpi() as f32 / 96.0).round() as i32;
+            layout::docked_grid(panes.len(), area, gap, px(w), px(DOCK_MIN_DIP))
+        });
+        self.seam.set(
+            docked
+                .as_ref()
+                .and_then(|g| g.last())
+                .map(|c| (c[0] - gap, c[0])),
+        );
+        let grid = docked.unwrap_or_else(|| layout::grid(panes.len(), area, gap));
         let many = panes.len() > 1;
         let zoomed = many && self.zoomed.get();
         let active = self.active.borrow().clone();
@@ -402,6 +428,40 @@ impl TerminalWindow {
         if self.glides.borrow().moving() && self.glided.get().is_none() {
             self.glided.set(Some(Instant::now()));
             crate::vsync::start(self.hwnd, GLIDE_TIMER);
+        }
+    }
+
+    /// How wide the browser pane is, in DIPs, when it is docked on the
+    /// right. It is always the last pane.
+    fn dock_width(&self, panes: &[Box<Pane>]) -> Option<f32> {
+        let key = panes.last()?.console().web.as_deref()?;
+        web::dock(key)
+    }
+
+    /// Whether a client point is on the seam beside a docked browser pane.
+    fn on_seam(&self, p: POINT) -> bool {
+        self.seam.get().is_some_and(|(l, r)| p.x >= l && p.x < r)
+    }
+
+    /// Follows the seam with the cursor: the docked pane is as wide as
+    /// from there to the stage's right edge.
+    fn drag_seam(&self, grab: i32) {
+        let p = self.cursor();
+        let mut r = RECT::default();
+        unsafe {
+            let _ = GetClientRect(self.hwnd, &mut r);
+        }
+        let gap = (PANE_GAP_DIP * self.dpi() as f32 / 96.0).round() as i32;
+        let width = r.right - gap - (p.x - grab);
+        let dip = width as f32 * 96.0 / self.dpi() as f32;
+        let key = self
+            .panes
+            .borrow()
+            .last()
+            .and_then(|p| p.console().web.clone());
+        if let Some(key) = key {
+            web::set_dock(&key, Some(dip.max(DOCK_MIN_DIP)));
+            self.layout();
         }
     }
 
@@ -1355,6 +1415,28 @@ impl TerminalWindow {
                 self.start_drag(wparam.0);
                 Some(LRESULT(0))
             }
+            WM_STAGE_LAYOUT => {
+                self.layout();
+                Some(LRESULT(0))
+            }
+            WM_SETCURSOR
+                if (lparam.0 & 0xffff) as u32 == HTCLIENT
+                    && (self.seam_drag.get().is_some() || self.on_seam(self.cursor())) =>
+            {
+                unsafe {
+                    SetCursor(LoadCursorW(None, IDC_SIZEWE).ok());
+                }
+                Some(LRESULT(1))
+            }
+            WM_LBUTTONDOWN if self.on_seam(self.cursor()) => {
+                let p = self.cursor();
+                let right = self.seam.get().map_or(p.x, |(_, r)| r);
+                self.seam_drag.set(Some(p.x - right));
+                unsafe {
+                    SetCapture(self.hwnd);
+                }
+                Some(LRESULT(0))
+            }
             WM_PANE_ZOOM => {
                 self.toggle_zoom(wparam.0);
                 Some(LRESULT(0))
@@ -1362,6 +1444,19 @@ impl TerminalWindow {
             WM_PANE_MOVE => {
                 if let Some(&dir) = DIRS.get(lparam.0 as usize) {
                     self.move_focus(wparam.0, dir);
+                }
+                Some(LRESULT(0))
+            }
+            WM_MOUSEMOVE if self.seam_drag.get().is_some() => {
+                if let Some(grab) = self.seam_drag.get() {
+                    self.drag_seam(grab);
+                }
+                Some(LRESULT(0))
+            }
+            WM_LBUTTONUP if self.seam_drag.get().is_some() => {
+                self.seam_drag.set(None);
+                unsafe {
+                    let _ = ReleaseCapture();
                 }
                 Some(LRESULT(0))
             }
@@ -1378,6 +1473,7 @@ impl TerminalWindow {
             }
             // Taken away mid drag: everything goes back where it was.
             WM_CAPTURECHANGED => {
+                self.seam_drag.set(None);
                 if let Some(d) = self.drag.take() {
                     self.put_down();
                     if d.moved {

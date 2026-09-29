@@ -853,6 +853,16 @@ settled "no web view" for web pages only: Horadric's own UI stays Direct2D.
   kept: the pane still moves between cells as sessions come and go.
   Checked over DevTools: Phone gave `innerWidth` 390, a drag 680 × 497,
   Desktop scaled to 54% still 1920 × 1080, and Fit the whole glass.
+- **Browser on the right** (`layout::docked_grid`, pure), the last line
+  of the size menu. The browser pane stands full height on the right of
+  the stage and the sessions share the grid left of it, so it keeps its
+  place and width as sessions come and go. Off, it takes a cell in the
+  grid as before. The gap beside it is a seam: drag it to change the
+  width, kept per project (`page_docks`). It starts as wide as a sized
+  page needs to show unscaled, or 640 DIPs, and each side keeps at least
+  320. Tested with four `cmd.exe` sessions: on, they went 2 by 2 on the
+  left of a full height browser; the seam dragged 200 pixels widened it
+  by that; off, the grid came back.
 
 Tested on screen with a dev instance on its own port and `cmd.exe`
 sessions in two projects: Ctrl+Shift+B put the pane in the grid and asked

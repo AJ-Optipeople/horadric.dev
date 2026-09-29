@@ -1664,6 +1664,28 @@ pub fn grid(n: usize, area: (i32, i32, i32, i32), gap: i32) -> Vec<[i32; 4]> {
         .collect()
 }
 
+/// The grid with its last pane docked on the right: that pane full height
+/// and `width` wide, the rest in a grid of their own left of it. `width`
+/// is kept to leave each side at least `min`. None where the area is too
+/// narrow for both, so the plain grid is used.
+pub fn docked_grid(
+    n: usize,
+    area: (i32, i32, i32, i32),
+    gap: i32,
+    width: i32,
+    min: i32,
+) -> Option<Vec<[i32; 4]>> {
+    let (left, top, right, bottom) = area;
+    if n < 2 || right - left < 2 * min + gap {
+        return None;
+    }
+    let width = width.clamp(min, right - left - gap - min);
+    let seam = right - width;
+    let mut cells = grid(n - 1, (left, top, seam - gap, bottom), gap);
+    cells.push([seam, top, right, bottom]);
+    Some(cells)
+}
+
 /// The order a project's sessions sit in on the stage. `order` is the one
 /// remembered, which keeps sessions that are paused right now so they come
 /// back to their place; new `live` ones join its end. Returns the live ones
@@ -2703,6 +2725,20 @@ mod tests {
             snap((4, 615), (280, 100), WORK, &[other], SPACING),
             (0, 612)
         );
+    }
+
+    #[test]
+    fn a_docked_pane_takes_the_right_full_height_and_the_rest_share_the_left() {
+        let area = (10, 40, 1010, 840);
+        let cells = docked_grid(3, area, 8, 400, 200).unwrap();
+        assert_eq!(cells.len(), 3);
+        assert_eq!(cells[2], [610, 40, 1010, 840]);
+        assert_eq!(cells[..2], grid(2, (10, 40, 602, 840), 8)[..]);
+        // Kept to leave the sessions their minimum, and itself its own.
+        assert_eq!(docked_grid(2, area, 8, 5000, 200).unwrap()[1][0], 218);
+        assert_eq!(docked_grid(2, area, 8, 10, 200).unwrap()[1][0], 810);
+        assert_eq!(docked_grid(1, area, 8, 400, 200), None, "alone it fills");
+        assert_eq!(docked_grid(2, (0, 0, 300, 100), 8, 150, 200), None);
     }
 
     #[test]

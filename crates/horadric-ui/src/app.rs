@@ -435,6 +435,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
 
     let saved = store::load();
     web::set_sizes(&saved.page_sizes);
+    web::set_docks(&saved.page_docks);
     let mut registry = Registry::new();
     let now = SystemTime::now();
     for s in &saved.sessions {
@@ -1563,12 +1564,21 @@ fn size_items(key: &str, base: usize) -> Vec<Item> {
     items.push(Item::Separator);
     items.push(check(base + 10, "Resize by hand".into(), custom.is_some()));
     items.push(Item::action(base + 11, "Size..."));
+    items.push(Item::Separator);
+    items.push(check(
+        base + 12,
+        "Browser on the right".into(),
+        web::dock(key).is_some(),
+    ));
     items
 }
 
+/// How wide the browser pane is when first put on the right, in DIPs.
+const DOCK_WIDTH: f32 = 640.0;
+
 /// Does what a line from [`size_items`] says. False for another line.
 fn pick_size(key: &str, base: usize, picked: usize) -> bool {
-    let Some(i) = picked.checked_sub(base).filter(|i| *i <= 11) else {
+    let Some(i) = picked.checked_sub(base).filter(|i| *i <= 12) else {
         return false;
     };
     match i {
@@ -1581,6 +1591,16 @@ fn pick_size(key: &str, base: usize, picked: usize) -> bool {
             }
         }
         11 => ask_size(key),
+        12 => {
+            // As wide as a sized page needs to show unscaled, or else a
+            // browser's usual share. The seam beside it changes it after.
+            let width = match (web::dock(key), web::size(key)) {
+                (Some(_), _) => None,
+                (None, Some((w, _))) => Some(w as f32 + 2.0 * (viewport::GRIP + glyphs::BEZEL)),
+                (None, None) => Some(DOCK_WIDTH),
+            };
+            web::set_dock(key, width);
+        }
         n => {
             if let Some((_, w, h)) = viewport::PRESETS.get(n - 1) {
                 web::set_size(key, Some((*w, *h)));
@@ -1632,7 +1652,7 @@ fn web_menu(key: &str) {
         Item::action(FORWARD, "Forward\tAlt+Right"),
         Item::action(RELOAD, "Reload\tF5"),
         Item::Separator,
-        Item::Submenu("Page size".into(), size_items(key, SIZE)),
+        Item::Submenu("Size and place".into(), size_items(key, SIZE)),
         Item::action(OUTSIDE, "Open in your browser"),
         Item::Separator,
         Item::action(CLOSE, "Close"),
@@ -4993,6 +5013,7 @@ impl App {
             live: !self.quit,
             recovering: self.recovering.is_some(),
             page_sizes: web::sizes(),
+            page_docks: web::docks(),
             ..Default::default()
         }
     }
