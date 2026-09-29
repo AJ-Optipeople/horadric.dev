@@ -13,10 +13,10 @@ pub struct Board {
     pub mode: Mode,
     pub tasks: Vec<Task>,
     /// How many items the runner may hold at once, each in a worktree of
-    /// its own. One when the project keeps a shared tree.
+    /// its own. One outside a repository.
     pub parallel: usize,
-    /// Each new session gets a worktree of its own, so an item can run in
-    /// tombs.
+    /// The project is a repository's main tree, so an item can get a
+    /// worktree of its own, to run beside others or in tombs.
     pub own_trees: bool,
 }
 

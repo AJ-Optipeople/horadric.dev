@@ -78,7 +78,7 @@ impl App {
             .get(key)
             .is_some_and(|b| b.own_trees);
         if !own_trees {
-            return Err("tombs need a worktree for each session, and this project has none".into());
+            return Err("tombs need a worktree each, and this project is not in git".into());
         }
         let task = tasks::parse(&file::read(&dir))
             .into_iter()
@@ -117,7 +117,7 @@ impl App {
             .or_default()
             .insert(n);
         let id = tombs::tomb(batch, n);
-        let cwd = self.own_tree(&id, &tasks::slug(&task.title), dir.to_path_buf(), &[]);
+        let cwd = self.own_tree(&id, &tasks::slug(&task.title), dir.to_path_buf(), &[], true);
         if !self.new_trees.contains_key(&id) {
             return Err("git gave the tomb no worktree of its own".into());
         }

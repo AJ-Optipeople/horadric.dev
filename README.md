@@ -2,8 +2,11 @@
 
 Every coding agent session you have running becomes a small tile on your
 Windows desktop, grouped by project, that lights up when it needs you and
-grows into a full terminal when you click it. Each session works in its own
-git worktree, and the tile shows you what it changed.
+grows into a full terminal when you click it. Sessions share one working
+tree and commit on it, or, if you pick that work mode for a project, each
+works in a git worktree of its own and the tile shows you what it changed.
+When two sessions in one tree edit the same file, both you and the agent
+hear about it.
 
 Horadric is a window manager for agent sessions that already exist. It never
 puts its own chat UI in front of the agent. The terminal is the UI.

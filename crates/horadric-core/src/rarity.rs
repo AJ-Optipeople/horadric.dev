@@ -54,7 +54,7 @@ pub struct Loot {
 
 /// The tools that write files. A shell command may too, which the
 /// worktree's diff catches where there is one.
-const WRITERS: [&str; 4] = ["Edit", "Write", "MultiEdit", "NotebookEdit"];
+pub const WRITERS: [&str; 4] = ["Edit", "Write", "MultiEdit", "NotebookEdit"];
 
 impl Loot {
     /// Takes in a tool that finished, well or not. Subagents count: what
