@@ -1,9 +1,13 @@
 //! A session's own git worktree: whether a project wants one per session,
 //! what runs in a new one, which ports it gets, and what the agent is told.
 //!
-//! Each new session in a repository gets a branch and a folder of its own
-//! beside the repository, so sessions stop editing the same files under
-//! each other. Gitignored files do not come along to a new worktree, so a
+//! A project works in one of two modes. In trunk mode, the default, every
+//! session shares the main working tree and commits on what it has checked
+//! out, and a worktree is made only when asked for: a session started in
+//! one, tombs, or task items run side by side. With a branch per session,
+//! each new session in a repository gets a branch and a folder of its own
+//! beside the repository, so sessions never edit the same files under each
+//! other. Gitignored files do not come along to a new worktree, so a
 //! project lists `setup` commands that put them there (an install, a copied
 //! `.env`). Every worktree gets a range of ports of its own, so two dev
 //! servers never fight over one.
@@ -14,8 +18,9 @@
 //! { "worktrees": { "setup": ["npm install"], "ports": 10 } }
 //! ```
 //!
-//! `"worktrees": false`, or `"enabled": false` inside it, keeps every
-//! session in the shared working tree.
+//! `"enabled": true` inside it, or `"worktrees": true`, gives each new
+//! session its own. Without it the project is in trunk mode, and `setup`
+//! and `ports` apply to the worktrees it is asked for.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -41,15 +46,16 @@ pub struct Settings {
     pub ports: u16,
 }
 
-/// The settings in a `config.json`. On unless it says otherwise, since a
-/// session that shares its tree with others is the thing worktrees fix.
+/// The settings in a `config.json`. Trunk mode unless it says otherwise:
+/// most work is one line of commits, and a branch nobody asked for is work
+/// that is not on it yet when it is built or shipped.
 pub fn settings(config: &str) -> Settings {
     let v = serde_json::from_str::<Value>(config).unwrap_or(Value::Null);
     let w = v.get("worktrees");
     let enabled = match w {
         Some(Value::Bool(b)) => *b,
-        Some(Value::Object(m)) => m.get("enabled").and_then(Value::as_bool) != Some(false),
-        _ => true,
+        Some(Value::Object(m)) => m.get("enabled").and_then(Value::as_bool) == Some(true),
+        _ => false,
     };
     let setup = w
         .and_then(|w| w.get("setup"))
@@ -203,6 +209,23 @@ pub fn system_prompt(w: &Worktree) -> String {
     out
 }
 
+/// What an agent in the shared working tree `top` is told, on `branch`
+/// when git named one. Other sessions may be editing beside it, so it
+/// commits often and only what it changed itself.
+pub fn trunk_prompt(top: &str, branch: Option<&str>) -> String {
+    let on = branch.map(|b| format!(" on `{b}`")).unwrap_or_default();
+    format!(
+        "You work in the project's shared working tree at {top}{on}, and other \
+         sessions may be working in it beside you. Commit small and often, on \
+         the branch that is checked out, so a build or a ship always has your \
+         work. Stage only the files you changed, by name, never `git add -A` or \
+         `git add .`, since another session's half done work would go into your \
+         commit. When the branch has an upstream, push after you commit. Do not \
+         make branches or worktrees unless you are asked to. Horadric tells you \
+         when a file you edit was changed by another session too."
+    )
+}
+
 /// Which of `unmerged`, the branches not merged into the main tree yet,
 /// hold finished items, each with its item's title. A done item's branch is
 /// named from its title, with 2, 3 and on after it when that name was
@@ -322,11 +345,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn worktrees_are_on_unless_switched_off() {
-        assert!(settings("").enabled);
-        assert!(settings(r#"{"tasks":{"mode":"auto"}}"#).enabled);
+    fn trunk_mode_unless_a_branch_per_session_is_asked_for() {
+        assert!(!settings("").enabled);
+        assert!(!settings(r#"{"tasks":{"mode":"auto"}}"#).enabled);
         assert!(settings(r#"{"worktrees":true}"#).enabled);
-        assert!(settings(r#"{"worktrees":{"setup":[]}}"#).enabled);
+        assert!(settings(r#"{"worktrees":{"enabled":true}}"#).enabled);
+        assert!(!settings(r#"{"worktrees":{"setup":[]}}"#).enabled);
         assert!(!settings(r#"{"worktrees":false}"#).enabled);
         assert!(!settings(r#"{"worktrees":{"enabled":false,"setup":["x"]}}"#).enabled);
     }
@@ -493,6 +517,14 @@ mod tests {
         assert!(p.contains("Ports 4110 to 4119 are yours"));
         w.ports = None;
         assert!(!system_prompt(&w).contains("Ports"));
+    }
+
+    #[test]
+    fn the_trunk_prompt_says_where_and_how_to_commit() {
+        let p = trunk_prompt("C:/Code/app", Some("main"));
+        assert!(p.contains("shared working tree at C:/Code/app on `main`, and"));
+        assert!(p.contains("never `git add -A`"));
+        assert!(trunk_prompt("C:/Code/app", None).contains("at C:/Code/app, and"));
     }
 
     #[test]

@@ -141,8 +141,10 @@ fn stamp(dir: &Path) -> Stamp {
 }
 
 fn read_board(dir: &Path) -> Board {
-    // Items side by side in one tree would edit the same files.
-    let own_trees = file::worktrees(dir).enabled && crate::worktree::main_tree(dir).is_some();
+    // Items side by side in one tree would edit the same files, so they
+    // get worktrees of their own even in trunk mode, and only a repository
+    // can give them.
+    let own_trees = crate::worktree::main_tree(dir).is_some();
     Board {
         mode: file::mode(dir),
         tasks: tasks::parse(&file::read(dir)),
@@ -352,7 +354,19 @@ impl App {
                 system.push(tombs::system_prompt(n, tombs::weight(batch)));
             }
         }
-        system.extend(own_tree.as_ref().map(worktree::system_prompt));
+        match &own_tree {
+            Some(w) => system.push(worktree::system_prompt(w)),
+            None => {
+                if let Some(place) = crate::worktree::main_tree(cwd) {
+                    let top = Path::new(&place.top);
+                    let branch = crate::worktree::checked_out(top);
+                    system.push(worktree::trunk_prompt(
+                        &place.top.replace('\\', "/"),
+                        branch.as_deref(),
+                    ));
+                }
+            }
+        }
         // The config may be kept out of git, so a worktree reads its
         // project's from the main tree.
         system.extend(ssh_prompt(Path::new(&folder_key(&cwd.to_string_lossy()))));
@@ -406,7 +420,7 @@ impl App {
             .get(key)
             .is_some_and(|b| b.parallel > 1);
         let cwd = if parallel {
-            self.own_tree(&id, &tasks::slug(title), dir.clone(), &[])
+            self.own_tree(&id, &tasks::slug(title), dir.clone(), &[], true)
         } else {
             dir.clone()
         };
@@ -1229,7 +1243,7 @@ fn mode_menu(key: &str) {
         }));
     } else {
         items.push(Item::Disabled(
-            "One at a time: several need a worktree each".into(),
+            "One at a time: several need a git repository".into(),
         ));
     }
     items.push(Item::Separator);

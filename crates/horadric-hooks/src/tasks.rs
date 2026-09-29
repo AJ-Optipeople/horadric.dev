@@ -91,7 +91,8 @@ pub fn worktrees(project: &Path) -> worktree::Settings {
     worktree::settings(&read_text(&config_file(project)))
 }
 
-/// Switches a worktree for each new session on or off for the project.
+/// Puts the project in trunk mode, or with `enabled` gives each new session
+/// a worktree of its own.
 pub fn set_worktrees(project: &Path, enabled: bool) -> io::Result<()> {
     let path = config_file(project);
     let old = read_text(&path);
