@@ -179,6 +179,18 @@ const WM_HORADRIC_USAGE_MENU: u32 = WM_APP + 23;
 const WM_HORADRIC_ACCOUNT_MENU: u32 = WM_APP + 24;
 /// Ask what the app's `web_ask` says, for a browser pane.
 const WM_HORADRIC_WEB: u32 = WM_APP + 25;
+/// Do what the app's `pane_ask` says, for a session's pane.
+const WM_HORADRIC_PANE: u32 = WM_APP + 26;
+
+/// A button in a session pane's header, handled outside the app's borrow
+/// since it may ask first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaneAsk {
+    /// The cross: end the session.
+    End,
+    /// Put the session in the stash.
+    Stash,
+}
 
 /// What is asked for a browser pane, outside the app's borrow.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -289,6 +301,9 @@ pub(crate) enum Input {
     WebAsk(String, WebAsk),
     /// A file view's cross or Esc: close the view with this serial.
     CloseView(usize),
+    /// A session pane's cross or stash button, for the session with this
+    /// id.
+    PaneAsk(String, PaneAsk),
     /// Ctrl and plus, minus, zero or the wheel in a pane: the terminal font
     /// for every pane.
     Font(FontStep),
@@ -602,6 +617,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             views: HashMap::new(),
             webs: HashMap::new(),
             web_ask: None,
+            pane_ask: None,
             stage: None,
             stage_rect: saved.stage.filter(|r| on_screen(r[0], r[1])),
             stage_key: None,
@@ -906,6 +922,12 @@ unsafe extern "system" fn app_proc(
         }
         WM_HORADRIC_ACCOUNT_MENU => {
             account_menu();
+            return LRESULT(0);
+        }
+        WM_HORADRIC_PANE => {
+            if let Some((id, what)) = with_app(|app| app.pane_ask.take()).flatten() {
+                pane_ask(&id, what);
+            }
             return LRESULT(0);
         }
         WM_HORADRIC_RECENT_MENU => {
@@ -1362,6 +1384,72 @@ fn confirm_stash(id: &str) -> bool {
         default: 1,
     });
     pressed == Some(0)
+}
+
+/// A session pane's cross or stash button, asked about first where
+/// something would be lost.
+fn pane_ask(id: &str, what: PaneAsk) {
+    match what {
+        PaneAsk::End if confirm_end_session(id) => {
+            with_app(|app| app.end(id));
+        }
+        PaneAsk::Stash if stash_has_room() && confirm_stash(id) => {
+            with_app(|app| app.stash(id));
+        }
+        _ => {}
+    }
+}
+
+/// Asks before the cross ends an agent that is still running: it sits
+/// beside the zoom button and is easy to hit. A plain shell or a program
+/// that has exited goes at once.
+fn confirm_end_session(id: &str) -> bool {
+    let running = with_app(|app| {
+        let live = app
+            .consoles
+            .get(id)
+            .is_some_and(|c| !c.shell && c.exit_code().is_none());
+        let working = app
+            .shared
+            .registry
+            .lock()
+            .is_ok_and(|r| r.get(id).is_some_and(|s| s.phase.mid_turn()));
+        live.then_some(working)
+    })
+    .flatten();
+    let Some(working) = running else {
+        return true;
+    };
+    let text = if working {
+        "It is mid turn. Ending it stops it now, the turn is cut short and its tile goes. \
+         The conversation stays on disk for claude --resume."
+    } else {
+        "It stops and its tile goes. The conversation stays on disk for claude --resume."
+    };
+    let pressed = ask(&Dialog {
+        tone: Tone::Warning,
+        title: "End session",
+        text,
+        buttons: &["End", "Cancel"],
+        default: 1,
+    });
+    pressed == Some(0)
+}
+
+/// Says so when the stash is full, as the tile menu's greyed Stash does.
+fn stash_has_room() -> bool {
+    let full = with_app(|app| app.shared.registry.lock().is_ok_and(|r| r.stash_full()));
+    if full != Some(true) {
+        return true;
+    }
+    ask(&Dialog {
+        tone: Tone::Warning,
+        title: "Stash is full",
+        text: "End a stashed session or bring one back to make room.",
+        buttons: &["OK"],
+        default: 0,
+    });
+    false
 }
 
 /// The menu for a stashed session: bring it back running or paused, or
@@ -2294,6 +2382,9 @@ struct App {
     webs: HashMap<String, Arc<Console>>,
     /// What to ask for which project's browser pane, once out of the borrow.
     web_ask: Option<(String, WebAsk)>,
+    /// Which session pane's header button to act on, once out of the
+    /// borrow.
+    pane_ask: Option<(String, PaneAsk)>,
     /// The terminal window, showing one project's sessions, while open.
     stage: Option<Box<TerminalWindow>>,
     /// Where the stage was when it last closed.
@@ -5433,6 +5524,10 @@ impl App {
                 Input::Browser(id) => self.show_browsers(&id),
                 Input::View(key, dir, rel) => self.open_view(&key, &dir, &rel),
                 Input::CloseView(serial) => self.close_view(serial),
+                Input::PaneAsk(id, what) => {
+                    self.pane_ask = Some((id, what));
+                    post(self.notify.0 as isize, WM_HORADRIC_PANE, 0);
+                }
                 Input::Browse => {
                     if let Some(key) = self.stage.as_ref().map(|s| s.project()) {
                         self.open_web(&key, None);

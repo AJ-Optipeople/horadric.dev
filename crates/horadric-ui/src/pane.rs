@@ -72,14 +72,14 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{IsChild, PostMessageW};
 
-use crate::app::{self, Input};
+use crate::app::{self, Input, PaneAsk};
 use crate::clipboard;
 use crate::console::{Console, GridSize};
 use crate::field::{self, Field};
 use crate::frame::{Decoration, Stroke};
 use crate::glyphs::{
-    self, Bar, BarEdit, BarHit, BarLayout, CellSize, FindBar, GridTarget, Header, PageFrame,
-    BAR_INSET, HEADER_H,
+    self, Bar, BarEdit, BarHit, BarLayout, Buttons, CellSize, FindBar, GridTarget, Header,
+    PageFrame, BAR_INSET, HEADER_H,
 };
 use crate::keys::{
     self, Button, CharAction, Chord, FontStep, Key, KeyEvent, Kitty, Mods, MouseEncoding,
@@ -636,10 +636,15 @@ impl Pane {
         self.invalidate();
     }
 
-    /// Ends in a cross: a file view and a browser pane, which close without
-    /// ending a session.
-    fn closes(&self) -> bool {
-        self.console.is_view() || self.console.web.is_some()
+    /// A session's own pane, not a file view or a browser pane.
+    fn is_session(&self) -> bool {
+        !self.console.is_view() && self.console.web.is_none()
+    }
+
+    /// Has the button that stashes it: an agent's session, since a plain
+    /// shell has no conversation to bring back.
+    fn stashes(&self) -> bool {
+        self.is_session() && !self.console.shell
     }
 
     pub fn invalidate(&self) {
@@ -798,7 +803,8 @@ impl Pane {
             accent: self.accent.get(),
             active: self.focused.get(),
             lifted: self.lifted.get(),
-            close: self.closes(),
+            close: true,
+            stash: self.stashes(),
             zoom: self.zoom.get(),
             bar,
         });
@@ -1317,10 +1323,12 @@ impl Pane {
         true
     }
 
+    /// The cross: a file view or a browser pane closes, a session ends.
     fn close(&self) {
         match &self.console.web {
             Some(key) => app::push(Input::CloseWeb(key.clone())),
-            None => app::push(Input::CloseView(self.serial())),
+            None if self.console.is_view() => app::push(Input::CloseView(self.serial())),
+            None => app::push(Input::PaneAsk(self.session().to_string(), PaneAsk::End)),
         }
     }
 
@@ -1547,15 +1555,15 @@ impl Pane {
         self.header.get() && self.dip(lparam).1 < HEADER_H
     }
 
-    /// Where the header's buttons start: the zoom button's, then the
-    /// cross's that closes a file view.
-    fn buttons(&self) -> (Option<f32>, Option<f32>) {
+    /// Where the header's buttons start: the stash button's, the zoom
+    /// button's, then the cross's.
+    fn buttons(&self) -> Buttons {
         let mut r = RECT::default();
         unsafe {
             let _ = GetClientRect(self.hwnd, &mut r);
         }
         let width = r.right as f32 * 96.0 / self.dpi_now() as f32;
-        glyphs::header_buttons(width, self.zoom.get().is_some(), self.closes())
+        glyphs::header_buttons(width, self.stashes(), self.zoom.get().is_some(), true)
     }
 
     fn on_button(&self, lparam: LPARAM, at: Option<f32>) -> bool {
@@ -1569,7 +1577,7 @@ impl Pane {
             let _ = GetClientRect(self.hwnd, &mut r);
         }
         let width = r.right as f32 * 96.0 / self.dpi_now() as f32;
-        glyphs::bar_layout(width, self.zoom.get().is_some(), self.closes())
+        glyphs::bar_layout(width, self.zoom.get().is_some(), true)
     }
 
     /// What in a browser pane's address bar is under a client point.
@@ -1746,11 +1754,15 @@ impl Pane {
     }
 
     fn on_close(&self, lparam: LPARAM) -> bool {
-        self.on_button(lparam, self.buttons().1)
+        self.on_button(lparam, self.buttons().close)
     }
 
     fn on_zoom(&self, lparam: LPARAM) -> bool {
-        self.on_button(lparam, self.buttons().0)
+        self.on_button(lparam, self.buttons().zoom)
+    }
+
+    fn on_stash(&self, lparam: LPARAM) -> bool {
+        self.on_button(lparam, self.buttons().stash)
     }
 
     /// The cell under a client point, and which half of it.
@@ -2244,6 +2256,8 @@ impl Pane {
                 self.focus();
                 if self.on_close(lparam) {
                     self.close();
+                } else if self.on_stash(lparam) {
+                    app::push(Input::PaneAsk(self.session().to_string(), PaneAsk::Stash));
                 } else if self.on_zoom(lparam) {
                     self.tell_stage(WM_PANE_ZOOM);
                 } else if self.in_header(lparam) {

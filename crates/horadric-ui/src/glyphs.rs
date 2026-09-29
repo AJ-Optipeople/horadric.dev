@@ -113,6 +113,8 @@ pub struct Header<'a> {
     pub lifted: bool,
     /// Ends in a cross that closes it, a square [`HEADER_H`] wide.
     pub close: bool,
+    /// Has the button that stashes its session, left of the zoom button.
+    pub stash: bool,
     /// Has the button that zooms it, a square left of the cross, and
     /// whether it is zoomed now.
     pub zoom: Option<bool>,
@@ -196,8 +198,7 @@ pub fn bar_layout(width: f32, zoom: bool, close: bool) -> BarLayout {
     let forward = back + HEADER_H;
     let reload = forward + HEADER_H;
     let size = reload + HEADER_H;
-    let (zoom_at, close_at) = header_buttons(width, zoom, close);
-    let end = zoom_at.or(close_at).unwrap_or(width - BEZEL);
+    let end = header_buttons(width, false, zoom, close).start(width);
     let first = size + HEADER_H + 2.0;
     let places = [Side::Left, Side::Top, Side::Right];
     let places = std::array::from_fn(|i| (places[i], first + i as f32 * PLACE_W));
@@ -256,14 +257,40 @@ pub fn bar_text(gpu: &Gpu, text: &str) -> Result<IDWriteTextLayout> {
     }
 }
 
-/// Where a header's buttons start, from its left, in a pane `width` DIPs
-/// wide: the zoom button's, then the cross's. They end over the glass's
-/// right edge.
-pub fn header_buttons(width: f32, zoom: bool, close: bool) -> (Option<f32>, Option<f32>) {
-    let end = width - BEZEL;
-    let close_at = close.then_some(end - HEADER_H);
-    let zoom_at = zoom.then_some(close_at.unwrap_or(end) - HEADER_H);
-    (zoom_at, close_at)
+/// Where each of a header's buttons starts, from its left.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Buttons {
+    pub stash: Option<f32>,
+    pub zoom: Option<f32>,
+    pub close: Option<f32>,
+}
+
+impl Buttons {
+    /// Where the first button starts, or the glass's right edge when there
+    /// is none: what the name or the address runs up to.
+    pub fn start(&self, width: f32) -> f32 {
+        self.stash
+            .or(self.zoom)
+            .or(self.close)
+            .unwrap_or(width - BEZEL)
+    }
+}
+
+/// Where a header's buttons start in a pane `width` DIPs wide: the stash
+/// button's, the zoom button's, then the cross's. They end over the
+/// glass's right edge.
+pub fn header_buttons(width: f32, stash: bool, zoom: bool, close: bool) -> Buttons {
+    let mut end = width - BEZEL;
+    let mut place = |on: bool| {
+        on.then(|| {
+            end -= HEADER_H;
+            end
+        })
+    };
+    let close = place(close);
+    let zoom = place(zoom);
+    let stash = place(stash);
+    Buttons { stash, zoom, close }
 }
 
 /// The search bar over a pane's top right corner, while it is open.
@@ -1058,8 +1085,12 @@ impl GridTarget {
         }
 
         let left = BEZEL + 16.0;
-        let (zoom_at, close_at) = header_buttons(width, h.zoom.is_some(), h.close);
-        let right = zoom_at.or(close_at).unwrap_or(width - 8.0);
+        let at = header_buttons(width, h.stash, h.zoom.is_some(), h.close);
+        let right = if at == Buttons::default() {
+            width - 8.0
+        } else {
+            at.start(width)
+        };
         let button = |glyph: &str, at: f32| {
             let glyph: Vec<u16> = glyph.encode_utf16().collect();
             self.brush.SetColor(&render::color(theme::TEXT_DIM));
@@ -1077,12 +1108,15 @@ impl GridTarget {
                 DWRITE_MEASURING_MODE_NATURAL,
             );
         };
-        if let Some(at) = close_at {
+        if let Some(at) = at.close {
             button("\u{E711}", at);
         }
         // Full screen to zoom in, back to window to zoom out.
-        if let (Some(at), Some(zoomed)) = (zoom_at, h.zoom) {
+        if let (Some(at), Some(zoomed)) = (at.zoom, h.zoom) {
             button(if zoomed { "\u{E73F}" } else { "\u{E740}" }, at);
+        }
+        if let Some(at) = at.stash {
+            button("\u{E7B8}", at);
         }
         if let Some(bar) = &h.bar {
             self.bar(
@@ -1442,27 +1476,36 @@ mod tests {
     }
 
     #[test]
-    fn header_buttons_sit_at_the_end_zoom_first() {
+    fn header_buttons_sit_at_the_end_stash_zoom_then_cross() {
         let end = 400.0 - BEZEL;
-        assert_eq!(header_buttons(400.0, false, false), (None, None));
+        let none = header_buttons(400.0, false, false, false);
+        assert_eq!(none, Buttons::default());
+        assert_eq!(none.start(400.0), end);
+        let close = header_buttons(400.0, false, false, true);
+        assert_eq!(close.close, Some(end - HEADER_H));
+        assert_eq!(close.zoom, None);
         assert_eq!(
-            header_buttons(400.0, false, true),
-            (None, Some(end - HEADER_H))
+            header_buttons(400.0, false, true, false).zoom,
+            Some(end - HEADER_H)
         );
+        let all = header_buttons(400.0, true, true, true);
         assert_eq!(
-            header_buttons(400.0, true, false),
-            (Some(end - HEADER_H), None)
+            all,
+            Buttons {
+                stash: Some(end - 3.0 * HEADER_H),
+                zoom: Some(end - 2.0 * HEADER_H),
+                close: Some(end - HEADER_H),
+            }
         );
-        assert_eq!(
-            header_buttons(400.0, true, true),
-            (Some(end - 2.0 * HEADER_H), Some(end - HEADER_H))
-        );
+        assert_eq!(all.start(400.0), end - 3.0 * HEADER_H);
+        let no_zoom = header_buttons(400.0, true, false, true);
+        assert_eq!(no_zoom.stash, Some(end - 2.0 * HEADER_H), "closes the gap");
     }
 
     #[test]
     fn the_address_field_runs_from_the_buttons_to_the_cross() {
         let l = bar_layout(600.0, false, true);
-        let (_, close) = header_buttons(600.0, false, true);
+        let close = header_buttons(600.0, false, false, true).close;
         assert_eq!(l.forward, l.back + HEADER_H);
         assert_eq!(l.reload, l.forward + HEADER_H);
         assert_eq!(l.size, l.reload + HEADER_H);
