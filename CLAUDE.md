@@ -61,7 +61,7 @@ Tests cannot tell you a window looks right. The loop that works:
 
 1. Always test as a dev instance: `HORADRIC_DEV=1`. It listens on 43118,
    keeps its state in `%APPDATA%\Horadric-dev`, never turns on autostart, has
-   a red topped tray icon, and refuses `install`, `uninstall` and hook or Explorer
+   a red lit tray icon, and refuses `install`, `uninstall` and hook or Explorer
    changes. The installed Horadric keeps running beside it.
 2. Stop only the dev build, never every `horadric.exe`. You may be running
    inside a terminal of the installed one, and killing it kills you.

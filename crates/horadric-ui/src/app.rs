@@ -2299,14 +2299,20 @@ impl App {
                 continue;
             };
             let serial = self.next_serial;
-            let console =
-                match Console::attach(&id, serial, saved.args.clone(), saved.shell, self.notify) {
-                    Ok(c) => c,
-                    Err(e) => {
-                        eprintln!("horadric: cannot attach to {id}: {e}");
-                        continue;
-                    }
-                };
+            let console = match Console::attach(
+                &id,
+                serial,
+                saved.args.clone(),
+                saved.shell,
+                PathBuf::from(&saved.cwd),
+                self.notify,
+            ) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("horadric: cannot attach to {id}: {e}");
+                    continue;
+                }
+            };
             self.next_serial += 1;
             self.paused.remove(&id);
             let busy = saved

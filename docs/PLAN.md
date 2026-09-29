@@ -190,6 +190,20 @@ arrow keys, a prompt and its answer, resize, collapse and expand, `/exit`.
   encoded as 1006, 1005 or the old bytes) gets clicks, releases, the
   wheel and moves instead; Shift keeps a click for selecting, as in
   xterm.
+- **Links.** Ctrl+click opens what is under the mouse, and while Ctrl is
+  held that link is underlined and the cursor is a hand (`links.rs` finds
+  it, pure; `watch::open_link` opens it). A web address goes to the
+  browser, a folder to Explorer, a text file to VS Code with `-g` at the
+  line the text gave (`a.rs:12:5`, `a.rs(12,5)`), in the window that has
+  the project, anything else to what Windows opens it with, so a program
+  runs. A path counts only when it is on disk, relative ones against the
+  folder the session started in, which the console keeps for that. Quoted
+  text is tried whole first, for paths with spaces, and a line wrapped by
+  the terminal is read as one. Links a program made with OSC 8 are always
+  underlined and win over the text, but open only web pages and files
+  that are not programs: their text can say anything, and a click should
+  not run what it hid. Claude Code wraps long lines itself, with real
+  line breaks, so an address it splits over two rows is not rejoined.
 - **Lifetime.** Closing the window collapses: window and renderer go, the
   console and its grid stay, and the window comes back where it was. A
   clean exit closes the window; a failed one keeps it open so the error can
@@ -218,7 +232,10 @@ new project, so three ways in that need no terminal:
   recent projects one click away, and Quit, which warns when sessions in
   Horadric terminals would end. Recent projects live in
   `%APPDATA%\Horadric\recent.json`. The tooltip counts sessions and waiting
-  ones. The icon is drawn in code (`icon.rs`), so there is no file to ship.
+  ones. The icon is drawn in code (`icon.rs`), so there is no file to ship:
+  a dark cube with its lid lifted and light pouring out. One colour lights
+  it (gold, red for a dev instance), and `icon::lit` takes any other, so
+  the light can later follow what Horadric is doing.
   Pulled forward from step 5.
 - **The full width `+` below a cluster's last tile** starts another session
   in that project at once, no picker. It is outlined, not filled, so it
@@ -437,7 +454,7 @@ a dev instance:
   already live in the installed Horadric.
 - No autostart offer and no switch for it in the tray. The first dev run
   used to point the `Run` key at `target\debug\horadricw.exe`.
-- A red topped tray icon and "Horadric dev" in the tooltip.
+- A red lit tray icon and "Horadric dev" in the tooltip.
 - `install`, `uninstall` and the hook and Explorer installers refuse to run.
 
 The hook URL is fixed at install time, so a `claude` in a dev terminal

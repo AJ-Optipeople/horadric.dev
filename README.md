@@ -64,6 +64,10 @@ work. Worktrees are next.
   and plus, minus or the wheel sizes the font, Ctrl+0 puts it back.
 - Ctrl+Shift+F searches a pane's history, which keeps 10,000 lines. Enter
   finds the next match up, Shift+Enter the next one down, Esc closes it.
+- Ctrl+click opens what a pane shows: a web address in the browser, a
+  file in VS Code at its line (`src/main.rs:12`, relative to the session's
+  folder), a folder in Explorer, a program by running it. Hold Ctrl and
+  the link under the mouse is underlined.
 - A quest log per project: `.horadric/quests.md` (a `tasks.md` from
   before the rename is still read), a Markdown checklist in the repo,
   shown in a quests tile in the cluster. Click a quest and a session
@@ -141,7 +145,7 @@ them") come back as paused tiles, and a click resumes the conversation.
 which is the cheap way to try them.
 
 `HORADRIC_DEV=1` runs a build beside the installed Horadric without touching
-it: its own port and saved state, no autostart, a red topped tray icon. That is how
+it: its own port and saved state, no autostart, a red lit tray icon. That is how
 Horadric is developed from a session inside Horadric.
 
 `target\release\horadric.exe reload` updates a running Horadric to a new build

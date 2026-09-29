@@ -128,6 +128,9 @@ pub struct Console {
     /// Claude Code, not a shell or another agent put in its place with
     /// `HORADRIC_AGENT`, so its slash commands work.
     pub claude: bool,
+    /// Where the program started, or a view's file lives: what a relative
+    /// path clicked in the pane is relative to.
+    pub cwd: Option<PathBuf>,
     /// When a key was last typed into it, which may have left a draft in
     /// its prompt box.
     typed: Mutex<Option<SystemTime>>,
@@ -140,6 +143,7 @@ struct Meta {
     args: Vec<String>,
     shell: bool,
     claude: bool,
+    cwd: Option<PathBuf>,
 }
 
 /// The file a view shows, and how it is laid out in the grid now.
@@ -339,6 +343,7 @@ impl Console {
             args.insert(0, "setup".into());
             program = host_program();
         }
+        let cwd = launch.cwd.clone();
         let cmd = Command {
             program,
             args,
@@ -369,6 +374,7 @@ impl Console {
             args: launch.args,
             shell: launch.shell,
             claude,
+            cwd: Some(cwd),
         };
         Ok(Console::hosted(attached, meta, notify))
     }
@@ -381,6 +387,7 @@ impl Console {
         serial: usize,
         args: Vec<String>,
         shell: bool,
+        cwd: PathBuf,
         notify: HWND,
     ) -> io::Result<Arc<Console>> {
         let attached = Remote::attach(&pipe_name(id), &job_name(id))?;
@@ -390,6 +397,7 @@ impl Console {
             args,
             shell,
             claude: !shell && agent_program().is_some_and(|p| is_claude(&p)),
+            cwd: Some(cwd),
         };
         Ok(Console::hosted(attached, meta, notify))
     }
@@ -437,6 +445,7 @@ impl Console {
             args: meta.args,
             shell: meta.shell,
             claude: meta.claude,
+            cwd: meta.cwd,
             typed: Mutex::new(None),
         });
         let notify = notify.0 as isize;
@@ -489,6 +498,7 @@ impl Console {
             remote: None,
             title: Arc::clone(&title),
         };
+        let cwd = path.parent().map(Path::to_path_buf);
         let console = Arc::new(Console {
             id,
             serial,
@@ -516,6 +526,7 @@ impl Console {
             args: Vec::new(),
             shell: false,
             claude: false,
+            cwd,
             typed: Mutex::new(None),
         });
         console.load(notify.0 as isize);

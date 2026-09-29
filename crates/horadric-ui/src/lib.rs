@@ -50,6 +50,7 @@ pub mod icon;
 pub mod inbox;
 pub mod keys;
 pub mod layout;
+pub mod links;
 pub mod loot;
 pub mod motion;
 pub mod palette;
