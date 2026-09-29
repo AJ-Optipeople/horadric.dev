@@ -47,6 +47,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use horadric_core::accounts::{Account, Accounts};
+use horadric_core::agent::Agent;
 use horadric_core::background::Asked;
 use horadric_core::diff::{self as changes, Diff, FileDiff, Recount};
 use horadric_core::fleet::{self, Device};
@@ -3020,10 +3021,7 @@ impl App {
         args: &[String],
         asked: bool,
     ) -> PathBuf {
-        let carries_on = ["--resume", "-r", "--continue", "-c"]
-            .iter()
-            .any(|f| has_flag(args, f));
-        if carries_on {
+        if Agent::Claude.carries_on(args) {
             return cwd;
         }
         match worktree::add(&cwd, branch, &self.ports_taken(), asked) {
@@ -3433,8 +3431,7 @@ impl App {
             },
             history::Pick::All => None,
         };
-        let mut args = vec!["--resume".to_string()];
-        args.extend(past.map(|p| p.id.clone()));
+        let args = Agent::Claude.resume_args(past.map(|p| p.id.as_str()));
         let id = match self.start(None, dir.to_path_buf(), args) {
             Ok(id) => id,
             Err(e) => {
@@ -3687,7 +3684,7 @@ impl App {
         if !console::is_claude(program) {
             return Vec::new();
         }
-        let mut extra = self.shared.defaults.borrow().flags(args);
+        let mut extra = self.shared.defaults.borrow().flags(Agent::Claude, args);
         if let (Some(path), false) = (&self.status_settings, has_flag(args, "--settings")) {
             extra.push("--settings".into());
             extra.push(path.to_string_lossy().into_owned());

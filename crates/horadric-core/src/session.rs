@@ -4,6 +4,7 @@ use std::time::{Duration, SystemTime};
 
 use serde::{Deserialize, Serialize};
 
+use crate::agent::Agent;
 use crate::diff::Diff;
 use crate::event::HookEvent;
 use crate::rarity::{self, Loot, Rarity};
@@ -90,6 +91,10 @@ pub struct Session {
     /// Claude's own session id, from the latest hook that carried one. It
     /// changes on `/clear`, and it is what `claude --resume` takes.
     pub claude_session_id: Option<String>,
+    /// The agent it runs. Only starting and resuming it care; everything
+    /// else works on the hook events it sends.
+    #[serde(default)]
+    pub agent: Agent,
     /// True once a prompt was sent. Before that Claude has written no
     /// transcript, and there is nothing to resume.
     #[serde(default)]
@@ -173,6 +178,7 @@ impl Session {
             title: None,
             renamed: false,
             claude_session_id: None,
+            agent: Agent::Claude,
             prompted: false,
             cwd: cwd.into(),
             shell: false,

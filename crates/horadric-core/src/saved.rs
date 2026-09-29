@@ -12,6 +12,7 @@ use std::time::SystemTime;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+use crate::agent::Agent;
 use crate::rarity::Loot;
 use crate::runeword::Runeword;
 use crate::session::{Phase, Session};
@@ -286,6 +287,9 @@ pub struct SavedSession {
     #[serde(default)]
     pub renamed: bool,
     pub cwd: String,
+    /// The agent it runs, Claude for a file from before there was a choice.
+    #[serde(default)]
+    pub agent: Agent,
     /// What the session was started with, `--model` and friends.
     #[serde(default)]
     pub args: Vec<String>,
@@ -328,6 +332,7 @@ impl SavedSession {
             title: s.title.clone(),
             renamed: s.renamed,
             cwd: s.cwd.clone(),
+            agent: s.agent,
             args,
             claude_session_id: s.claude_session_id.clone(),
             prompted: s.prompted,
@@ -346,6 +351,7 @@ impl SavedSession {
         let mut s = Session::new(&self.id, &self.name, &self.cwd);
         s.title = self.title.clone();
         s.renamed = self.renamed;
+        s.agent = self.agent;
         s.claude_session_id = self.claude_session_id.clone();
         s.prompted = self.prompted;
         s.last_line = self.last_line.clone();
@@ -359,30 +365,12 @@ impl SavedSession {
         s
     }
 
-    /// Arguments for `claude` to carry on: the original ones with
-    /// `--resume <id>` in front when there is a conversation to resume, and
-    /// without any earlier resume or continue flag, which would fight it.
+    /// Arguments for the agent to carry on: the original ones with its
+    /// resume in front when there is a conversation to resume, and without
+    /// any earlier resume or continue, which would fight it.
     pub fn launch_args(&self) -> Vec<String> {
-        let mut out = Vec::new();
-        if let (true, Some(id)) = (self.prompted, &self.claude_session_id) {
-            out.push("--resume".to_string());
-            out.push(id.clone());
-        }
-        let mut args = self.args.iter();
-        while let Some(a) = args.next() {
-            match a.as_str() {
-                "--resume" | "-r" | "--session-id" => {
-                    // Their value, unless the next thing is another flag.
-                    if args.as_slice().first().is_some_and(|v| !v.starts_with('-')) {
-                        args.next();
-                    }
-                }
-                "--continue" | "-c" => {}
-                _ if a.starts_with("--resume=") || a.starts_with("--session-id=") => {}
-                _ => out.push(a.clone()),
-            }
-        }
-        out
+        let id = self.claude_session_id.as_deref().filter(|_| self.prompted);
+        self.agent.carry_on(id, &self.args)
     }
 }
 
@@ -451,6 +439,7 @@ mod tests {
             }),
             renamed: true,
             cwd: "C:/app".into(),
+            agent: Agent::Claude,
             args: args.iter().map(|s| s.to_string()).collect(),
             claude_session_id: Some("abc".into()),
             prompted,
@@ -514,6 +503,27 @@ mod tests {
         // A bare --resume followed by a flag has no value to drop.
         let s = saved(&["--resume", "--verbose"], true);
         assert_eq!(s.launch_args(), vec!["--resume", "abc", "--verbose"]);
+    }
+
+    #[test]
+    fn a_codex_session_resumes_the_codex_way() {
+        let mut s = saved(&["-m", "gpt"], true);
+        s.agent = Agent::Codex;
+        assert_eq!(s.launch_args(), vec!["resume", "abc", "-m", "gpt"]);
+        let back = s.to_session(SystemTime::UNIX_EPOCH);
+        assert_eq!(back.agent, Agent::Codex);
+        assert_eq!(
+            SavedSession::from_session(&back, vec![], false).agent,
+            Agent::Codex
+        );
+    }
+
+    #[test]
+    fn a_session_saved_before_agents_loads_as_claude() {
+        let state = SavedState::from_json(
+            br#"{"version":1,"sessions":[{"id":"a","name":"a","cwd":"C:/app"}]}"#,
+        );
+        assert_eq!(state.sessions[0].agent, Agent::Claude);
     }
 
     #[test]

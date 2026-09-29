@@ -11,6 +11,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::agent::Agent;
+
 /// One usage limit: how much of it is used, and when it starts over.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Limit {
@@ -184,23 +186,6 @@ impl Setting {
         }
     }
 
-    fn flag(self) -> &'static str {
-        match self {
-            Setting::Model => "--model",
-            Setting::Effort => "--effort",
-            Setting::Permissions => "--permission-mode",
-        }
-    }
-
-    /// Flags in a session's own arguments that already decide this.
-    fn overridden_by(self) -> &'static [&'static str] {
-        match self {
-            Setting::Model => &["--model"],
-            Setting::Effort => &["--effort"],
-            Setting::Permissions => &["--permission-mode", "--dangerously-skip-permissions"],
-        }
-    }
-
     /// What `claude` takes, and what the window calls it. Models by their
     /// full names, so the version picked is the version that runs, and an
     /// alias moving on to a newer model never changes it behind your back.
@@ -254,7 +239,7 @@ impl Setting {
     /// Whether a session started with `args` chose this setting itself,
     /// so the defaults leave it alone.
     pub fn chosen_by(self, args: &[String]) -> bool {
-        self.overridden_by().iter().any(|f| has_flag(args, f))
+        Agent::Claude.chosen(self, args)
     }
 
     /// What a value is called, or "Default" for none, which leaves it to
@@ -299,19 +284,19 @@ impl Defaults {
         }
     }
 
-    /// The flags to put before a session's own `args`. A setting its
-    /// arguments already make is left to them.
-    pub fn flags(&self, args: &[String]) -> Vec<String> {
+    /// The flags to put before the own `args` of a session of `agent`,
+    /// spelled its way. A setting its arguments already make is left to
+    /// them.
+    pub fn flags(&self, agent: Agent, args: &[String]) -> Vec<String> {
         let mut out = Vec::new();
         for s in Setting::ALL {
             let Some(value) = self.get(s) else {
                 continue;
             };
-            if s.chosen_by(args) {
+            if agent.chosen(s, args) {
                 continue;
             }
-            out.push(s.flag().to_string());
-            out.push(value.to_string());
+            out.extend(agent.setting_args(s, value).unwrap_or_default());
         }
         out
     }
@@ -469,18 +454,21 @@ mod tests {
             permission_mode: Some("plan".into()),
         };
         assert_eq!(
-            d.flags(&[]),
+            d.flags(Agent::Claude, &[]),
             args("--model opus --effort high --permission-mode plan")
         );
         assert_eq!(
-            d.flags(&args("--model=haiku --dangerously-skip-permissions")),
+            d.flags(
+                Agent::Claude,
+                &args("--model=haiku --dangerously-skip-permissions")
+            ),
             args("--effort high")
         );
         assert_eq!(
-            d.flags(&args("--effort max --permission-mode auto")),
+            d.flags(Agent::Claude, &args("--effort max --permission-mode auto")),
             args("--model opus")
         );
-        assert!(Defaults::default().flags(&[]).is_empty());
+        assert!(Defaults::default().flags(Agent::Claude, &[]).is_empty());
     }
 
     #[test]

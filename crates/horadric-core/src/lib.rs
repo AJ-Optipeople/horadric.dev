@@ -6,6 +6,7 @@
 //! without a terminal or a network.
 
 pub mod accounts;
+pub mod agent;
 pub mod background;
 pub mod cube;
 pub mod diff;
@@ -27,6 +28,7 @@ pub mod tombs;
 pub mod usage;
 pub mod worktree;
 
+pub use agent::Agent;
 pub use event::HookEvent;
 pub use registry::{Registry, Route, STASH_SLOTS};
 pub use saved::{Carry, SavedCluster, SavedPanel, SavedSession, SavedState};
