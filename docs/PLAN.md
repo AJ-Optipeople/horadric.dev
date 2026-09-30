@@ -2505,6 +2505,21 @@ file, and a JWT's payload is base64 and JSON.
    Claude's by date. Live check: a tile started, went done on "pong",
    and resumed its conversation after the dev UI and its hosts were
    killed, one `codex.exe` each time. The tile mark comes with Grok.
+   Grok done 2026-09-30: "New Grok Build session" in the project menu and
+   `horadric new --agent grok` when `grok` is found, on `PATH` or in
+   `~/.grok/bin`, where its installer puts it. A paused tile resumes with
+   `--resume <id>`, without the prompt it was started with. The defaults
+   pass as `-m` and `--effort`, Max as `xhigh`, where Grok's scale stops
+   too. History reads `sessions/<folder>/<id>/summary.json`, the folder
+   percent encoded, titled by its `session_summary` or else the first
+   prompt in `prompt_history.jsonl`. A tile that is not Claude's says
+   "Codex" or "Grok" in small dim letters before its age; Claude's tiles
+   carry no mark. Live check: a tile asked Grok's folder trust question,
+   went done on "pong", and resumed its conversation after the dev UI and
+   its hosts were killed, one `grok.exe` each time; a start with Max and a
+   Claude model passed `--effort xhigh` and no model. Grok prints an
+   "SSRF protection" line in its TUI for every event, from the Claude
+   `http` hook it borrows from `~/.claude/settings.json`.
 6. **Limits per provider.** The usage window gets a screen per provider
    in use, named this time ("Claude", "ChatGPT", "Grok"), since with more
    than one the numbers need saying whose they are. Codex's come from the

@@ -257,8 +257,9 @@ fn claude_search_path() -> std::ffi::OsString {
     std::env::join_paths(std::env::split_paths(&path).chain(dirs)).unwrap_or(path)
 }
 
-/// The folders Claude Code's installers put `claude` in: the native one,
-/// npm's global folder, winget's links and Scoop's shims.
+/// The folders the agents' installers put them in: Claude Code's native
+/// one, npm's global folder, winget's links, Scoop's shims and Grok
+/// Build's own.
 fn install_dirs(
     profile: Option<PathBuf>,
     appdata: Option<PathBuf>,
@@ -276,6 +277,7 @@ fn install_dirs(
     }
     if let Some(p) = profile {
         dirs.push(p.join("scoop").join("shims"));
+        dirs.push(p.join(".grok").join("bin"));
     }
     dirs
 }
@@ -1060,7 +1062,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn claude_is_looked_for_where_its_installers_put_it() {
+    fn agents_are_looked_for_where_their_installers_put_them() {
         let dirs = install_dirs(
             Some(PathBuf::from(r"C:\Users\x")),
             Some(PathBuf::from(r"C:\Users\x\AppData\Roaming")),
@@ -1073,6 +1075,7 @@ mod tests {
                 r"C:\Users\x\AppData\Roaming\npm",
                 r"C:\Users\x\AppData\Local\Microsoft\WinGet\Links",
                 r"C:\Users\x\scoop\shims",
+                r"C:\Users\x\.grok\bin",
             ]
             .map(PathBuf::from)
         );

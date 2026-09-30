@@ -2658,7 +2658,17 @@ impl Painter<'_> {
             _ => age,
         };
         let age_w = self.measure(gpu, &gpu.small, &age).min(top.w * 0.55);
-        let name_rect = Rect::new(top.x, top.y, top.w - age_w - 8.0, top.h);
+        let mut name_rect = Rect::new(top.x, top.y, top.w - age_w - 8.0, top.h);
+        // Which agent runs it, quietly, where it is not Claude.
+        if let Some(tag) = s.agent.mark() {
+            let tag_w = self.measure(gpu, &gpu.small, tag);
+            if tag_w < name_rect.w * 0.4 {
+                let at = Rect::new(name_rect.x, top.y, name_rect.w, top.h);
+                let ink = theme::TEXT_DIM.with_alpha(0.75).fade(presence);
+                self.text(&gpu.small_right, ink, tag, at);
+                name_rect.w -= tag_w + 8.0;
+            }
+        }
         // Its name says how it ended, in item colours, apart from the lamp.
         let ink = theme::rarity_color(s.rarity()).fade(presence);
         self.text(&gpu.name, ink, s.label(), name_rect);

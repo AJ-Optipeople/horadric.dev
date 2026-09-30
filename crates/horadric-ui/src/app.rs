@@ -1639,7 +1639,7 @@ fn not_found(agent: Agent) -> String {
     let get = match agent {
         Agent::Claude => "Install it from https://claude.com/claude-code",
         Agent::Codex => "Install it with `npm install -g @openai/codex`",
-        Agent::Grok => "Install Grok Build",
+        Agent::Grok => "Install Grok Build from https://x.ai/cli",
     };
     format!(
         "Horadric cannot find {}. {get}, then try again. If it is installed, \
@@ -1879,7 +1879,7 @@ fn project_menu(key: &str) {
     }
     // Claude Code is what the plus starts. Another agent is offered when
     // it is installed.
-    let others: Vec<Agent> = [Agent::Codex]
+    let others: Vec<Agent> = [Agent::Codex, Agent::Grok]
         .into_iter()
         .filter(|a| console::agent_program(*a).is_some())
         .collect();
@@ -2150,12 +2150,12 @@ fn add_host(dir: &Path, host: &str) {
 /// The lines of a History menu: each past conversation, `first` on, then
 /// Claude Code's own picker for the rest.
 /// The past conversations held in `dir`, leaving out the ones in `held`.
-/// Claude Code's and Codex's past conversations in `dir` together, newest
-/// first.
+/// Every agent's past conversations in `dir` together, newest first.
 fn past_in(dir: &Path, held: &[String]) -> Vec<Past> {
     let dir = dir.to_string_lossy();
     let mut past = transcript::history(&dir, held, HISTORY);
     past.extend(horadric_hooks::codex::history(&dir, held, HISTORY));
+    past.extend(horadric_hooks::grok::history(&dir, held, HISTORY));
     past.sort_by_key(|p| std::cmp::Reverse(p.modified));
     past.truncate(HISTORY);
     past
@@ -3764,6 +3764,10 @@ impl App {
             let mut extra = Agent::Codex.hook_args(&hook);
             extra.extend(self.shared.defaults.borrow().flags(Agent::Codex, args));
             return extra;
+        }
+        // Grok's hook is in its home, written by `install`.
+        if console::agent_of(program) == Some(Agent::Grok) {
+            return self.shared.defaults.borrow().flags(Agent::Grok, args);
         }
         if !console::is_claude(program) {
             return Vec::new();

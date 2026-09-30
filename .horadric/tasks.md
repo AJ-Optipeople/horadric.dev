@@ -172,25 +172,30 @@ Everything in docs/IDEAS.md not yet built, asked for by the human. For each one:
 
 ChatGPT and xAI subscriptions used from Horadric like a Claude one. See "Codex and Grok Build beside Claude Code" under Next in docs/PLAN.md, which has the table of what each agent gives and the reasoning; read it before starting. Claude sessions must behave exactly as before at every step.
 
-- [/] Spike: install the Codex CLI and answer the plan's open questions about Codex and Grok Build @spike-install-the-codex-cli-and-answer-72784
+- [x] Spike: install the Codex CLI and answer the plan's open questions about Codex and Grok Build @spike-install-the-codex-cli-and-answer-72784
   Step 1 of the plan. Test with a dev instance. Answer: does a Codex command hook see `HORADRIC_SESSION` from the parent; does Codex read `auth.json` again while running and write it back on refresh; does `codex resume <id>` take a session started elsewhere; does a Grok `http` hook expand `$HORADRIC_SESSION` in its URL on Windows; which Grok event means waiting on you, and does `Stop` come at every turn's end.
   Also check what the installed Horadric receives from Grok today: Grok reads the hooks in `~/.claude/settings.json`, so every `grok` already posts to the Claude hook. Does it send the header?
   Never switch or copy the real logins in `~/.codex` or `~/.grok`: read them, do not write them. Write the answers into the plan's table and steps, and change the steps below if an answer calls for it. No code beyond throwaway scripts.
-- [ ] Add an Agent to the core model: Claude, Codex or Grok, saved on every session
+- [x] Add an Agent to the core model: Claude, Codex or Grok, saved on every session @add-an-agent-to-the-core-model-claude-73414
   The seam in "The shape". Missing reads as Claude, so old state loads. It answers the program, resume arguments and default flags per agent; the registry, phases, tiles and journal keep working on `HookEvent` and never learn the agent's name. Pure and tested. Nothing changes for Claude.
-- [ ] Sign in to Codex and Grok again, then finish the spike's live checks
+- [x] Sign in to Codex and Grok again, then finish the spike's live checks @sign-in-to-codex-and-grok-again-then-73593
   Needs the human: both logins here have expired. Run `codex login`, then `grok update` (0.2.22 is installed, 1.0.44 is out) and `grok login`. Then, with throwaway hooks and `-p` or `exec` turns: Codex's `Stop`, `PermissionRequest` and `Interrupt` on real turns; whether Grok 1.x still refuses an `http` hook to 127.0.0.1; which Grok event means waiting on you; whether `stop` comes at every turn's end; whether Grok reads a changed `auth.json` without a restart. Write the answers into the plan's table and step 1.
-- [ ] `horadric hook`: the command hook Codex and Grok both post through
+- [x] `horadric hook`: the command hook Codex and Grok both post through @horadric-hook-the-command-hook-codex-and-16517
   Step 2. Neither can post over HTTP: Codex has command hooks only and Grok refuses loopback URLs. The command reads the event on stdin and posts it with the tag from its environment and the agent's name, like `horadric status`. It is the one process per event Horadric spawns, so it starts fast, has a short timeout, fails open, and does nothing without `HORADRIC_SESSION`. Turns a Codex or Grok payload into a `HookEvent`. Pure and tested.
-- [ ] Codex: pass its hooks on the command line and read its events
+- [x] Codex: pass its hooks on the command line and read its events @codex-pass-its-hooks-on-the-command-line-16670
   Step 3. `-c hooks.<Event>=[...]` for each event plus `--dangerously-bypass-hook-trust` when Horadric starts `codex`, so `~/.codex` is never written and a `codex` outside Horadric runs no Horadric hook. `PermissionRequest` is waiting, `Stop` done, `Interrupt` idle, a `SessionEnd` after a turn with no `Stop` is a failed turn. Pure and tested.
-- [ ] Codex: start, resume and pick defaults for a Codex session
+- [x] Codex: start, resume and pick defaults for a Codex session @codex-start-resume-and-pick-defaults-for-16984
   Step 5 for Codex. `codex resume <id>` for a paused tile (it takes Codex Desktop sessions too), `-m` and `-c model_reasoning_effort=` for the defaults, History from `~/.codex/sessions`. Verify on screen with a real `codex`, and count its processes.
-- [ ] Grok: install its command hook and read its events
+- [x] Grok: install its command hook and read its events @grok-install-its-command-hook-and-read-17542
   Step 4. `~/.grok/hooks/horadric.json`, a `command` hook calling `horadric hook`, added by `install` and removed by `uninstall`, never by a dev instance. Phases from the live checks above. If Grok 1.x accepts a loopback URL after all, the listener drops a Grok payload that arrives on the Claude path by its shape. Pure and tested.
-- [ ] Grok: start, resume and pick defaults for a Grok session
+- [/] Grok: start, resume and pick defaults for a Grok session @grok-start-resume-and-pick-defaults-for-a-17845
   Step 5 for Grok. The plus button and `horadric new --agent grok` start it when `grok` is found, `--resume <id>` carries a paused tile on, the model and effort defaults pass as `-m` and `--effort`, a tile shows a small mark for its agent, and History lists Grok's own conversations from `~/.grok/sessions`. Verify on screen with a real `grok`, and count its processes after any change to how sessions start.
 - [ ] Limits per provider in the usage window, Codex's from its transcripts
   Step 6. A named screen per provider in use (Claude, ChatGPT, Grok). Codex's limits from the newest `token_count` in the transcript its hooks point at, read on each `Stop`: `rate_limits.primary` and `secondary`, `used_percent` and `resets_at`. The settings follow the agent, each with its own models and efforts. Grok shows no limits until a source turns up. Verify on screen.
 - [ ] Switch ChatGPT and xAI accounts the way Claude accounts switch
   Step 7, built on "Accounts" in docs/PLAN.md. Codex: the whole `auth.json` is the login, `account_id` the account, the email from the `id_token`; force the file store, and stop and resume its sessions, since a running Codex treats another account on disk as a permanent error. Grok: its `auth.json` entry is the login, and Grok reads it again by itself, so a switch is only the write. A switch touches one provider's sessions. Test with a fake `CODEX_HOME` and `GROK_HOME`, never the real logins.
+- [ ] Resume Claude sessions without resending the prompt they were started with
+- [ ] Keep Grok from showing an SSRF error for the Claude hook it borrows
+  Grok runs the `http` hooks in `~/.claude/settings.json` and prints "blocked by SSRF protection" in its TUI at every event. `[compat.claude] hooks = false` in Grok's config stops it, but that is the user's file; look for a flag or environment variable Horadric can pass when it starts `grok` instead.
+- [ ] Ship public: release everything on main to every install
+  Always the last item. Everything finished on main goes out, not only the Codex and Grok work. Follow RELEASING.md and "Ship public" in CLAUDE.md.

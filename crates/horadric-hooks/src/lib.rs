@@ -12,6 +12,7 @@
 
 pub mod client;
 pub mod codex;
+pub mod grok;
 pub mod install;
 pub mod listener;
 pub mod tasks;

@@ -41,6 +41,17 @@ impl Agent {
         }
     }
 
+    /// The small mark a tile carries so two agents' sessions in one
+    /// project can be told apart. Claude's tiles are the usual ones and
+    /// carry none.
+    pub fn mark(self) -> Option<&'static str> {
+        match self {
+            Agent::Claude => None,
+            Agent::Codex => Some("Codex"),
+            Agent::Grok => Some("Grok"),
+        }
+    }
+
     /// The agent `name` means, as `--agent` takes it: its program's name,
     /// in any case.
     pub fn from_name(name: &str) -> Option<Agent> {
@@ -78,7 +89,13 @@ impl Agent {
     pub fn carry_on(self, id: Option<&str>, args: &[String]) -> Vec<String> {
         let mut out = id.map_or_else(Vec::new, |id| self.resume_args(Some(id)));
         match self {
-            Agent::Claude | Agent::Grok => out.extend(without_resume(args)),
+            Agent::Claude => out.extend(without_resume(args)),
+            // The prompt it was started with was sent then, and a resume
+            // would send it again.
+            Agent::Grok if id.is_some() => {
+                out.extend(without_prompt(&without_resume(args), &GROK_VALUE_FLAGS))
+            }
+            Agent::Grok => out.extend(without_resume(args)),
             Agent::Codex => {
                 let mut rest = args.iter();
                 if args.first().is_some_and(|a| a == "resume") {
@@ -93,7 +110,7 @@ impl Agent {
                 // it again.
                 let rest: Vec<String> = rest.filter(|a| *a != "--last").cloned().collect();
                 match id {
-                    Some(_) => out.extend(without_prompt(&rest)),
+                    Some(_) => out.extend(without_prompt(&rest, &CODEX_VALUE_FLAGS)),
                     None => out.extend(rest),
                 }
             }
@@ -105,13 +122,13 @@ impl Agent {
     /// agent has no such setting, or where Claude Code's values do not
     /// mean anything to it: the permission modes and the models are Claude's
     /// own until each agent has its own list. Effort is one scale, and
-    /// Codex's stops at `xhigh`.
+    /// Codex's and Grok's stop at `xhigh`.
     pub fn setting_args(self, s: Setting, value: &str) -> Option<Vec<String>> {
         if self != Agent::Claude && s == Setting::Model && value.starts_with("claude-") {
             return None;
         }
         let value = match (self, value) {
-            (Agent::Codex, "max") => "xhigh",
+            (Agent::Codex | Agent::Grok, "max") => "xhigh",
             _ => value,
         };
         let pair = |flag: &str| Some(vec![flag.to_string(), value.to_string()]);
@@ -390,12 +407,45 @@ const CODEX_VALUE_FLAGS: [&str; 16] = [
     "--local-provider",
 ];
 
-/// Codex `args` less the prompt: whatever is not a flag or a flag's value.
-fn without_prompt(args: &[String]) -> Vec<String> {
+/// Grok's flags that take a value, as the next argument. `--resume` and
+/// `--worktree` take one only when it follows, and a resume has lost its
+/// own by now.
+const GROK_VALUE_FLAGS: [&str; 26] = [
+    "--agent",
+    "--agents",
+    "--allow",
+    "--allowedTools",
+    "--cwd",
+    "--debug-file",
+    "--deny",
+    "--disallowedTools",
+    "--disallowed-tools",
+    "--json-schema",
+    "--leader-socket",
+    "-m",
+    "--model",
+    "--max-turns",
+    "--output-format",
+    "--permission-mode",
+    "--prompt-file",
+    "--prompt-json",
+    "--reasoning-effort",
+    "--effort",
+    "--rules",
+    "--sandbox",
+    "--system-prompt-override",
+    "--system-prompt",
+    "--tools",
+    "--worktree-ref",
+];
+
+/// `args` less the prompt: whatever is not a flag or the value of one of
+/// `value_flags`.
+fn without_prompt(args: &[String], value_flags: &[&str]) -> Vec<String> {
     let mut out = Vec::new();
     let mut args = args.iter();
     while let Some(a) = args.next() {
-        if CODEX_VALUE_FLAGS.contains(&a.as_str()) {
+        if value_flags.contains(&a.as_str()) {
             out.push(a.clone());
             out.extend(args.next().cloned());
         } else if a.starts_with('-') {
@@ -585,6 +635,13 @@ mod tests {
     }
 
     #[test]
+    fn only_other_agents_tiles_carry_a_mark() {
+        assert_eq!(Agent::Claude.mark(), None);
+        assert_eq!(Agent::Codex.mark(), Some("Codex"));
+        assert_eq!(Agent::Grok.mark(), Some("Grok"));
+    }
+
+    #[test]
     fn codex_resumes_by_subcommand_the_others_by_flag() {
         assert_eq!(Agent::Claude.resume_args(Some("a")), args("--resume a"));
         assert_eq!(Agent::Grok.resume_args(Some("a")), args("--resume a"));
@@ -683,9 +740,27 @@ mod tests {
             Some(args("-c model_reasoning_effort=xhigh"))
         );
         assert_eq!(
+            Agent::Grok.setting_args(Setting::Effort, "max"),
+            Some(args("--effort xhigh"))
+        );
+        assert_eq!(
             Agent::Claude.setting_args(Setting::Effort, "max"),
             Some(args("--effort max"))
         );
+    }
+
+    #[test]
+    fn grok_resumes_without_its_first_prompt() {
+        let a = Agent::Grok;
+        assert_eq!(
+            a.carry_on(
+                Some("id"),
+                &args("--resume old -m grok-4.7 pong --effort high --no-plan")
+            ),
+            args("--resume id -m grok-4.7 --effort high --no-plan")
+        );
+        assert_eq!(a.carry_on(None, &args("-m g pong")), args("-m g pong"));
+        assert_eq!(a.carry_on(None, &args("--continue pong")), args("pong"));
     }
 
     #[test]
