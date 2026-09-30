@@ -10,7 +10,7 @@ use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::rc::Rc;
 
-use horadric_core::Setting;
+use horadric_core::{Agent, Setting};
 use windows::core::{w, Result, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{
@@ -48,6 +48,8 @@ const DROP: f32 = 4.0;
 
 pub struct Dropdown {
     pub hwnd: HWND,
+    /// Whose setting it is: the usage window's screen it dropped from.
+    pub agent: Agent,
     pub setting: Setting,
     shared: Rc<Shared>,
     target: RefCell<Option<Target>>,
@@ -78,10 +80,12 @@ pub fn register_class() -> Result<()> {
     }
 }
 
-/// When a pick takes hold, the note on top of the list. A running session
-/// switches once it is free, see [`horadric_core::Session::free_for_command`].
-fn note(setting: Setting) -> &'static str {
-    if setting.command(None).is_some() {
+/// When a pick takes hold, the note on top of the list. A running Claude
+/// Code session switches once it is free, see
+/// [`horadric_core::Session::free_for_command`]. The other agents have no
+/// command Horadric can type in.
+fn note(agent: Agent, setting: Setting) -> &'static str {
+    if agent == Agent::Claude && setting.command(None).is_some() {
         "Running sessions switch too"
     } else {
         "From the next start or resume"
@@ -93,12 +97,13 @@ impl Dropdown {
     /// pixels at `dpi`, or over it when there is no room below.
     pub fn open(
         shared: Rc<Shared>,
+        agent: Agent,
         setting: Setting,
         current: Option<&str>,
         row: RECT,
         dpi: u32,
     ) -> Result<Box<Self>> {
-        let choices = setting.choices();
+        let choices = setting.choices(agent);
         let mut labels = vec!["Default"];
         let mut values = vec![None];
         for (v, name) in choices {
@@ -127,6 +132,7 @@ impl Dropdown {
         };
         let mut win = Box::new(Dropdown {
             hwnd: HWND::default(),
+            agent,
             setting,
             shared,
             target: RefCell::new(None),
@@ -207,7 +213,7 @@ impl Dropdown {
         }
         let scene = DropdownScene {
             layout: &self.layout,
-            note: note(self.setting),
+            note: note(self.agent, self.setting),
             items: &self.labels,
             current: self.current,
             hot: self.hot.get(),
@@ -264,7 +270,7 @@ impl Dropdown {
         let value = pick
             .and_then(|i| self.values.get(i))
             .map(|v| v.map(str::to_string));
-        app::push(Input::Picked(self.setting, value));
+        app::push(Input::Picked(self.agent, self.setting, value));
     }
 
     fn handle(&self, msg: u32, wparam: WPARAM, lparam: LPARAM) -> Option<LRESULT> {
@@ -383,8 +389,10 @@ mod tests {
 
     #[test]
     fn the_note_says_when_a_pick_takes_hold() {
-        assert!(note(Setting::Model).starts_with("Running"));
-        assert!(note(Setting::Effort).starts_with("Running"));
-        assert!(note(Setting::Permissions).starts_with("From the next"));
+        let claude = |s| note(Agent::Claude, s);
+        assert!(claude(Setting::Model).starts_with("Running"));
+        assert!(claude(Setting::Effort).starts_with("Running"));
+        assert!(claude(Setting::Permissions).starts_with("From the next"));
+        assert!(note(Agent::Codex, Setting::Model).starts_with("From the next"));
     }
 }

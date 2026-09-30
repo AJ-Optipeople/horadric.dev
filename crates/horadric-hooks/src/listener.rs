@@ -15,7 +15,7 @@ use std::thread;
 use std::time::{Duration, SystemTime};
 
 use horadric_core::overlap::{self, Claims, Overlap};
-use horadric_core::{Agent, HookEvent, Status};
+use horadric_core::{Agent, HookEvent, Limits, Status};
 use serde_json::{json, Value};
 
 use crate::{
@@ -28,6 +28,11 @@ use crate::{
 pub struct Tagged {
     pub horadric_id: String,
     pub event: HookEvent,
+    /// Which agent sent it, whose limits `limits` are.
+    pub agent: Agent,
+    /// The account's limits, when the event brought them: a status line's,
+    /// or those at the end of a Codex transcript when a turn stops.
+    pub limits: Option<Limits>,
 }
 
 /// A request to start a session in a Horadric terminal.
@@ -245,12 +250,18 @@ fn handle(
                 .ok()
                 .and_then(|v| v.get("session_id")?.as_str().map(str::to_string))
                 .unwrap_or_default();
+            let limits = Some(status.limits.clone()).filter(|l| !l.is_empty());
             let event = HookEvent {
                 status: Some(status),
                 session_id,
                 ..HookEvent::synthetic(HookEvent::STATUS)
             };
-            let _ = tx.send(Tagged { horadric_id, event });
+            let _ = tx.send(Tagged {
+                horadric_id,
+                event,
+                agent: Agent::Claude,
+                limits,
+            });
         }
         return Ok(());
     }
@@ -326,7 +337,18 @@ fn handle(
         } else if event.may_peek_title() {
             event.title = transcript::tail_title(std::path::Path::new(&event.transcript_path));
         }
-        let _ = tx.send(Tagged { horadric_id, event });
+        let agent = agent.unwrap_or_default();
+        // Codex writes its limits into the transcript, not to a hook, and
+        // a turn that stopped has just had them counted.
+        let limits = (agent == Agent::Codex && event.hook_event_name == "Stop")
+            .then(|| transcript::codex_limits(std::path::Path::new(&event.transcript_path)))
+            .flatten();
+        let _ = tx.send(Tagged {
+            horadric_id,
+            event,
+            agent,
+            limits,
+        });
     }
     Ok(())
 }

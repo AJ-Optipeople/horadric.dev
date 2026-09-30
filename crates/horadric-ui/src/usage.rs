@@ -1,5 +1,7 @@
 //! The usage window: how much of the account's Claude limits is used, and
 //! the model, effort and permission mode every session Horadric starts gets.
+//! With Codex or Grok Build in use as well, a screen for each provider,
+//! named on top, a click on the name going on to the next.
 //!
 //! It belongs to no project, so it is a window of its own rather than a tile
 //! in a cluster, and it sits at the top of the first column of tiles. It
@@ -15,7 +17,7 @@ use std::ffi::c_void;
 use std::rc::Rc;
 use std::time::SystemTime;
 
-use horadric_core::Setting;
+use horadric_core::{Agent, Setting};
 use windows::core::{w, Result, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{
@@ -66,22 +68,59 @@ pub struct UsageWindow {
     slide: Cell<Option<(usize, usize)>>,
     /// A newer release's version, set by the app when a check finds one.
     pub update: RefCell<Option<String>>,
+    /// The agents in use, one screen each, Claude first. Set by the app.
+    screens: RefCell<Vec<Agent>>,
+    /// The one on screen now.
+    screen: Cell<Agent>,
 }
 
-/// Which rows of settings are sliders, in the order the window shows
-/// them: the settings, then the account and the version.
-fn scales() -> Vec<bool> {
-    Setting::ALL
+/// One row of the settings section.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Row {
+    Setting(Setting),
+    /// Names the account in use. Only Claude's can be switched so far.
+    Account,
+    /// Says which Horadric this is.
+    Version,
+}
+
+/// The rows on `agent`'s screen, in order: its settings, then the account
+/// and the version.
+fn rows(agent: Agent) -> Vec<Row> {
+    agent
+        .settings()
         .iter()
-        .map(|s| s.is_scale())
-        .chain([false, false])
+        .map(|&s| Row::Setting(s))
+        .chain((agent == Agent::Claude).then_some(Row::Account))
+        .chain([Row::Version])
         .collect()
 }
 
-/// The row after the settings, which names the account.
-const ACCOUNT_ROW: usize = Setting::ALL.len();
-/// The last row, which says which Horadric this is.
-const VERSION_ROW: usize = ACCOUNT_ROW + 1;
+/// Which of `agent`'s rows are sliders.
+fn scales(agent: Agent) -> Vec<bool> {
+    rows(agent)
+        .iter()
+        .map(|r| matches!(r, Row::Setting(s) if s.is_scale()))
+        .collect()
+}
+
+/// What the limits' screen says while none is known.
+fn empty(agent: Agent) -> &'static str {
+    match agent {
+        Agent::Claude => "Limits show after a reply in a session",
+        Agent::Codex => "Limits show after a turn in a session",
+        Agent::Grok => "Grok Build does not say its limits",
+    }
+}
+
+/// The screen after `at` among `screens`, round to the first again.
+fn next_screen(screens: &[Agent], at: Agent) -> Agent {
+    let i = screens.iter().position(|a| *a == at).map_or(0, |i| i + 1);
+    screens
+        .get(i % screens.len().max(1))
+        .copied()
+        .unwrap_or_default()
+}
 
 /// What the Version row says: this build's version, or the release to
 /// update to when a check found one, which a click then offers.
@@ -92,10 +131,11 @@ fn version_value(current: &str, update: Option<&str>) -> String {
     }
 }
 
-/// What each stop of a scale sets: the default, then its values.
-fn stops(setting: Setting) -> Vec<Option<&'static str>> {
+/// What each stop of one of `agent`'s scales sets: the default, then its
+/// values.
+fn stops(agent: Agent, setting: Setting) -> Vec<Option<&'static str>> {
     std::iter::once(None)
-        .chain(setting.choices().iter().map(|(v, _)| Some(*v)))
+        .chain(setting.choices(agent).iter().map(|(v, _)| Some(*v)))
         .collect()
 }
 
@@ -135,7 +175,7 @@ impl UsageWindow {
     /// Creates the window at `(x, y)` in physical pixels and shows it
     /// without activating it.
     pub fn create(shared: Rc<Shared>, collapsed: bool, x: i32, y: i32) -> Result<Box<Self>> {
-        let initial = layout::usage(&shared.metrics, 0, &scales(), collapsed);
+        let initial = layout::usage(&shared.metrics, false, 0, &scales(Agent::Claude), collapsed);
         let mut win = Box::new(UsageWindow {
             hwnd: HWND::default(),
             collapsed: Cell::new(collapsed),
@@ -149,6 +189,8 @@ impl UsageWindow {
             open: Cell::new(None),
             slide: Cell::new(None),
             update: RefCell::new(None),
+            screens: RefCell::new(vec![Agent::Claude]),
+            screen: Cell::new(Agent::Claude),
         });
         unsafe {
             let hwnd = CreateWindowExW(
@@ -248,20 +290,31 @@ impl UsageWindow {
 
     fn limits(&self) -> usize {
         self.shared
-            .usage
-            .lock()
-            .ok()
-            .and_then(|u| u.as_ref().map(|u| u.limits.named().len()))
-            .unwrap_or(0)
+            .usage_of(self.screen.get())
+            .map_or(0, |u| u.limits.named().len())
+    }
+
+    /// The agents in use, as the app sees them. Claude always has a
+    /// screen. One that is no longer in use takes its screen with it.
+    pub fn set_screens(&self, mut agents: Vec<Agent>) {
+        agents.retain(|a| *a != Agent::Claude);
+        agents.insert(0, Agent::Claude);
+        agents.dedup();
+        if !agents.contains(&self.screen.get()) {
+            self.screen.set(Agent::Claude);
+        }
+        *self.screens.borrow_mut() = agents;
     }
 
     /// Lays out again for the limits known now and resizes to fit. True
     /// when the size changed, so the stack needs arranging again.
     pub fn fit(&self) -> bool {
+        let agent = self.screen.get();
         let l = layout::usage(
             &self.shared.metrics,
+            self.screens.borrow().len() > 1,
             self.limits(),
-            &scales(),
+            &scales(agent),
             self.collapsed.get(),
         );
         *self.layout.borrow_mut() = l;
@@ -303,8 +356,9 @@ impl UsageWindow {
                 }
             }
         }
-        let usage = self.shared.usage.lock().ok().and_then(|u| u.clone());
-        let defaults = self.shared.defaults.borrow();
+        let agent = self.screen.get();
+        let usage = self.shared.usage_of(agent);
+        let defaults = self.shared.defaults_of(agent);
         let now = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs());
@@ -312,42 +366,46 @@ impl UsageWindow {
         let scene = UsageScene {
             layout: &layout,
             collapsed: self.collapsed.get(),
+            provider: agent.provider(),
+            empty: empty(agent),
             usage: usage.as_ref(),
             now,
-            settings: Setting::ALL
-                .iter()
+            settings: rows(agent)
+                .into_iter()
                 .enumerate()
-                .map(|(i, &s)| {
-                    let value = match self.slide.get() {
-                        Some((j, stop)) if j == i => stops(s).get(stop).copied().flatten(),
-                        _ => defaults.get(s),
-                    };
-                    let all = stops(s);
-                    SettingLook {
-                        label: s.label(),
-                        value: s.name_of(value).to_string(),
-                        stop: s.is_scale().then(|| {
-                            let at = all.iter().position(|v| *v == value).unwrap_or(0);
-                            (at, all.len())
-                        }),
-                        list: true,
+                .map(|(i, row)| match row {
+                    Row::Setting(s) => {
+                        let all = stops(agent, s);
+                        let value = match self.slide.get() {
+                            Some((j, stop)) if j == i => all.get(stop).copied().flatten(),
+                            _ => defaults.get(s),
+                        };
+                        SettingLook {
+                            label: s.label(),
+                            value: s.name_of(agent, value).to_string(),
+                            stop: s.is_scale().then(|| {
+                                let at = all.iter().position(|v| *v == value).unwrap_or(0);
+                                (at, all.len())
+                            }),
+                            list: true,
+                        }
                     }
+                    Row::Account => SettingLook {
+                        label: "Account",
+                        value: account_name(self.shared.account.borrow().as_deref()),
+                        stop: None,
+                        list: true,
+                    },
+                    Row::Version => SettingLook {
+                        label: "Version",
+                        value: version_value(
+                            env!("CARGO_PKG_VERSION"),
+                            self.update.borrow().as_deref(),
+                        ),
+                        stop: None,
+                        list: false,
+                    },
                 })
-                .chain([SettingLook {
-                    label: "Account",
-                    value: account_name(self.shared.account.borrow().as_deref()),
-                    stop: None,
-                    list: true,
-                }])
-                .chain([SettingLook {
-                    label: "Version",
-                    value: version_value(
-                        env!("CARGO_PKG_VERSION"),
-                        self.update.borrow().as_deref(),
-                    ),
-                    stop: None,
-                    list: false,
-                }])
                 .collect(),
             hot: self.hot.get(),
             pressed: self.pressed.get(),
@@ -402,11 +460,23 @@ impl UsageWindow {
                 self.fit();
                 app::push(Input::Arrange);
             }
-            UsageHit::Setting(ACCOUNT_ROW) => app::push(Input::AccountMenu),
-            UsageHit::Setting(VERSION_ROW) => app::push(Input::Version),
+            UsageHit::Header => {
+                let next = next_screen(&self.screens.borrow(), self.screen.get());
+                self.screen.set(next);
+                self.fit();
+                app::push(Input::Arrange);
+            }
             UsageHit::Setting(i) => {
-                if let (Some(&s), Some(row)) = (Setting::ALL.get(i), self.row_on_screen(i)) {
-                    app::push(Input::SettingMenu(s, row));
+                let agent = self.screen.get();
+                match rows(agent).get(i) {
+                    Some(Row::Account) => app::push(Input::AccountMenu),
+                    Some(Row::Version) => app::push(Input::Version),
+                    Some(&Row::Setting(s)) => {
+                        if let Some(row) = self.row_on_screen(i) {
+                            app::push(Input::SettingMenu(agent, s, row));
+                        }
+                    }
+                    None => {}
                 }
             }
             UsageHit::Nothing => {}
@@ -443,7 +513,7 @@ impl UsageWindow {
         if y < row.line.y + row.line.h / 2.0 {
             return None;
         }
-        let n = stops(*Setting::ALL.get(i)?).len();
+        let n = stops(self.screen.get(), self.setting_at(i)?).len();
         Some((i, layout::slider_stop(&track, n, x)))
     }
 
@@ -455,12 +525,12 @@ impl UsageWindow {
         let s = self.scale();
         let x = (lparam.0 & 0xffff) as i16 as f32 / s;
         let l = self.layout.borrow();
-        let (Some(track), Some(&setting)) =
-            (l.settings.get(i).and_then(|r| r.track), Setting::ALL.get(i))
+        let (Some(track), Some(setting)) =
+            (l.settings.get(i).and_then(|r| r.track), self.setting_at(i))
         else {
             return;
         };
-        let stop = layout::slider_stop(&track, stops(setting).len(), x);
+        let stop = layout::slider_stop(&track, stops(self.screen.get(), setting).len(), x);
         if self.slide.replace(Some((i, stop))) != Some((i, stop)) {
             self.invalidate();
         }
@@ -471,14 +541,23 @@ impl UsageWindow {
         let Some((i, stop)) = self.slide.take() else {
             return;
         };
-        let Some(&setting) = Setting::ALL.get(i) else {
+        let Some(setting) = self.setting_at(i) else {
             return;
         };
-        let value = stops(setting).get(stop).copied().flatten();
-        if value != self.shared.defaults.borrow().get(setting) {
-            app::push(Input::SetDefault(setting, value.map(str::to_string)));
+        let agent = self.screen.get();
+        let value = stops(agent, setting).get(stop).copied().flatten();
+        if value != self.shared.defaults_of(agent).get(setting) {
+            app::push(Input::SetDefault(agent, setting, value.map(str::to_string)));
         }
         self.invalidate();
+    }
+
+    /// The setting on row `i` of the screen shown, if that row is one.
+    fn setting_at(&self, i: usize) -> Option<Setting> {
+        match rows(self.screen.get()).get(i)? {
+            Row::Setting(s) => Some(*s),
+            _ => None,
+        }
     }
 
     fn handle(&self, msg: u32, wparam: WPARAM, lparam: LPARAM) -> Option<LRESULT> {
@@ -675,11 +754,52 @@ mod tests {
 
     #[test]
     fn a_scale_starts_at_its_default_then_runs_through_its_values() {
-        let all = stops(Setting::Effort);
+        let all = stops(Agent::Claude, Setting::Effort);
         assert_eq!(all.first(), Some(&None));
         assert_eq!(all.last(), Some(&Some("max")));
-        assert_eq!(all.len(), Setting::Effort.choices().len() + 1);
-        assert_eq!(scales(), [false, true, false, false, false]);
+        assert_eq!(all.len(), Setting::Effort.choices(Agent::Claude).len() + 1);
+        assert_eq!(scales(Agent::Claude), [false, true, false, false, false]);
+        assert_eq!(
+            stops(Agent::Grok, Setting::Effort).last(),
+            Some(&Some("xhigh"))
+        );
+    }
+
+    #[test]
+    fn each_screen_has_its_agents_rows() {
+        assert_eq!(
+            rows(Agent::Claude),
+            [
+                Row::Setting(Setting::Model),
+                Row::Setting(Setting::Effort),
+                Row::Setting(Setting::Permissions),
+                Row::Account,
+                Row::Version,
+            ]
+        );
+        assert_eq!(
+            rows(Agent::Codex),
+            [
+                Row::Setting(Setting::Model),
+                Row::Setting(Setting::Effort),
+                Row::Version,
+            ]
+        );
+        assert_eq!(scales(Agent::Grok), [false, true, false]);
+    }
+
+    #[test]
+    fn a_click_on_the_name_goes_round_the_screens() {
+        let all = [Agent::Claude, Agent::Codex, Agent::Grok];
+        assert_eq!(next_screen(&all, Agent::Claude), Agent::Codex);
+        assert_eq!(next_screen(&all, Agent::Grok), Agent::Claude);
+        assert_eq!(next_screen(&[Agent::Claude], Agent::Claude), Agent::Claude);
+        // One gone from the list starts over.
+        assert_eq!(
+            next_screen(&[Agent::Claude, Agent::Grok], Agent::Codex),
+            Agent::Claude
+        );
+        assert_eq!(next_screen(&[], Agent::Codex), Agent::Claude);
     }
 
     #[test]

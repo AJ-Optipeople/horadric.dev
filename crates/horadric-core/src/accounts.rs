@@ -282,6 +282,7 @@ mod tests {
                 five_hour: Some(Limit {
                     used: 40.0,
                     resets_at: None,
+                    minutes: None,
                 }),
                 ..Default::default()
             },

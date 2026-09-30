@@ -10,7 +10,7 @@
 //! the system move loop would activate the window.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use horadric_core::tasks::{Mark, Mode};
-use horadric_core::{format_age, Defaults, Registry, Session, Usage};
+use horadric_core::{format_age, Agent, Defaults, Registry, Session, Usage};
 use windows::core::{w, Result, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{
@@ -92,15 +92,39 @@ pub struct Shared {
     /// The session whose pane has the keyboard, or last had it.
     pub active: RefCell<Option<String>>,
     pub browsing: RefCell<HashSet<String>>,
-    /// Written by the feeder thread as status lines arrive.
+    /// Claude's limits, written by the feeder thread as status lines
+    /// arrive. They go with the account, see `accounts`.
     pub usage: Arc<Mutex<Option<Usage>>>,
+    /// The other agents' limits, written by the feeder thread as their
+    /// events bring them.
+    pub agent_usage: Arc<Mutex<BTreeMap<Agent, Usage>>>,
     /// The Claude account in use, as the usage window names it.
     pub account: RefCell<Option<String>>,
-    pub defaults: RefCell<Defaults>,
+    /// What each agent's sessions start with, from its own lists.
+    pub defaults: RefCell<BTreeMap<Agent, Defaults>>,
     /// Each project's task list as last read, by project key.
     pub boards: RefCell<HashMap<String, Board>>,
     /// The cube's window while there is one, for what is carried over it.
     pub cube: Cell<Option<HWND>>,
+}
+
+impl Shared {
+    /// What `agent`'s sessions start with.
+    pub fn defaults_of(&self, agent: Agent) -> Defaults {
+        self.defaults
+            .borrow()
+            .get(&agent)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// `agent`'s limits as last heard.
+    pub fn usage_of(&self, agent: Agent) -> Option<Usage> {
+        match agent {
+            Agent::Claude => self.usage.lock().ok()?.clone(),
+            _ => self.agent_usage.lock().ok()?.get(&agent).cloned(),
+        }
+    }
 }
 
 /// One project cluster on screen.

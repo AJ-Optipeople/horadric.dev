@@ -318,6 +318,10 @@ pub struct TaskRow {
 pub struct UsageScene<'a> {
     pub layout: &'a UsageLayout,
     pub collapsed: bool,
+    /// Whose limits and settings these are, when there is a header to say.
+    pub provider: &'a str,
+    /// What the screen says while no limit is known.
+    pub empty: &'a str,
     pub usage: Option<&'a Usage>,
     /// Unix seconds.
     pub now: u64,
@@ -886,11 +890,26 @@ impl Painter<'_> {
     }
 
     /// The usage window, dressed like a cluster: the same plate, the
-    /// limits on a screen and the settings in a grooved section. No name
-    /// on top: the limits say what it is.
+    /// limits on a screen and the settings in a grooved section. With one
+    /// agent in use no name on top: the limits say what it is. With more,
+    /// the provider's name, and a chevron that says a click goes on.
     unsafe fn usage(&self, gpu: &Gpu, m: &Metrics, scene: &UsageScene) {
         let l = scene.layout;
         self.plate(m, l.size);
+        if let Some(h) = l.header {
+            let ink = match scene.button(UsageHit::Header) {
+                Button::Idle => theme::TEXT_DIM,
+                _ => theme::TEXT,
+            };
+            let label = Rect::new(h.x + 4.0, h.y, h.w - 8.0, h.h);
+            self.text(&gpu.small, ink, scene.provider, label);
+            self.icon(
+                &gpu.icon_small,
+                ink,
+                '\u{E76C}',
+                Rect::new(h.right() - 18.0, h.y, 14.0, h.h),
+            );
+        }
 
         self.screen(gpu, &l.limits_box, m.tile_radius);
         let limits = scene.usage.map(|u| u.limits.named()).unwrap_or_default();
@@ -898,12 +917,7 @@ impl Painter<'_> {
         match (limits.first(), first) {
             (None, Some(r)) => {
                 let r = Rect::new(r.x + INNER_PAD, r.y, r.w - 2.0 * INNER_PAD, r.h);
-                self.text(
-                    &gpu.small,
-                    theme::TEXT_DIM,
-                    "Limits show after a reply in a session",
-                    r,
-                );
+                self.text(&gpu.small, theme::TEXT_DIM, scene.empty, r);
             }
             _ => {
                 for (r, (name, limit)) in l.limits.iter().zip(&limits) {

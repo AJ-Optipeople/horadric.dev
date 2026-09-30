@@ -21,6 +21,10 @@ pub struct Limit {
     /// Unix seconds.
     #[serde(default)]
     pub resets_at: Option<u64>,
+    /// How long the window is, when the agent says. Codex does, and a free
+    /// plan's first limit is a month long, not five hours.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub minutes: Option<u32>,
 }
 
 impl Limit {
@@ -39,7 +43,32 @@ impl Limit {
         Some(Limit {
             used: v.get("used_percentage")?.as_f64()? as f32,
             resets_at: v.get("resets_at").and_then(Value::as_u64),
+            minutes: None,
         })
+    }
+
+    /// One of Codex's `rate_limits`, where the percent is `used_percent`.
+    fn from_codex(v: &Value) -> Option<Limit> {
+        Some(Limit {
+            used: v.get("used_percent")?.as_f64()? as f32,
+            resets_at: v.get("resets_at").and_then(Value::as_u64),
+            minutes: v
+                .get("window_minutes")
+                .and_then(Value::as_u64)
+                .and_then(|m| u32::try_from(m).ok()),
+        })
+    }
+
+    /// What a window of this length is called, when it is one a person
+    /// would name.
+    fn window_name(&self) -> Option<&'static str> {
+        match self.minutes? {
+            0..=360 => Some("Session"),
+            1_380..=1_500 => Some("Day"),
+            9_000..=11_000 => Some("Week"),
+            40_000..=46_000 => Some("Month"),
+            _ => None,
+        }
     }
 }
 
@@ -69,7 +98,32 @@ impl Limits {
         ]
         .into_iter()
         .filter_map(|(name, l)| Some((name, l?)))
+        .map(|(name, l)| (l.window_name().unwrap_or(name), l))
         .collect()
+    }
+
+    /// The limits in the newest `token_count` of a Codex rollout, `text`
+    /// being its end. Its `primary` is the short window and `secondary` the
+    /// long one, as Claude's five hour and weekly limits are. A count with
+    /// no limits, as an API key's has, is passed over for an older one.
+    pub fn from_codex(text: &str) -> Option<Limits> {
+        text.lines().rev().find_map(|line| {
+            if !line.contains("\"token_count\"") {
+                return None;
+            }
+            let v: Value = serde_json::from_str(line).ok()?;
+            let p = v.get("payload")?;
+            if p.get("type")?.as_str()? != "token_count" {
+                return None;
+            }
+            let r = p.get("rate_limits")?;
+            let limits = Limits {
+                five_hour: r.get("primary").and_then(Limit::from_codex),
+                seven_day: r.get("secondary").and_then(Limit::from_codex),
+                spend: None,
+            };
+            (!limits.is_empty()).then_some(limits)
+        })
     }
 
     /// When the account can work again, in Unix seconds, if a limit is
@@ -186,28 +240,50 @@ impl Setting {
         }
     }
 
-    /// What `claude` takes, and what the window calls it. Models by their
+    /// What `agent` takes, and what the window calls it. Models by their
     /// full names, so the version picked is the version that runs, and an
     /// alias moving on to a newer model never changes it behind your back.
     /// The last permission mode sits apart in its list, so it is never
-    /// picked by a slip.
-    pub fn choices(self) -> &'static [(&'static str, &'static str)] {
-        match self {
-            Setting::Model => &[
-                ("claude-fable-5-1", "Fable 5.1"),
-                ("claude-opus-5-5", "Opus 5.5"),
-                ("claude-opus-5-5[1m]", "Opus 5.5 1M"),
-                ("claude-sonnet-5", "Sonnet 5"),
-                ("claude-haiku-4-5-20251001", "Haiku 4.5"),
+    /// picked by a slip. Codex's and Grok's are what their own pickers
+    /// list, and they have no permission modes to pick here.
+    pub fn choices(self, agent: Agent) -> &'static [(&'static str, &'static str)] {
+        match (agent, self) {
+            (Agent::Codex, Setting::Model) => &[
+                ("gpt-6-luna", "GPT-6 Luna"),
+                ("gpt-5.6-terra", "GPT-5.6 Terra"),
+                ("gpt-5.6-luna", "GPT-5.6 Luna"),
+                ("gpt-5.5", "GPT-5.5"),
             ],
-            Setting::Effort => &[
+            (Agent::Codex, Setting::Effort) => &[
                 ("low", "Low"),
                 ("medium", "Medium"),
                 ("high", "High"),
                 ("xhigh", "Extra high"),
                 ("max", "Max"),
             ],
-            Setting::Permissions => &[
+            (Agent::Grok, Setting::Model) => &[("grok-4.7", "Grok 4.7")],
+            (Agent::Grok, Setting::Effort) => &[
+                ("low", "Low"),
+                ("medium", "Medium"),
+                ("high", "High"),
+                ("xhigh", "Extra high"),
+            ],
+            (Agent::Codex | Agent::Grok, Setting::Permissions) => &[],
+            (Agent::Claude, Setting::Model) => &[
+                ("claude-fable-5-1", "Fable 5.1"),
+                ("claude-opus-5-5", "Opus 5.5"),
+                ("claude-opus-5-5[1m]", "Opus 5.5 1M"),
+                ("claude-sonnet-5", "Sonnet 5"),
+                ("claude-haiku-4-5-20251001", "Haiku 4.5"),
+            ],
+            (Agent::Claude, Setting::Effort) => &[
+                ("low", "Low"),
+                ("medium", "Medium"),
+                ("high", "High"),
+                ("xhigh", "Extra high"),
+                ("max", "Max"),
+            ],
+            (Agent::Claude, Setting::Permissions) => &[
                 ("manual", "Ask first"),
                 ("acceptEdits", "Accept edits"),
                 ("plan", "Plan"),
@@ -243,12 +319,12 @@ impl Setting {
     }
 
     /// What a value is called, or "Default" for none, which leaves it to
-    /// Claude Code's own settings.
-    pub fn name_of(self, value: Option<&str>) -> &'static str {
+    /// the agent's own settings.
+    pub fn name_of(self, agent: Agent, value: Option<&str>) -> &'static str {
         let Some(value) = value else {
             return "Default";
         };
-        self.choices()
+        self.choices(agent)
             .iter()
             .find(|(v, _)| *v == value)
             .map_or("Custom", |(_, name)| name)
@@ -336,7 +412,8 @@ mod tests {
             s.limits.five_hour,
             Some(Limit {
                 used: 41.2,
-                resets_at: Some(1738425600)
+                resets_at: Some(1738425600),
+                minutes: None,
             })
         );
         assert_eq!(s.limits.seven_day.map(|l| l.used), Some(12.0));
@@ -368,17 +445,77 @@ mod tests {
         assert_eq!(Status::default().line(), "");
     }
 
+    const CODEX: &str = r#"{"timestamp":"t","type":"session_meta","payload":{"id":"x"}}
+{"type":"event_msg","payload":{"type":"token_count","info":null,"rate_limits":{"limit_id":"codex","primary":{"used_percent":3.0,"window_minutes":300,"resets_at":100},"secondary":{"used_percent":20.5,"window_minutes":10080,"resets_at":900},"credits":null}}}
+{"type":"response_item","payload":{"type":"message","content":"token_count"}}
+{"type":"event_msg","payload":{"type":"token_count","info":{},"rate_limits":{"limit_id":"codex","primary":{"used_percent":1.0,"window_minutes":43200,"resets_at":1793333433},"secondary":null,"plan_type":"free"}}}
+{"type":"event_msg","payload":{"type":"token_count","info":{},"rate_limits":null}}
+{"type":"event_msg","payload":{"type":"agent_message","message":"pong"}}"#;
+
+    #[test]
+    fn codex_limits_come_from_its_newest_token_count() {
+        let l = Limits::from_codex(CODEX).unwrap();
+        assert_eq!(
+            l.five_hour,
+            Some(Limit {
+                used: 1.0,
+                resets_at: Some(1793333433),
+                minutes: Some(43200),
+            })
+        );
+        assert_eq!(l.seven_day, None);
+        // A free plan's one limit is a month long, and says so.
+        let names: Vec<&str> = l.named().iter().map(|(n, _)| *n).collect();
+        assert_eq!(names, ["Month"]);
+        // Cut before the newest, the one before it is the newest.
+        let older = &CODEX[..CODEX
+            .find(
+                "
+{\"type\":\"response_item",
+            )
+            .unwrap()];
+        let l = Limits::from_codex(older).unwrap();
+        assert_eq!(l.five_hour.map(|l| l.used), Some(3.0));
+        assert_eq!(l.seven_day.map(|l| l.used), Some(20.5));
+        let names: Vec<&str> = l.named().iter().map(|(n, _)| *n).collect();
+        assert_eq!(names, ["Session", "Week"]);
+        assert_eq!(
+            Limits::from_codex("{\"type\":\"token_count\"} not json"),
+            None
+        );
+        assert_eq!(Limits::from_codex(""), None);
+    }
+
+    #[test]
+    fn a_window_of_no_usual_length_keeps_its_place_name() {
+        let l = Limits {
+            five_hour: Some(Limit {
+                used: 1.0,
+                resets_at: None,
+                minutes: Some(90 * 60),
+            }),
+            ..Limits::default()
+        };
+        assert_eq!(l.named()[0].0, "Session");
+        assert_eq!(
+            serde_json::to_string(&l.five_hour).unwrap(),
+            r#"{"used":1.0,"resets_at":null,"minutes":5400}"#
+        );
+    }
+
     #[test]
     fn a_limit_past_its_reset_is_empty() {
         let l = Limit {
             used: 80.0,
             resets_at: Some(1000),
+            minutes: None,
         };
         assert_eq!(l.at(400), (80.0, Some(600)));
         assert_eq!(l.at(1000), (0.0, None));
         let open = Limit {
             used: 5.0,
             resets_at: None,
+            minutes: None,
         };
         assert_eq!(open.at(1000), (5.0, None));
     }
@@ -387,6 +524,7 @@ mod tests {
         Some(Limit {
             used,
             resets_at: Some(resets_at),
+            minutes: None,
         })
     }
 
@@ -482,17 +620,35 @@ mod tests {
     #[test]
     fn settings_name_their_values() {
         let mut d = Defaults::default();
-        assert_eq!(Setting::Effort.name_of(d.get(Setting::Effort)), "Default");
+        let claude = Agent::Claude;
+        assert_eq!(
+            Setting::Effort.name_of(claude, d.get(Setting::Effort)),
+            "Default"
+        );
         d.set(Setting::Effort, Some("xhigh".into()));
         assert_eq!(
-            Setting::Effort.name_of(d.get(Setting::Effort)),
+            Setting::Effort.name_of(claude, d.get(Setting::Effort)),
             "Extra high"
         );
-        assert_eq!(Setting::Model.name_of(Some("claude-opus-5-5")), "Opus 5.5");
-        assert_eq!(Setting::Model.name_of(Some("opus")), "Custom");
-        for s in Setting::ALL {
-            assert!(!s.choices().is_empty(), "{s:?}");
+        assert_eq!(
+            Setting::Model.name_of(claude, Some("claude-opus-5-5")),
+            "Opus 5.5"
+        );
+        assert_eq!(Setting::Model.name_of(claude, Some("opus")), "Custom");
+        assert_eq!(
+            Setting::Model.name_of(Agent::Codex, Some("gpt-5.5")),
+            "GPT-5.5"
+        );
+        for a in Agent::ALL {
+            for &s in a.settings() {
+                assert!(!s.choices(a).is_empty(), "{a:?} {s:?}");
+            }
         }
+        // Each agent's own scale: Grok's stops short of Max.
+        let last = |a: Agent| Setting::Effort.choices(a).last().map(|c| c.0);
+        assert_eq!(last(Agent::Claude), Some("max"));
+        assert_eq!(last(Agent::Codex), Some("max"));
+        assert_eq!(last(Agent::Grok), Some("xhigh"));
     }
 
     #[test]

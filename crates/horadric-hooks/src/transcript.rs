@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::SystemTime;
 
-use horadric_core::{title, Agent, Title};
+use horadric_core::{title, Agent, Limits, Title};
 
 /// Claude Code repeats the title every few turns, so the end of the file
 /// nearly always has it. A transcript is megabytes by the end of a long day.
@@ -170,6 +170,14 @@ pub fn tail_title(path: &Path) -> Option<Title> {
     read_from(&mut file, len.saturating_sub(TAIL)).and_then(|b| title::latest(&b))
 }
 
+/// The limits in the newest `token_count` near the end of a Codex rollout.
+pub fn codex_limits(path: &Path) -> Option<Limits> {
+    let mut file = File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    let tail = read_from(&mut file, len.saturating_sub(TAIL))?;
+    Limits::from_codex(&String::from_utf8_lossy(&tail))
+}
+
 fn read_from(file: &mut File, at: u64) -> Option<Vec<u8>> {
     file.seek(SeekFrom::Start(at)).ok()?;
     let mut buf = Vec::new();
@@ -204,6 +212,16 @@ mod tests {
         );
         assert_eq!(title(&path).map(|t| t.text).as_deref(), Some("Early title"));
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn codex_limits_are_read_from_the_rollouts_end() {
+        let count = r#"{"type":"event_msg","payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":7.0,"window_minutes":300,"resets_at":50}}}}"#;
+        let path = scratch("codex", &[count.into(), r#"{"type":"event_msg"}"#.into()]);
+        let l = codex_limits(Path::new(&path)).unwrap();
+        assert_eq!(l.five_hour.map(|l| l.used), Some(7.0));
+        let _ = std::fs::remove_file(path);
+        assert_eq!(codex_limits(Path::new("C:/no/such/rollout.jsonl")), None);
     }
 
     #[test]

@@ -11,7 +11,9 @@ use serde_json::{Map, Value};
 use crate::usage::{has_flag, Setting};
 use crate::HookEvent;
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum Agent {
     #[default]
@@ -38,6 +40,25 @@ impl Agent {
             Agent::Claude => "Claude Code",
             Agent::Codex => "Codex",
             Agent::Grok => "Grok Build",
+        }
+    }
+
+    /// Whose subscription it runs on, which is whose limits it spends.
+    pub fn provider(self) -> &'static str {
+        match self {
+            Agent::Claude => "Claude",
+            Agent::Codex => "ChatGPT",
+            Agent::Grok => "Grok",
+        }
+    }
+
+    /// The settings the usage window offers for it. Only Claude Code's
+    /// permission modes are Horadric's to pick: Codex splits them in two
+    /// and Grok keeps its own in its config.
+    pub fn settings(self) -> &'static [Setting] {
+        match self {
+            Agent::Claude => &Setting::ALL,
+            Agent::Codex | Agent::Grok => &[Setting::Model, Setting::Effort],
         }
     }
 
@@ -118,19 +139,9 @@ impl Agent {
         out
     }
 
-    /// The flags that give setting `s` the value `value`. None where the
-    /// agent has no such setting, or where Claude Code's values do not
-    /// mean anything to it: the permission modes and the models are Claude's
-    /// own until each agent has its own list. Effort is one scale, and
-    /// Codex's and Grok's stop at `xhigh`.
+    /// The flags that give setting `s` the value `value`, one of the
+    /// agent's own choices. None where the agent has no such setting.
     pub fn setting_args(self, s: Setting, value: &str) -> Option<Vec<String>> {
-        if self != Agent::Claude && s == Setting::Model && value.starts_with("claude-") {
-            return None;
-        }
-        let value = match (self, value) {
-            (Agent::Codex | Agent::Grok, "max") => "xhigh",
-            _ => value,
-        };
         let pair = |flag: &str| Some(vec![flag.to_string(), value.to_string()]);
         match (self, s) {
             (Agent::Claude, Setting::Model) => pair("--model"),
@@ -727,26 +738,16 @@ mod tests {
     }
 
     #[test]
-    fn claude_values_do_not_reach_another_agent() {
-        let codex = |s, v| Agent::Codex.setting_args(s, v);
-        assert_eq!(codex(Setting::Model, "claude-opus-5-5"), None);
-        assert_eq!(
-            Agent::Grok.setting_args(Setting::Model, "claude-opus-5-5"),
-            None
-        );
-        assert_eq!(codex(Setting::Model, "gpt-5.5"), Some(args("-m gpt-5.5")));
-        assert_eq!(
-            codex(Setting::Effort, "max"),
-            Some(args("-c model_reasoning_effort=xhigh"))
-        );
-        assert_eq!(
-            Agent::Grok.setting_args(Setting::Effort, "max"),
-            Some(args("--effort xhigh"))
-        );
-        assert_eq!(
-            Agent::Claude.setting_args(Setting::Effort, "max"),
-            Some(args("--effort max"))
-        );
+    fn each_agent_is_offered_the_settings_it_takes() {
+        assert_eq!(Agent::Claude.settings(), Setting::ALL);
+        for a in [Agent::Codex, Agent::Grok] {
+            assert_eq!(a.settings(), [Setting::Model, Setting::Effort]);
+            for &s in a.settings() {
+                assert!(a.setting_args(s, "v").is_some(), "{a:?} {s:?}");
+            }
+        }
+        assert_eq!(Agent::Codex.provider(), "ChatGPT");
+        assert_eq!(Agent::Grok.provider(), "Grok");
     }
 
     #[test]

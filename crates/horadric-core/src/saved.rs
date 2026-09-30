@@ -80,6 +80,13 @@ pub struct SavedState {
     /// until the first reply after a restart.
     #[serde(default)]
     pub usage: Option<Usage>,
+    /// The other agents' defaults, each from its own lists. Claude Code's
+    /// are `defaults`, from before there was a choice.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub agent_defaults: BTreeMap<Agent, Defaults>,
+    /// The other agents' limits as last heard. Claude Code's are `usage`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub agent_usage: BTreeMap<Agent, Usage>,
     /// Where the usage window was.
     #[serde(default)]
     pub usage_window: Option<SavedPanel>,
@@ -556,6 +563,20 @@ mod tests {
                 at: 7,
                 ..Default::default()
             }),
+            agent_defaults: BTreeMap::from([(
+                Agent::Codex,
+                Defaults {
+                    model: Some("gpt-5.5".into()),
+                    ..Default::default()
+                },
+            )]),
+            agent_usage: BTreeMap::from([(
+                Agent::Codex,
+                Usage {
+                    at: 9,
+                    ..Default::default()
+                },
+            )]),
             usage_window: Some(SavedPanel { collapsed: true }),
             font_size: Some(17.0),
             quiet: true,
@@ -573,6 +594,8 @@ mod tests {
         assert_eq!(back.grids, state.grids);
         assert_eq!(back.defaults, state.defaults);
         assert_eq!(back.usage, state.usage);
+        assert_eq!(back.agent_defaults, state.agent_defaults);
+        assert_eq!(back.agent_usage, state.agent_usage);
         assert_eq!(back.usage_window, state.usage_window);
         assert_eq!(back.font_size, state.font_size);
         assert!(back.quiet);

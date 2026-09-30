@@ -1011,6 +1011,9 @@ scripted one.
 
 ### The usage window
 
+With Codex or Grok Build in use too, it has a screen per provider, see
+step 6 of "Codex and Grok Build beside Claude Code".
+
 A window of its own at the top of the stack: how much of the account's
 Claude limits is used, and the model, effort and permission mode every
 session Horadric starts gets. Asked for so the limits are in view without
@@ -2527,6 +2530,26 @@ file, and a JWT's payload is base64 and JSON.
    `Stop`, and map straight onto `Limit`: `used_percent` and `resets_at`.
    Grok shows no limits until a source turns up. The settings follow the
    agent: each has its own models and efforts, and Default passes nothing.
+   Done 2026-09-30. A screen for Claude always, and for Codex and Grok
+   when they were found installed at start or have a session. With more
+   than one, a line on top names the provider with a chevron, and a click
+   on it goes on to the next; folded, the line stays, so the one limit
+   left still says whose it is. The listener reads the rollout's last
+   256 KB on a Codex `Stop` (`Limits::from_codex`) and the feeder keeps
+   them per agent (`agent_usage` in `state.json`, Claude's stay `usage`,
+   which goes with the account). A limit now keeps its `window_minutes`
+   and is named by it: a free ChatGPT plan's one limit is 30 days long and
+   reads "Month", not "Session". Each agent has its own lists
+   (`Setting::choices`), Codex's models and efforts as its own picker has
+   them (GPT-6 Luna to GPT-5.5, Low to Max), Grok's Grok 4.7 and Low to
+   Extra high, and no permission modes, so its screen has Model, Effort
+   and Version. They are saved as `agent_defaults`, passed as is, and never
+   typed into a running session: only Claude Code has the commands.
+   Tested with a dev instance: three named screens, a faked Codex `Stop`
+   whose rollout said 41 % of five hours and 82 % of a week showed both
+   under ChatGPT, GPT-5.5 picked from Codex's list and saved, Grok's
+   slider with five stops and its screen saying it has no limits, and
+   folded under a header. Not tried: a real Codex turn feeding the window.
 7. **Accounts per provider**, built on the Claude switching above. Codex:
    the whole `auth.json` is the login, the account is `account_id`, the
    email is in the `id_token`. Horadric forces the file store if a user

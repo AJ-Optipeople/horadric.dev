@@ -325,7 +325,7 @@ pub(crate) enum Input {
     Spotlight,
     /// A list setting in the usage window clicked: drop its list under its
     /// row, given in screen pixels.
-    SettingMenu(Setting, RECT),
+    SettingMenu(Agent, Setting, RECT),
     /// The usage window right clicked: its own menu.
     UsageMenu,
     /// The usage window's Account row clicked: the accounts to switch to.
@@ -334,9 +334,9 @@ pub(crate) enum Input {
     /// check for one.
     Version,
     /// A setting's list closed, with the value picked, if one was.
-    Picked(Setting, Option<Option<String>>),
+    Picked(Agent, Setting, Option<Option<String>>),
     /// A slider in the usage window let go at a new value.
-    SetDefault(Setting, Option<String>),
+    SetDefault(Agent, Setting, Option<String>),
     /// The catch-up closed, with the session of the line clicked, if one
     /// was.
     Listened(Option<String>),
@@ -472,6 +472,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
     registry.set_stash(&saved.stash);
     let registry = Arc::new(Mutex::new(registry));
     let usage = Arc::new(Mutex::new(saved.usage.clone()));
+    let agent_usage = Arc::new(Mutex::new(saved.agent_usage.clone()));
     let requests: Arc<Mutex<Vec<Command>>> = Arc::new(Mutex::new(Vec::new()));
 
     // Listener thread: sockets in, tagged events and commands out.
@@ -487,6 +488,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
     // status line are the account's, so the latest from any session wins.
     let feed_registry = Arc::clone(&registry);
     let feed_usage = Arc::clone(&usage);
+    let feed_agent_usage = Arc::clone(&agent_usage);
     thread::spawn(move || {
         // Background sessions already running get their tiles now, not at
         // their next hook, which may be a while for one that is done.
@@ -495,13 +497,18 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
         }
         let mut asked = Asked::default();
         for t in rx {
-            let limits = t.event.status.as_ref().map(|s| &s.limits);
-            if let (Some(limits), Ok(mut u)) = (limits.filter(|l| !l.is_empty()), feed_usage.lock())
-            {
-                *u = Some(Usage {
-                    limits: limits.clone(),
+            if let Some(limits) = t.limits.filter(|l| !l.is_empty()) {
+                let heard = Usage {
+                    limits,
                     at: unix_now(),
-                });
+                };
+                if t.agent == Agent::Claude {
+                    if let Ok(mut u) = feed_usage.lock() {
+                        *u = Some(heard);
+                    }
+                } else if let Ok(mut u) = feed_agent_usage.lock() {
+                    u.insert(t.agent, heard);
+                }
             }
             let route = feed_registry
                 .lock()
@@ -581,8 +588,13 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
         active: RefCell::new(None),
         browsing: RefCell::new(HashSet::new()),
         usage,
+        agent_usage,
         account: RefCell::new(None),
-        defaults: RefCell::new(saved.defaults.clone()),
+        defaults: RefCell::new({
+            let mut d = saved.agent_defaults.clone();
+            d.insert(Agent::Claude, saved.defaults.clone());
+            d
+        }),
         boards: RefCell::new(HashMap::new()),
         cube: Cell::new(None),
     });
@@ -607,6 +619,10 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
         let mut app = App {
             shared,
             usage_window,
+            agents_found: [Agent::Codex, Agent::Grok]
+                .into_iter()
+                .filter(|a| console::agent_program(*a).is_some())
+                .collect(),
             stash_window: None,
             cube_window: None,
             cube: Vec::new(),
@@ -989,19 +1005,18 @@ unsafe extern "system" fn app_proc(
             // Outside the app's borrow: the list takes the focus as it opens,
             // and the windows losing it are the app's.
             let want = with_app(|app| {
-                let (setting, row) = app.setting_menu_for.take()?;
+                let (agent, setting, row) = app.setting_menu_for.take()?;
                 let current = app
                     .shared
-                    .defaults
-                    .borrow()
+                    .defaults_of(agent)
                     .get(setting)
                     .map(str::to_string);
                 let dpi = app.usage_window.as_ref().map_or(96, |u| u.dpi());
-                Some((Rc::clone(&app.shared), setting, current, row, dpi))
+                Some((Rc::clone(&app.shared), agent, setting, current, row, dpi))
             })
             .flatten();
-            if let Some((shared, setting, current, row, dpi)) = want {
-                match Dropdown::open(shared, setting, current.as_deref(), row, dpi) {
+            if let Some((shared, agent, setting, current, row, dpi)) = want {
+                match Dropdown::open(shared, agent, setting, current.as_deref(), row, dpi) {
                     Ok(d) => {
                         with_app(|app| app.dropped(d));
                     }
@@ -2415,6 +2430,9 @@ struct App {
     shared: Rc<Shared>,
     /// The account's usage and the defaults for new sessions.
     usage_window: Option<Box<UsageWindow>>,
+    /// The agents besides Claude Code found installed when the app
+    /// started, each with a screen in the usage window.
+    agents_found: Vec<Agent>,
     /// The sessions put away for later, there while it holds any.
     stash_window: Option<Box<StashWindow>>,
     /// The cube, there while there is anything to drop in it.
@@ -2429,7 +2447,7 @@ struct App {
     /// line. None when it could not be written, and then sessions go without.
     status_settings: Option<PathBuf>,
     /// The setting whose list is about to drop, and its row on screen.
-    setting_menu_for: Option<(Setting, RECT)>,
+    setting_menu_for: Option<(Agent, Setting, RECT)>,
     /// A setting's list, while it is dropped down.
     dropdown: Option<Box<Dropdown>>,
     /// Slash commands waiting to be typed into running sessions, by session
@@ -3762,17 +3780,27 @@ impl App {
         if console::agent_of(program) == Some(Agent::Codex) {
             let hook = store::exe_command(&console::host_program(), "hook codex");
             let mut extra = Agent::Codex.hook_args(&hook);
-            extra.extend(self.shared.defaults.borrow().flags(Agent::Codex, args));
+            extra.extend(
+                self.shared
+                    .defaults_of(Agent::Codex)
+                    .flags(Agent::Codex, args),
+            );
             return extra;
         }
         // Grok's hook is in its home, written by `install`.
         if console::agent_of(program) == Some(Agent::Grok) {
-            return self.shared.defaults.borrow().flags(Agent::Grok, args);
+            return self
+                .shared
+                .defaults_of(Agent::Grok)
+                .flags(Agent::Grok, args);
         }
         if !console::is_claude(program) {
             return Vec::new();
         }
-        let mut extra = self.shared.defaults.borrow().flags(Agent::Claude, args);
+        let mut extra = self
+            .shared
+            .defaults_of(Agent::Claude)
+            .flags(Agent::Claude, args);
         if let (Some(path), false) = (&self.status_settings, has_flag(args, "--settings")) {
             extra.push("--settings".into());
             extra.push(path.to_string_lossy().into_owned());
@@ -3781,12 +3809,31 @@ impl App {
         extra
     }
 
-    /// A setting picked in the usage window. Sessions take it as they start
-    /// or resume. Running ones switch too where Claude Code has a command
-    /// for it, typed in once each is free, unless it chose the setting with
-    /// its own arguments.
-    fn set_default(&mut self, setting: Setting, value: Option<String>) {
-        if let Some(command) = setting.command(value.as_deref()) {
+    /// The agents with a screen in the usage window: Claude Code, those
+    /// installed, and any with a session, which may have been started
+    /// from a program installed since.
+    fn agents_in_use(&self) -> Vec<Agent> {
+        let running: HashSet<Agent> = self
+            .shared
+            .registry
+            .lock()
+            .map(|r| r.all().map(|s| s.agent).collect())
+            .unwrap_or_default();
+        Agent::ALL
+            .into_iter()
+            .filter(|a| *a == Agent::Claude || self.agents_found.contains(a) || running.contains(a))
+            .collect()
+    }
+
+    /// A setting picked in the usage window for `agent`'s sessions. They
+    /// take it as they start or resume. Running Claude Code sessions switch
+    /// too where it has a command for it, typed in once each is free, unless
+    /// one chose the setting with its own arguments.
+    fn set_default(&mut self, agent: Agent, setting: Setting, value: Option<String>) {
+        let command = setting
+            .command(value.as_deref())
+            .filter(|_| agent == Agent::Claude);
+        if let Some(command) = command {
             for (id, c) in &self.consoles {
                 if !c.claude || c.exit_code().is_some() || setting.chosen_by(&c.args) {
                     continue;
@@ -3796,7 +3843,12 @@ impl App {
                 queue.push((setting, command.clone()));
             }
         }
-        self.shared.defaults.borrow_mut().set(setting, value);
+        self.shared
+            .defaults
+            .borrow_mut()
+            .entry(agent)
+            .or_default()
+            .set(setting, value);
         if let Some(u) = &self.usage_window {
             u.invalidate();
         }
@@ -4139,7 +4191,7 @@ impl App {
         let i = self
             .dropdown
             .as_ref()
-            .and_then(|d| Setting::ALL.iter().position(|s| *s == d.setting));
+            .and_then(|d| d.agent.settings().iter().position(|s| *s == d.setting));
         if let Some(u) = &self.usage_window {
             u.open.set(i);
             u.invalidate();
@@ -5289,8 +5341,22 @@ impl App {
                 .lock()
                 .map(|r| r.stashed().to_vec())
                 .unwrap_or_default(),
-            defaults: self.shared.defaults.borrow().clone(),
+            defaults: self.shared.defaults_of(Agent::Claude),
+            agent_defaults: self
+                .shared
+                .defaults
+                .borrow()
+                .iter()
+                .filter(|(a, d)| **a != Agent::Claude && **d != horadric_core::Defaults::default())
+                .map(|(a, d)| (*a, d.clone()))
+                .collect(),
             usage: self.shared.usage.lock().ok().and_then(|u| u.clone()),
+            agent_usage: self
+                .shared
+                .agent_usage
+                .lock()
+                .map(|u| u.clone())
+                .unwrap_or_default(),
             usage_window: self.usage_window.as_ref().map(|u| SavedPanel {
                 collapsed: u.collapsed.get(),
             }),
@@ -5407,8 +5473,10 @@ impl App {
         self.sync_stash();
         self.sync_cube();
         self.sync_start();
-        // A status line can bring the first limits, which adds rows.
+        // A status line can bring the first limits, which adds rows, and a
+        // session of another agent its screen.
         if let Some(u) = &self.usage_window {
+            u.set_screens(self.agents_in_use());
             u.fit();
         }
         self.arrange();
@@ -5755,11 +5823,11 @@ impl App {
                 Input::UsageMenu => post(self.notify.0 as isize, WM_HORADRIC_USAGE_MENU, 0),
                 Input::AccountMenu => post(self.notify.0 as isize, WM_HORADRIC_ACCOUNT_MENU, 0),
                 Input::Version => post(self.notify.0 as isize, WM_HORADRIC_VERSION, 0),
-                Input::SettingMenu(s, row) => {
-                    self.setting_menu_for = Some((s, row));
+                Input::SettingMenu(a, s, row) => {
+                    self.setting_menu_for = Some((a, s, row));
                     post(self.notify.0 as isize, WM_HORADRIC_SETTING_MENU, 0);
                 }
-                Input::Picked(setting, pick) => {
+                Input::Picked(agent, setting, pick) => {
                     if let Some(d) = self.dropdown.take() {
                         d.destroy();
                     }
@@ -5768,10 +5836,10 @@ impl App {
                         u.invalidate();
                     }
                     if let Some(value) = pick {
-                        self.set_default(setting, value);
+                        self.set_default(agent, setting, value);
                     }
                 }
-                Input::SetDefault(setting, value) => self.set_default(setting, value),
+                Input::SetDefault(agent, setting, value) => self.set_default(agent, setting, value),
                 Input::Listened(session) => {
                     if let Some(c) = self.catchup.take() {
                         c.destroy();
