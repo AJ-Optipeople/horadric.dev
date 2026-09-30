@@ -240,7 +240,14 @@ impl App {
     ) -> Option<String> {
         let id = self.unique_id("review");
         self.tasks.prompts.insert(id.clone(), prompt);
-        if let Err(e) = self.launch(&id, name, main, Vec::new(), Run::Agent, false) {
+        if let Err(e) = self.launch(
+            &id,
+            name,
+            main,
+            Vec::new(),
+            Run::Agent(horadric_core::Agent::Claude),
+            false,
+        ) {
             self.tasks.prompts.remove(&id);
             eprintln!("horadric: cannot start the reviewer: {e}");
             self.toasts

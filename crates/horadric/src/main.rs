@@ -36,8 +36,9 @@ horadric: every coding agent session as a tile on your desktop
 Usage:
   horadric                       Start Horadric in the background (tray icon and tiles)
   horadric app                   Run it in this terminal instead, with its log
-  horadric new [--name NAME] [--cwd DIR] [-- claude args...]
-                               Start a session in a Horadric terminal
+  horadric new [--name NAME] [--cwd DIR] [--agent claude|codex|grok] [-- agent args...]
+                               Start a session in a Horadric terminal, Claude
+                               Code unless --agent says another
   horadric run [--name NAME] [--cwd DIR] [-- claude args...]
                                Start a tagged `claude` in this terminal instead
   horadric quest done|blocked WHY|add TITLE|list

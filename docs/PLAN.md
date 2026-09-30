@@ -2482,6 +2482,18 @@ file, and a JWT's payload is base64 and JSON.
    for its agent, so two sessions in one project can be told apart.
    History lists each agent's own conversations: Codex keeps them in
    `sessions/` by date, Grok in `sessions/<cwd>/<id>/summary.json`.
+   Codex done 2026-09-30: `horadric new --agent codex`, and "New Codex
+   session" in the project menu when `codex` is found (the plus stays
+   Claude's). A paused tile resumes with `codex resume <id>`, without the
+   prompt it was started with, which would be sent again. The defaults
+   pass as `-m` and `-c model_reasoning_effort=`: a Claude model is not
+   passed on, and Max becomes `xhigh`, where Codex's scale stops, until
+   step 6 gives each agent its own lists. History reads each rollout's
+   first line for its folder, the desktop app's too, with the name from
+   `session_index.jsonl` or else the first prompt, and lists them among
+   Claude's by date. Live check: a tile started, went done on "pong",
+   and resumed its conversation after the dev UI and its hosts were
+   killed, one `codex.exe` each time. The tile mark comes with Grok.
 6. **Limits per provider.** The usage window gets a screen per provider
    in use, named this time ("Claude", "ChatGPT", "Grok"), since with more
    than one the numbers need saying whose they are. Codex's come from the

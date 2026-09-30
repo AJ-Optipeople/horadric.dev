@@ -421,11 +421,25 @@ impl App {
             .get(key)
             .is_some_and(|b| b.parallel > 1);
         let cwd = if parallel {
-            self.own_tree(&id, &tasks::slug(title), dir.clone(), &[], true)
+            self.own_tree(
+                &id,
+                &tasks::slug(title),
+                dir.clone(),
+                &[],
+                horadric_core::Agent::Claude,
+                true,
+            )
         } else {
             dir.clone()
         };
-        if let Err(e) = self.launch(&id, title, cwd, Vec::new(), Run::Agent, false) {
+        if let Err(e) = self.launch(
+            &id,
+            title,
+            cwd,
+            Vec::new(),
+            Run::Agent(horadric_core::Agent::Claude),
+            false,
+        ) {
             // A worktree the session never started in holds nothing.
             if let Some((w, _)) = self.new_trees.remove(&id) {
                 crate::worktree::remove(w);

@@ -35,13 +35,16 @@ pub struct Tagged {
 pub struct NewSession {
     pub name: Option<String>,
     pub cwd: String,
-    /// Passed to `claude` as they are.
+    /// Passed to the agent as they are.
     pub args: Vec<String>,
+    /// Which agent to start. A request without one is for Claude Code.
+    pub agent: Agent,
 }
 
 impl NewSession {
     pub fn to_json(&self) -> String {
-        json!({ "name": self.name, "cwd": self.cwd, "args": self.args }).to_string()
+        json!({ "name": self.name, "cwd": self.cwd, "args": self.args, "agent": self.agent })
+            .to_string()
     }
 
     pub fn from_json(body: &[u8]) -> Option<Self> {
@@ -56,7 +59,16 @@ impl NewSession {
                 .map(|x| x.as_str().map(str::to_string))
                 .collect::<Option<Vec<_>>>()?,
         };
-        Some(NewSession { name, cwd, args })
+        let agent = match v.get("agent") {
+            None | Some(Value::Null) => Agent::Claude,
+            Some(a) => Agent::from_name(a.as_str()?)?,
+        };
+        Some(NewSession {
+            name,
+            cwd,
+            args,
+            agent,
+        })
     }
 }
 
@@ -513,6 +525,7 @@ X-Horadric-Port: {dev}
             name: Some("fix-login".into()),
             cwd: "C:/dev/app".into(),
             args: vec!["--model".into(), "haiku".into()],
+            agent: Agent::Codex,
         };
         let reply = post_new(port, "X-Horadric-Command: new\r\n", &want.to_json());
         assert!(reply.starts_with("HTTP/1.1 200"), "{reply}");
@@ -611,7 +624,12 @@ X-Horadric-Port: {dev}
         let n = NewSession::from_json(br#"{"cwd":"C:/x"}"#).unwrap();
         assert_eq!(n.name, None);
         assert!(n.args.is_empty());
+        assert_eq!(n.agent, Agent::Claude);
         assert_eq!(NewSession::from_json(br#"{"name":"x"}"#), None);
+        assert_eq!(
+            NewSession::from_json(br#"{"cwd":"C:/x","agent":"gemini"}"#),
+            None
+        );
     }
 
     #[test]

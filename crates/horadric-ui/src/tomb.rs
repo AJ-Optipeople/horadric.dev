@@ -117,7 +117,14 @@ impl App {
             .or_default()
             .insert(n);
         let id = tombs::tomb(batch, n);
-        let cwd = self.own_tree(&id, &tasks::slug(&task.title), dir.to_path_buf(), &[], true);
+        let cwd = self.own_tree(
+            &id,
+            &tasks::slug(&task.title),
+            dir.to_path_buf(),
+            &[],
+            horadric_core::Agent::Claude,
+            true,
+        );
         if !self.new_trees.contains_key(&id) {
             return Err("git gave the tomb no worktree of its own".into());
         }
@@ -126,7 +133,14 @@ impl App {
             tasks::prompt(task, &horadric_command(), file::rel(dir)),
         );
         let name = tombs::name(&task.title, n);
-        if let Err(e) = self.launch(&id, &name, cwd, Vec::new(), Run::Agent, false) {
+        if let Err(e) = self.launch(
+            &id,
+            &name,
+            cwd,
+            Vec::new(),
+            Run::Agent(horadric_core::Agent::Claude),
+            false,
+        ) {
             if let Some((w, _)) = self.new_trees.remove(&id) {
                 crate::worktree::remove(w);
             }

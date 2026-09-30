@@ -11,6 +11,7 @@
 //! Horadric is not running costs Claude Code a few microseconds.
 
 pub mod client;
+pub mod codex;
 pub mod install;
 pub mod listener;
 pub mod tasks;

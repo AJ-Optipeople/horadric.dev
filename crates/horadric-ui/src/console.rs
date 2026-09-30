@@ -190,13 +190,17 @@ pub struct Launch {
     pub setup: Vec<String>,
 }
 
-/// The agent binary: `HORADRIC_AGENT` when set, which is also how a plain
-/// shell gets into a tile for testing, otherwise `claude` from `PATH`, the
-/// first of `claude.exe` or `claude.cmd` in path order, as cmd.exe resolves
-/// it. The npm install is a `.cmd` shim, so `.exe` alone would skip it.
-pub fn agent_program() -> Option<PathBuf> {
+/// The program `agent` runs, from `PATH` or where its installers put it,
+/// the first `.exe` or `.cmd` in path order, as cmd.exe resolves it. The
+/// npm installs are `.cmd` shims, so `.exe` alone would skip them. For
+/// Claude, `HORADRIC_AGENT` wins when set, which is how a plain shell gets
+/// into a tile for testing.
+pub fn agent_program(agent: Agent) -> Option<PathBuf> {
     let path = claude_search_path();
-    let name = std::env::var("HORADRIC_AGENT").unwrap_or_else(|_| "claude".into());
+    let chosen = std::env::var("HORADRIC_AGENT")
+        .ok()
+        .filter(|_| agent == Agent::Claude);
+    let name = chosen.unwrap_or_else(|| agent.program().into());
     if Path::new(&name).is_absolute() {
         return Some(PathBuf::from(name));
     }
@@ -432,6 +436,7 @@ impl Console {
         serial: usize,
         args: Vec<String>,
         shell: bool,
+        agent: Agent,
         cwd: PathBuf,
         notify: HWND,
     ) -> io::Result<Arc<Console>> {
@@ -441,7 +446,9 @@ impl Console {
             serial,
             args,
             shell,
-            claude: !shell && agent_program().is_some_and(|p| is_claude(&p)),
+            claude: !shell
+                && agent == Agent::Claude
+                && agent_program(agent).is_some_and(|p| is_claude(&p)),
             cwd: Some(cwd),
         };
         Ok(Console::hosted(attached, meta, notify))

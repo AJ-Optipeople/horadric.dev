@@ -1,15 +1,16 @@
 //! `horadric run` and `horadric new`: the two ways to start a session.
 //!
-//! `new` asks the running app to start `claude` in a terminal window of its
-//! own, which is the normal way. `run` starts it right here, in the terminal
-//! you called it from, tagged so its tile still shows up. Clicking that tile
-//! does nothing, since Horadric does not own the terminal.
+//! `new` asks the running app to start `claude`, or with `--agent` another
+//! agent, in a terminal of its own, which is the normal way. `run` starts
+//! `claude` right here, in the terminal you called it from, tagged so its
+//! tile still shows up. Clicking that tile does nothing, since Horadric does
+//! not own the terminal.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::SystemTime;
 
-use horadric_core::{session_id, HookEvent};
+use horadric_core::{session_id, Agent, HookEvent};
 use horadric_hooks::listener::NewSession;
 use horadric_hooks::{
     client, COMMAND_HEADER, HOOK_PATH, NEW_PATH, OWNER_ENV, SESSION_ENV, SESSION_HEADER,
@@ -21,12 +22,14 @@ struct Options {
     name: Option<String>,
     cwd: PathBuf,
     passthrough: Vec<String>,
+    agent: Agent,
 }
 
 fn parse(args: &[String], command: &str) -> Result<Options, String> {
     let mut name: Option<String> = None;
     let mut cwd: Option<PathBuf> = None;
     let mut passthrough: Vec<String> = Vec::new();
+    let mut agent = Agent::Claude;
 
     let mut i = 0;
     while i < args.len() {
@@ -37,6 +40,13 @@ fn parse(args: &[String], command: &str) -> Result<Options, String> {
             }
             "--cwd" => {
                 cwd = args.get(i + 1).map(PathBuf::from);
+                i += 2;
+            }
+            "--agent" if command == "new" => {
+                let name = args.get(i + 1).map_or("", String::as_str);
+                agent = Agent::from_name(name).ok_or_else(|| {
+                    format!("no agent called `{name}`, try claude, codex or grok")
+                })?;
                 i += 2;
             }
             "--" => {
@@ -57,6 +67,7 @@ fn parse(args: &[String], command: &str) -> Result<Options, String> {
         name,
         cwd,
         passthrough,
+        agent,
     })
 }
 
@@ -67,6 +78,7 @@ pub fn new(args: &[String]) -> Result<(), String> {
         name: o.name,
         cwd: o.cwd.to_string_lossy().to_string(),
         args: o.passthrough,
+        agent: o.agent,
     };
     let port = horadric_hooks::port();
     match client::post(
@@ -88,6 +100,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
         name,
         cwd,
         passthrough,
+        ..
     } = parse(args, "run")?;
     let id = new_id(name.as_deref(), &cwd);
     let shown = name
@@ -150,4 +163,26 @@ fn new_id(name: Option<&str>, cwd: &Path) -> String {
         .or_else(|| cwd.file_name().map(|n| n.to_string_lossy().to_string()))
         .unwrap_or_else(|| "session".into());
     session_id(&base, SystemTime::now())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(line: &str) -> Vec<String> {
+        line.split_whitespace().map(str::to_string).collect()
+    }
+
+    #[test]
+    fn new_takes_an_agent_and_run_does_not() {
+        let o = parse(&args("--agent Codex --cwd C:/p -- -m gpt"), "new").unwrap();
+        assert_eq!(o.agent, Agent::Codex);
+        assert_eq!(o.passthrough, args("-m gpt"));
+        assert_eq!(
+            parse(&args("--cwd C:/p"), "new").unwrap().agent,
+            Agent::Claude
+        );
+        assert!(parse(&args("--agent gemini"), "new").is_err());
+        assert!(parse(&args("--agent codex"), "run").is_err());
+    }
 }

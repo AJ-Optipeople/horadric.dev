@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::SystemTime;
 
-use horadric_core::{title, Title};
+use horadric_core::{title, Agent, Title};
 
 /// Claude Code repeats the title every few turns, so the end of the file
 /// nearly always has it. A transcript is megabytes by the end of a long day.
@@ -43,12 +43,14 @@ pub fn mid_turn(cwd: &str, id: &str) -> Option<bool> {
     })
 }
 
-/// A conversation Claude Code kept, which `claude --resume <id>` carries on.
+/// A conversation an agent kept, which its resume carries on.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Past {
     pub id: String,
     pub title: Title,
     pub modified: SystemTime,
+    /// Whose conversation it is, which says how to carry it on.
+    pub agent: Agent,
 }
 
 /// A menu is not the place for every conversation ever held in a folder,
@@ -95,6 +97,7 @@ fn list_in(root: &Path, cwd: &str, skip: &[String], limit: usize) -> Vec<Past> {
                 id,
                 title,
                 modified,
+                agent: Agent::Claude,
             })
         })
         .take(limit)

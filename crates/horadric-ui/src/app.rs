@@ -1624,13 +1624,28 @@ const MENU_HOSTS: usize = 8;
 /// What a session's console runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Run {
-    Agent,
+    Agent(Agent),
     Shell,
     /// `ssh` to this host, a shell on another machine.
     Ssh(String),
     /// `claude attach` to the background session with this short id. The
     /// daemon runs the agent; the pane only shows it.
     Attach(String),
+}
+
+/// What to say when `agent` is not installed, or was installed after
+/// Horadric started and is not on the `PATH` it has.
+fn not_found(agent: Agent) -> String {
+    let get = match agent {
+        Agent::Claude => "Install it from https://claude.com/claude-code",
+        Agent::Codex => "Install it with `npm install -g @openai/codex`",
+        Agent::Grok => "Install Grok Build",
+    };
+    format!(
+        "Horadric cannot find {}. {get}, then try again. If it is installed, \
+         quit Horadric from the tray and start it again, so it sees the new PATH.",
+        agent.label()
+    )
 }
 
 /// Puts the keyboard in the address bar of the project's browser pane,
@@ -1821,6 +1836,7 @@ fn project_menu(key: &str) {
     const MERGE: usize = 300;
     const MERGE_END: usize = 400;
     const COLOUR: usize = 400;
+    const ADD_AGENT: usize = 500;
     let dir = with_app(|app| app.project_dir(key)).flatten();
     // Reading transcripts and asking git are the slow part of opening the
     // menu, so they are done side by side.
@@ -1860,6 +1876,18 @@ fn project_menu(key: &str) {
     // In trunk mode a worktree is had by asking for one.
     if own_trees == Some(false) {
         items.push(Item::action(ADD_TREE, "New session in its own worktree"));
+    }
+    // Claude Code is what the plus starts. Another agent is offered when
+    // it is installed.
+    let others: Vec<Agent> = [Agent::Codex]
+        .into_iter()
+        .filter(|a| console::agent_program(*a).is_some())
+        .collect();
+    for (i, a) in others.iter().enumerate() {
+        items.push(Item::action(
+            ADD_AGENT + i,
+            format!("New {} session", a.label()),
+        ));
     }
     items.extend([
         Item::Submenu("History".into(), history_items(&past, PAST)),
@@ -1974,7 +2002,14 @@ fn project_menu(key: &str) {
         Some(ADD) => app.add_sessions(key, 1),
         Some(ADD_TREE) => {
             if let Some(dir) = app.project_dir(key) {
-                if let Err(e) = app.start_in(None, dir, Vec::new(), true) {
+                if let Err(e) = app.start_in(None, dir, Vec::new(), Agent::Claude, true) {
+                    eprintln!("horadric: cannot start session: {e}");
+                }
+            }
+        }
+        Some(i) if (ADD_AGENT..ADD_AGENT + others.len()).contains(&i) => {
+            if let Some(dir) = app.project_dir(key) {
+                if let Err(e) = app.start_in(None, dir, Vec::new(), others[i - ADD_AGENT], false) {
                     eprintln!("horadric: cannot start session: {e}");
                 }
             }
@@ -2115,8 +2150,15 @@ fn add_host(dir: &Path, host: &str) {
 /// The lines of a History menu: each past conversation, `first` on, then
 /// Claude Code's own picker for the rest.
 /// The past conversations held in `dir`, leaving out the ones in `held`.
+/// Claude Code's and Codex's past conversations in `dir` together, newest
+/// first.
 fn past_in(dir: &Path, held: &[String]) -> Vec<Past> {
-    transcript::history(&dir.to_string_lossy(), held, HISTORY)
+    let dir = dir.to_string_lossy();
+    let mut past = transcript::history(&dir, held, HISTORY);
+    past.extend(horadric_hooks::codex::history(&dir, held, HISTORY));
+    past.sort_by_key(|p| std::cmp::Reverse(p.modified));
+    past.truncate(HISTORY);
+    past
 }
 
 fn history_items(past: &[Past], first: usize) -> Vec<Item> {
@@ -2656,7 +2698,8 @@ impl App {
                 for command in pending {
                     match command {
                         Command::New(n) => {
-                            if let Err(e) = self.start(n.name, PathBuf::from(n.cwd), n.args) {
+                            let cwd = PathBuf::from(n.cwd);
+                            if let Err(e) = self.start_in(n.name, cwd, n.args, n.agent, false) {
                                 eprintln!("horadric: cannot start session: {e}");
                             }
                         }
@@ -2801,6 +2844,7 @@ impl App {
                 serial,
                 saved.args.clone(),
                 saved.shell,
+                saved.agent,
                 PathBuf::from(&saved.cwd),
                 self.notify,
             ) {
@@ -2993,7 +3037,7 @@ impl App {
         cwd: PathBuf,
         args: Vec<String>,
     ) -> Result<String, String> {
-        self.start_in(name, cwd, args, false)
+        self.start_in(name, cwd, args, Agent::Claude, false)
     }
 
     /// [`App::start`], in a worktree of its own when `own_tree` even where
@@ -3003,6 +3047,7 @@ impl App {
         name: Option<String>,
         cwd: PathBuf,
         args: Vec<String>,
+        agent: Agent,
         own_tree: bool,
     ) -> Result<String, String> {
         if !cwd.is_dir() {
@@ -3013,8 +3058,8 @@ impl App {
         let id = self.unique_id(&base);
         let branch = name.as_deref().unwrap_or("session").to_string();
         let shown = name.unwrap_or(folder);
-        let cwd = self.own_tree(&id, &branch, cwd, &args, own_tree);
-        if let Err(e) = self.launch(&id, &shown, cwd, args, Run::Agent, false) {
+        let cwd = self.own_tree(&id, &branch, cwd, &args, agent, own_tree);
+        if let Err(e) = self.launch(&id, &shown, cwd, args, Run::Agent(agent), false) {
             // A worktree the session never started in holds nothing.
             if let Some((w, _)) = self.new_trees.remove(&id) {
                 worktree::remove(w);
@@ -3040,16 +3085,17 @@ impl App {
     /// Where a new session starts: a worktree of its own added from `cwd`,
     /// or `cwd` itself when the project is in trunk mode and none was
     /// `asked` for, is not in a repository, or `args` carry on a
-    /// conversation, which Claude Code keeps by the folder it was held in.
+    /// conversation, which the agent keeps by the folder it was held in.
     fn own_tree(
         &mut self,
         id: &str,
         branch: &str,
         cwd: PathBuf,
         args: &[String],
+        agent: Agent,
         asked: bool,
     ) -> PathBuf {
-        if Agent::Claude.carries_on(args) {
+        if agent.carries_on(args) {
             return cwd;
         }
         match worktree::add(&cwd, branch, &self.ports_taken(), asked) {
@@ -3459,8 +3505,9 @@ impl App {
             },
             history::Pick::All => None,
         };
-        let args = Agent::Claude.resume_args(past.map(|p| p.id.as_str()));
-        let id = match self.start(None, dir.to_path_buf(), args) {
+        let agent = past.map_or(Agent::Claude, |p| p.agent);
+        let args = agent.resume_args(past.map(|p| p.id.as_str()));
+        let id = match self.start_in(None, dir.to_path_buf(), args, agent, false) {
             Ok(id) => id,
             Err(e) => {
                 eprintln!("horadric: cannot resume a conversation: {e}");
@@ -3496,7 +3543,7 @@ impl App {
             let run = match (&saved.ssh, saved.shell) {
                 (Some(host), _) => Run::Ssh(host.clone()),
                 (None, true) => Run::Shell,
-                (None, false) => Run::Agent,
+                (None, false) => Run::Agent(saved.agent),
             };
             self.launch(id, &saved.name, cwd, args, run, show)
         } else {
@@ -3586,20 +3633,15 @@ impl App {
         }
         // An attached pane is started like a shell, untagged: the session's
         // hooks come from the daemon, not from this console.
-        let shell = run != Run::Agent;
+        let shell = !matches!(run, Run::Agent(_));
         let attach = matches!(run, Run::Attach(_));
         let host = match &run {
             Run::Ssh(h) => Some(h.clone()),
             _ => None,
         };
         let (program, args) = match &run {
-            Run::Agent => (
-                console::agent_program().ok_or(
-                    "Horadric cannot find Claude Code. Install it from \
-                     https://claude.com/claude-code, then try again. If it is \
-                     installed, quit Horadric from the tray and start it again, \
-                     so it sees the new PATH.",
-                )?,
+            Run::Agent(agent) => (
+                console::agent_program(*agent).ok_or_else(|| not_found(*agent))?,
                 args,
             ),
             Run::Shell => (
@@ -3642,8 +3684,9 @@ impl App {
                     }
                     own_tree = s.worktree.clone();
                     s.shell = shell && !attach;
-                    if run == Run::Agent {
-                        s.agent = console::agent_of(&program).unwrap_or_default();
+                    if let Run::Agent(agent) = run {
+                        // A shell put in with `HORADRIC_AGENT` stays Claude's.
+                        s.agent = console::agent_of(&program).unwrap_or(agent);
                     }
                     // Until the remote shell sets a title, the tile says
                     // where it is.
@@ -3718,7 +3761,9 @@ impl App {
     fn extra_args(&mut self, id: &str, program: &Path, args: &[String], cwd: &Path) -> Vec<String> {
         if console::agent_of(program) == Some(Agent::Codex) {
             let hook = store::exe_command(&console::host_program(), "hook codex");
-            return Agent::Codex.hook_args(&hook);
+            let mut extra = Agent::Codex.hook_args(&hook);
+            extra.extend(self.shared.defaults.borrow().flags(Agent::Codex, args));
+            return extra;
         }
         if !console::is_claude(program) {
             return Vec::new();

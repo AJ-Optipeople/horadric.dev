@@ -88,8 +88,14 @@ impl Agent {
                         rest.next();
                     }
                 }
-                // `-c` is Codex's config override, so it stays.
-                out.extend(rest.filter(|a| *a != "--last").cloned());
+                // `-c` is Codex's config override, so it stays. The prompt
+                // it was started with was sent then, and a resume would send
+                // it again.
+                let rest: Vec<String> = rest.filter(|a| *a != "--last").cloned().collect();
+                match id {
+                    Some(_) => out.extend(without_prompt(&rest)),
+                    None => out.extend(rest),
+                }
             }
         }
         out
@@ -97,8 +103,17 @@ impl Agent {
 
     /// The flags that give setting `s` the value `value`. None where the
     /// agent has no such setting, or where Claude Code's values do not
-    /// mean anything to it: the permission modes are Claude's own.
+    /// mean anything to it: the permission modes and the models are Claude's
+    /// own until each agent has its own list. Effort is one scale, and
+    /// Codex's stops at `xhigh`.
     pub fn setting_args(self, s: Setting, value: &str) -> Option<Vec<String>> {
+        if self != Agent::Claude && s == Setting::Model && value.starts_with("claude-") {
+            return None;
+        }
+        let value = match (self, value) {
+            (Agent::Codex, "max") => "xhigh",
+            _ => value,
+        };
         let pair = |flag: &str| Some(vec![flag.to_string(), value.to_string()]);
         match (self, s) {
             (Agent::Claude, Setting::Model) => pair("--model"),
@@ -324,6 +339,41 @@ fn without_resume(args: &[String]) -> Vec<String> {
     out
 }
 
+/// Codex's flags that take a value, as the next argument.
+const CODEX_VALUE_FLAGS: [&str; 16] = [
+    "-c",
+    "--config",
+    "-m",
+    "--model",
+    "-p",
+    "--profile",
+    "-s",
+    "--sandbox",
+    "-a",
+    "--ask-for-approval",
+    "-C",
+    "--cd",
+    "-i",
+    "--image",
+    "--add-dir",
+    "--local-provider",
+];
+
+/// Codex `args` less the prompt: whatever is not a flag or a flag's value.
+fn without_prompt(args: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut args = args.iter();
+    while let Some(a) = args.next() {
+        if CODEX_VALUE_FLAGS.contains(&a.as_str()) {
+            out.push(a.clone());
+            out.extend(args.next().cloned());
+        } else if a.starts_with('-') {
+            out.push(a.clone());
+        }
+    }
+    out
+}
+
 /// Whether Codex `args` override config `key`, as `-c key=v`,
 /// `--config key=v` or `--config=key=v`.
 fn sets_config(args: &[String], key: &str) -> bool {
@@ -509,6 +559,12 @@ mod tests {
             args("resume new -m gpt")
         );
         assert_eq!(a.carry_on(None, &args("-c k=v")), args("-c k=v"));
+        // The prompt it started with is not sent again.
+        assert_eq!(
+            a.carry_on(Some("id"), &args("-m gpt -C dir --search pong -c k=v")),
+            args("resume id -m gpt -C dir --search -c k=v")
+        );
+        assert_eq!(a.carry_on(None, &args("-m gpt pong")), args("-m gpt pong"));
     }
 
     #[test]
@@ -549,6 +605,25 @@ mod tests {
             Some(args("--effort v"))
         );
         assert_eq!(flags(Agent::Grok, Setting::Permissions), None);
+    }
+
+    #[test]
+    fn claude_values_do_not_reach_another_agent() {
+        let codex = |s, v| Agent::Codex.setting_args(s, v);
+        assert_eq!(codex(Setting::Model, "claude-opus-5-5"), None);
+        assert_eq!(
+            Agent::Grok.setting_args(Setting::Model, "claude-opus-5-5"),
+            None
+        );
+        assert_eq!(codex(Setting::Model, "gpt-5.5"), Some(args("-m gpt-5.5")));
+        assert_eq!(
+            codex(Setting::Effort, "max"),
+            Some(args("-c model_reasoning_effort=xhigh"))
+        );
+        assert_eq!(
+            Agent::Claude.setting_args(Setting::Effort, "max"),
+            Some(args("--effort max"))
+        );
     }
 
     #[test]

@@ -53,6 +53,7 @@ fn run() -> Result<(), String> {
         name: None,
         cwd: folder.to_string_lossy().to_string(),
         args: Vec::new(),
+        agent: horadric_core::Agent::Claude,
     };
     match client::post(
         port,
