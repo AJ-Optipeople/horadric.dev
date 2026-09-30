@@ -110,9 +110,12 @@ impl Agent {
     pub fn carry_on(self, id: Option<&str>, args: &[String]) -> Vec<String> {
         let mut out = id.map_or_else(Vec::new, |id| self.resume_args(Some(id)));
         match self {
-            Agent::Claude => out.extend(without_resume(args)),
             // The prompt it was started with was sent then, and a resume
             // would send it again.
+            Agent::Claude if id.is_some() => {
+                out.extend(without_claude_prompt(&without_resume(args)))
+            }
+            Agent::Claude => out.extend(without_resume(args)),
             Agent::Grok if id.is_some() => {
                 out.extend(without_prompt(&without_resume(args), &GROK_VALUE_FLAGS))
             }
@@ -477,6 +480,88 @@ fn without_prompt(args: &[String], value_flags: &[&str]) -> Vec<String> {
     out
 }
 
+/// Claude's flags that take one value, as the next argument, or may
+/// (`--debug`, `--worktree` and the like), which then take the next
+/// argument that is not a flag, prompt or not.
+const CLAUDE_VALUE_FLAGS: [&str; 38] = [
+    "--agent",
+    "--agents",
+    "--append-system-prompt",
+    "--autocompact",
+    "--client-data-url",
+    "--cloud",
+    "-d",
+    "--debug",
+    "--debug-file",
+    "--effort",
+    "--environment",
+    "--fallback-model",
+    "--from-pr",
+    "--input-format",
+    "--json-schema",
+    "--max-budget-usd",
+    "--model",
+    "-n",
+    "--name",
+    "--output-format",
+    "--permission-mode",
+    "--permission-prompts",
+    "--plugin-dir",
+    "--plugin-url",
+    "--prompt-suggestions",
+    "--remote-control",
+    "--remote-control-session-name-prefix",
+    "--session-id",
+    "--setting-sources",
+    "--settings",
+    "--system-prompt",
+    "--system-prompt-snapshot",
+    "--teleport",
+    "-w",
+    "--worktree",
+    "--permission-prompt-tool",
+    "--system-prompt-file",
+    "--append-system-prompt-file",
+];
+
+/// Claude's flags that take every argument after them up to the next flag,
+/// so no prompt can follow one.
+const CLAUDE_LIST_FLAGS: [&str; 9] = [
+    "--add-dir",
+    "--allowedTools",
+    "--allowed-tools",
+    "--betas",
+    "--disallowedTools",
+    "--disallowed-tools",
+    "--file",
+    "--mcp-config",
+    "--tools",
+];
+
+/// Claude's `args` less the prompt. A value that starts with a dash stays
+/// by being a flag itself.
+fn without_claude_prompt(args: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut args = args.iter().peekable();
+    while let Some(a) = args.next() {
+        if a == "--" {
+            break;
+        }
+        if CLAUDE_LIST_FLAGS.contains(&a.as_str()) {
+            out.push(a.clone());
+            while let Some(v) = args.next_if(|v| !v.starts_with('-')) {
+                out.push(v.clone());
+            }
+        } else if CLAUDE_VALUE_FLAGS.contains(&a.as_str()) {
+            out.push(a.clone());
+            out.extend(args.next_if(|v| !v.starts_with('-')).cloned());
+        } else if a.starts_with('-') {
+            out.push(a.clone());
+        }
+    }
+    out
+}
+
 /// Whether Codex `args` override config `key`, as `-c key=v`,
 /// `--config key=v` or `--config=key=v`.
 fn sets_config(args: &[String], key: &str) -> bool {
@@ -696,6 +781,30 @@ mod tests {
             args("--resume abc --verbose")
         );
         assert_eq!(a.carry_on(None, &args("--model x")), args("--model x"));
+    }
+
+    #[test]
+    fn claude_resumes_without_its_first_prompt() {
+        let a = Agent::Claude;
+        assert_eq!(
+            a.carry_on(
+                Some("id"),
+                &args("--model x -p pong --settings s --dangerously-skip-permissions")
+            ),
+            args("--resume id --model x -p --settings s --dangerously-skip-permissions")
+        );
+        assert_eq!(
+            a.carry_on(Some("id"), &args("--add-dir a b --verbose pong")),
+            args("--resume id --add-dir a b --verbose")
+        );
+        assert_eq!(
+            a.carry_on(Some("id"), &args("-w tree --debug -- pong")),
+            args("--resume id -w tree --debug")
+        );
+        assert_eq!(
+            a.carry_on(None, &args("--model x pong")),
+            args("--model x pong")
+        );
     }
 
     #[test]
