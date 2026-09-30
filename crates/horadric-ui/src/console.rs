@@ -371,7 +371,8 @@ impl Console {
         };
         let claude = !launch.shell && is_claude(&launch.program);
         let mut program = launch.program;
-        let mut args = match agent_of(&program).filter(|_| !launch.shell) {
+        let agent = agent_of(&program).filter(|_| !launch.shell);
+        let mut args = match agent {
             Some(agent) => agent.line(&launch.extra, &launch.args),
             None => [&launch.extra[..], &launch.args[..]].concat(),
         };
@@ -384,6 +385,7 @@ impl Console {
                 ("COLORTERM".into(), "truecolor".into()),
             ]
         };
+        env_set.extend(agent.map(Agent::env).unwrap_or_default());
         env_set.extend(launch.env);
         // The setup runs in the pane, where its output can be read, and
         // the agent starts after it in the same console.

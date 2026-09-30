@@ -222,6 +222,17 @@ impl Agent {
         }
     }
 
+    /// The environment this agent starts with beside Horadric's session
+    /// tag. Grok runs the `http` hooks in `~/.claude/settings.json` too and
+    /// refuses each one to loopback, with an SSRF error in its TUI at
+    /// every event. Its own command hook already posts them.
+    pub fn env(self) -> Vec<(String, String)> {
+        match self {
+            Agent::Grok => vec![("GROK_CLAUDE_HOOKS_ENABLED".into(), "false".into())],
+            Agent::Claude | Agent::Codex => Vec::new(),
+        }
+    }
+
     /// The command line: Horadric's `extra` before the session's own
     /// `args`. Codex drops every `-c` given before its subcommand once
     /// another comes after it, hooks included, so the session's own config
@@ -694,6 +705,16 @@ mod tests {
         );
         assert!(Agent::Claude.login_args().is_empty());
         assert!(Agent::Grok.login_args().is_empty());
+    }
+
+    #[test]
+    fn grok_skips_the_claude_hooks_it_would_borrow() {
+        assert_eq!(
+            Agent::Grok.env(),
+            [("GROK_CLAUDE_HOOKS_ENABLED".to_string(), "false".to_string())]
+        );
+        assert!(Agent::Claude.env().is_empty());
+        assert!(Agent::Codex.env().is_empty());
     }
 
     #[test]
