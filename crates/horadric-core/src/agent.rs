@@ -214,6 +214,24 @@ impl Agent {
         self == Agent::Codex
     }
 
+    /// Whether a `Notification` of `idle_prompt` in the middle of a turn
+    /// means the agent asked something and waits. Claude Code sends one
+    /// when it does. Grok sends one only a minute after a turn has ended,
+    /// so it says nothing.
+    pub fn idle_means_waiting(self) -> bool {
+        self != Agent::Grok
+    }
+
+    /// Whether `body`, which came in as Claude Code's, is Grok's: Grok runs
+    /// Claude's hooks too, and should it ever post to Claude's `http` hook,
+    /// its own command hook has sent the same event already. Only Grok
+    /// spells the event name in camel case.
+    pub fn is_grok_shaped(body: &[u8]) -> bool {
+        serde_json::from_slice::<Value>(body)
+            .ok()
+            .is_some_and(|v| v.get("hookEventName").is_some())
+    }
+
     /// The hook payload `body` this agent sent, as a [`HookEvent`]. Claude
     /// Code's is the shape the rest of Horadric reads. Codex's is close,
     /// with the prompt under `prompt`. Grok's spells most fields twice,
@@ -229,6 +247,19 @@ impl Agent {
             fields = snake_keys(fields);
             if let Some(Value::String(name)) = fields.get_mut("hook_event_name") {
                 *name = pascal(name);
+            }
+            // A failed turn's class is `error`, its text `errorDetails`, or
+            // else the message shown in its place.
+            if fields.get("hook_event_name").and_then(Value::as_str) == Some("StopFailure") {
+                let text = fields
+                    .remove("error_details")
+                    .or_else(|| fields.get("last_assistant_message").cloned());
+                if let Some(kind) = fields.remove("error") {
+                    fields.entry("error_type").or_insert(kind);
+                }
+                if let Some(text) = text {
+                    fields.entry("error_message").or_insert(text);
+                }
             }
         }
         if !fields.contains_key("user_prompt") {
@@ -450,6 +481,37 @@ mod tests {
         assert_eq!(e.hook_event_name, "StopCancelled");
         assert!(Agent::Grok.event(br#"{"hookEventName":"stop"}"#).is_none());
         assert!(Agent::Codex.event(b"[1]").is_none());
+    }
+
+    #[test]
+    fn a_grok_failure_says_its_class_and_text() {
+        let e = Agent::Grok
+            .event(
+                br#"{"sessionId":"g","hookEventName":"stop_failure","error":"rate_limit",
+                "errorDetails":"429 slow down","lastAssistantMessage":"Rate limited"}"#,
+            )
+            .unwrap();
+        assert_eq!(e.hook_event_name, "StopFailure");
+        assert_eq!(e.error_type.as_deref(), Some("rate_limit"));
+        assert_eq!(e.error_message.as_deref(), Some("429 slow down"));
+        let e = Agent::Grok
+            .event(
+                br#"{"sessionId":"g","hookEventName":"stop_failure","error":"unknown",
+                "lastAssistantMessage":"refused"}"#,
+            )
+            .unwrap();
+        assert_eq!(e.error_message.as_deref(), Some("refused"));
+    }
+
+    #[test]
+    fn a_grok_payload_is_told_from_claudes_by_its_shape() {
+        assert!(Agent::is_grok_shaped(
+            br#"{"sessionId":"g","session_id":"g","hookEventName":"stop","hook_event_name":"Stop"}"#
+        ));
+        assert!(!Agent::is_grok_shaped(
+            br#"{"session_id":"c","hook_event_name":"Stop"}"#
+        ));
+        assert!(!Agent::is_grok_shaped(b"not json"));
     }
 
     #[test]

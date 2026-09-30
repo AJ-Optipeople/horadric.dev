@@ -92,6 +92,7 @@ mod cube;
 mod dialog;
 #[cfg(windows)]
 pub use dialog::error_alone;
+pub use store::exe_command;
 #[cfg(windows)]
 mod dropdown;
 #[cfg(windows)]

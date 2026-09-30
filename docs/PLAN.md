@@ -2477,6 +2477,17 @@ file, and a JWT's payload is base64 and JSON.
    `StopCancelled` is idle, `StopFailure` is failed, and the `Stop`
    with `reason: "shutdown"` after `SessionEnd` is ignored.
    `idle_prompt` changes nothing.
+   Done 2026-09-30. The file is written only when Grok's home (`$GROK_HOME`
+   or `~/.grok`) exists, so a machine without Grok gets no `~/.grok`, and
+   `reload` rewrites it with the Claude hooks. Every entry says a 5 s
+   timeout, since `Stop` is a gate Grok would otherwise wait ten minutes
+   on. `StopFailure` reads its class from `error` and its text from
+   `errorDetails`. The listener drops a payload with a camel case
+   `hookEventName` that came in as Claude's. Live check: the same file,
+   as a trusted project's `.grok/hooks`, ran `horadric.exe hook grok`
+   unquoted with forward slashes on a real `grok -p` turn, and
+   `SessionStart`, `UserPromptSubmit`, `Stop`, `SessionEnd` and the
+   shutdown `Stop` all arrived tagged. Grok sessions start with step 5.
 5. **Starting one.** The plus button and `horadric new --agent codex` start
    any agent found on PATH, Claude by default. A tile carries a small mark
    for its agent, so two sessions in one project can be told apart.

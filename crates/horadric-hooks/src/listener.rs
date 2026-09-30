@@ -280,6 +280,12 @@ fn handle(
         return respond(&mut stream, "200 OK");
     }
 
+    // Grok runs Claude's hooks as well as its own. Should it ever reach
+    // Claude's `http` hook, its command hook has sent the event already.
+    if agent.unwrap_or_default() == Agent::Claude && Agent::is_grok_shaped(&body) {
+        return respond(&mut stream, "200 OK");
+    }
+
     // Parsing is all that happens before the reply, which tells an agent
     // that just edited a file another session is still changing.
     let parsed = agent.unwrap_or_default().event(&body);

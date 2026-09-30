@@ -207,12 +207,16 @@ fn install_command() -> Result<(), String> {
         horadric_hooks::install::settings_path().ok_or("cannot find your home directory")?;
     horadric_hooks::install::install(&settings, horadric_hooks::port())
         .map_err(|e| format!("{}: {e}", settings.display()))?;
+    let grok = install::grok_hooks(&dir.join("horadric.exe"))?;
     println!("installed Horadric in {}", dir.display());
     println!("  Start menu: search for Horadric");
     println!("  Terminal:   `horadric` in any new terminal (this one still has the old PATH)");
     println!("  Explorer:   right click a folder, Show more options, Open in Horadric");
     println!("  Starts with Windows (switch it off from the tray menu)");
     println!("  Claude Code hooks in {}", settings.display());
+    if let Some(grok) = grok {
+        println!("  Grok Build hooks in {}", grok.display());
+    }
     launch(&dir.join("horadric.exe"))
 }
 
@@ -222,6 +226,7 @@ fn uninstall_command() -> Result<(), String> {
         horadric_hooks::install::settings_path().ok_or("cannot find your home directory")?;
     horadric_hooks::install::uninstall(&settings)
         .map_err(|e| format!("{}: {e}", settings.display()))?;
+    install::remove_grok_hooks()?;
     println!("uninstalled Horadric: PATH, Start menu, Explorer, start with Windows and hooks");
     if let Some(dir) = install::dir().filter(|d| d.exists()) {
         println!(
@@ -269,12 +274,16 @@ fn hooks(sub: Option<&str>) -> Result<(), String> {
             install::install(&path, port).map_err(|e| format!("{}: {e}", path.display()))?;
             println!("installed Horadric hooks in {}", path.display());
             println!("posting to {}", horadric_hooks::hook_url(port));
+            let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+            if let Some(grok) = crate::install::grok_hooks(&exe)? {
+                println!("installed Grok Build hooks in {}", grok.display());
+            }
             Ok(())
         }
         Some("uninstall") => {
             install::uninstall(&path).map_err(|e| format!("{}: {e}", path.display()))?;
             println!("removed Horadric hooks from {}", path.display());
-            Ok(())
+            crate::install::remove_grok_hooks()
         }
         Some("status") => {
             let ok =

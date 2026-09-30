@@ -5,6 +5,11 @@
 //! started under Horadric: the session header comes out empty and the listener
 //! drops the event. The installer only ever touches entries whose URL
 //! contains `/horadric/`, so a user's own hooks are left exactly as they were.
+//!
+//! Grok Build reads hooks from a folder of files, so it gets one of its own,
+//! `~/.grok/hooks/horadric.json`, a command hook for `horadric hook grok`.
+//! Grok refuses an `http` hook to loopback. The command does nothing for a
+//! `grok` not started under Horadric.
 
 use std::fs;
 use std::io;
@@ -165,6 +170,68 @@ pub fn status(path: &Path, port: u16) -> io::Result<bool> {
     Ok(is_installed(&read(path)?, port))
 }
 
+/// The Grok events Horadric hears. `Notification` carries the permission
+/// prompt that is waiting, `StopCancelled` a Ctrl+C or a rejected prompt.
+pub const GROK_EVENTS: &[&str] = &[
+    "SessionStart",
+    "UserPromptSubmit",
+    "PreToolUse",
+    "PostToolUse",
+    "PostToolUseFailure",
+    "Notification",
+    "Stop",
+    "StopFailure",
+    "StopCancelled",
+    "SessionEnd",
+];
+
+/// Grok's home: `$GROK_HOME`, or `~/.grok`.
+pub fn grok_home() -> Option<PathBuf> {
+    if let Some(home) = std::env::var_os("GROK_HOME").filter(|h| !h.is_empty()) {
+        return Some(PathBuf::from(home));
+    }
+    let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))?;
+    Some(Path::new(&home).join(".grok"))
+}
+
+/// Horadric's hook file in Grok home `home`.
+pub fn grok_hooks_path(home: &Path) -> PathBuf {
+    home.join("hooks").join("horadric.json")
+}
+
+/// The hook file that runs `command` on every event Horadric needs. `Stop`
+/// is a gate Grok waits up to ten minutes for by default, so every entry
+/// says five seconds: `horadric hook` gives up sooner anyway.
+pub fn grok_hooks(command: &str) -> Value {
+    let hooks: Map<String, Value> = GROK_EVENTS
+        .iter()
+        .map(|e| {
+            let handler = json!({ "type": "command", "command": command, "timeout": 5 });
+            (e.to_string(), json!([{ "hooks": [handler] }]))
+        })
+        .collect();
+    json!({ "hooks": hooks })
+}
+
+/// Writes Horadric's hook file into Grok home `home`, when Grok is there:
+/// a machine without Grok gets no `~/.grok`. True when it wrote one.
+/// Idempotent, and the file is Horadric's alone.
+pub fn install_grok(home: &Path, command: &str) -> io::Result<bool> {
+    if !home.is_dir() {
+        return Ok(false);
+    }
+    write(&grok_hooks_path(home), &grok_hooks(command))?;
+    Ok(true)
+}
+
+/// Removes Horadric's hook file from Grok home `home`. Idempotent.
+pub fn uninstall_grok(home: &Path) -> io::Result<()> {
+    match fs::remove_file(grok_hooks_path(home)) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
+    }
+}
+
 /// What Claude Code's `/model` and `/effort` save into the user's settings
 /// as they switch a session: typed in, as Horadric does, they switch this
 /// session and also make the pick the default for every new one. Effort is
@@ -264,6 +331,36 @@ mod tests {
         let mut s = json!({ "model": "x" });
         remove_from(&mut s);
         assert_eq!(s, json!({ "model": "x" }));
+    }
+
+    #[test]
+    fn grok_gets_a_command_hook_on_every_event() {
+        let f = grok_hooks("C:/h/horadric.exe hook grok");
+        let hooks = f["hooks"].as_object().unwrap();
+        assert_eq!(hooks.len(), GROK_EVENTS.len());
+        let h = &f["hooks"]["StopCancelled"][0]["hooks"][0];
+        assert_eq!(h["type"], "command");
+        assert_eq!(h["command"], "C:/h/horadric.exe hook grok");
+        assert_eq!(h["timeout"], 5);
+        assert!(hooks.contains_key("Notification"));
+    }
+
+    #[test]
+    fn grok_hooks_go_only_where_grok_is_and_come_out_again() {
+        let dir = std::env::temp_dir().join(format!("horadric-grok-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        assert!(!install_grok(&dir, "h").unwrap());
+        assert!(!dir.exists());
+        fs::create_dir_all(&dir).unwrap();
+        assert!(install_grok(&dir, "h").unwrap());
+        assert!(install_grok(&dir, "h").unwrap());
+        let written: Value =
+            serde_json::from_slice(&fs::read(grok_hooks_path(&dir)).unwrap()).unwrap();
+        assert_eq!(written, grok_hooks("h"));
+        uninstall_grok(&dir).unwrap();
+        uninstall_grok(&dir).unwrap();
+        assert!(!grok_hooks_path(&dir).exists());
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

@@ -126,7 +126,7 @@ fn swap_inner(pid: u32, log: &mut Log) -> Result<(), String> {
                 format!("install failed ({e}), and the old build did not come up")
             });
         }
-        hooks(log);
+        hooks(&dir, log);
     }
 
     if start_and_check(&dir, log)? {
@@ -148,10 +148,13 @@ fn swap_inner(pid: u32, log: &mut Log) -> Result<(), String> {
     }
 }
 
-/// The Claude Code hooks, as `horadric install` writes them, in case the new
-/// build changed them. A failure is logged, not fatal: the old hooks still
-/// reach Horadric.
-fn hooks(log: &mut Log) {
+/// The Claude Code and Grok hooks, as `horadric install` writes them, in
+/// case the new build changed them. A failure is logged, not fatal: the old
+/// hooks still reach Horadric.
+fn hooks(dir: &Path, log: &mut Log) {
+    if let Err(e) = install::grok_hooks(&dir.join("horadric.exe")) {
+        log.line(&format!("Grok hooks not updated: {e}"));
+    }
     let Some(settings) = horadric_hooks::install::settings_path() else {
         return;
     };

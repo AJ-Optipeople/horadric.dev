@@ -4,7 +4,8 @@
 //! apps live, then from there: puts the folder on the user's `PATH` so
 //! `horadric` works in any new terminal, adds a Start menu shortcut so Windows
 //! search finds it, points Explorer's "Open in Horadric" and Start with
-//! Windows at the installed copy, and installs the Claude Code hooks. No
+//! Windows at the installed copy, and installs the Claude Code hooks and,
+//! when Grok Build is there, its hook file. No
 //! admin rights anywhere. `horadric uninstall` takes all of it back out, and
 //! leaves the saved sessions in `%APPDATA%\Horadric`.
 
@@ -93,6 +94,32 @@ pub fn uninstall(running: bool) -> Result<(), String> {
     }
     let _ = fs::remove_dir(&dir);
     Ok(())
+}
+
+/// Writes Grok's hook file to run `exe hook grok`, when Grok is on this
+/// machine. Returns where, or None when there is no Grok.
+pub fn grok_hooks(exe: &Path) -> Result<Option<PathBuf>, String> {
+    use horadric_hooks::install as hooks;
+    let Some(home) = hooks::grok_home() else {
+        return Ok(None);
+    };
+    let command = horadric_ui::exe_command(exe, "hook grok");
+    let path = hooks::grok_hooks_path(&home);
+    match hooks::install_grok(&home, &command) {
+        Ok(true) => Ok(Some(path)),
+        Ok(false) => Ok(None),
+        Err(e) => Err(format!("{}: {e}", path.display())),
+    }
+}
+
+/// Removes Grok's hook file, if there is one.
+pub fn remove_grok_hooks() -> Result<(), String> {
+    use horadric_hooks::install as hooks;
+    let Some(home) = hooks::grok_home() else {
+        return Ok(());
+    };
+    hooks::uninstall_grok(&home)
+        .map_err(|e| format!("{}: {e}", hooks::grok_hooks_path(&home).display()))
 }
 
 pub fn same_dir(a: &Path, b: &Path) -> bool {

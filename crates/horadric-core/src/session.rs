@@ -362,6 +362,8 @@ impl Session {
                 Some(Phase::Waiting(WaitReason::Permission))
             }
             "Notification" => self.apply_notification(event),
+            // Grok's last `Stop` comes after its `SessionEnd`, as it quits.
+            "Stop" if event.reason.as_deref() == Some("shutdown") => None,
             "Stop" => {
                 if let Some(m) = &event.last_assistant_message {
                     self.last_line = first_line(m);
@@ -398,8 +400,9 @@ impl Session {
                 }
                 _ => Some(Phase::Ended),
             },
-            // Codex's Esc, mid turn or at an approval. No `Stop` follows.
-            "Interrupt" => Some(Phase::Idle),
+            // Codex's Esc, mid turn or at an approval, and Grok's Ctrl+C or
+            // a rejected prompt. No `Stop` follows.
+            "Interrupt" | "StopCancelled" => Some(Phase::Idle),
             _ => None,
         };
         if let Some(t) = &event.title {
@@ -444,6 +447,7 @@ impl Session {
                 }
             }
             "UserPromptSubmit" | "Stop" | "StopFailure" | "SessionEnd" | "Interrupt"
+            | "StopCancelled"
                 if !event.is_subagent() =>
             {
                 self.tool = None;
@@ -557,6 +561,7 @@ impl Session {
             "permission_prompt" => Phase::Waiting(WaitReason::Permission),
             // Idle after a finished turn is just "done, unread". Idle while
             // Claude was supposedly working means it asked and is waiting.
+            "idle_prompt" if !self.agent.idle_means_waiting() => return None,
             "idle_prompt" | "agent_needs_input" => match self.phase {
                 Phase::Working => Phase::Waiting(WaitReason::Input),
                 _ => return None,
@@ -760,6 +765,49 @@ mod tests {
         assert_eq!(s.phase, Phase::Waiting(WaitReason::Error("failed".into())));
         // Then the process exits.
         assert!(s.apply(&HookEvent::synthetic("SessionEnd"), now()));
+        assert_eq!(s.phase, Phase::Ended);
+    }
+
+    #[test]
+    fn grok_waits_is_done_is_cancelled_fails_and_quits() {
+        let mut s = Session::new("g1", "x", "");
+        s.agent = Agent::Grok;
+        s.apply(&ev("UserPromptSubmit"), now());
+        let mut ask = ev("Notification");
+        ask.notification_type = Some("permission_prompt".into());
+        assert!(s.apply(&ask, now()));
+        assert_eq!(s.phase, Phase::Waiting(WaitReason::Permission));
+        assert!(s.apply(&ev("StopCancelled"), now()));
+        assert_eq!(s.phase, Phase::Idle);
+
+        s.apply(&ev("UserPromptSubmit"), now());
+        // Idle during a turn is not Grok asking anything.
+        let mut idle = ev("Notification");
+        idle.notification_type = Some("idle_prompt".into());
+        assert!(!s.apply(&idle, now()));
+        assert_eq!(s.phase, Phase::Working);
+        let mut stop = ev("Stop");
+        stop.reason = Some("end_turn".into());
+        assert!(s.apply(&stop, now()));
+        assert_eq!(s.phase, Phase::Done);
+        assert!(!s.apply(&idle, now()));
+        assert_eq!(s.phase, Phase::Done);
+
+        s.apply(&ev("UserPromptSubmit"), now());
+        let mut failed = ev("StopFailure");
+        failed.error_type = Some("rate_limit".into());
+        assert!(s.apply(&failed, now()));
+        assert_eq!(
+            s.phase,
+            Phase::Waiting(WaitReason::Error("rate_limit".into()))
+        );
+
+        // Quitting: `SessionEnd`, then a `Stop` that is not a finished turn.
+        assert!(s.apply(&ev("SessionEnd"), now()));
+        assert_eq!(s.phase, Phase::Ended);
+        let mut shutdown = ev("Stop");
+        shutdown.reason = Some("shutdown".into());
+        assert!(!s.apply(&shutdown, now()));
         assert_eq!(s.phase, Phase::Ended);
     }
 
