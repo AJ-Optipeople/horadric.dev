@@ -185,6 +185,8 @@ const WM_HORADRIC_PANE: u32 = WM_APP + 26;
 /// The usage window's Version row clicked, handled outside the app's
 /// borrow since it may ask.
 const WM_HORADRIC_VERSION: u32 = WM_APP + 27;
+/// A session did not start, and the app's `start_failed` says why.
+const WM_HORADRIC_START_FAILED: u32 = WM_APP + 28;
 
 /// A button in a session pane's header, handled outside the app's borrow
 /// since it may ask first.
@@ -671,6 +673,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             last_saved: Some(saved),
             frozen: false,
             pick_from: None,
+            start_failed: None,
             menu_for: None,
             stash_menu_for: None,
             project_menu_for: None,
@@ -911,6 +914,18 @@ unsafe extern "system" fn app_proc(
         WM_HORADRIC_PICK => {
             let start = with_app(|app| app.pick_from.take()).flatten();
             pick_and_start(hwnd, start);
+            return LRESULT(0);
+        }
+        WM_HORADRIC_START_FAILED => {
+            if let Some(why) = with_app(|app| app.start_failed.take()).flatten() {
+                ask(&Dialog {
+                    tone: Tone::Error,
+                    title: "Cannot start the session",
+                    text: &why,
+                    buttons: &["OK"],
+                    default: 0,
+                });
+            }
             return LRESULT(0);
         }
         WM_HORADRIC_TILE_MENU => {
@@ -2486,6 +2501,8 @@ struct App {
     frozen: bool,
     /// Where the next folder picker opens. Set by the plus button.
     pick_from: Option<PathBuf>,
+    /// Why the last session asked for did not start, until it is said.
+    start_failed: Option<String>,
     /// The tile whose menu is about to show.
     menu_for: Option<String>,
     /// The stashed session whose menu is about to show.
@@ -3002,6 +3019,10 @@ impl App {
             if let Some((w, _)) = self.new_trees.remove(&id) {
                 worktree::remove(w);
             }
+            // Said outside the borrow. Otherwise nothing shows it failed:
+            // the folder picker only closes, and no tile appears.
+            self.start_failed = Some(e.clone());
+            post(self.notify.0 as isize, WM_HORADRIC_START_FAILED, 0);
             return Err(e);
         }
         // A new session joins the stage where it stands, at the size it was
@@ -3573,8 +3594,12 @@ impl App {
         };
         let (program, args) = match &run {
             Run::Agent => (
-                console::agent_program()
-                    .ok_or("claude not found on PATH (or set HORADRIC_AGENT)")?,
+                console::agent_program().ok_or(
+                    "Horadric cannot find Claude Code. Install it from \
+                     https://claude.com/claude-code, then try again. If it is \
+                     installed, quit Horadric from the tray and start it again, \
+                     so it sees the new PATH.",
+                )?,
                 args,
             ),
             Run::Shell => (

@@ -194,7 +194,7 @@ pub struct Launch {
 /// first of `claude.exe` or `claude.cmd` in path order, as cmd.exe resolves
 /// it. The npm install is a `.cmd` shim, so `.exe` alone would skip it.
 pub fn agent_program() -> Option<PathBuf> {
-    let path = std::env::var_os("PATH").unwrap_or_default();
+    let path = claude_search_path();
     let name = std::env::var("HORADRIC_AGENT").unwrap_or_else(|_| "claude".into());
     if Path::new(&name).is_absolute() {
         return Some(PathBuf::from(name));
@@ -233,8 +233,40 @@ pub fn ssh_program() -> Option<PathBuf> {
 /// Claude Code itself, for commands of its own such as `claude agents`,
 /// whatever `HORADRIC_AGENT` puts in the tiles.
 pub fn claude_program() -> Option<PathBuf> {
+    find_program("claude", &claude_search_path(), PROGRAM_EXTS, Path::is_file)
+}
+
+/// `PATH`, then where Claude Code's installers put it. `PATH` is the one
+/// Horadric started with, and Claude Code installed since, or by an
+/// installer that only changed the path for new logins, is not on it.
+fn claude_search_path() -> std::ffi::OsString {
+    let var = |name| std::env::var_os(name).map(PathBuf::from);
     let path = std::env::var_os("PATH").unwrap_or_default();
-    find_program("claude", &path, PROGRAM_EXTS, Path::is_file)
+    let dirs = install_dirs(var("USERPROFILE"), var("APPDATA"), var("LOCALAPPDATA"));
+    std::env::join_paths(std::env::split_paths(&path).chain(dirs)).unwrap_or(path)
+}
+
+/// The folders Claude Code's installers put `claude` in: the native one,
+/// npm's global folder, winget's links and Scoop's shims.
+fn install_dirs(
+    profile: Option<PathBuf>,
+    appdata: Option<PathBuf>,
+    local: Option<PathBuf>,
+) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(p) = &profile {
+        dirs.push(p.join(".local").join("bin"));
+    }
+    if let Some(a) = appdata {
+        dirs.push(a.join("npm"));
+    }
+    if let Some(l) = local {
+        dirs.push(l.join("Microsoft").join("WinGet").join("Links"));
+    }
+    if let Some(p) = profile {
+        dirs.push(p.join("scoop").join("shims"));
+    }
+    dirs
 }
 
 /// `claude` with these arguments, without a window, and without the
@@ -1009,6 +1041,26 @@ impl EventListener for Events {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn claude_is_looked_for_where_its_installers_put_it() {
+        let dirs = install_dirs(
+            Some(PathBuf::from(r"C:\Users\x")),
+            Some(PathBuf::from(r"C:\Users\x\AppData\Roaming")),
+            Some(PathBuf::from(r"C:\Users\x\AppData\Local")),
+        );
+        assert_eq!(
+            dirs,
+            [
+                r"C:\Users\x\.local\bin",
+                r"C:\Users\x\AppData\Roaming\npm",
+                r"C:\Users\x\AppData\Local\Microsoft\WinGet\Links",
+                r"C:\Users\x\scoop\shims",
+            ]
+            .map(PathBuf::from)
+        );
+        assert!(install_dirs(None, None, None).is_empty());
+    }
 
     #[test]
     fn claude_is_claude_however_it_is_installed() {
