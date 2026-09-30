@@ -98,8 +98,8 @@ pub struct Shared {
     /// The other agents' limits, written by the feeder thread as their
     /// events bring them.
     pub agent_usage: Arc<Mutex<BTreeMap<Agent, Usage>>>,
-    /// The Claude account in use, as the usage window names it.
-    pub account: RefCell<Option<String>>,
+    /// The account each agent uses, as the usage window names it.
+    pub account: RefCell<BTreeMap<Agent, String>>,
     /// What each agent's sessions start with, from its own lists.
     pub defaults: RefCell<BTreeMap<Agent, Defaults>>,
     /// Each project's task list as last read, by project key.

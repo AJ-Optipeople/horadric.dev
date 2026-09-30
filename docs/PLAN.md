@@ -2560,6 +2560,34 @@ file, and a JWT's payload is base64 and JSON.
    not notice a changed file in the live check, so a switch stops and
    resumes its sessions, as for Claude and Codex. A switch touches one
    provider's sessions and leaves the others running.
+   Done 2026-09-30. Every provider's screen in the usage window has the
+   Account row, and its list holds that provider's accounts alone, with
+   the plan for ChatGPT ("Plus", from the `id_token`'s
+   `chatgpt_plan_type`). An account now says whose it is (`agent`,
+   missing reads as Claude, so `accounts.dat` from before loads), and
+   Codex's and Grok's ids start with the agent's name. Codex's id is its
+   `account_id` and the ChatGPT user, Grok's its `user_id` and `team_id`.
+   The app follows each agent's login on its own (`Login`): watched,
+   kept, put back after Add account, guarded for 15 seconds after a
+   switch, and a switch waits only for that agent's sessions. Add
+   account opens `codex login` or `grok login`. Every Codex start, resume
+   and login gets `-c cli_auth_credentials_store=file`, the value bare
+   since a non TOML value is taken as the string. A dev instance
+   switches Codex only with `CODEX_HOME` set, Grok only with `GROK_HOME`.
+   ChatGPT's limits go with its account as Claude's do.
+   Tested with a dev instance, a fake `CODEX_HOME` and `GROK_HOME` with
+   two made up logins each, and `codex.cmd` and `grok.cmd` stand-ins
+   that post a `SessionStart` through `horadric hook`: a login written
+   from outside was kept, the list named both with their plans, picking
+   the other ChatGPT account stopped the Codex sessions only and resumed
+   the prompted one with `resume <id>`, one process each, and a Grok
+   switch picked while its session was mid turn said "after 1 turn" and
+   went through at its `Stop`, `--resume grok-1`, Codex left alone. Not
+   tested: real second subscriptions, and whether `codex login` or
+   `grok login` revokes the login it replaces. Grok has a leader process
+   (`grok leader`), and whether a resumed session reads the file again
+   or gets the old login from a leader still running is for the first
+   real switch to show.
 
 **Not in this.** Cursor, Gemini and the rest, until one is asked for.
 API keys and OpenRouter, asked to wait. Grok Build on Windows is

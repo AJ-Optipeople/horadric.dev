@@ -9,8 +9,8 @@
 //! another place in the columns the same way. A click on the limits folds
 //! it down to the session's budget alone. A list setting drops its list,
 //! which the app opens, since it owns the defaults. Effort is a slider in
-//! the window itself. Under the settings, the Claude account in use, whose
-//! row opens the accounts to switch to.
+//! the window itself. Under the settings, the provider's account in use,
+//! whose row opens its accounts to switch to.
 
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
@@ -78,7 +78,7 @@ pub struct UsageWindow {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Row {
     Setting(Setting),
-    /// Names the account in use. Only Claude's can be switched so far.
+    /// Names the account in use, and opens the ones to switch to.
     Account,
     /// Says which Horadric this is.
     Version,
@@ -91,8 +91,7 @@ fn rows(agent: Agent) -> Vec<Row> {
         .settings()
         .iter()
         .map(|&s| Row::Setting(s))
-        .chain((agent == Agent::Claude).then_some(Row::Account))
-        .chain([Row::Version])
+        .chain([Row::Account, Row::Version])
         .collect()
 }
 
@@ -392,7 +391,9 @@ impl UsageWindow {
                     }
                     Row::Account => SettingLook {
                         label: "Account",
-                        value: account_name(self.shared.account.borrow().as_deref()),
+                        value: account_name(
+                            self.shared.account.borrow().get(&agent).map(String::as_str),
+                        ),
                         stop: None,
                         list: true,
                     },
@@ -469,7 +470,7 @@ impl UsageWindow {
             UsageHit::Setting(i) => {
                 let agent = self.screen.get();
                 match rows(agent).get(i) {
-                    Some(Row::Account) => app::push(Input::AccountMenu),
+                    Some(Row::Account) => app::push(Input::AccountMenu(agent)),
                     Some(Row::Version) => app::push(Input::Version),
                     Some(&Row::Setting(s)) => {
                         if let Some(row) = self.row_on_screen(i) {
@@ -782,10 +783,11 @@ mod tests {
             [
                 Row::Setting(Setting::Model),
                 Row::Setting(Setting::Effort),
+                Row::Account,
                 Row::Version,
             ]
         );
-        assert_eq!(scales(Agent::Grok), [false, true, false]);
+        assert_eq!(scales(Agent::Grok), [false, true, false, false]);
     }
 
     #[test]

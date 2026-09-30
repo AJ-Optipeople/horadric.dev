@@ -208,6 +208,17 @@ impl Agent {
         out
     }
 
+    /// The flags that keep this agent's login in the file Horadric reads
+    /// and switches. Codex can keep it in the OS keyring instead, where
+    /// Horadric cannot see it. A value that is not TOML is taken as the
+    /// string it says, which spares the quotes a console line mangles.
+    pub fn login_args(self) -> Vec<String> {
+        match self {
+            Agent::Codex => vec!["-c".into(), "cli_auth_credentials_store=file".into()],
+            Agent::Claude | Agent::Grok => Vec::new(),
+        }
+    }
+
     /// The command line: Horadric's `extra` before the session's own
     /// `args`. Codex drops every `-c` given before its subcommand once
     /// another comes after it, hooks included, so the session's own config
@@ -588,6 +599,16 @@ mod tests {
         assert_eq!(a.last().unwrap(), "--dangerously-bypass-hook-trust");
         assert!(Agent::Claude.hook_args("x").is_empty());
         assert!(Agent::Grok.hook_args("x").is_empty());
+    }
+
+    #[test]
+    fn codex_keeps_its_login_in_the_file_horadric_switches() {
+        assert_eq!(
+            Agent::Codex.login_args(),
+            ["-c", "cli_auth_credentials_store=file"]
+        );
+        assert!(Agent::Claude.login_args().is_empty());
+        assert!(Agent::Grok.login_args().is_empty());
     }
 
     #[test]

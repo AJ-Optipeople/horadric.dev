@@ -30,13 +30,18 @@ const HEAD: u64 = 512 * 1024;
 /// The newest `limit` Codex conversations held in `cwd`, newest first,
 /// leaving out the ids in `skip`. Only ones with a prompt count.
 pub fn history(cwd: &str, skip: &[String], limit: usize) -> Vec<Past> {
-    let Some(root) = home(
-        std::env::var("CODEX_HOME").ok().as_deref(),
-        std::env::var("USERPROFILE").ok().as_deref(),
-    ) else {
+    let Some(root) = codex_home() else {
         return Vec::new();
     };
     list_in(&root, cwd, skip, limit)
+}
+
+/// Codex's home: `$CODEX_HOME`, or `~/.codex`.
+pub fn codex_home() -> Option<PathBuf> {
+    home(
+        std::env::var("CODEX_HOME").ok().as_deref(),
+        std::env::var("USERPROFILE").ok().as_deref(),
+    )
 }
 
 /// `$CODEX_HOME`, or `.codex` in the home folder.
