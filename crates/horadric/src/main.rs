@@ -11,6 +11,7 @@
 
 mod console;
 mod explorer;
+mod hook;
 mod install;
 mod release;
 mod reload;
@@ -55,6 +56,8 @@ Usage:
   horadric uninstall             Take all of that back out
   horadric status                The status line Horadric gives its sessions: reads Claude
                                Code's JSON on stdin and passes it to the app
+  horadric hook codex|grok       The command hook Codex and Grok post their events
+                               through: reads one on stdin and passes it to the app
   horadric reload [--now]        Swap the running Horadric for this build once no session
                                is working (a build from before session hosts waits),
                                and carry the running sessions over to it.
@@ -103,6 +106,7 @@ fn main() -> ExitCode {
         Some("reload") => reload::request(&args[1..]),
         Some("release") => release::run(&args[1..]),
         Some("status") => status::run(),
+        Some("hook") => hook::run(&args[1..]),
         Some("swap") => reload::swap(&args[1..]),
         Some("install") => install_command(),
         Some("uninstall") => uninstall_command(),

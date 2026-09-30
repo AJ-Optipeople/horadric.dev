@@ -2435,7 +2435,14 @@ file, and a JWT's payload is base64 and JSON.
    - The Codex TUI asks "Trust this folder?" the first time it opens in
      a folder, before any hook runs. A project's first Codex tile shows
      that question, and it is the user's to answer.
-2. **`horadric hook`, the command hook.** Both agents need it, since
+2. **`horadric hook`, the command hook. Done 2026-09-30.** `horadric
+   hook codex|grok` posts the payload as it came with an
+   `X-Horadric-Agent` header, and the listener reads it in that agent's
+   shape through `Agent::event`: Codex's `prompt` becomes the prompt,
+   Grok's camel case keys and snake case event names become Claude's.
+   The event names are left as each agent sends them, for steps 3 and 4
+   to give phases. It prints nothing, so an overlap warning does not
+   reach these agents yet. Both agents need it, since
    neither can post to Horadric over HTTP. It reads the event on stdin
    and posts it with the tag from its environment, as `horadric status`
    does for the status line, adding which agent sent it. It is the one

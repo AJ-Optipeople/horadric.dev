@@ -33,6 +33,11 @@ pub const OWNER_ENV: &str = "HORADRIC_OWNER_PORT";
 /// is. The worktree has none, or an old copy.
 pub const TASKS_ENV: &str = "HORADRIC_TASKS";
 
+/// Header `horadric hook` names the agent that sent the event in, as
+/// [`horadric_core::Agent::from_name`] reads it. Without it the event is
+/// Claude Code's.
+pub const AGENT_HEADER: &str = "x-horadric-agent";
+
 /// Header the hook carries [`OWNER_ENV`] in.
 pub const OWNER_HEADER: &str = "x-horadric-port";
 

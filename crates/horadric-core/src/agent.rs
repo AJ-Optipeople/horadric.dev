@@ -6,8 +6,10 @@
 //! none on disk, and reads as Claude.
 
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 
 use crate::usage::{has_flag, Setting};
+use crate::HookEvent;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -138,6 +140,79 @@ impl Agent {
     }
 }
 
+impl Agent {
+    /// The hook payload `body` this agent sent, as a [`HookEvent`]. Claude
+    /// Code's is the shape the rest of Horadric reads. Codex's is close,
+    /// with the prompt under `prompt`. Grok's spells most fields twice,
+    /// once in camel case, and some only in camel case.
+    pub fn event(self, body: &[u8]) -> Option<HookEvent> {
+        if self == Agent::Claude {
+            return HookEvent::from_json(body).ok();
+        }
+        let Value::Object(mut fields) = serde_json::from_slice(body).ok()? else {
+            return None;
+        };
+        if self == Agent::Grok {
+            fields = snake_keys(fields);
+            if let Some(Value::String(name)) = fields.get_mut("hook_event_name") {
+                *name = pascal(name);
+            }
+        }
+        if !fields.contains_key("user_prompt") {
+            if let Some(p) = fields.remove("prompt") {
+                fields.insert("user_prompt".into(), p);
+            }
+        }
+        serde_json::from_value(Value::Object(fields)).ok()
+    }
+}
+
+/// `fields` with every camel case key in snake case, unless the snake case
+/// key is there already, which then wins.
+fn snake_keys(fields: Map<String, Value>) -> Map<String, Value> {
+    let mut out = Map::new();
+    let mut camel = Vec::new();
+    for (k, v) in fields {
+        let snake = snake(&k);
+        if snake == k {
+            out.insert(k, v);
+        } else {
+            camel.push((snake, v));
+        }
+    }
+    for (k, v) in camel {
+        out.entry(k).or_insert(v);
+    }
+    out
+}
+
+fn snake(key: &str) -> String {
+    let mut out = String::with_capacity(key.len() + 4);
+    for c in key.chars() {
+        if c.is_ascii_uppercase() {
+            if !out.is_empty() {
+                out.push('_');
+            }
+            out.push(c.to_ascii_lowercase());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// `stop_failure` as `StopFailure`. A name already in Pascal case stays.
+fn pascal(name: &str) -> String {
+    name.split('_')
+        .map(|w| {
+            let mut c = w.chars();
+            c.next()
+                .map(|f| f.to_ascii_uppercase().to_string() + c.as_str())
+                .unwrap_or_default()
+        })
+        .collect()
+}
+
 /// Codex's config key for the reasoning effort.
 const EFFORT_KEY: &str = "model_reasoning_effort";
 
@@ -181,6 +256,71 @@ mod tests {
 
     fn args(line: &str) -> Vec<String> {
         line.split_whitespace().map(str::to_string).collect()
+    }
+
+    #[test]
+    fn claude_payloads_read_as_they_always_have() {
+        let e = Agent::Claude
+            .event(br#"{"session_id":"c","hook_event_name":"Stop","extra":1}"#)
+            .unwrap();
+        assert_eq!(e.session_id, "c");
+        assert_eq!(e.hook_event_name, "Stop");
+        assert!(Agent::Claude.event(b"not json").is_none());
+    }
+
+    #[test]
+    fn a_codex_payload_becomes_a_hook_event() {
+        let body = br#"{"session_id":"019a","hook_event_name":"UserPromptSubmit",
+            "cwd":"C:/p","transcript_path":"C:/r.jsonl","model":"gpt-5.5",
+            "permission_mode":"default","turn_id":"t1","prompt":"Reply with pong"}"#;
+        let e = Agent::Codex.event(body).unwrap();
+        assert_eq!(e.session_id, "019a");
+        assert_eq!(e.hook_event_name, "UserPromptSubmit");
+        assert_eq!(e.cwd, "C:/p");
+        assert_eq!(e.transcript_path, "C:/r.jsonl");
+        assert_eq!(e.user_prompt.as_deref(), Some("Reply with pong"));
+        let stop = Agent::Codex
+            .event(
+                br#"{"session_id":"s","hook_event_name":"Stop","last_assistant_message":"pong"}"#,
+            )
+            .unwrap();
+        assert_eq!(stop.last_assistant_message.as_deref(), Some("pong"));
+    }
+
+    #[test]
+    fn a_grok_payload_becomes_a_hook_event_from_either_spelling() {
+        let both = br#"{"sessionId":"g1","session_id":"g1","hookEventName":"stop",
+            "hook_event_name":"Stop","cwd":"C:/p","workspaceRoot":"C:/p",
+            "transcriptPath":"C:/t.jsonl","reason":"end_turn"}"#;
+        let e = Agent::Grok.event(both).unwrap();
+        assert_eq!(e.session_id, "g1");
+        assert_eq!(e.hook_event_name, "Stop");
+        assert_eq!(e.transcript_path, "C:/t.jsonl");
+        assert_eq!(e.reason.as_deref(), Some("end_turn"));
+
+        let camel = br#"{"sessionId":"g2","hookEventName":"notification",
+            "notificationType":"permission_prompt","message":"Tool permission requested",
+            "toolName":"bash","promptId":"p"}"#;
+        let e = Agent::Grok.event(camel).unwrap();
+        assert_eq!(e.session_id, "g2");
+        assert_eq!(e.hook_event_name, "Notification");
+        assert_eq!(e.notification_type.as_deref(), Some("permission_prompt"));
+        assert_eq!(e.tool_name.as_deref(), Some("bash"));
+
+        let e = Agent::Grok
+            .event(br#"{"sessionId":"g3","hookEventName":"stop_cancelled"}"#)
+            .unwrap();
+        assert_eq!(e.hook_event_name, "StopCancelled");
+        assert!(Agent::Grok.event(br#"{"hookEventName":"stop"}"#).is_none());
+        assert!(Agent::Codex.event(b"[1]").is_none());
+    }
+
+    #[test]
+    fn keys_and_names_change_case() {
+        assert_eq!(snake("transcriptPath"), "transcript_path");
+        assert_eq!(snake("cwd"), "cwd");
+        assert_eq!(pascal("stop_failure"), "StopFailure");
+        assert_eq!(pascal("PreToolUse"), "PreToolUse");
     }
 
     #[test]

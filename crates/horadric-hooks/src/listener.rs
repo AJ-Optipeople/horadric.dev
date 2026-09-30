@@ -15,12 +15,12 @@ use std::thread;
 use std::time::{Duration, SystemTime};
 
 use horadric_core::overlap::{self, Claims, Overlap};
-use horadric_core::{HookEvent, Status};
+use horadric_core::{Agent, HookEvent, Status};
 use serde_json::{json, Value};
 
 use crate::{
-    client, transcript, COMMAND_HEADER, HOOK_PATH, NEW_PATH, OWNER_HEADER, RELOAD_PATH,
-    SESSION_HEADER, STATUS_PATH, TASKS_PATH,
+    client, transcript, AGENT_HEADER, COMMAND_HEADER, HOOK_PATH, NEW_PATH, OWNER_HEADER,
+    RELOAD_PATH, SESSION_HEADER, STATUS_PATH, TASKS_PATH,
 };
 
 /// A hook event together with the Horadric session id from the header.
@@ -184,6 +184,7 @@ fn handle(
     let mut owner = None;
     let mut command = String::new();
     let mut from_browser = false;
+    let mut agent = None;
     loop {
         let mut line = String::new();
         if reader.read_line(&mut line)? == 0 {
@@ -201,6 +202,7 @@ fn handle(
                 n if n == SESSION_HEADER => horadric_id = value.to_string(),
                 n if n == OWNER_HEADER => owner = value.parse::<u16>().ok(),
                 n if n == COMMAND_HEADER => command = value.to_string(),
+                n if n == AGENT_HEADER => agent = Agent::from_name(value),
                 "origin" => from_browser = true,
                 _ => {}
             }
@@ -268,13 +270,13 @@ fn handle(
 
     // Parsing is all that happens before the reply, which tells an agent
     // that just edited a file another session is still changing.
-    let parsed = HookEvent::from_json(&body);
+    let parsed = agent.unwrap_or_default().event(&body);
     let overlap = match &parsed {
-        Ok(event) => claims()
+        Some(event) => claims()
             .lock()
             .ok()
             .and_then(|mut c| c.hear(&horadric_id, event, SystemTime::now())),
-        Err(_) => None,
+        None => None,
     };
     match &overlap {
         Some(o) => respond_with(&mut stream, "200 OK", &overlap::reply(&overlap::context(o)))?,
@@ -292,10 +294,15 @@ fn handle(
         // not bounce back. Nobody listening there means the event is lost,
         // which is what it would be without the hop.
         let body = String::from_utf8_lossy(&body);
-        let _ = client::post(owner, HOOK_PATH, &[(SESSION_HEADER, &horadric_id)], &body);
+        let agent = agent.unwrap_or_default().program();
+        let headers = [
+            (SESSION_HEADER, horadric_id.as_str()),
+            (AGENT_HEADER, agent),
+        ];
+        let _ = client::post(owner, HOOK_PATH, &headers, &body);
         return Ok(());
     }
-    if let Ok(mut event) = parsed {
+    if let Some(mut event) = parsed {
         if event.may_retitle() {
             event.title = transcript::title(&event.transcript_path);
         } else if event.may_peek_title() {
@@ -401,6 +408,27 @@ mod tests {
         assert_eq!(got.horadric_id, "tile-9");
         assert_eq!(got.event.hook_event_name, "Stop");
         assert!(host_rx.recv_timeout(Duration::from_millis(200)).is_err());
+    }
+
+    #[test]
+    fn an_event_from_another_agent_is_read_in_its_shape() {
+        let (host, _host_rx) = start();
+        let (dev, dev_rx) = start();
+        let grok = r#"{"sessionId":"g","hookEventName":"stop","reason":"end_turn"}"#;
+        post(
+            host,
+            &format!(
+                "X-Horadric-Session: tile-4
+X-Horadric-Agent: grok
+X-Horadric-Port: {dev}
+"
+            ),
+            grok,
+        );
+        // Passed on with its agent, or the owner could not read it.
+        let got = dev_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(got.event.session_id, "g");
+        assert_eq!(got.event.hook_event_name, "Stop");
     }
 
     #[test]
