@@ -240,6 +240,8 @@ const VIEW: &str = "view:";
 const WEB: &str = "web:";
 pub(crate) const MARGIN_DIP: i32 = 12;
 pub(crate) const GAP_DIP: i32 = 12;
+/// The narrowest the stage gets when it gives way to a new column.
+const STAGE_MIN_W_DIP: i32 = 480;
 /// Narrower than this beside the stage, a new browser window stays where
 /// it opened rather than squeeze in.
 const BROWSER_MIN_DIP: i32 = 360;
@@ -629,6 +631,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             stage: None,
             stage_rect: saved.stage.filter(|r| on_screen(r[0], r[1])),
             stage_key: None,
+            tiles_edge: None,
             hotkey,
             listen_key,
             away: Away::default(),
@@ -2422,6 +2425,10 @@ struct App {
     stage: Option<Box<TerminalWindow>>,
     /// Where the stage was when it last closed.
     stage_rect: Option<[i32; 4]>,
+    /// The first pixel right of the tiles when the columns were last
+    /// arranged, which tells a stage standing against them from one you
+    /// put somewhere else.
+    tiles_edge: Option<i32>,
     /// The project the stage showed when it last closed, which "Show
     /// terminal" in the tray brings back.
     stage_key: Option<String>,
@@ -4474,6 +4481,7 @@ impl App {
                 }
             }
         }
+        self.stage_follows(self.tiles_edge);
         if let Some(stage) = &self.stage {
             stage.show(key, &project_name(key), sessions);
         }
@@ -4914,6 +4922,24 @@ impl App {
             for c in &self.clusters {
                 c.refresh();
             }
+        }
+    }
+
+    /// Moves the stage's edge to the tiles' when they reach under it, or
+    /// when it stood against them at `was` before they changed width.
+    fn stage_follows(&self, was: Option<i32>) {
+        let (Some(stage), Some(edge)) = (&self.stage, self.tiles_edge) else {
+            return;
+        };
+        let Ok(r) = snapping::visible_rect(stage.hwnd) else {
+            return;
+        };
+        let work = work_area(self.screen.as_deref());
+        let rect = [r.left, r.top, r.right, r.bottom];
+        if let Some(to) =
+            layout::follow_tiles(rect, was, edge, (work.0, work.2), self.px(STAGE_MIN_W_DIP))
+        {
+            stage.set_visible_rect(to);
         }
     }
 
@@ -5953,6 +5979,13 @@ impl App {
         }
         for (model, scroll) in scrolls {
             self.columns.cols[model].scroll = scroll;
+        }
+        // Mid drag the columns are not settled yet, so the stage waits for
+        // the drop.
+        if self.carried.is_none() {
+            let edge = g.x(shown.len().max(1) - 1) + g.width + g.gap;
+            let was = self.tiles_edge.replace(edge);
+            self.stage_follows(was);
         }
         // The windows there at the start stand there at once; the ones
         // that come after arrive.

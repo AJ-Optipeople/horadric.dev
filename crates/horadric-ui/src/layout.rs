@@ -1820,6 +1820,33 @@ pub fn square(area: [i32; 4], tiles_left: bool) -> [i32; 4] {
     dock((side, side), area, tiles_left)
 }
 
+/// Where the stage goes when the columns of tiles change width: its left
+/// edge on `edge`, the first pixel the tiles leave free, when the tiles now
+/// reach under it or when it stood against them at `was`, so a sized stage
+/// gives way to a new column and takes the room back when one goes. Its
+/// right edge, top and bottom stay where you put them, unless giving way
+/// would leave it narrower than `min_w`, when it keeps that much inside
+/// `right`, the work area's edge. Nothing when it can stay, or when it is
+/// on another screen. All as (left, top, right, bottom).
+pub fn follow_tiles(
+    stage: [i32; 4],
+    was: Option<i32>,
+    edge: i32,
+    (left, right): (i32, i32),
+    min_w: i32,
+) -> Option<[i32; 4]> {
+    let [l, t, r, b] = stage;
+    if l >= right || r <= left || l == edge {
+        return None;
+    }
+    let against = was.is_some_and(|w| (l - w).abs() <= 2);
+    if l > edge && !against {
+        return None;
+    }
+    let r = r.max(edge + min_w).min(right);
+    Some([edge, t, r, b])
+}
+
 /// Where a browser window a session opened goes when it first appears: in
 /// the space beside the tiles and the stage together, against the stage,
 /// its own size where that fits and shrunk where it does not. Nothing when
@@ -2577,6 +2604,50 @@ mod tests {
         let area = [304, 12, 1908, 1068];
         assert_eq!(square(area, true), [304, 12, 1360, 1068]);
         assert_eq!(square(area, false), [852, 12, 1908, 1068]);
+    }
+
+    #[test]
+    fn a_stage_gives_way_to_a_new_column() {
+        let stage = [304, 40, 1500, 900];
+        assert_eq!(
+            follow_tiles(stage, Some(304), 596, (0, 1920), 400),
+            Some([596, 40, 1500, 900])
+        );
+    }
+
+    #[test]
+    fn a_stage_against_the_tiles_takes_the_room_back() {
+        let stage = [596, 40, 1500, 900];
+        assert_eq!(
+            follow_tiles(stage, Some(596), 304, (0, 1920), 400),
+            Some([304, 40, 1500, 900])
+        );
+    }
+
+    #[test]
+    fn a_stage_away_from_the_tiles_stays() {
+        let stage = [800, 40, 1500, 900];
+        assert_eq!(follow_tiles(stage, Some(596), 304, (0, 1920), 400), None);
+        assert_eq!(follow_tiles(stage, Some(304), 596, (0, 1920), 400), None);
+    }
+
+    #[test]
+    fn a_narrow_stage_keeps_its_least_width() {
+        let stage = [304, 40, 700, 900];
+        assert_eq!(
+            follow_tiles(stage, None, 596, (0, 1920), 400),
+            Some([596, 40, 996, 900])
+        );
+        assert_eq!(
+            follow_tiles(stage, None, 1600, (0, 1920), 400),
+            Some([1600, 40, 1920, 900])
+        );
+    }
+
+    #[test]
+    fn a_stage_on_another_screen_stays() {
+        let stage = [2000, 40, 3000, 900];
+        assert_eq!(follow_tiles(stage, None, 596, (0, 1920), 400), None);
     }
 
     #[test]
