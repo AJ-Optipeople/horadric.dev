@@ -388,8 +388,18 @@ impl Session {
                     self.claude_session_id = None;
                     Some(Phase::Idle)
                 }
+                // Codex says a turn failed only by ending with no `Stop`.
+                // Horadric's own, when the process exits, carries no id.
+                _ if self.phase == Phase::Working
+                    && self.agent.ends_failed_turns()
+                    && !event.session_id.is_empty() =>
+                {
+                    Some(Phase::Waiting(WaitReason::Error("failed".into())))
+                }
                 _ => Some(Phase::Ended),
             },
+            // Codex's Esc, mid turn or at an approval. No `Stop` follows.
+            "Interrupt" => Some(Phase::Idle),
             _ => None,
         };
         if let Some(t) = &event.title {
@@ -433,7 +443,9 @@ impl Session {
                     self.tool = Some(t.clone());
                 }
             }
-            "UserPromptSubmit" | "Stop" | "StopFailure" | "SessionEnd" if !event.is_subagent() => {
+            "UserPromptSubmit" | "Stop" | "StopFailure" | "SessionEnd" | "Interrupt"
+                if !event.is_subagent() =>
+            {
                 self.tool = None;
                 self.agents.clear();
             }
@@ -720,6 +732,48 @@ mod tests {
         assert_eq!(s.last_line, "allow Edit?");
         assert!(s.apply(&ev("PostToolUse"), now()));
         assert_eq!(s.phase, Phase::Working);
+    }
+
+    #[test]
+    fn codex_waits_is_done_goes_idle_and_fails_by_ending() {
+        let mut s = Session::new("g1", "x", "");
+        s.agent = Agent::Codex;
+        s.apply(&ev("UserPromptSubmit"), now());
+        assert!(s.apply(&ev("PermissionRequest"), now()));
+        assert_eq!(s.phase, Phase::Waiting(WaitReason::Permission));
+        assert!(s.apply(&ev("Interrupt"), now()));
+        assert_eq!(s.phase, Phase::Idle);
+        s.apply(&ev("UserPromptSubmit"), now());
+        assert!(s.apply(&ev("Stop"), now()));
+        assert_eq!(s.phase, Phase::Done);
+        // Ending after a finished turn is the session ending.
+        assert!(s.apply(&ev("SessionEnd"), now()));
+        assert_eq!(s.phase, Phase::Ended);
+
+        // A turn that failed ends the session with no `Stop`.
+        let mut s = Session::new("g2", "x", "");
+        s.agent = Agent::Codex;
+        s.apply(&ev("UserPromptSubmit"), now());
+        let mut end = ev("SessionEnd");
+        end.reason = Some("other".into());
+        assert!(s.apply(&end, now()));
+        assert_eq!(s.phase, Phase::Waiting(WaitReason::Error("failed".into())));
+        // Then the process exits.
+        assert!(s.apply(&HookEvent::synthetic("SessionEnd"), now()));
+        assert_eq!(s.phase, Phase::Ended);
+    }
+
+    #[test]
+    fn claude_quit_mid_turn_and_a_process_exit_just_end() {
+        let mut s = Session::new("g1", "x", "");
+        s.apply(&ev("UserPromptSubmit"), now());
+        s.apply(&ev("SessionEnd"), now());
+        assert_eq!(s.phase, Phase::Ended);
+        let mut s = Session::new("g2", "x", "");
+        s.agent = Agent::Codex;
+        s.apply(&ev("UserPromptSubmit"), now());
+        s.apply(&HookEvent::synthetic("SessionEnd"), now());
+        assert_eq!(s.phase, Phase::Ended);
     }
 
     #[test]

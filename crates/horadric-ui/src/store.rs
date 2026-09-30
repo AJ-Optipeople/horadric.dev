@@ -71,7 +71,7 @@ pub fn write_status_settings(exe: &Path) -> Option<PathBuf> {
     let path = dir.join("claude-settings.json");
     let reviews = rule_path(&dir.join("reviews"));
     let body = serde_json::json!({
-        "statusLine": { "type": "command", "command": status_command(exe), "padding": 0 },
+        "statusLine": { "type": "command", "command": exe_command(exe, "status"), "padding": 0 },
         "permissions": { "allow": [format!("Read({reviews})"), format!("Edit({reviews})")] }
     });
     fs::write(&path, body.to_string()).ok()?;
@@ -81,13 +81,13 @@ pub fn write_status_settings(exe: &Path) -> Option<PathBuf> {
 /// Claude Code runs the command in a shell that may be Git Bash, cmd or
 /// PowerShell. Forward slashes read as a path in all three, and quotes
 /// only where a space needs them, since PowerShell takes a quoted first
-/// word as a string rather than a program.
-fn status_command(exe: &Path) -> String {
+/// word as a string rather than a program. Codex's hooks the same.
+pub fn exe_command(exe: &Path, rest: &str) -> String {
     let exe = exe.to_string_lossy().replace('\\', "/");
     if exe.contains(' ') {
-        format!("\"{exe}\" status")
+        format!("\"{exe}\" {rest}")
     } else {
-        format!("{exe} status")
+        format!("{exe} {rest}")
     }
 }
 
@@ -174,14 +174,18 @@ mod tests {
     #[test]
     fn the_status_command_quotes_only_for_a_space() {
         assert_eq!(
-            status_command(Path::new(
-                r"C:\Users\me\AppData\Local\Programs\Horadric\horadric.exe"
-            )),
+            exe_command(
+                Path::new(r"C:\Users\me\AppData\Local\Programs\Horadric\horadric.exe"),
+                "status"
+            ),
             "C:/Users/me/AppData/Local/Programs/Horadric/horadric.exe status"
         );
         assert_eq!(
-            status_command(Path::new(r"C:\Program Files\Horadric\horadric.exe")),
-            "\"C:/Program Files/Horadric/horadric.exe\" status"
+            exe_command(
+                Path::new(r"C:\Program Files\Horadric\horadric.exe"),
+                "hook codex"
+            ),
+            "\"C:/Program Files/Horadric/horadric.exe\" hook codex"
         );
     }
 }

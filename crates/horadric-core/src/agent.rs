@@ -141,6 +141,64 @@ impl Agent {
 }
 
 impl Agent {
+    /// The flags that make this agent post its events through `hook`, the
+    /// command line of `horadric hook <agent>`. Only Codex takes its hooks
+    /// on the command line, which keeps `~/.codex` untouched: a `codex`
+    /// started outside Horadric runs no Horadric hook, and a dev instance
+    /// and the installed one each pass their own. A hook nobody reviewed
+    /// in `/hooks` is skipped without a word, hence the bypass, which also
+    /// runs any unreviewed hooks of the user's own.
+    pub fn hook_args(self, hook: &str) -> Vec<String> {
+        if self != Agent::Codex {
+            return Vec::new();
+        }
+        let entry = format!(
+            "[{{hooks=[{{type=\"command\",command={}}}]}}]",
+            toml_string(hook)
+        );
+        let mut out = Vec::new();
+        for event in CODEX_EVENTS {
+            out.push("-c".to_string());
+            out.push(format!("hooks.{event}={entry}"));
+        }
+        out.push("--dangerously-bypass-hook-trust".to_string());
+        out
+    }
+
+    /// The command line: Horadric's `extra` before the session's own
+    /// `args`. Codex drops every `-c` given before its subcommand once
+    /// another comes after it, hooks included, so the session's own config
+    /// overrides move up beside Horadric's, ahead of any `resume`.
+    pub fn line(self, extra: &[String], args: &[String]) -> Vec<String> {
+        let mut out = extra.to_vec();
+        if self != Agent::Codex {
+            out.extend_from_slice(args);
+            return out;
+        }
+        let mut rest = Vec::new();
+        let mut args = args.iter();
+        while let Some(a) = args.next() {
+            if a == "-c" || a == "--config" {
+                out.push(a.clone());
+                out.extend(args.next().cloned());
+            } else if a.starts_with("--config=") {
+                out.push(a.clone());
+            } else {
+                rest.push(a.clone());
+            }
+        }
+        out.extend(rest);
+        out
+    }
+
+    /// Whether a `SessionEnd` in the middle of a turn means the turn
+    /// failed. Codex sends no `Stop` for a turn that failed, and nothing
+    /// else, until the session ends. An Esc sends `Interrupt` first. When
+    /// Claude Code ends mid turn it was quit.
+    pub fn ends_failed_turns(self) -> bool {
+        self == Agent::Codex
+    }
+
     /// The hook payload `body` this agent sent, as a [`HookEvent`]. Claude
     /// Code's is the shape the rest of Horadric reads. Codex's is close,
     /// with the prompt under `prompt`. Grok's spells most fields twice,
@@ -211,6 +269,35 @@ fn pascal(name: &str) -> String {
                 .unwrap_or_default()
         })
         .collect()
+}
+
+/// The Codex events Horadric hears. `PermissionRequest` is waiting,
+/// `Stop` done, `Interrupt` idle.
+const CODEX_EVENTS: [&str; 8] = [
+    "SessionStart",
+    "UserPromptSubmit",
+    "PreToolUse",
+    "PermissionRequest",
+    "PostToolUse",
+    "Stop",
+    "Interrupt",
+    "SessionEnd",
+];
+
+/// `s` as a TOML basic string.
+fn toml_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            c if c.is_control() => out.push_str(&format!("\\u{:04X}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 /// Codex's config key for the reasoning effort.
@@ -313,6 +400,44 @@ mod tests {
         assert_eq!(e.hook_event_name, "StopCancelled");
         assert!(Agent::Grok.event(br#"{"hookEventName":"stop"}"#).is_none());
         assert!(Agent::Codex.event(b"[1]").is_none());
+    }
+
+    #[test]
+    fn codex_gets_its_hooks_on_the_command_line() {
+        let a = Agent::Codex.hook_args("C:/h/horadric.exe hook codex");
+        assert_eq!(a.len(), CODEX_EVENTS.len() * 2 + 1);
+        assert_eq!(a[0], "-c");
+        assert_eq!(
+            a[1],
+            r#"hooks.SessionStart=[{hooks=[{type="command",command="C:/h/horadric.exe hook codex"}]}]"#
+        );
+        assert!(a.iter().any(|x| x.starts_with("hooks.Interrupt=")));
+        assert_eq!(a.last().unwrap(), "--dangerously-bypass-hook-trust");
+        assert!(Agent::Claude.hook_args("x").is_empty());
+        assert!(Agent::Grok.hook_args("x").is_empty());
+    }
+
+    #[test]
+    fn a_hook_command_is_a_toml_string() {
+        assert_eq!(
+            toml_string(r#""C:/Program Files/h.exe" hook codex"#),
+            r#""\"C:/Program Files/h.exe\" hook codex""#
+        );
+        assert_eq!(toml_string(r"C:\h"), r#""C:\\h""#);
+    }
+
+    #[test]
+    fn codex_config_overrides_go_before_its_subcommand() {
+        let extra = args("-c hooks.Stop=h --dangerously-bypass-hook-trust");
+        assert_eq!(
+            Agent::Codex.line(&extra, &args("resume id -m gpt -c k=v --config=a=b")),
+            args("-c hooks.Stop=h --dangerously-bypass-hook-trust -c k=v --config=a=b resume id -m gpt")
+        );
+        // The others keep the order they were given.
+        assert_eq!(
+            Agent::Claude.line(&args("--settings s"), &args("--resume x -c")),
+            args("--settings s --resume x -c")
+        );
     }
 
     #[test]

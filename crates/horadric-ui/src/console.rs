@@ -31,6 +31,7 @@ use alacritty_terminal::index::{Column, Line, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::{Config, Term};
 use alacritty_terminal::vte::ansi::{CursorShape, CursorStyle, Processor};
+use horadric_core::agent::Agent;
 use horadric_core::worktree::SETUP_ENV;
 use horadric_hooks::{OWNER_ENV, SESSION_ENV};
 use horadric_pty::host::{Attached, Incoming, Remote, Spec};
@@ -211,6 +212,12 @@ pub fn is_claude(program: &Path) -> bool {
         .is_some_and(|s| s.eq_ignore_ascii_case("claude"))
 }
 
+/// The agent `program` is, by its name: `codex.cmd` is Codex. None for a
+/// shell put in its place with `HORADRIC_AGENT`.
+pub fn agent_of(program: &Path) -> Option<Agent> {
+    Agent::from_name(&program.file_stem()?.to_string_lossy())
+}
+
 /// The shell a plain terminal runs, see [`shell::program`].
 pub fn shell_program() -> Option<PathBuf> {
     let path = std::env::var_os("PATH").unwrap_or_default();
@@ -358,7 +365,10 @@ impl Console {
         };
         let claude = !launch.shell && is_claude(&launch.program);
         let mut program = launch.program;
-        let mut args: Vec<String> = launch.extra.iter().chain(&launch.args).cloned().collect();
+        let mut args = match agent_of(&program).filter(|_| !launch.shell) {
+            Some(agent) => agent.line(&launch.extra, &launch.args),
+            None => [&launch.extra[..], &launch.args[..]].concat(),
+        };
         let mut env_set = if launch.shell {
             vec![("COLORTERM".into(), "truecolor".into())]
         } else {

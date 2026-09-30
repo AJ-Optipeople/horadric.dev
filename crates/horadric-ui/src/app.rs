@@ -3642,6 +3642,9 @@ impl App {
                     }
                     own_tree = s.worktree.clone();
                     s.shell = shell && !attach;
+                    if run == Run::Agent {
+                        s.agent = console::agent_of(&program).unwrap_or_default();
+                    }
                     // Until the remote shell sets a title, the tile says
                     // where it is.
                     if let Some(h) = &host {
@@ -3713,6 +3716,10 @@ impl App {
     /// Code, not for a shell put in its place with `HORADRIC_AGENT`, and not
     /// over settings the session brought itself.
     fn extra_args(&mut self, id: &str, program: &Path, args: &[String], cwd: &Path) -> Vec<String> {
+        if console::agent_of(program) == Some(Agent::Codex) {
+            let hook = store::exe_command(&console::host_program(), "hook codex");
+            return Agent::Codex.hook_args(&hook);
+        }
         if !console::is_claude(program) {
             return Vec::new();
         }

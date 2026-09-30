@@ -2450,7 +2450,7 @@ file, and a JWT's payload is base64 and JSON.
    need, so it must start fast and never block the agent (a short
    timeout, fail open), and it does nothing when `HORADRIC_SESSION` is
    unset, so an agent started outside Horadric is not slowed.
-3. **Codex.** Horadric passes its hooks on the command line it starts,
+3. **Codex. Done 2026-09-30.** Horadric passes its hooks on the command line it starts,
    `-c hooks.<Event>=[{hooks=[{type="command",command="..."}]}]` for each
    event, with `--dangerously-bypass-hook-trust`, since a hook nobody has
    reviewed in `/hooks` is skipped without a word. That keeps
@@ -2462,6 +2462,11 @@ file, and a JWT's payload is base64 and JSON.
    after a turn with no `Stop` is a turn that failed. Every `-c` flag
    goes before the subcommand, together, or the hooks are lost.
    `codex resume <id>` carries a paused tile on.
+   Live check: through the npm `codex.cmd`, `SessionStart`,
+   `UserPromptSubmit`, `Stop` and `SessionEnd` all arrived, and a `-c`
+   after `exec` lost them all again, so `Agent::line` moves the
+   session's own `-c` flags up beside the hooks. Codex runs only when
+   `HORADRIC_AGENT` names it until step 5.
 4. **Grok.** A `command` hook calling `horadric hook`, in
    `~/.grok/hooks/horadric.json`, added and removed by `install` and
    `uninstall`, the dev instance never. The Claude hook Grok borrows
