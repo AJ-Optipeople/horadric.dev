@@ -178,6 +178,7 @@ pub fn cluster(hit: Hit) -> Option<&'static str> {
         Hit::TasksMode => "Pick how the tasks run",
         Hit::TasksAdd => "Add a task",
         Hit::Task(_) => "Read this quest before taking it on, or show the session doing it. Right click for more",
+        Hit::TasksGive => "Ask an agent to suggest quests for this project. You pick which go in the log",
         Hit::TaskApprove(_) => "Mark this task done",
         Hit::Nothing => return None,
     })
@@ -626,6 +627,7 @@ mod tests {
             Hit::TasksHeader,
             Hit::TasksMode,
             Hit::TasksAdd,
+            Hit::TasksGive,
             Hit::Task(0),
             Hit::TaskApprove(0),
         ];

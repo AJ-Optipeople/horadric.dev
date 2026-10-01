@@ -631,6 +631,39 @@ impl App {
         self.run_tasks();
     }
 
+    /// The lightbulb on the tile: starts a session in the project that
+    /// suggests quests and adds the ones the human picks, and puts it on
+    /// the stage, since it asks.
+    pub(super) fn give_quests(&mut self, key: &str) {
+        let Some(dir) = self.project_dir(key) else {
+            return;
+        };
+        let id = self.unique_id("quest-giver");
+        self.tasks.prompts.insert(
+            id.clone(),
+            tasks::giver_prompt(&horadric_command(), file::rel(&dir)),
+        );
+        if let Err(e) = self.launch(
+            &id,
+            "Quest Giver",
+            dir,
+            Vec::new(),
+            Run::Agent(horadric_core::Agent::Claude),
+            false,
+        ) {
+            self.tasks.prompts.remove(&id);
+            eprintln!("horadric: cannot start the quest giver: {e}");
+            self.toasts
+                .show(Kind::Failed, "Cannot start the quest giver", &e);
+            return;
+        }
+        if self.fill_stage(key) {
+            if let Some(stage) = &self.stage {
+                stage.focus_session(&id);
+            }
+        }
+    }
+
     /// Once a second: the Enter of a nudge that is due, and a look at the
     /// lists in case one changed.
     pub(super) fn tick_tasks(&mut self) {
