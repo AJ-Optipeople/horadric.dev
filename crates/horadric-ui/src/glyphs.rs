@@ -20,11 +20,11 @@ use windows::core::{w, Result, BOOL, HSTRING};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Direct2D::Common::{D2D1_COLOR_F, D2D1_GRADIENT_STOP, D2D_RECT_F};
 use windows::Win32::Graphics::Direct2D::{
-    ID2D1Geometry, ID2D1HwndRenderTarget, ID2D1LinearGradientBrush, ID2D1SolidColorBrush,
+    ID2D1HwndRenderTarget, ID2D1LinearGradientBrush, ID2D1SolidColorBrush,
     D2D1_ANTIALIAS_MODE_ALIASED, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_DRAW_TEXT_OPTIONS_CLIP,
     D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT, D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE,
-    D2D1_EXTEND_MODE_CLAMP, D2D1_GAMMA_2_2, D2D1_LAYER_OPTIONS_NONE, D2D1_LAYER_PARAMETERS,
-    D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES, D2D1_ROUNDED_RECT,
+    D2D1_EXTEND_MODE_CLAMP, D2D1_GAMMA_2_2, D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES,
+    D2D1_ROUNDED_RECT,
 };
 use windows::Win32::Graphics::DirectWrite::{
     IDWriteFactory, IDWriteFont1, IDWriteFontCollection, IDWriteFontFace, IDWriteFontFamily,
@@ -33,7 +33,7 @@ use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_GLYPH_METRICS, DWRITE_GLYPH_RUN,
     DWRITE_MEASURING_MODE_NATURAL, DWRITE_WORD_WRAPPING_NO_WRAP,
 };
-use windows_numerics::{Matrix3x2, Vector2};
+use windows_numerics::Vector2;
 
 use crate::frame::{Decoration, Frame, BOLD, ITALIC};
 use crate::render::{self, hwnd_target, Gpu};
@@ -406,7 +406,14 @@ pub struct Font {
     /// In DIPs, the same for every pane.
     size: Cell<f32>,
     cache: RefCell<HashMap<(char, u8), u16>>,
+    /// The characters drawn one at a time, laid out once. Laying one out
+    /// finds its fallback font, which is most of what drawing it costs.
+    layouts: RefCell<HashMap<(String, u8), IDWriteTextLayout>>,
 }
+
+/// Loose characters kept laid out, at most. A screen of a script the font
+/// lacks stays under it; more than that and the cache starts over.
+const LAYOUTS: usize = 2048;
 
 struct Faces {
     /// Regular, bold, italic, bold italic: indexed by the frame's style bits.
@@ -522,6 +529,7 @@ impl Font {
             dw: dw.clone(),
             size: Cell::new(size),
             cache: RefCell::new(HashMap::new()),
+            layouts: RefCell::new(HashMap::new()),
         })
     }
 
@@ -539,6 +547,7 @@ impl Font {
     pub fn set_size(&self, size: f32) -> Result<()> {
         *self.formats.borrow_mut() = formats(&self.dw, &self.faces.borrow().family, size)?;
         self.size.set(size);
+        self.layouts.borrow_mut().clear();
         Ok(())
     }
 
@@ -549,6 +558,7 @@ impl Font {
         *self.formats.borrow_mut() = formats(&self.dw, &faces.family, self.size.get())?;
         *self.faces.borrow_mut() = faces;
         self.cache.borrow_mut().clear();
+        self.layouts.borrow_mut().clear();
         Ok(())
     }
 
@@ -585,6 +595,29 @@ impl Font {
             .borrow_mut()
             .entry((c, style))
             .or_insert_with(|| glyph_index(&self.faces.borrow().faces[style as usize & 3], c))
+    }
+
+    /// `text` laid out in a style, from the cache when it was drawn before.
+    fn layout(&self, text: &str, style: u8) -> Option<IDWriteTextLayout> {
+        let key = (text.to_string(), style & 3);
+        if let Some(l) = self.layouts.borrow().get(&key) {
+            return Some(l.clone());
+        }
+        let wide: Vec<u16> = text.encode_utf16().collect();
+        // Leading aligned and never wrapped, so the box only has to be big
+        // enough: where the text starts does not depend on it.
+        let room = self.size.get() * 4.0;
+        let layout = unsafe {
+            self.dw
+                .CreateTextLayout(&wide, &self.formats.borrow()[key.1 as usize], room, room)
+                .ok()?
+        };
+        let mut layouts = self.layouts.borrow_mut();
+        if layouts.len() >= LAYOUTS {
+            layouts.clear();
+        }
+        layouts.insert(key, layout.clone());
+        Some(layout)
     }
 }
 
@@ -800,10 +833,10 @@ impl GridTarget {
                 ManuallyDrop::drop(&mut run.fontFace);
             }
 
-            let formats = font.formats.borrow();
             for l in &frame.loose {
-                let wide: Vec<u16> = l.text.encode_utf16().collect();
-                let fmt = &formats[l.style as usize & 3];
+                let Some(layout) = font.layout(&l.text, l.style) else {
+                    continue;
+                };
                 // Colour glyphs only for wide characters, which is where
                 // emoji presentation lives. A one cell symbol such as Claude
                 // Code's bullet has to keep the colour the program gave it.
@@ -813,13 +846,14 @@ impl GridTarget {
                     D2D1_DRAW_TEXT_OPTIONS_NONE
                 };
                 self.brush.SetColor(&color(l.color));
-                self.rt.DrawText(
-                    &wide,
-                    fmt,
-                    &rect(l.row, l.col, l.cells),
+                self.rt.DrawTextLayout(
+                    Vector2 {
+                        X: x(l.col),
+                        Y: y(l.row),
+                    },
+                    &layout,
                     &self.brush,
                     options,
-                    DWRITE_MEASURING_MODE_NATURAL,
                 );
             }
 
@@ -877,7 +911,7 @@ impl GridTarget {
             self.rt.PopAxisAlignedClip();
             self.rt.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
 
-            self.glass(gpu, &screen, header);
+            self.glass(&screen, header);
             if let Some(bar) = &header.bar {
                 self.tab_strip(gpu, bar, size.width, header.accent);
             }
@@ -937,7 +971,7 @@ impl GridTarget {
                 bottom,
             };
             if shown {
-                self.latched_key(gpu, &key, TAB_RADIUS);
+                self.latched_key(&key, TAB_RADIUS);
             } else {
                 self.raised_key(&key, TAB_RADIUS);
             }
@@ -1039,7 +1073,7 @@ impl GridTarget {
     /// A key latched in, level with the plate: the plate's shade falling
     /// in over its top edge and the plate's lit lip along its bottom, as
     /// round a bay.
-    unsafe fn latched_key(&self, gpu: &Gpu, r: &D2D_RECT_F, radius: f32) {
+    unsafe fn latched_key(&self, r: &D2D_RECT_F, radius: f32) {
         let lip = D2D_RECT_F {
             left: r.left - 0.5,
             top: r.top + 0.5,
@@ -1054,35 +1088,7 @@ impl GridTarget {
             .SetColor(&render::color(theme::WELL.mix(theme::SURFACE, 0.15)));
         self.rt
             .FillRoundedRectangle(&rounded(r, radius), &self.brush);
-        if let Ok(mask) = gpu.d2d.CreateRoundedRectangleGeometry(&rounded(r, radius)) {
-            if let Ok(layer) = self.rt.CreateLayer(None) {
-                let params = D2D1_LAYER_PARAMETERS {
-                    contentBounds: *r,
-                    geometricMask: ManuallyDrop::new(mask.cast::<ID2D1Geometry>().ok()),
-                    maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
-                    maskTransform: Matrix3x2::identity(),
-                    opacity: 1.0,
-                    opacityBrush: ManuallyDrop::new(None),
-                    layerOptions: D2D1_LAYER_OPTIONS_NONE,
-                };
-                self.rt.PushLayer(&params, &layer);
-                let depth = 6.0;
-                self.shade.SetStartPoint(Vector2 { X: 0.0, Y: r.top });
-                self.shade.SetEndPoint(Vector2 {
-                    X: 0.0,
-                    Y: r.top + depth,
-                });
-                self.rt.FillRectangle(
-                    &D2D_RECT_F {
-                        bottom: r.top + depth,
-                        ..*r
-                    },
-                    &self.shade,
-                );
-                self.rt.PopLayer();
-                drop(ManuallyDrop::into_inner(params.geometricMask));
-            }
-        }
+        self.sink(r, radius, 6.0);
         let edge = D2D_RECT_F {
             left: r.left + 0.5,
             top: r.top + 0.5,
@@ -1288,40 +1294,8 @@ impl GridTarget {
     /// What makes the glass look sunk: shade falling from its top edge,
     /// and its rim, lit in the project's colour on the pane with the
     /// keyboard.
-    unsafe fn glass(&self, gpu: &Gpu, screen: &D2D_RECT_F, header: &Header) {
-        if let Ok(mask) = gpu
-            .d2d
-            .CreateRoundedRectangleGeometry(&rounded(screen, SCREEN_RADIUS))
-        {
-            if let Ok(layer) = self.rt.CreateLayer(None) {
-                let params = D2D1_LAYER_PARAMETERS {
-                    contentBounds: *screen,
-                    geometricMask: ManuallyDrop::new(mask.cast::<ID2D1Geometry>().ok()),
-                    maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
-                    maskTransform: Matrix3x2::identity(),
-                    opacity: 1.0,
-                    opacityBrush: ManuallyDrop::new(None),
-                    layerOptions: D2D1_LAYER_OPTIONS_NONE,
-                };
-                self.rt.PushLayer(&params, &layer);
-                let depth = 10.0;
-                self.shade.SetStartPoint(Vector2 {
-                    X: 0.0,
-                    Y: screen.top,
-                });
-                self.shade.SetEndPoint(Vector2 {
-                    X: 0.0,
-                    Y: screen.top + depth,
-                });
-                let band = D2D_RECT_F {
-                    bottom: screen.top + depth,
-                    ..*screen
-                };
-                self.rt.FillRectangle(&band, &self.shade);
-                self.rt.PopLayer();
-                drop(ManuallyDrop::into_inner(params.geometricMask));
-            }
-        }
+    unsafe fn glass(&self, screen: &D2D_RECT_F, header: &Header) {
+        self.sink(screen, SCREEN_RADIUS, 10.0);
         let rim = if header.active && !header.lifted {
             header.accent.with_alpha(0.55)
         } else {
@@ -1336,6 +1310,31 @@ impl GridTarget {
         self.brush.SetColor(&render::color(rim));
         self.rt
             .DrawRoundedRectangle(&rounded(&edge, SCREEN_RADIUS - 0.5), &self.brush, 1.0, None);
+    }
+
+    /// Shade falling `depth` from the top edge of the rounded `r`, as into
+    /// a well. The gradient clamps to clear below `depth`, so filling the
+    /// rounded shape clipped to the band shades it with the corners cut,
+    /// without a layer and a geometry made for every paint.
+    unsafe fn sink(&self, r: &D2D_RECT_F, radius: f32, depth: f32) {
+        self.shade.SetStartPoint(Vector2 { X: 0.0, Y: r.top });
+        self.shade.SetEndPoint(Vector2 {
+            X: 0.0,
+            Y: r.top + depth,
+        });
+        // A pixel wider each side, so the clip never shaves the shape's own
+        // antialiased edge.
+        let band = D2D_RECT_F {
+            left: r.left - 1.0,
+            top: r.top - 1.0,
+            right: r.right + 1.0,
+            bottom: r.top + depth,
+        };
+        self.rt
+            .PushAxisAlignedClip(&band, D2D1_ANTIALIAS_MODE_ALIASED);
+        self.rt
+            .FillRoundedRectangle(&rounded(r, radius), &self.shade);
+        self.rt.PopAxisAlignedClip();
     }
 
     /// The session's name printed on the plate above the glass, after its
