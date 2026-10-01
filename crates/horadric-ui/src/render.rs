@@ -3010,6 +3010,13 @@ impl Painter<'_> {
         }
         self.icon(&gpu.icon_small, ink, '\u{E710}', l.add);
 
+        // A lightbulb: an agent with ideas for the log.
+        let (fill, ink) = theme::button_look(scene.button(Hit::TasksGive));
+        if let Some(fill) = fill {
+            self.fill_rounded(&l.give.inset(4.0), 6.0, fill);
+        }
+        self.icon(&gpu.icon_small, ink, '\u{E82F}', l.give);
+
         // A row done a moment ago is struck through left to right, then
         // folds away, and the rows under it close up over its place.
         let mut closed = 0.0;

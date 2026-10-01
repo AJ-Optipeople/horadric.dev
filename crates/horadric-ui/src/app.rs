@@ -364,6 +364,8 @@ pub(crate) enum Input {
     TasksMode(String),
     /// The plus in a tasks tile's header: ask for a new item.
     TaskAdd(String),
+    /// The lightbulb beside it: start an agent that suggests quests.
+    GiveQuests(String),
     /// A stashed session's slot clicked: bring it back.
     Unstash(String),
     /// A stashed session's slot right clicked.
@@ -5986,6 +5988,7 @@ impl App {
                 }
                 Input::TasksMode(key) => runner::ask_for(self, runner::Menu::Mode(key)),
                 Input::TaskAdd(key) => runner::ask_for(self, runner::Menu::Add(key)),
+                Input::GiveQuests(key) => self.give_quests(&key),
             }
         }
         if relayout {
