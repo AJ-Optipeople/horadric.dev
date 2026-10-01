@@ -74,6 +74,7 @@ fn broken_file(text: &str, source: Source) -> Option<Stone> {
         label: "(the whole file)".into(),
         steps: Err(why),
         source,
+        about: String::new(),
     })
 }
 
@@ -123,6 +124,9 @@ fn show(s: &Stone) -> String {
         Source::Global => "every project",
     };
     let mut out = format!("{}  \"{}\"  ({whose})\n", runeword::name(&s.label), s.label);
+    if !s.about.is_empty() {
+        out.push_str(&format!("  {}\n", s.about));
+    }
     match &s.steps {
         Ok(runes) => {
             for (i, rune) in runes.iter().enumerate() {
@@ -145,9 +149,12 @@ mod tests {
             "",
         );
         let shown = show(&stones[0]);
-        assert!(shown.starts_with(&runeword::name("Test, merge")), "{shown}");
-        assert!(shown.contains("\"Test, merge\"  (built in)"));
-        assert!(shown.contains("  1. test\n  2. merge\n"));
+        assert!(shown.starts_with(&runeword::name("Approve")), "{shown}");
+        assert!(
+            shown.contains("\"Approve\"  (built in)\n  Presses Enter"),
+            "{shown}"
+        );
+        assert!(shown.contains("  1. keys {Enter}\n"), "{shown}");
         let open = show(stones.last().unwrap());
         assert!(open.contains("\"Open\"  (this project)"), "{open}");
         assert!(open.contains("  1. run npm run dev (shown)\n"), "{open}");

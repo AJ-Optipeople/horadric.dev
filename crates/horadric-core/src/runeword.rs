@@ -25,9 +25,12 @@ use crate::cube::{self, Subject};
 use crate::session::Phase;
 use crate::tasks::one_line;
 
+mod edit;
 mod stone;
+pub use edit::unwrite;
 pub use stone::{
-    carve, fingerprint, name, smith_prompt, tip, Carving, Stroke, EDGE_POINTS, EMPTY_TIP, RUNES,
+    ask_text, carve, fingerprint, name, reforge_prompt, smith_prompt, tip, Carving, Stroke,
+    EDGE_POINTS, EMPTY_TIP, RUNES,
 };
 
 /// One action a runeword casts on its session.
@@ -254,12 +257,60 @@ pub fn named(runes: &[Rune]) -> String {
 /// Runewords by name, as a project offers them.
 pub type Offered = Vec<(String, Vec<Rune>)>;
 
-/// The runewords every project offers.
-const BUILT_IN: [&[Rune]; 3] = [
-    &[Rune::Test, Rune::Merge],
-    &[Rune::Test, Rune::Review, Rune::Merge],
-    &[Rune::Review, Rune::Merge],
-];
+/// The stones every project has, by label, with what each is for: one or
+/// two of each kind of step, each worth a click on the first day, so the
+/// tome shows what a stone can do before anyone makes one.
+fn built_in() -> Vec<(&'static str, &'static str, Vec<Rune>)> {
+    let say = |t: &str| Rune::Say(t.into());
+    let keys = |k: &str| Rune::Keys(k.into());
+    vec![
+        (
+            "Approve",
+            "Presses Enter: yes to the question the agent is asking. Works while another stone runs.",
+            vec![keys("{Enter}")],
+        ),
+        (
+            "Interrupt",
+            "Presses Esc: the agent stops what it is doing and waits for you.",
+            vec![keys("Esc")],
+        ),
+        (
+            "Recap",
+            "Asks the agent where it is up to.",
+            vec![say(
+                "In three short sentences: what you have done, what is left, and anything you need from me.",
+            )],
+        ),
+        (
+            "Commit",
+            "Has the agent commit its work so far.",
+            vec![say(
+                "Commit what you have changed so far, staging only the files you changed, with a message that says why.",
+            )],
+        ),
+        (
+            "Fresh start",
+            "Clears the conversation, then has the agent find its bearings again.",
+            vec![
+                keys("/clear{Enter}"),
+                say("Read the README and any agent instructions in this project, then tell me in a few lines where the work is and what you would do next."),
+            ],
+        ),
+        (
+            "Second opinion",
+            "A new agent reviews this one's work, then this one answers the review.",
+            vec![Rune::Review],
+        ),
+        (
+            "Open folder",
+            "Opens the project's folder in Explorer. Needs no session.",
+            vec![Rune::Run {
+                command: "start \"\" .".into(),
+                show: false,
+            }],
+        ),
+    ]
+}
 
 /// Where a stone comes from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -278,6 +329,9 @@ pub struct Stone {
     pub label: String,
     pub steps: Steps,
     pub source: Source,
+    /// What it is for, in a sentence, when it says: `"about"` beside its
+    /// `"steps"`. Empty when it does not.
+    pub about: String,
 }
 
 impl Stone {
@@ -319,6 +373,14 @@ pub type Steps = Result<Vec<Rune>, String>;
 ///     "Ship": ["test", "Update the changelog", "merge"] } }
 /// ```
 pub fn parse(text: &str) -> Result<Vec<(String, Steps)>, String> {
+    Ok(written(text)?
+        .into_iter()
+        .map(|(label, steps, _)| (label, steps))
+        .collect())
+}
+
+/// What [`parse`] reads, each stone with its `about` as well.
+fn written(text: &str) -> Result<Vec<(String, Steps, String)>, String> {
     if text.trim().is_empty() {
         return Ok(Vec::new());
     }
@@ -332,7 +394,12 @@ pub fn parse(text: &str) -> Result<Vec<(String, Steps)>, String> {
         .iter()
         .filter_map(|(label, value)| {
             let label = one_line(label);
-            (!label.is_empty()).then(|| (label, steps_of(value)))
+            let about = value
+                .get("about")
+                .and_then(Value::as_str)
+                .map(one_line)
+                .unwrap_or_default();
+            (!label.is_empty()).then(|| (label, steps_of(value), about))
         })
         .collect())
 }
@@ -367,21 +434,27 @@ fn steps_of(v: &Value) -> Steps {
 pub fn stones(project: &str, global: &str) -> Vec<Stone> {
     let mut theirs: Vec<Stone> = Vec::new();
     for (text, source) in [(project, Source::Project), (global, Source::Global)] {
-        for (label, steps) in parse(text).unwrap_or_default() {
+        for (label, steps, about) in written(text).unwrap_or_default() {
             theirs.push(Stone {
                 label,
                 steps,
                 source,
+                about,
             });
         }
     }
-    let mut out: Vec<Stone> = BUILT_IN
-        .iter()
-        .filter(|runes| !theirs.iter().any(|s| s.runes() == Some(**runes)))
-        .map(|runes| Stone {
-            label: named(runes),
-            steps: Ok(runes.to_vec()),
+    let mut out: Vec<Stone> = built_in()
+        .into_iter()
+        .filter(|(label, _, runes)| {
+            !theirs
+                .iter()
+                .any(|s| s.label == *label || s.runes() == Some(runes.as_slice()))
+        })
+        .map(|(label, about, runes)| Stone {
+            label: label.into(),
+            steps: Ok(runes),
             source: Source::BuiltIn,
+            about: about.into(),
         })
         .collect();
     out.extend(theirs);
@@ -792,12 +865,23 @@ mod tests {
         );
     }
 
+    const BUILT_IN_LABELS: [&str; 7] = [
+        "Approve",
+        "Interrupt",
+        "Recap",
+        "Commit",
+        "Fresh start",
+        "Second opinion",
+        "Open folder",
+    ];
+
     #[test]
     fn the_tome_lays_out_built_in_then_project_then_global_stones() {
         let config = r#"{ "runewords": {
             "Ship": ["test", "Update the changelog", "merge"],
             "Empty": [],
-            "Again": ["test", "merge"]
+            "Again": ["review"],
+            "Commit": { "about": "Ours", "steps": ["Commit it"] }
         } }"#;
         let global = r#"{ "runewords": {
             "Open the site": { "steps": [ { "run": "start http://localhost:3000" } ] }
@@ -807,48 +891,60 @@ mod tests {
             .iter()
             .map(|s| (s.label.as_str(), s.source))
             .collect();
-        // Its own "Again" is the built in test and merge, which is not
-        // there twice.
+        // Its own "Again" is the built in second opinion, and its own
+        // "Commit" takes the built in one's place, so neither is there
+        // twice.
         assert_eq!(
             labels,
             [
-                ("Test, review, merge", Source::BuiltIn),
-                ("Review, merge", Source::BuiltIn),
+                ("Approve", Source::BuiltIn),
+                ("Interrupt", Source::BuiltIn),
+                ("Recap", Source::BuiltIn),
+                ("Fresh start", Source::BuiltIn),
+                ("Open folder", Source::BuiltIn),
                 ("Again", Source::Project),
+                ("Commit", Source::Project),
                 ("Empty", Source::Project),
                 ("Ship", Source::Project),
                 ("Open the site", Source::Global),
             ]
         );
-        assert_eq!(stones[3].steps, Err("it has no steps".into()));
-        assert!(stones[5].sessionless());
-        assert!(!stones[4].sessionless());
+        assert_eq!(stones[6].about, "Ours");
+        assert_eq!(stones[7].steps, Err("it has no steps".into()));
+        assert!(stones[9].sessionless());
+        assert!(!stones[8].sessionless());
         // The menu offers only what parses.
         let offered = offered(stones);
-        let names: Vec<&str> = offered.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(offered.len(), 9);
         assert_eq!(
-            names,
-            [
-                "Test, review, merge",
-                "Review, merge",
-                "Again",
-                "Ship",
-                "Open the site"
-            ]
-        );
-        assert_eq!(
-            offered[3].1,
+            offered[7].1,
             [
                 Rune::Test,
                 Rune::Say("Update the changelog".into()),
                 Rune::Merge
             ]
         );
-        let plain = super::offered(super::stones("", ""));
-        assert_eq!(plain.len(), 3);
-        assert_eq!(plain[0].0, "Test, merge");
+        let plain = super::stones("", "");
+        let names: Vec<&str> = plain.iter().map(|s| s.label.as_str()).collect();
+        assert_eq!(names, BUILT_IN_LABELS);
         // A broken file adds nothing, and takes nothing from the other.
-        assert_eq!(super::stones("{ not json", global).len(), 4);
+        assert_eq!(super::stones("{ not json", global).len(), 8);
+    }
+
+    #[test]
+    fn every_built_in_stone_says_what_it_is_for_and_parses_as_written() {
+        for s in super::stones("", "") {
+            assert!(!s.about.is_empty(), "{}", s.label);
+            let runes = s.runes().unwrap();
+            for r in runes {
+                if let Rune::Keys(spec) = r {
+                    assert!(keys(spec).is_ok(), "{spec}");
+                }
+            }
+        }
+        let approve = &super::stones("", "")[0];
+        assert!(only_keys(approve.runes().unwrap()));
+        assert!(super::stones("", "")[6].sessionless());
     }
 
     #[test]
