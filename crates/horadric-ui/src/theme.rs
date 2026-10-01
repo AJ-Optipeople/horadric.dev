@@ -531,6 +531,11 @@ pub fn set(t: Theme) {
     CURRENT.store(i, Ordering::Relaxed);
 }
 
+/// Whether the terminals have the code falling behind their text.
+pub fn rains() -> bool {
+    current() == Theme::Matrix
+}
+
 pub fn palette() -> &'static Palette {
     current().palette()
 }
