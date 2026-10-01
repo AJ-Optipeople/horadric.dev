@@ -117,6 +117,8 @@ struct Refused {
 pub(super) enum Menu {
     /// What can be done with an item, by its line and title.
     Item(String, usize, String),
+    /// An item's title and notes, to read before taking it on.
+    Quest(String, usize, String),
     /// The project's mode.
     Mode(String),
     /// A new item's title.
@@ -487,21 +489,37 @@ impl App {
         }
     }
 
-    /// A row clicked: an open item starts, one whose session is gone
-    /// starts again, and any other shows its session.
+    /// A row clicked: an item nobody works on shows its quest log first,
+    /// since a click that starts an agent is too easy to make by accident
+    /// and the title alone rarely says what the quest asks. Any other row
+    /// shows its session.
     pub(super) fn task_clicked(&mut self, key: &str, line: usize, title: &str) {
+        let Some(task) = self.task_at(key, line, title) else {
+            return;
+        };
+        match self.row_state(&task) {
+            RowState::Open | RowState::Gone => {
+                ask_for(self, Menu::Quest(key.into(), line, title.into()))
+            }
+            _ => {
+                if let Some(h) = task.holder.as_deref().and_then(|h| self.shown_for(h)) {
+                    self.reveal(&h, false);
+                }
+            }
+        }
+    }
+
+    /// The quest log accepted: an open item starts, one whose session is
+    /// gone starts again. Looked at afresh, since the runner or another
+    /// session may have taken it while the log was open.
+    fn accept_quest(&mut self, key: &str, line: usize, title: &str) {
         let Some(task) = self.task_at(key, line, title) else {
             return;
         };
         let result = match self.row_state(&task) {
             RowState::Open => self.take_task(key, line, title, true).map(drop),
             RowState::Gone => self.start_again(key, line, title),
-            _ => {
-                if let Some(h) = task.holder.as_deref().and_then(|h| self.shown_for(h)) {
-                    self.reveal(&h, false);
-                }
-                Ok(())
-            }
+            _ => Ok(()),
         };
         if let Err(e) = result {
             eprintln!("horadric: cannot start the task: {e}");
@@ -1101,6 +1119,7 @@ pub(super) fn ask_for(app: &mut App, menu: Menu) {
 pub(super) fn show_menu(menu: Menu) {
     match menu {
         Menu::Item(key, line, title) => item_menu(&key, line, &title),
+        Menu::Quest(key, line, title) => quest_log(&key, line, &title),
         Menu::Mode(key) => mode_menu(&key),
         Menu::Add(key) => {
             let question = ask::Ask {
@@ -1130,6 +1149,71 @@ pub(super) fn show_menu(menu: Menu) {
             }
         }
     }
+}
+
+/// Shows an item's title and notes and starts it only when accepted.
+fn quest_log(key: &str, line: usize, title: &str) {
+    let Some((text, again)) = with_app(|app| {
+        let t = app.task_at(key, line, title)?;
+        let again = app.row_state(&t) == RowState::Gone;
+        Some((quest_text(&t.title, &t.notes), again))
+    })
+    .flatten() else {
+        return;
+    };
+    let accept = if again { "Start again" } else { "Accept quest" };
+    let pressed = super::ask(&crate::dialog::Dialog {
+        tone: crate::dialog::Tone::Question,
+        title: "Quest log",
+        text: &text,
+        buttons: &[accept, "Not now"],
+        default: 0,
+    });
+    if pressed == Some(0) {
+        with_app(|app| app.accept_quest(key, line, title));
+    }
+}
+
+/// Most note lines a quest log shows, so a long brief still leaves the
+/// dialog's buttons on screen.
+const QUEST_NOTE_LINES: usize = 14;
+
+/// What the quest log says: the title, then the notes the agent will get,
+/// cut short past [`QUEST_NOTE_LINES`].
+fn quest_text(title: &str, notes: &[String]) -> String {
+    let mut text = format!("\"{}\"", tasks::one_line(title));
+    let notes: Vec<&str> = notes
+        .iter()
+        .map(|n| n.trim_end())
+        .skip_while(|n| n.is_empty())
+        .collect();
+    let notes = &notes[..notes.len() - notes.iter().rev().take_while(|n| n.is_empty()).count()];
+    if notes.is_empty() {
+        text.push_str(
+            "
+
+No notes. The agent gets the title alone.",
+        );
+        return text;
+    }
+    text.push_str(
+        "
+
+",
+    );
+    text.push_str(&notes[..notes.len().min(QUEST_NOTE_LINES)].join(
+        "
+",
+    ));
+    if notes.len() > QUEST_NOTE_LINES {
+        let more = notes.len() - QUEST_NOTE_LINES;
+        text.push_str(&format!(
+            "
+
+and {more} more lines in the quest file."
+        ));
+    }
+    text
 }
 
 /// What to ask before merging a finished item's branch.
@@ -1414,6 +1498,50 @@ mod tests {
         assert_eq!(at_once(1), "One at a time");
         assert_eq!(at_once(3), "3 at once, each in its own worktree");
         assert!(AT_ONCE.iter().all(|&n| n <= tasks::MOST_PARALLEL));
+    }
+
+    #[test]
+    fn the_quest_log_shows_the_title_and_its_notes() {
+        let notes = vec![
+            "".into(),
+            "First line.".into(),
+            "Second line.  ".into(),
+            "".into(),
+        ];
+        assert_eq!(
+            quest_text(
+                "Fix the
+login",
+                &notes
+            ),
+            "\"Fix the login\"
+
+First line.
+Second line."
+        );
+    }
+
+    #[test]
+    fn the_quest_log_says_when_there_are_no_notes() {
+        assert_eq!(
+            quest_text("Fix it", &["  ".into()]),
+            "\"Fix it\"
+
+No notes. The agent gets the title alone."
+        );
+    }
+
+    #[test]
+    fn the_quest_log_cuts_long_notes_short() {
+        let notes: Vec<String> = (0..QUEST_NOTE_LINES + 3).map(|i| format!("n{i}")).collect();
+        let text = quest_text("Big", &notes);
+        assert!(text.contains(&format!("n{}", QUEST_NOTE_LINES - 1)));
+        assert!(!text.contains(&format!("n{QUEST_NOTE_LINES}")));
+        assert!(text.ends_with(
+            "
+
+and 3 more lines in the quest file."
+        ));
     }
 
     #[test]

@@ -21,6 +21,7 @@ const USAGE: &str = "\
 usage: horadric quest done              The quest this session works is completed
        horadric quest blocked \"why\"     It can not go on without the human
        horadric quest add \"title\"       Add a quest to the end of the log
+             [--notes \"text\"]          with notes for the agent under it
        horadric quest list              Show the log";
 
 /// What the errors call the list, which may still be the old file.
@@ -39,11 +40,11 @@ pub fn run(args: &[String]) -> Result<(), String> {
             report(&cwd, Some(&why))
         }
         Some("add") => {
-            let title = tasks::one_line(&rest());
+            let (title, notes) = title_and_notes(&args[1..]);
             if title.is_empty() {
                 return Err("say what: horadric quest add \"title\"".into());
             }
-            add(&cwd, &title)
+            add(&cwd, &title, &notes)
         }
         Some("list") => list(&cwd),
         _ => Err(USAGE.into()),
@@ -95,14 +96,26 @@ fn report_tomb(cwd: &Path, id: &str, batch: &str, why: Option<&str>) -> Result<(
     Ok(())
 }
 
-fn add(cwd: &Path, title: &str) -> Result<(), String> {
+/// The title and the notes of `quest add`: the words before `--notes`
+/// make the title, on one line, and the words after it the notes.
+fn title_and_notes(args: &[String]) -> (String, String) {
+    let (title, notes) = match args.iter().position(|a| a == "--notes") {
+        Some(i) => (&args[..i], &args[i + 1..]),
+        None => (args, &[][..]),
+    };
+    (tasks::one_line(&title.join(" ")), notes.join(" "))
+}
+
+fn add(cwd: &Path, title: &str, notes: &str) -> Result<(), String> {
     let project = session()
         .and_then(|id| held(cwd, &id))
         .or_else(main_list)
         .or_else(|| file::find_list(cwd))
         .unwrap_or_else(|| cwd.to_path_buf());
-    file::update(&project, |text| Some(tasks::append(text, title)))
-        .map_err(|e| format!("{}: {e}", file::file(&project).display()))?;
+    file::update(&project, |text| {
+        Some(tasks::append_with_notes(text, title, notes))
+    })
+    .map_err(|e| format!("{}: {e}", file::file(&project).display()))?;
     tell_app(&project);
     println!("Added to {}", file::file(&project).display());
     Ok(())
@@ -162,4 +175,34 @@ fn post_app(body: &TasksChanged) -> Option<u16> {
         &body.to_json(),
     )
     .ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn words(s: &[&str]) -> Vec<String> {
+        s.iter().map(|w| w.to_string()).collect()
+    }
+
+    #[test]
+    fn a_quest_takes_its_notes_after_the_flag() {
+        assert_eq!(
+            title_and_notes(&words(&[
+                "Fix the",
+                "login",
+                "--notes",
+                "Only after\nexpiry"
+            ])),
+            ("Fix the login".into(), "Only after\nexpiry".into())
+        );
+        assert_eq!(
+            title_and_notes(&words(&["Fix", "the login"])),
+            ("Fix the login".into(), String::new())
+        );
+        assert_eq!(
+            title_and_notes(&words(&["--notes", "why"])),
+            (String::new(), "why".into())
+        );
+    }
 }

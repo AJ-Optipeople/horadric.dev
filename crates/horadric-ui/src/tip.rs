@@ -177,7 +177,7 @@ pub fn cluster(hit: Hit) -> Option<&'static str> {
         Hit::TasksHeader => "Fold or unfold the tasks. Right click to pick how they run",
         Hit::TasksMode => "Pick how the tasks run",
         Hit::TasksAdd => "Add a task",
-        Hit::Task(_) => "Start this task, or show the session doing it. Right click for more",
+        Hit::Task(_) => "Read this quest before taking it on, or show the session doing it. Right click for more",
         Hit::TaskApprove(_) => "Mark this task done",
         Hit::Nothing => return None,
     })

@@ -1266,7 +1266,7 @@ impl Cluster {
                             app::push(Input::TaskMenu(self.key.clone(), item.line, item.title));
                         }
                     }
-                    Hit::TasksHeader | Hit::TasksMode | Hit::TasksAdd => {
+                    Hit::TasksHeader | Hit::TasksMode | Hit::TasksAdd | Hit::TasksGive => {
                         app::push(Input::TasksMode(self.key.clone()))
                     }
                     _ => {}
@@ -1441,6 +1441,7 @@ impl Cluster {
             }
             Hit::TasksMode => app::push(Input::TasksMode(self.key.clone())),
             Hit::TasksAdd => app::push(Input::TaskAdd(self.key.clone())),
+            Hit::TasksGive => app::push(Input::GiveQuests(self.key.clone())),
             Hit::Task(i) => {
                 if let Some(item) = self.item_at(i) {
                     app::push(Input::TaskClick(self.key.clone(), item.line, item.title));
