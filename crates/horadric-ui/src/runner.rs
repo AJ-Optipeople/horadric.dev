@@ -117,6 +117,8 @@ struct Refused {
 pub(super) enum Menu {
     /// What can be done with an item, by its line and title.
     Item(String, usize, String),
+    /// An item's title and notes, read before it is accepted.
+    Brief(String, usize, String),
     /// The project's mode.
     Mode(String),
     /// A new item's title.
@@ -487,9 +489,24 @@ impl App {
         }
     }
 
-    /// A row clicked: an open item starts, one whose session is gone
-    /// starts again, and any other shows its session.
+    /// A row clicked: an item that would start is briefed first, since
+    /// one click must not set an agent off on a quest nobody has read,
+    /// and any other shows its session.
     pub(super) fn task_clicked(&mut self, key: &str, line: usize, title: &str) {
+        let Some(task) = self.task_at(key, line, title) else {
+            return;
+        };
+        match self.row_state(&task) {
+            RowState::Open | RowState::Gone => {
+                ask_for(self, Menu::Brief(key.to_string(), line, title.to_string()))
+            }
+            _ => self.accept_task(key, line, title),
+        }
+    }
+
+    /// An item accepted: an open one starts, one whose session is gone
+    /// starts again, and any other shows its session.
+    pub(super) fn accept_task(&mut self, key: &str, line: usize, title: &str) {
         let Some(task) = self.task_at(key, line, title) else {
             return;
         };
@@ -1101,6 +1118,7 @@ pub(super) fn ask_for(app: &mut App, menu: Menu) {
 pub(super) fn show_menu(menu: Menu) {
     match menu {
         Menu::Item(key, line, title) => item_menu(&key, line, &title),
+        Menu::Brief(key, line, title) => brief(&key, line, &title),
         Menu::Mode(key) => mode_menu(&key),
         Menu::Add(key) => {
             let question = ask::Ask {
@@ -1248,7 +1266,7 @@ fn item_menu(key: &str, line: usize, title: &str) {
         _ => {}
     }
     with_app(|app| match picked {
-        Some(START) => app.task_clicked(key, line, title),
+        Some(START) => app.accept_task(key, line, title),
         Some(n) if n > TOMBS && n < PICK => {
             if let Err(e) = app.take_tombs(key, line, title, n - TOMBS) {
                 eprintln!("horadric: cannot start the tombs: {e}");
@@ -1267,6 +1285,59 @@ fn item_menu(key: &str, line: usize, title: &str) {
         Some(DELETE) => app.change_list(key, |text| tasks::remove(text, line, title)),
         _ => {}
     });
+}
+
+/// Shows a quest before it starts, to accept, edit or leave.
+fn brief(key: &str, line: usize, title: &str) {
+    let Some((t, state)) = with_app(|app| {
+        let t = app.task_at(key, line, title)?;
+        let state = app.row_state(&t);
+        Some((t, state))
+    })
+    .flatten() else {
+        return;
+    };
+    let accept = match state {
+        RowState::Gone => "Accept again",
+        _ => "Accept",
+    };
+    let pressed = super::ask(&crate::dialog::Dialog {
+        tone: crate::dialog::Tone::Question,
+        title: "Quest",
+        text: &briefing(&t),
+        buttons: &[accept, "Edit quest", "Not now"],
+        default: 0,
+    });
+    match pressed {
+        Some(0) => {
+            with_app(|app| app.accept_task(key, line, title));
+        }
+        Some(1) => rewrite(key, &t),
+        _ => {}
+    }
+}
+
+/// What a quest's briefing says: its title, then its notes, or that it
+/// has none, since the agent gets nothing more than this.
+fn briefing(t: &Task) -> String {
+    let title = tasks::one_line(&t.title);
+    if t.notes.is_empty() {
+        format!(
+            "{title}
+
+No notes. The agent gets only the title."
+        )
+    } else {
+        format!(
+            "{title}
+
+{}",
+            t.notes.join(
+                "
+"
+            )
+        )
+    }
 }
 
 /// Asks for a quest's new title and notes, the old ones filled in.
@@ -1414,6 +1485,32 @@ mod tests {
         assert_eq!(at_once(1), "One at a time");
         assert_eq!(at_once(3), "3 at once, each in its own worktree");
         assert!(AT_ONCE.iter().all(|&n| n <= tasks::MOST_PARALLEL));
+    }
+
+    #[test]
+    fn a_briefing_gives_the_title_then_the_notes() {
+        let mut t = Task {
+            line: 3,
+            mark: Mark::Open,
+            title: "Fix  the	clock".into(),
+            holder: None,
+            reason: None,
+            notes: Vec::new(),
+        };
+        assert_eq!(
+            briefing(&t),
+            "Fix the clock
+
+No notes. The agent gets only the title."
+        );
+        t.notes = vec!["It runs fast.".into(), "See main.rs".into()];
+        assert_eq!(
+            briefing(&t),
+            "Fix the clock
+
+It runs fast.
+See main.rs"
+        );
     }
 
     #[test]
