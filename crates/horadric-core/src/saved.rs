@@ -14,7 +14,7 @@ use serde_json::{Map, Value};
 
 use crate::agent::Agent;
 use crate::rarity::Loot;
-use crate::runeword::Runeword;
+use crate::runeword::{OnProject, Runeword};
 use crate::session::{Phase, Session};
 use crate::title::Title;
 use crate::usage::{Defaults, Usage};
@@ -138,6 +138,10 @@ pub struct SavedState {
     /// of once, not at every start and every daily check.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub update_told: Option<String>,
+    /// Runewords cast on a project rather than a session, so a command
+    /// that runs through a reload is still followed after it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runewords: Vec<OnProject>,
 }
 
 /// The "Show on Discord" setting: whether Rich Presence is on, and whether
@@ -707,10 +711,21 @@ mod tests {
                 last_work: 160,
             }),
             screen: Some(r"\\.\DISPLAY2".into()),
+            runewords: vec![OnProject {
+                project: "c:/app".into(),
+                word: Runeword::new(
+                    "Open the site",
+                    vec![crate::runeword::Rune::Run {
+                        command: "start http://localhost:3000".into(),
+                        show: false,
+                    }],
+                ),
+            }],
             ..Default::default()
         };
         let back = SavedState::from_json(state.to_json().as_bytes());
         assert_eq!(back.version, VERSION);
+        assert_eq!(back.runewords, state.runewords);
         assert_eq!(back.sessions, state.sessions);
         assert_eq!(back.clusters, state.clusters);
         assert_eq!(back.columns, state.columns);

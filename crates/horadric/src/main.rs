@@ -17,6 +17,7 @@ mod mcp;
 mod release;
 mod reload;
 mod run;
+mod runestep;
 mod setup;
 mod status;
 mod task;
@@ -97,6 +98,7 @@ fn main() -> ExitCode {
         // `task` is how sessions started before the rename report back.
         Some("quest" | "task") => task::run(&args[1..]),
         Some("setup") => setup::run(&args[1..]),
+        Some("runestep") => runestep::run(&args[1..]),
         Some("host") => host(),
         Some("hooks") => hooks(args.get(1).map(String::as_str)),
         Some("explorer") => explorer_command(args.get(1).map(String::as_str)),

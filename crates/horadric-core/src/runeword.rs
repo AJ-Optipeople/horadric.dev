@@ -10,6 +10,11 @@
 //!
 //! Which step comes next is decided here from the session's phase, and
 //! the reviewer's while one reads, so the app only carries it out.
+//!
+//! The Runetome's stones are runewords too, read from a project's config
+//! and from one file every project shares. Their steps go beyond turns:
+//! keystrokes written into the session's terminal, and commands run in
+//! its folder, so a stone of only commands needs no session at all.
 
 use std::time::SystemTime;
 
@@ -32,6 +37,14 @@ pub enum Rune {
     Merge,
     /// Anything else in a config's runeword: told to the session as it is.
     Say(String),
+    /// Keystrokes written into the session's terminal, as [`keys`] reads
+    /// them. Done once written; it waits for no turn.
+    Keys(String),
+    /// A command run with `cmd /c` in the project's folder, or the
+    /// session's worktree. Done when it exits, and a code other than 0
+    /// stops the runeword. `show` runs it in a pane on the stage instead
+    /// of hidden.
+    Run { command: String, show: bool },
 }
 
 impl Rune {
@@ -54,8 +67,86 @@ impl Rune {
             Rune::Test => "test".into(),
             Rune::Review => "review".into(),
             Rune::Merge => "merge".into(),
-            Rune::Say(text) => cut(text, WORD_CHARS),
+            Rune::Say(text) | Rune::Keys(text) => cut(text, WORD_CHARS),
+            Rune::Run { command, .. } => cut(command, WORD_CHARS),
         }
+    }
+
+    /// Whether it is cast on a session. Only a command runs without one.
+    pub fn needs_session(&self) -> bool {
+        !matches!(self, Rune::Run { .. })
+    }
+
+    /// What it does, in full, for a stone's tooltip.
+    pub fn describe(&self) -> String {
+        match self {
+            Rune::Test => "test".into(),
+            Rune::Review => "review".into(),
+            Rune::Merge => "merge".into(),
+            Rune::Say(text) => format!("say \"{text}\""),
+            Rune::Keys(spec) => format!("keys {spec}"),
+            Rune::Run {
+                command,
+                show: false,
+            } => format!("run {command}"),
+            Rune::Run {
+                command,
+                show: true,
+            } => format!("run {command} (shown)"),
+        }
+    }
+
+    /// One step of a stone in a config: a word as [`Rune::parse`] reads
+    /// it, or an object with one of `say`, `keys` or `run`, the last with
+    /// `"show": true` if it should be watched.
+    fn from_value(v: &Value) -> Result<Rune, String> {
+        if let Some(word) = v.as_str() {
+            return Rune::parse(word).ok_or_else(|| "a step is empty".to_string());
+        }
+        let Some(m) = v.as_object() else {
+            return Err(format!("a step is a word or an object, not {v}"));
+        };
+        let text = |key: &str| -> Result<String, String> {
+            match m.get(key) {
+                Some(Value::String(t)) if !t.trim().is_empty() => Ok(t.clone()),
+                _ => Err(format!("\"{key}\" wants some text")),
+            }
+        };
+        let kinds: Vec<&str> = ["say", "keys", "run"]
+            .into_iter()
+            .filter(|k| m.contains_key(*k))
+            .collect();
+        let rune = match kinds.as_slice() {
+            ["say"] => Rune::Say(one_line(&text("say")?)),
+            ["keys"] => {
+                let spec = text("keys")?;
+                keys(&spec)?;
+                Rune::Keys(spec)
+            }
+            ["run"] => Rune::Run {
+                command: text("run")?.trim().to_string(),
+                show: match m.get("show") {
+                    None => false,
+                    Some(Value::Bool(b)) => *b,
+                    Some(_) => return Err("\"show\" is true or false".into()),
+                },
+            },
+            [] => {
+                let names: Vec<&str> = m.keys().map(String::as_str).collect();
+                return Err(format!(
+                    "a step has one of say, keys or run, not {}",
+                    names.join(", ")
+                ));
+            }
+            _ => return Err(format!("a step has one kind, not {}", kinds.join(" and "))),
+        };
+        if let Some(extra) = m
+            .keys()
+            .find(|k| !kinds.contains(&k.as_str()) && !(k.as_str() == "show" && kinds == ["run"]))
+        {
+            return Err(format!("a {} step has no \"{extra}\"", kinds[0]));
+        }
+        Ok(rune)
     }
 }
 
@@ -88,6 +179,17 @@ pub enum Step {
         reviewer: String,
         file: String,
         at: SystemTime,
+    },
+    /// Keystrokes are being written, a moment apart, so each lands as
+    /// typed rather than as one paste.
+    Typing,
+    /// A command runs. It writes its exit code beside `file` when it is
+    /// done, and hidden, its output, so a reload finds out how it went.
+    /// `pane` is the session it is shown in, when it is.
+    Running {
+        file: String,
+        #[serde(default)]
+        pane: Option<String>,
     },
 }
 
@@ -154,38 +256,324 @@ const BUILT_IN: [&[Rune]; 3] = [
     &[Rune::Review, Rune::Merge],
 ];
 
-/// The runewords a project offers: its config's own first, then the built
-/// in ones it has not already listed.
+/// Where a stone comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Source {
+    BuiltIn,
+    /// The project's `.horadric/config.json`.
+    Project,
+    /// The file every project shares.
+    Global,
+}
+
+/// A stone in the Runetome: a runeword by its label, or why it does not
+/// parse, kept so a stone with a mistake shows cracked rather than gone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Stone {
+    pub label: String,
+    pub steps: Steps,
+    pub source: Source,
+}
+
+impl Stone {
+    /// Its steps, when they parse.
+    pub fn runes(&self) -> Option<&[Rune]> {
+        self.steps.as_deref().ok()
+    }
+
+    /// Whether it casts on the project rather than on a session.
+    pub fn sessionless(&self) -> bool {
+        self.runes().is_some_and(sessionless)
+    }
+}
+
+/// Whether a runeword of these steps casts on the project rather than on
+/// a session: only commands, which need no session.
+pub fn sessionless(runes: &[Rune]) -> bool {
+    !runes.is_empty() && !runes.iter().any(Rune::needs_session)
+}
+
+/// A stone's steps, or why they do not parse.
+pub type Steps = Result<Vec<Rune>, String>;
+
+/// The stones in one file, by label, in the file's order, each with its
+/// steps or why they do not parse. Empty for an empty file or one without
+/// `runewords`, and an error for one that is not JSON. Both forms are read:
 ///
 /// ```json
-/// { "runewords": { "Ship": ["test", "Update the changelog", "merge"] } }
+/// { "runewords": {
+///     "Fresh start": { "steps": [ { "keys": "/clear{Enter}" },
+///                                 { "say": "Take the next quest" } ] },
+///     "Ship": ["test", "Update the changelog", "merge"] } }
 /// ```
-pub fn offered(config: &str) -> Offered {
-    let v = serde_json::from_str::<Value>(config).unwrap_or(Value::Null);
-    let mut out: Offered = v
-        .get("runewords")
-        .and_then(Value::as_object)
-        .map(|m| {
-            m.iter()
-                .filter_map(|(name, runes)| {
-                    let runes: Vec<Rune> = runes
-                        .as_array()?
-                        .iter()
-                        .filter_map(Value::as_str)
-                        .filter_map(Rune::parse)
-                        .collect();
-                    let name = one_line(name);
-                    (!runes.is_empty() && !name.is_empty()).then_some((name, runes))
-                })
-                .collect()
+pub fn parse(text: &str) -> Result<Vec<(String, Steps)>, String> {
+    if text.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let v: Value = serde_json::from_str(text).map_err(|e| format!("not JSON: {e}"))?;
+    let words = match v.get("runewords") {
+        None | Some(Value::Null) => return Ok(Vec::new()),
+        Some(Value::Object(m)) => m,
+        Some(_) => return Err("\"runewords\" is an object of stones by label".into()),
+    };
+    Ok(words
+        .iter()
+        .filter_map(|(label, value)| {
+            let label = one_line(label);
+            (!label.is_empty()).then(|| (label, steps_of(value)))
         })
-        .unwrap_or_default();
-    for runes in BUILT_IN {
-        if !out.iter().any(|(_, r)| r == runes) {
-            out.push((named(runes), runes.to_vec()));
+        .collect())
+}
+
+/// One stone's steps: a list, or an object with `steps`.
+fn steps_of(v: &Value) -> Steps {
+    let list = match v {
+        Value::Array(list) => list,
+        Value::Object(m) => match m.get("steps") {
+            Some(Value::Array(list)) => list,
+            Some(_) => return Err("\"steps\" is a list".into()),
+            None => return Err("a stone has \"steps\"".into()),
+        },
+        _ => return Err("a stone is a list of steps or {\"steps\": [...]}".into()),
+    };
+    let runes = list
+        .iter()
+        .enumerate()
+        .map(|(i, step)| Rune::from_value(step).map_err(|e| format!("step {}: {e}", i + 1)))
+        .collect::<Result<Vec<Rune>, String>>()?;
+    if runes.is_empty() {
+        return Err("it has no steps".into());
+    }
+    Ok(runes)
+}
+
+/// Every stone a project has, as the Runetome lays them out: the built in
+/// ones, then the project's (`project`, its config's text), then the ones
+/// every project shares (`global`). A built in one that a file repeats
+/// step for step is left to the file, which named it. A file that is not
+/// JSON adds nothing.
+pub fn stones(project: &str, global: &str) -> Vec<Stone> {
+    let mut theirs: Vec<Stone> = Vec::new();
+    for (text, source) in [(project, Source::Project), (global, Source::Global)] {
+        for (label, steps) in parse(text).unwrap_or_default() {
+            theirs.push(Stone {
+                label,
+                steps,
+                source,
+            });
         }
     }
+    let mut out: Vec<Stone> = BUILT_IN
+        .iter()
+        .filter(|runes| !theirs.iter().any(|s| s.runes() == Some(**runes)))
+        .map(|runes| Stone {
+            label: named(runes),
+            steps: Ok(runes.to_vec()),
+            source: Source::BuiltIn,
+        })
+        .collect();
+    out.extend(theirs);
     out
+}
+
+/// The runewords a session's menu offers: every stone that parses, in the
+/// tome's order.
+pub fn offered(stones: Vec<Stone>) -> Offered {
+    stones
+        .into_iter()
+        .filter_map(|s| Some((s.label, s.steps.ok()?)))
+        .collect()
+}
+
+/// Keystrokes as a `keys` step writes them, in pieces written a moment
+/// apart so each lands as typed: a run of text is one, each key in braces
+/// one of its own. The whole of `spec` may be one key (`"Esc"`,
+/// `"Ctrl+C"`), or text with keys in braces (`"/clear{Enter}"`), where
+/// `{{` and `}}` are braces.
+pub fn keys(spec: &str) -> Result<Vec<Vec<u8>>, String> {
+    if spec.trim().is_empty() {
+        return Err("no keys".into());
+    }
+    if !spec.contains(['{', '}']) {
+        if let Some(bytes) = chord(spec.trim()) {
+            return Ok(vec![bytes]);
+        }
+    }
+    let mut out: Vec<Vec<u8>> = Vec::new();
+    let mut text = String::new();
+    let mut chars = spec.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '{' | '}' if chars.peek() == Some(&c) => {
+                chars.next();
+                text.push(c);
+            }
+            '{' => {
+                let mut name = String::new();
+                loop {
+                    match chars.next() {
+                        Some('}') => break,
+                        Some(c) => name.push(c),
+                        None => return Err(format!("\"{{{name}\" is not closed")),
+                    }
+                }
+                let key = chord(name.trim()).ok_or_else(|| format!("no key called \"{name}\""))?;
+                if !text.is_empty() {
+                    out.push(std::mem::take(&mut text).into_bytes());
+                }
+                out.push(key);
+            }
+            c => text.push(c),
+        }
+    }
+    if !text.is_empty() {
+        out.push(text.into_bytes());
+    }
+    Ok(out)
+}
+
+/// One key with any of Ctrl, Alt and Shift before it, as a terminal sends
+/// it: `"Enter"`, `"Ctrl+C"`, `"Shift+Tab"`, `"Alt+Up"`. None for what is
+/// not one.
+fn chord(spec: &str) -> Option<Vec<u8>> {
+    let mut parts: Vec<&str> = spec.split('+').map(str::trim).collect();
+    // "Ctrl++" is Ctrl and the plus key.
+    if spec.len() > 1 && spec.ends_with("++") {
+        parts.truncate(parts.len() - 2);
+        parts.push("+");
+    }
+    let (key, mods) = parts.split_last()?;
+    let (mut ctrl, mut alt, mut shift) = (false, false, false);
+    for m in mods {
+        match m.to_lowercase().as_str() {
+            "ctrl" | "control" => ctrl = true,
+            "alt" => alt = true,
+            "shift" => shift = true,
+            _ => return None,
+        }
+    }
+    let lower = key.to_lowercase();
+    // xterm's modifier parameter: 1, and 1 more for Shift, 2 Alt, 4 Ctrl.
+    let param = 1 + u8::from(shift) + 2 * u8::from(alt) + 4 * u8::from(ctrl);
+    let letter = |l: u8| -> Vec<u8> {
+        match param {
+            1 => vec![0x1b, b'[', l],
+            _ => format!("\x1b[1;{param}{}", l as char).into_bytes(),
+        }
+    };
+    let tilde = |n: u8| -> Vec<u8> {
+        match param {
+            1 => format!("\x1b[{n}~").into_bytes(),
+            _ => format!("\x1b[{n};{param}~").into_bytes(),
+        }
+    };
+    match lower.as_str() {
+        "up" => return Some(letter(b'A')),
+        "down" => return Some(letter(b'B')),
+        "right" => return Some(letter(b'C')),
+        "left" => return Some(letter(b'D')),
+        "home" => return Some(letter(b'H')),
+        "end" => return Some(letter(b'F')),
+        "insert" | "ins" => return Some(tilde(2)),
+        "delete" | "del" => return Some(tilde(3)),
+        "pageup" | "pgup" => return Some(tilde(5)),
+        "pagedown" | "pgdn" => return Some(tilde(6)),
+        f if f.len() > 1 && f.starts_with('f') && f[1..].bytes().all(|b| b.is_ascii_digit()) => {
+            let n: u8 = f[1..].parse().ok().filter(|n| (1..=12).contains(n))?;
+            let p = b'P' + n.min(5) - 1;
+            return Some(match n {
+                1..=4 if param == 1 => vec![0x1b, b'O', p],
+                1..=4 => format!("\x1b[1;{param}{}", p as char).into_bytes(),
+                _ => tilde([15, 17, 18, 19, 20, 21, 23, 24][usize::from(n - 5)]),
+            });
+        }
+        _ => {}
+    }
+    let mut out = Vec::new();
+    if alt {
+        out.push(0x1b);
+    }
+    match lower.as_str() {
+        "enter" | "return" if shift => out.extend_from_slice(b"\x1b\r"),
+        "enter" | "return" => out.push(b'\r'),
+        "tab" if shift => out.extend_from_slice(b"\x1b[Z"),
+        "tab" => out.push(b'\t'),
+        "esc" | "escape" => out.push(0x1b),
+        "backspace" | "bksp" if ctrl => out.push(0x08),
+        "backspace" | "bksp" => out.push(0x7f),
+        "space" if ctrl => out.push(0),
+        "space" => out.push(b' '),
+        _ => {
+            let mut chars = key.chars();
+            let (Some(c), None) = (chars.next(), chars.next()) else {
+                return None;
+            };
+            if ctrl {
+                out.push(match c.to_ascii_lowercase() {
+                    l @ 'a'..='z' => l as u8 & 0x1f,
+                    '@' | '2' => 0,
+                    '[' => 0x1b,
+                    '\\' => 0x1c,
+                    ']' => 0x1d,
+                    '^' | '6' => 0x1e,
+                    '_' | '-' => 0x1f,
+                    _ => return None,
+                });
+            } else {
+                let c = if shift { c.to_ascii_uppercase() } else { c };
+                let mut buf = [0; 4];
+                out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+            }
+        }
+    }
+    Some(out)
+}
+
+/// A runeword cast on a project rather than on a session: a stone of only
+/// `run` steps. Saved beside the sessions, so it goes on through a reload.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OnProject {
+    /// The project's key.
+    pub project: String,
+    pub word: Runeword,
+}
+
+/// How a `run` step's command went.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Ran {
+    /// It exited with `code`. `last` is its last line of output, when its
+    /// output was kept.
+    Exited { code: i32, last: String },
+    /// It is gone without saying how it ended: its pane was closed.
+    Gone,
+}
+
+/// A command's exit code as its file holds it. None until it is written.
+pub fn exit_code(text: &str) -> Option<i32> {
+    text.trim().parse().ok()
+}
+
+/// The last line of a command's output with anything in it, cut short for
+/// a toast.
+pub fn last_line(output: &str) -> String {
+    let line = output
+        .lines()
+        .map(str::trim)
+        .rfind(|l| !l.is_empty())
+        .unwrap_or_default();
+    cut(line, LAST_CHARS)
+}
+
+/// How much of a failed command's last line a toast shows.
+const LAST_CHARS: usize = 160;
+
+/// Why a command that failed stopped its runeword. The toast names the
+/// command already, by the step it was at.
+fn failed(code: i32, last: &str) -> String {
+    match last {
+        "" => format!("it exited with {code}"),
+        _ => format!("it exited with {code}: {last}"),
+    }
 }
 
 /// A session as the next step looks at it.
@@ -196,6 +584,8 @@ pub struct Seen {
     pub since: SystemTime,
     /// When its last prompt went in, if one did since the app started.
     pub prompted: Option<SystemTime>,
+    /// Keystrokes a `keys` step gave it are still to be written.
+    pub typing: bool,
 }
 
 impl Seen {
@@ -224,17 +614,30 @@ pub enum Act {
     Stop(String),
 }
 
-/// The next step for `word` on a session seen as `session`, with its
-/// reviewer seen as `reviewer` while one reads (None when it is gone).
-pub fn act(word: &Runeword, session: &Seen, reviewer: Option<&Seen>) -> Act {
-    match session.phase {
-        Phase::Ended => return Act::Stop("the session ended".into()),
-        Phase::Paused => return Act::Wait,
+/// The next step for `word`, cast on a session seen as `session` or on
+/// its project with none, with its reviewer seen as `reviewer` while one
+/// reads (None when it is gone), and how the command of a `run` step went
+/// once it is known.
+pub fn act(
+    word: &Runeword,
+    session: Option<&Seen>,
+    reviewer: Option<&Seen>,
+    ran: Option<&Ran>,
+) -> Act {
+    match session.map(|s| &s.phase) {
+        Some(Phase::Ended) => return Act::Stop("the session ended".into()),
+        Some(Phase::Paused) => return Act::Wait,
         _ => {}
     }
+    let Some(session) = session else {
+        return sessionless_act(word, ran);
+    };
     match &word.step {
         Step::Due => match word.runes.get(word.at) {
             None => Act::Complete,
+            // Keys and commands wait for no turn: Esc is for a session
+            // that is busy, and a command does not type to it.
+            Some(rune @ (Rune::Keys(_) | Rune::Run { .. })) => Act::Cast(rune.clone()),
             // At rest, and not waiting on the human: telling it now would
             // land in the middle of what it is doing.
             Some(rune) if matches!(session.phase, Phase::Done | Phase::Idle) => {
@@ -264,6 +667,31 @@ pub fn act(word: &Runeword, session: &Seen, reviewer: Option<&Seen>) -> Act {
             Some(r) if r.finished_after(*at) => Act::Answer,
             Some(_) => Act::Wait,
         },
+        Step::Typing if session.typing => Act::Wait,
+        Step::Typing => Act::Next,
+        Step::Running { .. } => ran_act(ran),
+    }
+}
+
+/// The next step of a runeword cast on a project, which only runs
+/// commands.
+fn sessionless_act(word: &Runeword, ran: Option<&Ran>) -> Act {
+    match (&word.step, word.runes.get(word.at)) {
+        (Step::Due, None) => Act::Complete,
+        (Step::Due, Some(rune @ Rune::Run { .. })) => Act::Cast(rune.clone()),
+        (Step::Due, Some(rune)) => Act::Stop(format!("{} needs a session", rune.word())),
+        (Step::Running { .. }, _) => ran_act(ran),
+        _ => Act::Stop("it has no session".into()),
+    }
+}
+
+/// A running command's step: on once it exits cleanly, stopped otherwise.
+fn ran_act(ran: Option<&Ran>) -> Act {
+    match ran {
+        None => Act::Wait,
+        Some(Ran::Exited { code: 0, .. }) => Act::Next,
+        Some(Ran::Exited { code, last }) => Act::Stop(failed(*code, last)),
+        Some(Ran::Gone) => Act::Stop("its pane was closed".into()),
     }
 }
 
@@ -308,7 +736,13 @@ mod tests {
             phase,
             since: t(since),
             prompted: None,
+            typing: false,
         }
+    }
+
+    /// The next step on a session, with no command running.
+    fn on(w: &Runeword, s: &Seen, reviewer: Option<&Seen>) -> Act {
+        act(w, Some(s), reviewer, None)
     }
 
     fn word(runes: &[Rune]) -> Runeword {
@@ -348,42 +782,333 @@ mod tests {
     }
 
     #[test]
-    fn a_project_offers_its_own_runewords_before_the_built_in_ones() {
+    fn the_tome_lays_out_built_in_then_project_then_global_stones() {
         let config = r#"{ "runewords": {
             "Ship": ["test", "Update the changelog", "merge"],
             "Empty": [],
             "Again": ["test", "merge"]
         } }"#;
-        let offered = offered(config);
-        let names: Vec<&str> = offered.iter().map(|(n, _)| n.as_str()).collect();
+        let global = r#"{ "runewords": {
+            "Open the site": { "steps": [ { "run": "start http://localhost:3000" } ] }
+        } }"#;
+        let stones = stones(config, global);
+        let labels: Vec<(&str, Source)> = stones
+            .iter()
+            .map(|s| (s.label.as_str(), s.source))
+            .collect();
         // Its own "Again" is the built in test and merge, which is not
-        // offered twice.
+        // there twice.
+        assert_eq!(
+            labels,
+            [
+                ("Test, review, merge", Source::BuiltIn),
+                ("Review, merge", Source::BuiltIn),
+                ("Again", Source::Project),
+                ("Empty", Source::Project),
+                ("Ship", Source::Project),
+                ("Open the site", Source::Global),
+            ]
+        );
+        assert_eq!(stones[3].steps, Err("it has no steps".into()));
+        assert!(stones[5].sessionless());
+        assert!(!stones[4].sessionless());
+        // The menu offers only what parses.
+        let offered = offered(stones);
+        let names: Vec<&str> = offered.iter().map(|(n, _)| n.as_str()).collect();
         assert_eq!(
             names,
-            ["Again", "Ship", "Test, review, merge", "Review, merge"]
+            [
+                "Test, review, merge",
+                "Review, merge",
+                "Again",
+                "Ship",
+                "Open the site"
+            ]
         );
         assert_eq!(
-            offered[1].1,
+            offered[3].1,
             [
                 Rune::Test,
                 Rune::Say("Update the changelog".into()),
                 Rune::Merge
             ]
         );
-        let plain = super::offered("");
+        let plain = super::offered(super::stones("", ""));
         assert_eq!(plain.len(), 3);
         assert_eq!(plain[0].0, "Test, merge");
+        // A broken file adds nothing, and takes nothing from the other.
+        assert_eq!(super::stones("{ not json", global).len(), 4);
+    }
+
+    #[test]
+    fn both_forms_and_every_step_kind_parse() {
+        let text = r#"{ "runewords": {
+            "Fresh start": { "steps": [ { "keys": "/clear{Enter}" },
+                                        { "say": "Read docs/PLAN.md\n and go" } ] },
+            "Watch": { "steps": [ { "run": " npm test ", "show": true }, "Review" ] },
+            "Ship": ["test", { "run": "git push" }, "merge"]
+        } }"#;
+        let parsed = parse(text).unwrap();
+        assert_eq!(
+            parsed,
+            [
+                (
+                    "Fresh start".to_string(),
+                    Ok(vec![
+                        Rune::Keys("/clear{Enter}".into()),
+                        Rune::Say("Read docs/PLAN.md and go".into()),
+                    ])
+                ),
+                (
+                    "Ship".to_string(),
+                    Ok(vec![
+                        Rune::Test,
+                        Rune::Run {
+                            command: "git push".into(),
+                            show: false
+                        },
+                        Rune::Merge,
+                    ])
+                ),
+                (
+                    "Watch".to_string(),
+                    Ok(vec![
+                        Rune::Run {
+                            command: "npm test".into(),
+                            show: true
+                        },
+                        Rune::Review,
+                    ])
+                ),
+            ]
+        );
+        assert_eq!(parse(""), Ok(Vec::new()));
+        assert_eq!(parse(r#"{ "mode": "auto" }"#), Ok(Vec::new()));
+        assert!(parse("{ nope").unwrap_err().starts_with("not JSON"));
+        assert!(parse(r#"{ "runewords": [] }"#).is_err());
+    }
+
+    #[test]
+    fn a_stone_that_does_not_parse_says_why() {
+        let reason = |stone: &str| -> String {
+            let text = format!(r#"{{ "runewords": {{ "X": {stone} }} }}"#);
+            parse(&text).unwrap()[0].1.clone().unwrap_err()
+        };
+        assert_eq!(
+            reason("3"),
+            "a stone is a list of steps or {\"steps\": [...]}"
+        );
+        assert_eq!(reason("{}"), "a stone has \"steps\"");
+        assert_eq!(reason(r#"{"steps": "test"}"#), "\"steps\" is a list");
+        assert_eq!(reason(r#"["test", ""]"#), "step 2: a step is empty");
+        assert_eq!(
+            reason("[1]"),
+            "step 1: a step is a word or an object, not 1"
+        );
+        assert_eq!(
+            reason(r#"[{"keys": "{Enterr}"}]"#),
+            "step 1: no key called \"Enterr\""
+        );
+        assert_eq!(
+            reason(r#"[{"say": " "}]"#),
+            "step 1: \"say\" wants some text"
+        );
+        assert_eq!(
+            reason(r#"[{"say": "a", "run": "b"}]"#),
+            "step 1: a step has one kind, not say and run"
+        );
+        assert_eq!(
+            reason(r#"[{"type": "a"}]"#),
+            "step 1: a step has one of say, keys or run, not type"
+        );
+        assert_eq!(
+            reason(r#"[{"say": "a", "show": true}]"#),
+            "step 1: a say step has no \"show\""
+        );
+        assert_eq!(
+            reason(r#"[{"run": "a", "show": "yes"}]"#),
+            "step 1: \"show\" is true or false"
+        );
+    }
+
+    #[test]
+    fn keys_read_as_a_terminal_sends_them() {
+        let one = |spec: &str| keys(spec).unwrap().concat();
+        assert_eq!(one("Esc"), b"\x1b");
+        assert_eq!(one(" escape "), b"\x1b");
+        assert_eq!(one("Ctrl+C"), [3]);
+        assert_eq!(one("ctrl + c"), [3]);
+        assert_eq!(one("Enter"), b"\r");
+        assert_eq!(one("Shift+Tab"), b"\x1b[Z");
+        assert_eq!(one("Alt+x"), b"\x1bx");
+        assert_eq!(one("Up"), b"\x1b[A");
+        assert_eq!(one("Ctrl+Left"), b"\x1b[1;5D");
+        assert_eq!(one("Delete"), b"\x1b[3~");
+        assert_eq!(one("Shift+PageUp"), b"\x1b[5;2~");
+        assert_eq!(one("F1"), b"\x1bOP");
+        assert_eq!(one("F5"), b"\x1b[15~");
+        assert_eq!(one("F12"), b"\x1b[24~");
+        assert_eq!(one("Alt++"), b"\x1b+");
+        // Text, with keys in braces as pieces of their own.
+        assert_eq!(
+            keys("/clear{Enter}").unwrap(),
+            [b"/clear".to_vec(), b"\r".to_vec()]
+        );
+        assert_eq!(
+            keys("{Esc}{Esc}git log{Enter}").unwrap(),
+            [
+                b"\x1b".to_vec(),
+                b"\x1b".to_vec(),
+                b"git log".to_vec(),
+                b"\r".to_vec()
+            ]
+        );
+        assert_eq!(keys("a {{b}} c").unwrap(), [b"a {b} c".to_vec()]);
+        // A word that is no key is typed.
+        assert_eq!(keys("hello world").unwrap(), [b"hello world".to_vec()]);
+        assert_eq!(keys("1+1").unwrap(), [b"1+1".to_vec()]);
+        assert!(keys("  ").is_err());
+        assert_eq!(keys("{Enter").unwrap_err(), "\"{Enter\" is not closed");
+        assert_eq!(keys("{Hyper+A}").unwrap_err(), "no key called \"Hyper+A\"");
+        assert!(keys("{F13}").is_err());
+    }
+
+    #[test]
+    fn keys_are_written_at_once_and_done_once_written() {
+        let mut w = word(&[Rune::Keys("Esc".into()), Rune::Test]);
+        // Esc is for a session that is busy, so it waits for no rest.
+        assert_eq!(
+            on(&w, &seen(Phase::Working, 5), None),
+            Act::Cast(Rune::Keys("Esc".into()))
+        );
+        w.step = Step::Typing;
+        let typing = Seen {
+            typing: true,
+            ..seen(Phase::Working, 5)
+        };
+        assert_eq!(on(&w, &typing, None), Act::Wait);
+        assert_eq!(on(&w, &seen(Phase::Working, 5), None), Act::Next);
+        assert_eq!(on(&w, &seen(Phase::Paused, 5), None), Act::Wait);
+    }
+
+    #[test]
+    fn a_command_goes_on_when_it_exits_cleanly() {
+        let run = Rune::Run {
+            command: "npm test".into(),
+            show: false,
+        };
+        let mut w = word(&[run.clone(), Rune::Merge]);
+        let s = seen(Phase::Working, 5);
+        assert_eq!(act(&w, Some(&s), None, None), Act::Cast(run.clone()));
+        w.step = Step::Running {
+            file: "C:/r/1".into(),
+            pane: None,
+        };
+        assert_eq!(act(&w, Some(&s), None, None), Act::Wait);
+        let clean = Ran::Exited {
+            code: 0,
+            last: String::new(),
+        };
+        assert_eq!(act(&w, Some(&s), None, Some(&clean)), Act::Next);
+        let failing = Ran::Exited {
+            code: 1,
+            last: "2 tests failed".into(),
+        };
+        assert_eq!(
+            act(&w, Some(&s), None, Some(&failing)),
+            Act::Stop("it exited with 1: 2 tests failed".into())
+        );
+        assert_eq!(
+            act(&w, Some(&s), None, Some(&Ran::Gone)),
+            Act::Stop("its pane was closed".into())
+        );
+    }
+
+    #[test]
+    fn a_runeword_of_commands_needs_no_session() {
+        let run = |c: &str| Rune::Run {
+            command: c.into(),
+            show: false,
+        };
+        let runes = [run("a"), run("b")];
+        assert!(sessionless(&runes));
+        assert!(!sessionless(&[run("a"), Rune::Say("x".into())]));
+        assert!(!sessionless(&[]));
+        let mut w = word(&runes);
+        assert_eq!(act(&w, None, None, None), Act::Cast(run("a")));
+        w.step = Step::Running {
+            file: "f".into(),
+            pane: None,
+        };
+        assert_eq!(act(&w, None, None, None), Act::Wait);
+        let clean = Ran::Exited {
+            code: 0,
+            last: String::new(),
+        };
+        assert_eq!(act(&w, None, None, Some(&clean)), Act::Next);
+        w.advance();
+        w.advance();
+        assert_eq!(act(&w, None, None, None), Act::Complete);
+        let said = word(&[Rune::Say("hi".into())]);
+        assert_eq!(
+            act(&said, None, None, None),
+            Act::Stop("hi needs a session".into())
+        );
+    }
+
+    #[test]
+    fn a_command_s_last_line_and_code_read_from_its_files() {
+        assert_eq!(exit_code("0\r\n"), Some(0));
+        assert_eq!(exit_code("-1"), Some(-1));
+        assert_eq!(exit_code(""), None);
+        assert_eq!(last_line("one\r\n  two  \r\n\r\n"), "two");
+        assert_eq!(last_line(""), "");
+        assert_eq!(last_line(&"x".repeat(200)).chars().count(), 163);
+    }
+
+    #[test]
+    fn a_runeword_on_a_project_survives_a_save() {
+        let mut w = word(&[Rune::Run {
+            command: "start ms-settings:".into(),
+            show: true,
+        }]);
+        w.step = Step::Running {
+            file: "C:/r/1".into(),
+            pane: Some("rune-1".into()),
+        };
+        let on = OnProject {
+            project: "c:/p".into(),
+            word: w,
+        };
+        let json = serde_json::to_string(&on).unwrap();
+        assert_eq!(serde_json::from_str::<OnProject>(&json).unwrap(), on);
+        let typing = serde_json::to_string(&Step::Typing).unwrap();
+        assert_eq!(serde_json::from_str::<Step>(&typing).unwrap(), Step::Typing);
+    }
+
+    #[test]
+    fn a_step_describes_itself_in_full() {
+        assert_eq!(Rune::Say("Go on".into()).describe(), "say \"Go on\"");
+        assert_eq!(Rune::Keys("Ctrl+C".into()).describe(), "keys Ctrl+C");
+        let shown = Rune::Run {
+            command: "npm run dev".into(),
+            show: true,
+        };
+        assert_eq!(shown.describe(), "run npm run dev (shown)");
+        assert_eq!(shown.word(), "npm run dev");
+        assert!(!shown.needs_session());
+        assert!(Rune::Keys("Esc".into()).needs_session());
     }
 
     #[test]
     fn a_rune_is_cast_only_on_a_session_at_rest() {
         let w = word(&[Rune::Test, Rune::Merge]);
-        assert_eq!(act(&w, &seen(Phase::Done, 5), None), Act::Cast(Rune::Test));
-        assert_eq!(act(&w, &seen(Phase::Idle, 5), None), Act::Cast(Rune::Test));
-        assert_eq!(act(&w, &seen(Phase::Working, 5), None), Act::Wait);
+        assert_eq!(on(&w, &seen(Phase::Done, 5), None), Act::Cast(Rune::Test));
+        assert_eq!(on(&w, &seen(Phase::Idle, 5), None), Act::Cast(Rune::Test));
+        assert_eq!(on(&w, &seen(Phase::Working, 5), None), Act::Wait);
         let asking = Phase::Waiting(WaitReason::Permission);
-        assert_eq!(act(&w, &seen(asking, 5), None), Act::Wait);
-        assert_eq!(act(&w, &seen(Phase::Paused, 5), None), Act::Wait);
+        assert_eq!(on(&w, &seen(asking, 5), None), Act::Wait);
+        assert_eq!(on(&w, &seen(Phase::Paused, 5), None), Act::Wait);
     }
 
     #[test]
@@ -394,9 +1119,9 @@ mod tests {
             heard: None,
         };
         // The turn it was told in has not ended yet.
-        assert_eq!(act(&w, &seen(Phase::Done, 5), None), Act::Wait);
-        assert_eq!(act(&w, &seen(Phase::Working, 11), None), Act::Wait);
-        assert_eq!(act(&w, &seen(Phase::Done, 20), None), Act::Next);
+        assert_eq!(on(&w, &seen(Phase::Done, 5), None), Act::Wait);
+        assert_eq!(on(&w, &seen(Phase::Working, 11), None), Act::Wait);
+        assert_eq!(on(&w, &seen(Phase::Done, 20), None), Act::Next);
     }
 
     #[test]
@@ -411,16 +1136,16 @@ mod tests {
             ..seen(Phase::Working, prompted)
         };
         // A prompt from before the telling is not the told one.
-        assert_eq!(act(&w, &working(8), None), Act::Wait);
-        assert_eq!(act(&w, &working(11), None), Act::Heard(t(11)));
+        assert_eq!(on(&w, &working(8), None), Act::Wait);
+        assert_eq!(on(&w, &working(11), None), Act::Heard(t(11)));
         w.step = Step::Told {
             at: t(10),
             heard: Some(t(11)),
         };
-        assert_eq!(act(&w, &working(11), None), Act::Wait);
+        assert_eq!(on(&w, &working(11), None), Act::Wait);
         // The human cut the turn short and asked for something else.
         assert_eq!(
-            act(&w, &working(40), None),
+            on(&w, &working(40), None),
             Act::Stop("you took over from it".into())
         );
         // Even once that turn has ended.
@@ -428,13 +1153,13 @@ mod tests {
             prompted: Some(t(40)),
             ..seen(Phase::Done, 50)
         };
-        assert!(matches!(act(&w, &done, None), Act::Stop(_)));
+        assert!(matches!(on(&w, &done, None), Act::Stop(_)));
         // The told turn ending is the rune done, heard or not.
         let own = Seen {
             prompted: Some(t(11)),
             ..seen(Phase::Done, 30)
         };
-        assert_eq!(act(&w, &own, None), Act::Next);
+        assert_eq!(on(&w, &own, None), Act::Next);
     }
 
     #[test]
@@ -461,12 +1186,12 @@ mod tests {
             at: t(10),
         };
         let s = seen(Phase::Done, 5);
-        assert_eq!(act(&w, &s, Some(&seen(Phase::Idle, 10))), Act::Wait);
-        assert_eq!(act(&w, &s, Some(&seen(Phase::Working, 12))), Act::Wait);
-        assert_eq!(act(&w, &s, Some(&seen(Phase::Done, 30))), Act::Answer);
-        assert!(matches!(act(&w, &s, None), Act::Stop(_)));
+        assert_eq!(on(&w, &s, Some(&seen(Phase::Idle, 10))), Act::Wait);
+        assert_eq!(on(&w, &s, Some(&seen(Phase::Working, 12))), Act::Wait);
+        assert_eq!(on(&w, &s, Some(&seen(Phase::Done, 30))), Act::Answer);
+        assert!(matches!(on(&w, &s, None), Act::Stop(_)));
         assert!(matches!(
-            act(&w, &s, Some(&seen(Phase::Ended, 30))),
+            on(&w, &s, Some(&seen(Phase::Ended, 30))),
             Act::Stop(_)
         ));
     }
@@ -475,9 +1200,9 @@ mod tests {
     fn it_completes_after_the_last_rune_and_stops_with_its_session() {
         let mut w = word(&[Rune::Merge]);
         w.advance();
-        assert_eq!(act(&w, &seen(Phase::Done, 5), None), Act::Complete);
+        assert_eq!(on(&w, &seen(Phase::Done, 5), None), Act::Complete);
         assert_eq!(
-            act(&w, &seen(Phase::Ended, 5), None),
+            on(&w, &seen(Phase::Ended, 5), None),
             Act::Stop("the session ended".into())
         );
     }

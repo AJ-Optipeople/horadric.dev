@@ -697,6 +697,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             discord: saved.discord,
             rich: None,
             run: presence::Run::from_saved(saved.run),
+            tome: runner::runeword::Tome::new(saved.runewords.clone()),
             cube_on: saved.cube,
             font_family: saved.font_family.clone(),
             screen: saved.screen.clone(),
@@ -1392,6 +1393,19 @@ fn tile_menu(id: &str) {
             items.insert(at, entry);
         }
     }
+    // Runewords of commands cast on the session's project, which have no
+    // tile of their own to be stopped from until the Runetome.
+    let key = with_app(|app| app.project_of(id)).flatten();
+    let on_project = key
+        .as_ref()
+        .and_then(|k| with_app(|app| app.project_runewords(k)))
+        .unwrap_or_default();
+    if let Some(at) = items.iter().rposition(|i| matches!(i, Item::Separator)) {
+        for (i, w) in on_project.iter().enumerate().rev() {
+            let label = format!("Stop {} ({})", w.name, w.progress());
+            items.insert(at, Item::action(STOP_PROJECT + i, label));
+        }
+    }
     let tree = with_app(|app| app.diff_of(id)).flatten();
     if let Some((w, diff)) = &tree {
         items.insert(0, changes_menu(w, diff.as_ref()));
@@ -1433,6 +1447,12 @@ fn tile_menu(id: &str) {
         Some(PICK) => runner::tomb::ask_pick(id),
         Some(STOP_RUNEWORD) => {
             with_app(|app| app.stop_runeword(id));
+        }
+        Some(i) if (STOP_PROJECT..STOP_PROJECT + on_project.len()).contains(&i) => {
+            if let Some(key) = &key {
+                let name = &on_project[i - STOP_PROJECT].name;
+                with_app(|app| app.stop_project_runeword(key, name));
+            }
         }
         Some(i) if (RUNEWORD..RUNEWORD + offered.len()).contains(&i) => {
             let (name, runes) = offered[i - RUNEWORD].clone();
@@ -1535,6 +1555,8 @@ const COMMITTED: usize = 400;
 const COMMITTED_END: usize = 700;
 /// Where the runewords a session can be given start in its tile menu.
 const RUNEWORD: usize = 800;
+/// Where the runewords cast on the session's project start in its menu.
+const STOP_PROJECT: usize = 900;
 const CODE: usize = 700;
 /// The most files a half of the changes lists. A menu taller than the
 /// screen scrolls by the pixel, which is no way to look at a change.
@@ -1672,6 +1694,9 @@ pub(crate) enum Run {
     /// `claude attach` to the background session with this short id. The
     /// daemon runs the agent; the pane only shows it.
     Attach(String),
+    /// This program with the launch's arguments: `horadric runestep`
+    /// running a runeword's command where it can be watched.
+    Program(PathBuf),
 }
 
 /// What to say when `agent` is not installed, or was installed after
@@ -2640,6 +2665,8 @@ struct App {
     screen: Option<String>,
     /// The task lists: what was read, and what the runner is up to.
     tasks: runner::State,
+    /// Runewords cast on projects, and what casting keeps on the way.
+    tome: runner::runeword::Tome,
     /// Worktrees just added for sessions about to start, by session id,
     /// with the setup commands to run in them first. Taken by the launch.
     new_trees: HashMap<String, (Worktree, Vec<String>)>,
@@ -3733,6 +3760,7 @@ impl App {
                 console::claude_program().ok_or("claude not found on PATH")?,
                 vec!["attach".to_string(), short.clone()],
             ),
+            Run::Program(program) => (program.clone(), args),
         };
         let fresh = self.new_trees.remove(id);
         if fresh.is_none() {
@@ -5528,6 +5556,7 @@ impl App {
             accents: theme::accents(),
             page_docks: web::docks(),
             pages: web::pages(),
+            runewords: self.tome.projects.clone(),
             update_told: self.update_told.clone(),
             ..Default::default()
         }

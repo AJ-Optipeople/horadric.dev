@@ -2843,6 +2843,30 @@ saved in `state.json`) stays.
 - **Left alone**: the cube and its recipes, and how runes are cast
   turn by turn.
 
+The engine is built (2026-10-01). `runeword::parse` reads both forms
+and every step kind, `runeword::stones` lays out built in, project and
+global stones with a cracked one's reason, and `runeword::keys` turns
+a spec into pieces written 400 ms apart, a run of text one piece and
+each key in braces one of its own, so `/clear{Enter}` lands as typed.
+A `run` step goes through `horadric runestep <file> [--show]
+<command>`, started out of the app's job, which writes the exit code
+to `<file>.exit` (and, hidden, the output to `<file>.log`) under
+`runes` in the app's folder. That file is how a build after a reload
+learns how a command it did not start ended. A shown one runs in a
+plain pane that waits for Enter after a failure. Stones of only `run`
+steps cast on the project (`OnProject`, saved as `runewords` in
+`state.json`). The global file is `runewords.json` beside the state,
+in `Horadric-dev` for a dev instance, and both files are read again
+when their time or size changes. Until the tome exists, the tile menu's
+Runeword submenu offers every stone that parses, picking one of only
+commands casts it on the project, and "Stop <name>" items stop those.
+Checked on a dev instance with `cmd.exe` as the agent: `keys` typed
+`echo ...{Enter}` and cmd ran it, keys then a hidden `run` wrote its
+file in the project, a failing command toasted "it exited with 3:
+boom went the command", a shown one opened a pane and closed it on
+exit 0, the global stone ran, and a 30 second command cast before a
+`reload` finished after it, the new build completing the runeword.
+
 ### Step 4: worktrees and the git glance
 
 - `git worktree add` per session, branch named from the session name.
