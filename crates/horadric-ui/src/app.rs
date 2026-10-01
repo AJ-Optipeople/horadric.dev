@@ -2842,7 +2842,10 @@ impl App {
                 crate::vsync::took(self.notify, GLIDE_TIMER);
                 self.glide();
             }
-            WM_TIMER if wparam == BREATH_TIMER => self.tray.step(),
+            WM_TIMER if wparam == BREATH_TIMER => {
+                self.tray.step();
+                self.breathe_stage();
+            }
             WM_TIMER if wparam == SCREEN_TIMER => {
                 unsafe {
                     let _ = KillTimer(Some(self.notify), SCREEN_TIMER);
@@ -5741,6 +5744,7 @@ impl App {
             },
             Some(false) => unsafe {
                 let _ = KillTimer(Some(self.notify), BREATH_TIMER);
+                self.breathe_stage();
             },
             None => {}
         }
@@ -5760,6 +5764,13 @@ impl App {
         self.identify();
         self.announce();
         self.journal_phases();
+    }
+
+    /// Gives the stage's taskbar button the tray's current breath.
+    fn breathe_stage(&self) {
+        if let Some(stage) = &self.stage {
+            stage.set_icon(self.tray.taskbar_icon());
+        }
     }
 
     /// Writes a line for each session whose phase became one worth telling:
