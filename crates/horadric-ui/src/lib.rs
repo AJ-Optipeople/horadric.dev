@@ -57,6 +57,7 @@ pub mod motion;
 pub mod palette;
 pub mod paste;
 pub mod paths;
+pub mod rain;
 pub mod screens;
 pub mod shell;
 pub mod theme;

@@ -1684,7 +1684,9 @@ tracker.
   would fill its context with the items before. The commit the agent made
   is what the next one builds on. A session whose item is `[x]` closes
   once it is not mid turn, since the agent reports from inside its turn.
-- **When the runner stops.** At a blocked item, since the order is the
+- **When the runner stops.** At a blocked item that waits on the human
+  (one that names a wait it can check is passed, see "Waits a blocked
+  quest can name" below), since the order is the
   order and the next may need this one; an item added meanwhile waits
   behind it. At an item whose session is gone. At a paused session, after
   a restart: the runner never resumes one by itself, a click on its row
@@ -2375,6 +2377,63 @@ through the rename too.
 
 Not checked on screen: the tile's words are the only change there.
 
+### Waits a blocked quest can name
+
+Asked for on 2026-10-01: a `[!]` quest stopped the whole list until the
+human came, even when what it waited on was another quest that the list
+would get to anyway.
+
+- **The form.** `horadric quest blocked "why" --on-quest "title"`, or
+  `--on-main <commit or branch>`, `--on-file <path>`, `--on-cmd
+  "<command>"`, `--until <+30m, Unix seconds or 2026-10-01T14:05Z>`. With
+  a wait the why may be left out. The wait goes at the end of the item's
+  line in braces, `- [!] Wire it @wire-1: needs it {on quest: Build it}`,
+  so the file stays the state and a human can write one too
+  (`tasks::Wait`, pure and tested). A time is kept in UTC, so the file
+  means one moment wherever it is read.
+- **What holds.** A quest of that title, any case, marked `[x]` in the
+  same log. A ref that `git merge-base --is-ancestor <ref> HEAD` passes in
+  the main tree, so a branch with nothing new on it counts as merged. A
+  file from the project folder. A command `cmd.exe /d /c` runs in the
+  project folder exiting 0 within 30 seconds. The list and the clock are
+  asked on every look; git and a command run on a thread at most every 15
+  seconds, and until one has answered the wait is not over.
+- **The runner** (`tasks::next`, tested) passes a blocked quest with a
+  wait that does not hold yet and starts the next open one. A quest
+  blocked with only a why still stops the list there, since that needs the
+  human. A list with nothing left but waits is not finished. Once a wait
+  holds the quest takes a place like a start (`Next::Resume`), in list
+  order, within `parallel`, at most one start per project every 10
+  seconds. Its session, if there and between turns, gets `[/]` back with
+  its holder and is told what happened and to go on (`tasks::waited`),
+  typed in like the usage limit's go on. A session that is gone, ended, or
+  whose terminal exited, starts the quest again as a click on a gone row
+  does. A paused session, after a restart or a crash, waits for a click,
+  as every paused session does. Only in review and auto mode: manual
+  starts nothing. A toast says the quest goes on; a waiting quest raises
+  no "Blocked" toast, since it needs nobody.
+- **The row** reads in the idle colour with a clock and says what it
+  waits on, "after Build it", "for done.txt", "in 25 min"
+  (`Wait::label`, `board::note`).
+- **The system prompt** spells out the flags and asks the agent to use one
+  whenever it fits.
+
+Checked on screen with a dev instance on its own port and app data and
+`cmd.exe` as the agent, in auto mode: of two quests, the runner started
+the first, which was blocked on the second with `--on-quest`; the row read
+"after Build the engine" and the runner started the second. `quest done`
+on it marked it `[x]`, closed its session, put the first back to `[/]`
+with its own session and showed "Quest goes on". A quest held by a session
+that no longer exists, waiting on a file that was there, started again in
+a new session. One `cmd.exe` at any time. A killed terminal read as
+paused, so its quest waited for a click. Not checked on screen: `--on-cmd`,
+`--on-main` and `--until`.
+
+Built as the quest asked, with every kind of wait, before Orchestration
+below was written. If its `After:` lines are built, `--on-quest` should
+write one of those instead of `{on quest: ...}`, and `tasks::next`
+already passes a quest that waits and wakes it in the same place.
+
 ### Performance
 
 On 2026-09-26 everything felt less smooth: typing in the stage, right
@@ -2938,6 +2997,131 @@ the run of work was not handed over. It is now: the run is kept in the
 saved state (its last work cut to the minute, so a working session does
 not write the file every tick), and a start finds it there and carries
 on, unless the ten minute gap passed meanwhile.
+
+### Orchestration
+
+Asked for on 2026-10-01. Proposed, not built. The goal is development
+that runs itself across many sessions, with the human hearing only
+about what needs a human. Today the human is the orchestrator: with
+several sessions in a project, a quest that cannot go on because it
+waits on another sits `[!]` until the human notices, works out what it
+waits on and starts it again. "Blocked quests resume by themselves" in
+the quest log fixes part of that. It is not the whole answer, and this
+section says what is.
+
+**Why a blocked quest is the wrong place to start.** When quest B waits
+on quest A, the dependency was there before either started. B finds out
+halfway in, after a session and some of its context are spent. The
+Runetome tile is the example on our own log: it was taken, worked until
+it saw that two quests above it had not landed, and blocked. Resuming
+it once they land is a good safety net. Not starting it until they land
+is the fix. So the work splits in three layers, each useful alone, built
+in this order.
+
+**1. Dependencies in the quest log, declared before work starts.**
+
+This reopens "No dependencies" in The task list, so it waits for the
+human's yes before it is built.
+
+- **The form.** A notes line `After: <title>` names a quest this one
+  waits for, one line each. The title is matched exactly or by a unique
+  start, since titles are long and carry colons. A name that matches
+  nothing or several quests makes the quest not ready, and its row says
+  which name, so a typo never starts work early. The file stays the
+  state; nothing is kept beside it.
+- **Ready.** A quest is ready when every quest it names is `[x]`. Not
+  `[?]`: in review the work may not be on `main` yet, and with worktrees
+  it is not.
+- **The runner picks the first ready open quest**, not the first open
+  one. A quest waiting on another does not stop the list, it is passed
+  over, which is what `parallel` needs: with three slots and a chain of
+  three, one runs and the other slots take quests that do not wait. A
+  cycle is not ready either; its rows say so and the list stops there,
+  since only a human can break it.
+- **Who writes them.** The quest giver's prompt says to add `After:`
+  lines when a suggested quest needs another, and a planning quest that
+  writes its own quests below itself does the same. `quest add "title"
+  --after "other"` writes the line.
+- **"Blocked quests resume", cut down.** `quest blocked "why" --on
+  "title"` marks the quest `[!]` and writes the same `After:` line. When
+  that quest is `[x]`: a live holding session is told to go on, typed
+  in as `go_on` does after a usage limit, and the quest goes `[/]`; a
+  session that is gone starts again (`start_again`). One rule with two
+  ways in. Waits on a file, a command or a time are left out until a
+  quest needs one. A plain `blocked "why"` still stops the list for the
+  human.
+- **The board row** of a quest that waits reads "after <title>", dim,
+  with no lamp, since nothing runs.
+- **Pure and tested** in `horadric_core::tasks`: reading `After:` lines,
+  matching titles, ready, cycles, the runner's choice, the `--on` form.
+  On screen with a dev instance and `cmd.exe`: two quests, the second
+  after the first, auto mode, `quest done` on the first starts the
+  second. Count `claude.exe` after, since this starts agents.
+
+**2. An orchestrator session, woken by events.**
+
+Some blocks no rule can clear: an agent asks a question another agent
+could answer, two quests turn out to overlap, a merge conflicts, a
+quest is too big and should be split. Today each of those goes to the
+human. Most need judgment, not a human in particular. That judgment
+lives in an agent; Horadric stays the plumbing that wakes it, which
+keeps the runner small and testable and keeps state coming from hooks
+and the file.
+
+- **One per project, named Warriv** (the caravan master in the games,
+  who moves the camp on when the way is clear), a session on the stage
+  like the quest giver. It holds no quest and the runner never gives it
+  one.
+- **Woken by events, not left running.** A quest goes `[!]` without
+  `--on`; a session on a quest reads "asks you" after the nudge; a quest
+  names a dependency that matches nothing, or a cycle; a merge into
+  `main` fails; the log runs out of ready quests in auto mode while some
+  wait. Not every `Stop`: that would make it a second runner.
+- **A fresh session per wake**, for the reason the runner gives each
+  quest one: carrying a session from event to event fills its context.
+  Its first prompt is the event, the quest, the reason and the holding
+  session's last turn. Its memory is the quest log: it writes what it
+  decided as a notes line on the quest (`Warriv: split into the two
+  below`), so the next wake reads it. Events that arrive while it works
+  wait and go to it at its next `Stop` in one prompt. When it has no
+  event left and is not mid turn, it closes.
+- **What it may do.** Change the log (`quest add`, `--after`, notes,
+  move, put back), answer a holding session with `quest tell "title"
+  "message"` (typed in once the session is not mid turn, the same way
+  `go_on` types), and hand the event to the human with `quest blocked
+  "question"` on the quest, worded so the human can answer in one line.
+  It changes no code and starts no session; the runner starts what the
+  log says, with its fuses.
+- **Fuses.** At most one Warriv a project. At most six wakes a project
+  an hour, then events go to the human as today, with a notification
+  saying why. It is never woken by its own changes. A `quest tell` to a
+  session goes once per event. Its permission mode is the project's, and
+  a prompt it stops at is an "asks you" like any session's.
+- **Off by default.** `"orchestrator": true` in `.horadric/config.json`
+  turns it on. Without it, every event goes to the human as today.
+- **Pure and tested:** which events wake it, the wake budget, the first
+  prompt, the queue of events. On screen with a dev instance: a fake
+  quest blocked with a question its notes answer, Warriv wakes, tells the
+  session, the quest goes on. Count `claude.exe` after.
+
+**3. The human hears only what Warriv could not settle.**
+
+Not an inbox: that was dropped on 2026-09-26, and the tiles, the hotkey
+that walks waiting sessions and the notification still give the
+overview. What changes is what reaches them. With Warriv on, a quest is
+red only when it handed the question on, and its reason is that
+question. "N quests need you" counts only those. The notes say what
+Warriv tried, so the human answers without reading the session first.
+
+**Open questions.**
+
+- Whether Warriv may review `[?]` quests in review mode, as a first
+  reader before the human. It would make review mode run alone for
+  longer, and it is the first place a wrong judgment costs real work.
+- Whether a merge conflict between worktrees is Warriv's to resolve, or
+  a quest it files for a worker. The second keeps "changes no code".
+- Which model Warriv runs on. Its turns are short and many, which says a
+  small one, but a wrong call costs more than the turn saves.
 
 ### Step 4: worktrees and the git glance
 

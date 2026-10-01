@@ -144,6 +144,10 @@ pub struct TerminalWindow {
     /// How far the cursor is from each edge, from the first message of a
     /// move or resize until it ends.
     grab: Cell<Option<[i32; 4]>>,
+    /// The rect Horadric is moving the window to, while it does. A move
+    /// onto a screen of another DPI brings Windows' own suggestion, scaled
+    /// from the old DPI, and this one is kept instead.
+    placing: Cell<Option<[i32; 4]>>,
     /// Drawn in place of the Windows title bar. None only while the window
     /// is being made.
     caption: RefCell<Option<Box<Caption>>>,
@@ -203,6 +207,7 @@ impl TerminalWindow {
             drag: Cell::new(None),
             others: RefCell::new(Vec::new()),
             grab: Cell::new(None),
+            placing: Cell::new(None),
             caption: RefCell::new(None),
             tracking: Cell::new(false),
             glides: RefCell::default(),
@@ -314,7 +319,7 @@ impl TerminalWindow {
         // The window's edge in the project's colour, like its cluster's
         // mark, sunk most of the way into the clay so it tints the edge
         // rather than outlining the window.
-        backdrop::border(self.hwnd, Some(theme::WINDOW_BG.mix(accent, 0.35)));
+        backdrop::border(self.hwnd, Some(theme::window_bg().mix(accent, 0.35)));
         if let Some(c) = self.caption.borrow().as_ref() {
             c.set_accent(accent);
         }
@@ -584,6 +589,12 @@ impl TerminalWindow {
         self.refresh_title();
     }
 
+    /// The theme changed: the window's edge takes the new plate.
+    pub fn retheme(&self) {
+        let accent = theme::accent(&self.project.borrow());
+        backdrop::border(self.hwnd, Some(theme::window_bg().mix(accent, 0.35)));
+    }
+
     /// The font changed size: every pane fits its grid again.
     pub fn refont(&self) {
         for p in self.panes.borrow().iter() {
@@ -728,6 +739,7 @@ impl TerminalWindow {
             if IsIconic(self.hwnd).as_bool() || IsZoomed(self.hwnd).as_bool() {
                 let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
             }
+            self.placing.set(Some([l, t, r, b]));
             let _ = SetWindowPos(
                 self.hwnd,
                 None,
@@ -737,6 +749,7 @@ impl TerminalWindow {
                 b - t,
                 SWP_NOZORDER | SWP_NOACTIVATE,
             );
+            self.placing.set(None);
         }
     }
 
@@ -808,8 +821,8 @@ impl TerminalWindow {
             let mut r = RECT::default();
             let _ = GetClientRect(self.hwnd, &mut r);
             let verts = [
-                vertex(0, 0, theme::PLATE_TOP),
-                vertex(r.right, r.bottom, theme::PLATE_BOTTOM),
+                vertex(0, 0, theme::plate_top()),
+                vertex(r.right, r.bottom, theme::plate_bottom()),
             ];
             let mesh = GRADIENT_RECT {
                 UpperLeft: 0,
@@ -838,8 +851,8 @@ impl TerminalWindow {
             };
             let black = theme::Color::rgb(0);
             let white = theme::Color::rgb(0xFFFFFF);
-            let light = CreateSolidBrush(colorref(theme::WINDOW_BG.mix(white, 0.05)));
-            let dark = CreateSolidBrush(colorref(theme::WINDOW_BG.mix(black, 0.5)));
+            let light = CreateSolidBrush(colorref(theme::window_bg().mix(white, 0.05)));
+            let dark = CreateSolidBrush(colorref(theme::window_bg().mix(black, 0.5)));
             FrameRect(hdc, &lit, light);
             FrameRect(hdc, &seam, dark);
             let _ = DeleteObject(light.into());
@@ -1403,15 +1416,19 @@ impl TerminalWindow {
             WM_ERASEBKGND => Some(LRESULT(1)),
             WM_DPICHANGED => {
                 self.with_caption(Caption::set_dpi);
-                let r = unsafe { *(lparam.0 as *const RECT) };
+                let s = unsafe { *(lparam.0 as *const RECT) };
+                let [l, t, r, b] = self
+                    .placing
+                    .get()
+                    .unwrap_or([s.left, s.top, s.right, s.bottom]);
                 unsafe {
                     let _ = SetWindowPos(
                         self.hwnd,
                         None,
-                        r.left,
-                        r.top,
-                        r.right - r.left,
-                        r.bottom - r.top,
+                        l,
+                        t,
+                        r - l,
+                        b - t,
                         SWP_NOZORDER | SWP_NOACTIVATE,
                     );
                 }

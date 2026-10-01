@@ -69,8 +69,10 @@ use horadric_hooks::{install, TASKS_ENV};
 use windows::core::{w, BOOL, PCWSTR};
 use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    EnumDisplayMonitors, GetMonitorInfoW, MonitorFromPoint, MonitorFromRect, HDC, HMONITOR,
-    MONITORINFO, MONITORINFOEXW, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTONULL,
+    CreateRectRgn, EnumDisplayMonitors, GetMonitorInfoW, MonitorFromPoint, MonitorFromRect,
+    RedrawWindow, SetWindowRgn, HDC, HMONITOR, MONITORINFO, MONITORINFOEXW,
+    MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTONULL, RDW_ALLCHILDREN, RDW_ERASE, RDW_FRAME,
+    RDW_INVALIDATE,
 };
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -78,6 +80,7 @@ use windows::Win32::System::RemoteDesktop::{
     WTSRegisterSessionNotification, NOTIFY_FOR_THIS_SESSION,
 };
 use windows::Win32::System::SystemInformation::{GetLocalTime, GetTickCount};
+use windows::Win32::System::Threading::GetCurrentProcessId;
 use windows::Win32::UI::HiDpi::{
     GetDpiForWindow, SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
@@ -87,13 +90,13 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::Shell::{SHQueryUserNotificationState, NIN_BALLOONUSERCLICK};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, GetWindowRect, IsChild,
-    KillTimer, PostMessageW, PostQuitMessage, RegisterClassW, RegisterWindowMessageW, SetTimer,
-    SetWindowPos, SystemParametersInfoW, TranslateMessage, WindowFromPoint, MONITORINFOF_PRIMARY,
-    MSG, SPI_GETWORKAREA, SPI_SETWORKAREA, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER,
-    SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WM_APP, WM_DISPLAYCHANGE, WM_HOTKEY, WM_LBUTTONUP,
-    WM_QUERYENDSESSION, WM_QUIT, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_TIMER, WNDCLASSW,
-    WS_EX_TOOLWINDOW, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, DispatchMessageW, EnumWindows, GetMessageW, GetWindowRect,
+    GetWindowThreadProcessId, IsChild, KillTimer, PostMessageW, PostQuitMessage, RegisterClassW,
+    RegisterWindowMessageW, SetTimer, SetWindowPos, SystemParametersInfoW, TranslateMessage,
+    WindowFromPoint, MONITORINFOF_PRIMARY, MSG, SPI_GETWORKAREA, SPI_SETWORKAREA, SWP_NOACTIVATE,
+    SWP_NOSIZE, SWP_NOZORDER, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WM_APP, WM_DISPLAYCHANGE,
+    WM_HOTKEY, WM_LBUTTONUP, WM_QUERYENDSESSION, WM_QUIT, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_TIMER,
+    WNDCLASSW, WS_EX_TOOLWINDOW, WS_POPUP,
 };
 
 use crate::accounts;
@@ -118,6 +121,7 @@ use crate::sound;
 use crate::start::{self, StartWindow};
 use crate::stash::{self, StashWindow};
 use crate::terminal::{self, Place, TerminalWindow};
+use crate::theme::Theme;
 use crate::toast::{self, Kind, Toasts};
 use crate::tray::{self, Choice, Tray};
 use crate::usage::{self, UsageWindow};
@@ -598,6 +602,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
         BTreeMap::new()
     };
 
+    theme::set(Theme::from_key(saved.theme.as_deref()));
     let gpu = Gpu::new()?;
     let font = Font::new(
         &gpu.dw,
@@ -634,6 +639,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
     let usage_window = match UsageWindow::create(
         Rc::clone(&shared),
         saved.usage_window.as_ref().is_some_and(|p| p.collapsed),
+        saved.usage_window.as_ref().is_some_and(|p| p.locked),
         -10_000,
         -10_000,
     ) {
@@ -686,6 +692,8 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             toasts,
             glides: RefCell::default(),
             glided: Cell::new(None),
+            column_bounds: None,
+            clipped: RefCell::default(),
             arranged: false,
             carried: None,
             carry_at: None,
@@ -1159,6 +1167,7 @@ fn tray_menu(hwnd: HWND) {
         update.as_deref(),
         &fonts,
         &font,
+        theme::current(),
         xp,
     );
     match menu {
@@ -1214,6 +1223,9 @@ fn tray_menu(hwnd: HWND) {
                 unsafe { SetTimer(Some(hwnd), SCREEN_TIMER, 1000, None) };
             }
         }
+        Some(Choice::Theme(t)) => {
+            with_app(|app| app.set_theme(t));
+        }
         Some(Choice::Font(i)) => {
             if let Some(family) = fonts.get(i) {
                 with_app(|app| app.set_font_family(family));
@@ -1259,6 +1271,29 @@ fn tray_menu(hwnd: HWND) {
             }
         }
         None => {}
+    }
+}
+
+/// Asks every window of the app to paint, its children too, for a change
+/// that touches all of them, such as the theme.
+fn repaint_all() {
+    unsafe extern "system" fn each(hwnd: HWND, _: LPARAM) -> BOOL {
+        let mut pid = 0;
+        unsafe {
+            GetWindowThreadProcessId(hwnd, Some(&mut pid));
+            if pid == GetCurrentProcessId() {
+                let _ = RedrawWindow(
+                    Some(hwnd),
+                    None,
+                    None,
+                    RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN,
+                );
+            }
+        }
+        BOOL(1)
+    }
+    unsafe {
+        let _ = EnumWindows(Some(each), LPARAM(0));
     }
 }
 
@@ -2554,6 +2589,12 @@ struct App {
     glides: RefCell<Glides>,
     /// When the glides last moved on, while they move.
     glided: Cell<Option<Instant>>,
+    /// The top and bottom of the columns on screen when last arranged,
+    /// which every window in them is cut to.
+    column_bounds: Option<(i32, i32)>,
+    /// The cut each window in the columns has now, by its handle, with the
+    /// width it was made for, so a frame that changes neither sets none.
+    clipped: RefCell<Clipped>,
     /// The columns have been laid out with windows in them once.
     arranged: bool,
     /// The key of the window being dragged, which the layout leaves where
@@ -5066,6 +5107,17 @@ impl App {
     }
 
     /// The terminal font's family, for every pane at once.
+    /// Draws every window in `t`. The cached layers know their theme and
+    /// draw again for a new one, so asking each window to paint is enough.
+    fn set_theme(&mut self, t: Theme) {
+        theme::set(t);
+        if let Some(stage) = &self.stage {
+            stage.retheme();
+        }
+        repaint_all();
+        self.save();
+    }
+
     fn set_font_family(&mut self, family: &str) {
         if let Err(e) = self.shared.font.set_family(family) {
             eprintln!("horadric: cannot load the font {family}: {e}");
@@ -5516,6 +5568,7 @@ impl App {
                 .unwrap_or_default(),
             usage_window: self.usage_window.as_ref().map(|u| SavedPanel {
                 collapsed: u.collapsed.get(),
+                locked: u.locked.get(),
             }),
             font_size: Some(self.shared.font.size()).filter(|&s| s != keys::FONT_DEFAULT),
             quiet: self.quiet,
@@ -5524,6 +5577,7 @@ impl App {
             run: self.run.saved(),
             cube: self.cube_on,
             font_family: self.font_family.clone(),
+            theme: theme::current().saved(),
             screen: self.screen.clone(),
             live: !self.quit,
             recovering: self.recovering.is_some(),
@@ -6326,7 +6380,9 @@ impl App {
         }
 
         let shown = self.columns.shown(g.fits, is_present);
+        self.column_bounds = Some((g.top, g.top + g.height));
         let mut scrolls = Vec::new();
+        let mut seen = HashSet::new();
         for (i, (model, keys)) in shown.iter().enumerate() {
             let x = g.x(i);
             let tiles = self.column_windows(keys, i == 0);
@@ -6335,11 +6391,14 @@ impl App {
             let (filled, room) = columns::fill(&items, g.top, g.height, g.gap, g.min_files, scroll);
             scrolls.push((*model, scroll.clamp(0, room)));
             for (t, f) in tiles.iter().zip(filled) {
-                // The one being dragged is where the cursor holds it.
+                seen.insert(t.hwnd().0 as isize);
+                // The one being dragged is where the cursor holds it, whole.
                 if t.key().is_some() && t.key() == self.carried.as_deref() {
+                    clip_window(&mut self.clipped.borrow_mut(), t.hwnd(), None);
                     continue;
                 }
                 t.place(x, f, &mut self.glides.borrow_mut(), animate, self.arranged);
+                clip_window(&mut self.clipped.borrow_mut(), t.hwnd(), self.column_bounds);
             }
         }
         if shown.is_empty() {
@@ -6359,6 +6418,8 @@ impl App {
         for (model, scroll) in scrolls {
             self.columns.cols[model].scroll = scroll;
         }
+        // A handle Windows gives a new window must not inherit a cut.
+        self.clipped.borrow_mut().retain(|id, _| seen.contains(id));
         // Mid drag the columns are not settled yet, so the stage waits for
         // the drop.
         if self.carried.is_none() {
@@ -6393,6 +6454,11 @@ impl App {
                     0,
                     0,
                     SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOSIZE,
+                );
+                clip_window(
+                    &mut self.clipped.borrow_mut(),
+                    HWND(id as *mut c_void),
+                    self.column_bounds,
                 );
             }
             if !glides.moving() {
@@ -6682,6 +6748,33 @@ impl Tile<'_> {
     }
 }
 
+/// The cut of each window in the columns by its handle, with the width it
+/// was made for.
+type Clipped = HashMap<isize, (i32, Option<(i32, i32)>)>;
+
+/// Cuts a window in the columns to `bounds`, the column's top and bottom
+/// on screen, or shows all of it when None. Clicks fall through the cut
+/// part as well, to whatever is below.
+fn clip_window(clipped: &mut Clipped, hwnd: HWND, bounds: Option<(i32, i32)>) {
+    let mut r = RECT::default();
+    if unsafe { GetWindowRect(hwnd, &mut r) }.is_err() {
+        return;
+    }
+    let w = r.right - r.left;
+    let cut = bounds.and_then(|(top, bottom)| columns::clip(top, bottom, r.top, r.bottom - r.top));
+    let id = hwnd.0 as isize;
+    let was = clipped.get(&id).copied();
+    if was == Some((w, cut)) || (was.is_none() && cut.is_none()) {
+        return;
+    }
+    clipped.insert(id, (w, cut));
+    unsafe {
+        // The window owns the region once it is set.
+        let region = cut.map(|(from, to)| CreateRectRgn(0, from, w, to));
+        SetWindowRgn(hwnd, region, true);
+    }
+}
+
 /// A window's top left corner on screen.
 /// Whether the window at this point on the screen is `hwnd` or one in
 /// it, so a drop lands on what is on top there and not on a window under
@@ -6701,7 +6794,7 @@ fn window_at(hwnd: HWND) -> (i32, i32) {
     (r.left, r.top)
 }
 
-fn unix_now() -> u64 {
+pub(crate) fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs())

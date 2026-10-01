@@ -83,7 +83,10 @@ work. Worktrees are next.
   shows where it is. The mode button picks how the list is worked: Manual,
   one click per item; Review, the next item starts once you approve the
   last; Auto, down the list until it is done. The `+` adds an item, and so
-  does `horadric quest add` from any shell.
+  does `horadric quest add` from any shell. A quest blocked with
+  `--on-quest "title"`, `--on-main ref`, `--on-file path`, `--on-cmd
+  "command"` or `--until +30m` goes on by itself once that holds, and the
+  list works on past it meanwhile.
 - A Runetome per project: rune stones under the quest log, each a button
   that casts a runeword, a list of steps done in order. A step says
   something to the session and waits for its turn to end, types keys into

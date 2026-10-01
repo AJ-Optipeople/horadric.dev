@@ -101,6 +101,9 @@ pub struct SavedState {
     /// The terminal's font family, once one is picked from the tray.
     #[serde(default)]
     pub font_family: Option<String>,
+    /// The theme picked from the tray, by its key. None is the first.
+    #[serde(default)]
+    pub theme: Option<String>,
     /// No notification when a session starts waiting on you.
     #[serde(default)]
     pub quiet: bool,
@@ -460,11 +463,14 @@ pub struct SavedCluster {
     pub tome_collapsed: bool,
 }
 
-/// A window that is not a project's: whether it was folded.
+/// A window that is not a project's: whether it was folded, and whether
+/// it was locked against folding and dragging.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct SavedPanel {
     #[serde(default)]
     pub collapsed: bool,
+    #[serde(default)]
+    pub locked: bool,
 }
 
 /// A run of work as kept on disk, in unix seconds. See
@@ -710,8 +716,12 @@ mod tests {
                     ..Default::default()
                 },
             )]),
-            usage_window: Some(SavedPanel { collapsed: true }),
+            usage_window: Some(SavedPanel {
+                collapsed: true,
+                locked: true,
+            }),
             font_size: Some(17.0),
+            theme: Some("glass".into()),
             quiet: true,
             sounds: true,
             discord: Discord::Named,
@@ -747,6 +757,7 @@ mod tests {
         assert_eq!(back.agent_usage, state.agent_usage);
         assert_eq!(back.usage_window, state.usage_window);
         assert_eq!(back.font_size, state.font_size);
+        assert_eq!(back.theme, state.theme);
         assert!(back.quiet);
         assert!(back.sounds);
         assert_eq!(back.discord, Discord::Named);
@@ -838,7 +849,7 @@ mod tests {
         let s = SavedState::from_json(old);
         assert_eq!(s.clusters[0].key, "c:/app");
         assert!(s.clusters[0].collapsed);
-        assert!(s.usage_window.is_some_and(|u| u.collapsed));
+        assert!(s.usage_window.is_some_and(|u| u.collapsed && !u.locked));
         assert!(s.columns.is_empty());
     }
 

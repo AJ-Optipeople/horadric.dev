@@ -276,6 +276,20 @@ pub fn fill(
     (out, room)
 }
 
+/// The rows of a window in a column, `y` its top on screen and `h` its
+/// height, that show between the column's `top` and `bottom`, so a column
+/// taller than the screen scrolls inside the work area rather than hang
+/// below it behind the taskbar. In the window's own pixels, top and bottom;
+/// equal when none shows, and None when all of it does.
+pub fn clip(top: i32, bottom: i32, y: i32, h: i32) -> Option<(i32, i32)> {
+    if y >= top && y + h <= bottom {
+        return None;
+    }
+    let from = (top - y).clamp(0, h);
+    let to = (bottom - y).clamp(from, h);
+    Some((from, to))
+}
+
 /// Which visible column a new project goes into, given how much height
 /// each has to spare and how much the project needs. The one with the most
 /// room when it fits there, otherwise a new column at the end when
@@ -448,6 +462,17 @@ mod tests {
         assert_eq!(c.keys(), vec![vec!["gone", "b", "a"]]);
         c.move_to("a", 0, 0, present);
         assert_eq!(c.keys(), vec![vec!["gone", "a", "b"]]);
+    }
+
+    #[test]
+    fn clip_cuts_a_window_at_the_column_edges() {
+        assert_eq!(clip(0, 1000, 100, 200), None);
+        assert_eq!(clip(0, 1000, 0, 1000), None);
+        assert_eq!(clip(0, 1000, 900, 300), Some((0, 100)));
+        assert_eq!(clip(100, 1000, 50, 200), Some((50, 200)));
+        assert_eq!(clip(100, 1000, -50, 2000), Some((150, 1050)));
+        assert_eq!(clip(0, 1000, 1200, 100), Some((0, 0)));
+        assert_eq!(clip(100, 1000, -300, 100), Some((100, 100)));
     }
 
     #[test]

@@ -298,6 +298,8 @@ struct Item {
     line: usize,
     title: String,
     state: RowState,
+    /// What the row says in place of its state's word.
+    note: Option<String>,
     /// Done a moment ago and on its way out of the tile, this far.
     finish: Option<f32>,
     /// The session that has it.
@@ -603,6 +605,7 @@ impl Cluster {
             Some(r) => board::state_in(t, r),
             None => board::row_state(t, None),
         };
+        let now = crate::app::unix_now();
         let mut items: Vec<Item> = b
             .shown()
             .into_iter()
@@ -612,6 +615,7 @@ impl Cluster {
                     line: t.line,
                     title: t.title.clone(),
                     state: state(t),
+                    note: board::note(t, now),
                     finish: None,
                     holder: t.holder.clone(),
                 }
@@ -636,6 +640,7 @@ impl Cluster {
                 line,
                 title,
                 state: RowState::Open,
+                note: None,
                 finish: Some(p),
                 holder: None,
             };
@@ -915,6 +920,7 @@ impl Cluster {
                     .map(|i| TaskRow {
                         title: i.title.clone(),
                         state: i.state,
+                        note: i.note.clone(),
                         finish: i.finish,
                     })
                     .collect(),
