@@ -220,6 +220,12 @@ pub fn manifest_url(dev: bool, debug: bool, env: Option<&str>) -> Option<String>
 /// Nothing else a manifest lists is ever downloaded.
 pub const BINARIES: [&str; 2] = ["horadric.exe", "horadricw.exe"];
 
+/// The page with the notes of release `version`, for reading what is in
+/// the build that is running.
+pub fn notes_url(version: &str) -> String {
+    format!("https://github.com/Mopra/horadric.dev/releases/tag/v{version}")
+}
+
 /// Where to fetch `name` of release `version`, given the manifest's URL.
 /// The real releases are fetched by their tag, not through `latest`, so a
 /// release published during the download can not mix two versions. Any
@@ -582,6 +588,14 @@ mod tests {
         assert_eq!(
             download_url(LATEST_URL, "0.2.0", "horadric.exe").as_deref(),
             Some("https://github.com/Mopra/horadric.dev/releases/download/v0.2.0/horadric.exe")
+        );
+    }
+
+    #[test]
+    fn a_release_has_its_notes_on_its_tag() {
+        assert_eq!(
+            notes_url("0.9.0"),
+            "https://github.com/Mopra/horadric.dev/releases/tag/v0.9.0"
         );
     }
 
