@@ -32,16 +32,17 @@ impl Board {
             .collect()
     }
 
-    /// What the header says about the whole list.
+    /// What the header says about the whole list: how many are left, the
+    /// same count as the rows under it, and short enough to fit beside the
+    /// mode key on a narrow tile.
     pub fn summary(&self) -> String {
         let named = self.tasks.iter().filter(|t| !t.title.trim().is_empty());
         let total = named.clone().count();
-        let done = named.filter(|t| t.mark == Mark::Done).count();
-        match (done, total) {
+        let left = named.filter(|t| t.mark != Mark::Done).count();
+        match (left, total) {
             (_, 0) => "empty".into(),
-            (d, t) if d == t => "all done".into(),
-            (0, t) => format!("{t} to do"),
-            (d, t) => format!("{d} of {t} done"),
+            (0, _) => "all done".into(),
+            (l, _) => format!("{l} to do"),
         }
     }
 
@@ -209,7 +210,7 @@ mod tests {
     fn done_and_unnamed_items_get_no_row() {
         let b = board("- [x] A\n- [ ]\n- [/] B @b-1\n- [ ] C\n");
         assert_eq!(b.shown(), [2, 3]);
-        assert_eq!(b.summary(), "1 of 3 done");
+        assert_eq!(b.summary(), "2 to do");
         assert_eq!(board("- [x] A\n").summary(), "all done");
         assert_eq!(board("- [ ] A\n- [ ] B\n").summary(), "2 to do");
         assert_eq!(board("").summary(), "empty");
