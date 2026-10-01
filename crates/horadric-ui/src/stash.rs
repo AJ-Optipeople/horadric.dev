@@ -37,6 +37,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use crate::app::{self, Input};
 use crate::layout::{self, StashLayout};
 use crate::render::{StashLook, StashScene, Target};
+use crate::tip;
 use crate::window::Shared;
 use crate::{appear, backdrop, columns};
 
@@ -256,6 +257,7 @@ impl StashWindow {
     }
 
     fn hover(&self, hot: Option<usize>) {
+        tip::over(&self.shared, self.hwnd, hot.map(|_| tip::STASHED));
         if self.hot.replace(hot) != hot {
             self.invalidate();
         }
@@ -328,6 +330,7 @@ impl StashWindow {
                 Some(LRESULT(0))
             }
             WM_LBUTTONDOWN => {
+                tip::press(self.hwnd);
                 self.raise();
                 let mut cursor = POINT::default();
                 unsafe {
@@ -396,6 +399,7 @@ impl StashWindow {
                 Some(LRESULT(0))
             }
             WM_RBUTTONUP => {
+                tip::press(self.hwnd);
                 if let Some(id) = self.id_at(self.hit(lparam)) {
                     app::push(Input::StashMenu(id));
                 }
@@ -404,6 +408,7 @@ impl StashWindow {
             WM_MOUSELEAVE => {
                 self.tracking.set(false);
                 self.hover(None);
+                tip::away(self.hwnd);
                 Some(LRESULT(0))
             }
             WM_CAPTURECHANGED => {

@@ -823,6 +823,24 @@ impl Target {
         }
     }
 
+    /// Draws a button's line, `size` in DIPs and the text `pad` in from
+    /// its top left. `Err` means the target must be recreated.
+    pub fn draw_tip(
+        &self,
+        m: &Metrics,
+        text: &IDWriteTextLayout,
+        size: (f32, f32),
+        pad: (f32, f32),
+    ) -> Result<()> {
+        unsafe {
+            self.rt.BeginDraw();
+            let p = self.painter(&self.rt);
+            p.plate(m, size);
+            p.draw_layout(text, theme::TEXT, Rect::new(pad.0, pad.1, size.0, size.1));
+            self.rt.EndDraw(None, None)
+        }
+    }
+
     fn painter<'a>(&'a self, rt: &'a ID2D1RenderTarget) -> Painter<'a> {
         Painter {
             rt,
