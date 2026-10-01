@@ -242,6 +242,8 @@ const TICK_TIMER: usize = 1;
 const SCREEN_TIMER: usize = 2;
 /// Runs while a window glides to its place in the columns.
 const GLIDE_TIMER: usize = 3;
+/// Runs while a session works, to breathe the tray icon's light.
+const BREATH_TIMER: usize = 4;
 const ENDED_LINGER: Duration = Duration::from_secs(20);
 /// A crash this long after resuming sessions after a crash is a crash of
 /// its own, not the same one again, so the next start resumes once more.
@@ -2840,6 +2842,7 @@ impl App {
                 crate::vsync::took(self.notify, GLIDE_TIMER);
                 self.glide();
             }
+            WM_TIMER if wparam == BREATH_TIMER => self.tray.step(),
             WM_TIMER if wparam == SCREEN_TIMER => {
                 unsafe {
                     let _ = KillTimer(Some(self.notify), SCREEN_TIMER);
@@ -5723,12 +5726,24 @@ impl App {
         }
         self.sync_stage();
 
-        let (total, waiting) = self
+        let (total, waiting, working) = self
             .shared
             .registry
             .lock()
-            .map(|r| (r.len(), r.waiting().len()))
-            .unwrap_or((0, 0));
+            .map(|r| {
+                let working = r.all().any(|s| s.phase == Phase::Working);
+                (r.len(), r.waiting().len(), working)
+            })
+            .unwrap_or((0, 0, false));
+        match self.tray.breathe(working) {
+            Some(true) => unsafe {
+                SetTimer(Some(self.notify), BREATH_TIMER, tray::BREATH_STEP_MS, None);
+            },
+            Some(false) => unsafe {
+                let _ = KillTimer(Some(self.notify), BREATH_TIMER);
+            },
+            None => {}
+        }
         let app = if horadric_hooks::dev() {
             "Horadric dev"
         } else {
