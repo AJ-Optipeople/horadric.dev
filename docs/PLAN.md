@@ -2707,6 +2707,16 @@ would click, and a click that casts without asking. What changed:
   in stone offers "Put away" (`stones_hidden` in `state.json`). Every
   menu, and the one on the empty stone or the tome's header, has "Ask
   before a click casts" and, once one is put away, "Bring back".
+- **Drag a stone within the tome to move it** (asked for 2026-10-02).
+  While carried over the tome it shows in the place it would take
+  (`layout::stone_slot`, the nearest stone's, the last over the empty
+  stone), the others closed up around it; let go there and it stays.
+  Let go outside the tome and it casts as before. The order is kept per
+  project as labels (`stones_order` in `state.json`), laid out by
+  `runeword::arrange`, so built in, project and global stones mix
+  freely and a stone the order does not name, a new one, shows last.
+  Checked on a dev instance: a move, a drop on the empty stone and a
+  drop on a tile, which cast.
 - **Found on the way**: a toast about a session casting already named the
   project rather than the session (`on_label` without a session in hand
   looked the id up as a project key).

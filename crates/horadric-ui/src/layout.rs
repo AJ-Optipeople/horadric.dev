@@ -1911,6 +1911,26 @@ pub fn rank(order: &[String], id: &str) -> usize {
     order.iter().position(|s| s == id).unwrap_or(usize::MAX)
 }
 
+/// The place in the tome a stone carried to `(x, y)` takes: that of the
+/// stone nearest, or the last over the empty stone, which stays last.
+/// None when the point is outside the tome, where the stone is cast
+/// instead.
+pub fn stone_slot(tome: &TomeLayout, x: f32, y: f32) -> Option<usize> {
+    if !tome.rect.contains(x, y) {
+        return None;
+    }
+    let made = tome.stones.len().checked_sub(1)?;
+    let on = |r: Option<&Rect>| r.is_some_and(|r| r.contains(x, y));
+    if made > 0 && (on(tome.stones.get(made)) || on(tome.labels.get(made))) {
+        return Some(made - 1);
+    }
+    let far = |r: &Rect| {
+        let (dx, dy) = (r.x + r.w / 2.0 - x, r.y + r.h / 2.0 - y);
+        dx * dx + dy * dy
+    };
+    (0..made).min_by(|&a, &b| far(&tome.stones[a]).total_cmp(&far(&tome.stones[b])))
+}
+
 /// The order after a tile was dragged: `shown`, the tiles as they now
 /// stand, then whatever `order` remembers that has no tile right now.
 pub fn reordered(order: &[String], shown: &[String]) -> Vec<String> {
@@ -2621,6 +2641,13 @@ mod tests {
         let lb = t.labels[2];
         assert_eq!(hit(&l, lb.x + 1.0, lb.y + 1.0), Hit::Stone(2));
         assert_eq!(hit(&l, 20.0, t.header.y + 1.0), Hit::TomeHeader);
+        // A carried stone takes the place of the one nearest, never the
+        // empty stone's, and outside the tome no place at all.
+        let at = |r: Rect| stone_slot(t, r.x + r.w / 2.0, r.y + r.h / 2.0);
+        assert_eq!(at(t.stones[2]), Some(2));
+        assert_eq!(at(t.labels[4]), Some(4));
+        assert_eq!(at(t.stones[5]), Some(4));
+        assert_eq!(stone_slot(t, 20.0, t.rect.bottom() + 5.0), None);
         // Folded, the header alone.
         let folded = cluster(&m, 1, false, Some(&[]), Some(0), None);
         let t = folded.tome.unwrap();

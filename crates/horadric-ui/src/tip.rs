@@ -188,7 +188,7 @@ pub fn cluster(hit: Hit) -> Option<&'static str> {
         Hit::TasksGive => "Ask an agent to suggest quests for this project. You pick which go in the log",
         Hit::TaskApprove(_) => "Mark this quest completed",
         Hit::TomeHeader => "Fold or unfold the Runetome. Right click for more",
-        Hit::Stone(_) => "Cast this stone, or drag it onto a session. Right click for more",
+        Hit::Stone(_) => "Cast this stone, drag it onto a session, or drag it within the tome to move it. Right click for more",
         Hit::Nothing => return None,
     })
 }

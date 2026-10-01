@@ -390,6 +390,9 @@ pub(crate) enum Input {
     /// A stone of that project's tome let go of here, on the screen: cast
     /// on the tile or pane under it.
     StoneDrop(String, String, POINT),
+    /// A stone of that project's tome, at this place, dragged to another
+    /// place in the same tome.
+    StoneMove(String, usize, usize),
     /// A stone of that project's tome right clicked, by its label, None
     /// for the empty stone or the tome's header: offer what can be done
     /// with it.
@@ -5618,6 +5621,7 @@ impl App {
             stones_cast: self.tome.cast.clone(),
             cast_without_asking: !self.tome.ask,
             stones_hidden: self.tome.hidden.clone(),
+            stones_order: self.tome.order.clone(),
             update_told: self.update_told.clone(),
             ..Default::default()
         }
@@ -6218,6 +6222,7 @@ impl App {
                     post(self.notify.0 as isize, WM_HORADRIC_STONE, 0);
                 }
                 Input::StoneDrop(key, label, at) => self.stone_dropped(&key, &label, at),
+                Input::StoneMove(key, from, to) => self.move_stone(&key, from, to),
                 Input::StoneMenu(key, label) => {
                     self.stone_menu_for = Some((key, label));
                     post(self.notify.0 as isize, WM_HORADRIC_STONE_MENU, 0);

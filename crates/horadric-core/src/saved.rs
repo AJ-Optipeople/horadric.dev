@@ -158,6 +158,10 @@ pub struct SavedState {
     /// leaves out until they are shown again.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stones_hidden: Vec<String>,
+    /// The order each project's stones were dragged to, by project key,
+    /// as labels. A stone it does not name shows after the ones it does.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub stones_order: BTreeMap<String, Vec<String>>,
 }
 
 /// The "Show on Discord" setting: whether Rich Presence is on, and whether

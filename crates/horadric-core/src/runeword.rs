@@ -461,6 +461,31 @@ pub fn stones(project: &str, global: &str) -> Vec<Stone> {
     out
 }
 
+/// The stones in the order the human dragged them to, `order` being
+/// labels. A stone the order does not name keeps its place among the
+/// others after every one it names, so a new stone shows last, beside
+/// the empty stone that made it.
+pub fn arrange(mut stones: Vec<Stone>, order: &[String]) -> Vec<Stone> {
+    stones.sort_by_key(|s| {
+        order
+            .iter()
+            .position(|l| *l == s.label)
+            .unwrap_or(usize::MAX)
+    });
+    stones
+}
+
+/// The labels after the stone at `from` was dragged to the place `to`,
+/// the others closing up behind it. A place past the end is the last one.
+pub fn moved(labels: &[String], from: usize, to: usize) -> Vec<String> {
+    let mut out = labels.to_vec();
+    if from < out.len() {
+        let label = out.remove(from);
+        out.insert(to.min(out.len()), label);
+    }
+    out
+}
+
 /// Every stone that parses, by label, in the tome's order.
 pub fn offered(stones: Vec<Stone>) -> Offered {
     stones
@@ -945,6 +970,35 @@ mod tests {
         let approve = &super::stones("", "")[0];
         assert!(only_keys(approve.runes().unwrap()));
         assert!(super::stones("", "")[6].sessionless());
+    }
+
+    #[test]
+    fn a_dragged_order_lays_out_the_tome_and_new_stones_go_last() {
+        let labels = |s: &[Stone]| s.iter().map(|s| s.label.clone()).collect::<Vec<_>>();
+        let global = r#"{ "runewords": { "Mine": ["say hi"], "Yours": ["say yo"] } }"#;
+        let plain = super::stones("", global);
+        assert_eq!(arrange(plain.clone(), &[]), plain);
+        let order = vec!["Yours".to_string(), "Approve".to_string()];
+        let laid = labels(&arrange(plain.clone(), &order));
+        assert_eq!(laid[..2], ["Yours", "Approve"]);
+        // The rest keep the order they had, Mine still after the built in.
+        let rest: Vec<String> = labels(&plain)
+            .into_iter()
+            .filter(|l| !order.contains(l))
+            .collect();
+        assert_eq!(laid[2..], rest[..]);
+        assert_eq!(laid.last().map(String::as_str), Some("Mine"));
+    }
+
+    #[test]
+    fn a_moved_stone_takes_its_new_place_and_the_others_close_up() {
+        let v = |s: &[&str]| s.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let abcd = v(&["a", "b", "c", "d"]);
+        assert_eq!(moved(&abcd, 0, 2), v(&["b", "c", "a", "d"]));
+        assert_eq!(moved(&abcd, 3, 0), v(&["d", "a", "b", "c"]));
+        assert_eq!(moved(&abcd, 1, 1), abcd);
+        assert_eq!(moved(&abcd, 1, 99), v(&["a", "c", "d", "b"]));
+        assert_eq!(moved(&abcd, 9, 0), abcd);
     }
 
     #[test]

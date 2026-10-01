@@ -284,12 +284,14 @@ struct Tome {
 }
 
 /// A stone held down: which, where the button went down on the screen,
-/// and where the cursor is in the window, in DIPs.
+/// where the cursor is in the window, in DIPs, and the place in the tome
+/// it takes while it is carried over the tome.
 struct Carry {
     i: usize,
     start: POINT,
     at: (f32, f32),
     moved: bool,
+    to: Option<usize>,
 }
 
 /// A row of the tasks tile as the cluster reads it: which item, and how.
@@ -932,13 +934,28 @@ impl Cluster {
             }
         });
         let stones = self.stones();
-        let tome_scene = stones.as_ref().map(|stones| {
-            let t = self.tome.borrow();
-            TomeScene {
-                stones,
-                collapsed: t.collapsed,
-                carried: t.carry.as_ref().filter(|c| c.moved).map(|c| (c.i, c.at)),
+        // A stone carried over the tome shows in the place it would take,
+        // the others closed up around it.
+        let carry = self
+            .tome
+            .borrow()
+            .carry
+            .as_ref()
+            .filter(|c| c.moved)
+            .map(|c| (c.i, c.at, c.to));
+        let stones = stones.map(|mut v| {
+            if let Some((i, _, Some(to))) = carry {
+                if i < v.len() && to < v.len() {
+                    let s = v.remove(i);
+                    v.insert(to, s);
+                }
             }
+            v
+        });
+        let tome_scene = stones.as_ref().map(|stones| TomeScene {
+            stones,
+            collapsed: self.tome.borrow().collapsed,
+            carried: carry.map(|(i, at, to)| (to.unwrap_or(i), at)),
         });
         let hot = self.hot.get();
         let pressed = self.pressed.get();
@@ -1248,6 +1265,7 @@ impl Cluster {
                         start: cursor,
                         at: self.client(lparam),
                         moved: false,
+                        to: None,
                     });
                     return Some(LRESULT(0));
                 }
@@ -1311,7 +1329,13 @@ impl Cluster {
                 if let Some(c) = carry {
                     self.press(None);
                     if c.moved {
-                        self.drop_stone(c.i);
+                        match c.to {
+                            Some(to) if to != c.i => {
+                                app::push(Input::StoneMove(self.key.clone(), c.i, to))
+                            }
+                            Some(_) => {}
+                            None => self.drop_stone(c.i),
+                        }
                         self.invalidate();
                     } else {
                         self.click(lparam);
@@ -1576,6 +1600,10 @@ impl Cluster {
                     || (cursor.y - c.start.y).abs() > DRAG_THRESHOLD;
                 // The empty stone makes stones, it is not one to cast.
                 c.moved = far && !empty(c.i);
+            }
+            if c.moved {
+                c.to = (self.layout.borrow().tome.as_ref())
+                    .and_then(|t| layout::stone_slot(t, at.0, at.1));
             }
             c.moved
         };

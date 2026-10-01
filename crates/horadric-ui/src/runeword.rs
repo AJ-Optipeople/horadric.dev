@@ -50,6 +50,8 @@ pub(in crate::app) struct Tome {
     pub(in crate::app) ask: bool,
     /// The built in stones put away, by label.
     pub(in crate::app) hidden: Vec<String>,
+    /// The order each project's stones were dragged to, by project key.
+    pub(in crate::app) order: BTreeMap<String, Vec<String>>,
     /// Keystrokes still to be written, by session, each when it is due.
     typing: Vec<(String, Vec<u8>, Instant)>,
     /// The hidden commands this run of the app started, by file, to tell
@@ -74,6 +76,7 @@ impl Tome {
             cast: saved.stones_cast.clone(),
             ask: !saved.cast_without_asking,
             hidden: saved.stones_hidden.clone(),
+            order: saved.stones_order.clone(),
             ..Tome::default()
         }
     }
@@ -659,9 +662,8 @@ impl App {
             }
             words
         };
-        let mut out: Vec<TomeStone> = self
-            .tome
-            .stones(Some(dir))
+        let order = self.tome.order.get(key).map_or(&[][..], Vec::as_slice);
+        let mut out: Vec<TomeStone> = runeword::arrange(self.tome.stones(Some(dir)), order)
             .into_iter()
             .map(|stone| {
                 let marked = self.changed(key, &stone);
@@ -744,6 +746,27 @@ impl App {
         }
         self.redraw_tiles();
         Ok(())
+    }
+
+    /// Moves the stone at place `from` in the project's tome to place
+    /// `to`, as the tome now shows them, and keeps the order. The empty
+    /// stone stays last.
+    pub(in crate::app) fn move_stone(&mut self, key: &str, from: usize, to: usize) {
+        let labels: Vec<String> = self
+            .shared
+            .tomes
+            .borrow()
+            .get(key)
+            .map(|t| t.iter().filter_map(|s| s.label.clone()).collect())
+            .unwrap_or_default();
+        if from >= labels.len() || from == to {
+            return;
+        }
+        self.tome
+            .order
+            .insert(key.to_string(), runeword::moved(&labels, from, to));
+        self.save();
+        self.redraw_tiles();
     }
 
     /// Puts a built in stone away, or with None brings every one back.
