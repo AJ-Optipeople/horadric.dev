@@ -199,3 +199,22 @@ ChatGPT and xAI subscriptions used from Horadric like a Claude one. See "Codex a
   Grok runs the `http` hooks in `~/.claude/settings.json` and prints "blocked by SSRF protection" in its TUI at every event. `[compat.claude] hooks = false` in Grok's config stops it, but that is the user's file; look for a flag or environment variable Horadric can pass when it starts `grok` instead.
 - [ ] Ship public: release everything on main to every install
   Always the last item. Everything finished on main goes out, not only the Codex and Grok work. Follow RELEASING.md and "Ship public" in CLAUDE.md.
+
+## Discord Activity
+
+Horadric on the human's Discord profile through Rich Presence. See "Discord Activity" under Next in docs/PLAN.md, which has the protocol, the rules and the reasoning; read it before starting. The first four run side by side in the shared tree, so commit small, stage only your own files, and keep to your own new files where you can. Only the tray quest runs a dev instance on 43118; the others test with `cargo test` or a small check of their own, never a second dev instance.
+
+- [ ] Discord: a client for the Rich Presence pipe
+  The frame codec (opcode and length, little endian, then JSON), the handshake, `SET_ACTIVITY` and clearing, all pure and tested, in a module of their own. Then the client on its own thread: try `\.\pipe\discord-ipc-0` to `-9`, handshake and wait for `READY`, keep only the latest presence, retry every 30 s while Discord is closed and say nothing about it, at most one update every 4 s, never send an unchanged one, clear before closing.
+  Its interface is a handle the app keeps with `set(Option<Activity>)` and a `stop` that clears; the `Activity` type is shared with the presence quest, so define it first, commit it at once, and say in its doc comment that the other quest builds on it.
+  The client id is a constant (a placeholder until the human makes the application) overridden by `HORADRIC_DISCORD_CLIENT_ID`. Discord runs on this machine: with an id, check it against the real client with a small example or test binary that sets and clears an activity.
+- [ ] Discord: what the presence says
+  The pure function from the sessions and the setting to an `Option<Activity>`, as "What it says" in the plan: the counts, the project only when names are allowed, the small image by the most urgent state, a start time that holds while any session works, None with nothing running. Tested for each. Wait for the client quest's `Activity` type to be on main (`git log`), or agree on it by reading its commit; do not make a second one.
+- [ ] Discord: the art for the presence
+  First find out whether Rich Presence takes an `https` URL for `large_image` and `small_image` today; if it does, they live in the repository and the keys are their URLs. Make the large image (Horadric's own mark) and one small image per state (waits, working, idle) in the lamps' colours, 512 by 512 PNG, drawn the way the app draws them so they match. Put them in `docs/discord/` with a short note of the key for each, and the steps for the human to upload them if URLs do not work.
+- [ ] Discord: the "Show on Discord" setting in the tray
+  Off (the default), "Without project names", "With project names", checked as chosen, kept with the other app settings so a dev instance has its own. Nothing is sent yet: expose the choice where the wiring quest can read it and hear it change. Verify the menu on screen with a dev instance.
+- [ ] Discord: wire the presence into the app
+  Needs the four above on main. Keep a client while the setting is on, hand it the presence whenever the registry or the setting changes (it drops what did not change), and clear on Off, quit and reload as the plan says. Count that the UI thread never waits on the pipe. Check with a real Discord and a dev instance, the installed one left off.
+- [ ] Discord: check it on screen with a real Discord and write it into the README
+  Needs the human's Discord application id; if it is not in the code yet, report blocked and ask for it. Then with a dev instance: each setting, a session working, waiting and done, the elapsed time holding across turns, names hidden and shown, quit and reload clearing it. Screenshot the profile. Add a short part to README.md and mark the plan section done.
