@@ -555,8 +555,9 @@ pub struct UsageLayout {
     pub limits_box: Rect,
     /// One row per limit, or one for the line that says none is known yet.
     pub limits: Vec<Rect>,
-    /// The padlock in the window's top right corner, out in its margin,
-    /// which keeps the window from folding or being dragged.
+    /// The padlock, which keeps the window from folding or being dragged.
+    /// It is a piece of the plate bitten out of the screen's top right
+    /// corner, reaching out into the margin.
     pub lock: Rect,
     /// The section round the settings. None when folded.
     pub settings_box: Option<Rect>,
@@ -608,13 +609,18 @@ pub fn usage(
         settings_box: None,
         settings: Vec::new(),
     };
-    l.lock = Rect::new(m.width - m.pad, 1.0, m.pad - 2.0, m.pad - 2.0);
     for _ in 0..rows {
         l.limits.push(Rect::new(m.pad, y, full, m.limit_row_h));
         y += m.limit_row_h;
     }
     y += inner;
     l.limits_box = Rect::new(m.pad, top, full, y - top);
+    // Deep enough into the screen to swallow its rounded corner, and up to
+    // the header without covering it.
+    let (bite, reach) = (m.tile_radius + 4.0, 12.0);
+    let lock_top = header.map_or(top - reach, |h| h.bottom().max(top - reach));
+    let x = l.limits_box.right() - bite;
+    l.lock = Rect::new(x, lock_top, bite + reach, top + bite - lock_top);
     if !collapsed {
         y += m.gap;
         let top = y;
@@ -2163,10 +2169,13 @@ mod tests {
         let m = Metrics::default();
         for (header, collapsed) in [(false, false), (true, false), (false, true)] {
             let l = usage(&m, header, 2, &SCALES, collapsed);
-            let k = l.lock;
-            assert!(k.x >= 0.0 && k.y >= 0.0 && k.right() <= l.size.0);
-            assert!(k.x >= l.limits_box.right() && k.bottom() <= l.limits_box.y);
-            assert!(l.header.is_none_or(|h| k.x >= h.right()));
+            let (k, b) = (l.lock, l.limits_box);
+            // Inside the plate's seam, over the screen's corner.
+            assert!(k.y >= 6.0 && k.right() <= l.size.0 - 6.0);
+            assert!(k.x < b.right() && k.right() > b.right());
+            assert!(k.y < b.y && k.bottom() > b.y + m.tile_radius);
+            assert!(b.right() - k.x > m.tile_radius);
+            assert!(l.header.is_none_or(|h| k.y >= h.bottom()));
             let (x, y) = (k.x + k.w / 2.0, k.y + k.h / 2.0);
             assert_eq!(usage_hit(&l, x, y), UsageHit::Lock);
         }
