@@ -177,12 +177,12 @@ pub fn cluster(hit: Hit) -> Option<&'static str> {
         Hit::Shell => "Open a terminal in this project",
         Hit::FilesHeader => "Fold or unfold the changed files",
         Hit::File(_) => "Open on the stage, or with Ctrl in your editor. A folder opens or closes",
-        Hit::TasksHeader => "Fold or unfold the tasks. Right click to pick how they run",
-        Hit::TasksMode => "Pick how the tasks run",
-        Hit::TasksAdd => "Add a task",
+        Hit::TasksHeader => "Fold or unfold the quest log. Right click to pick how quests run",
+        Hit::TasksMode => "Pick how the quests run",
+        Hit::TasksAdd => "Add a quest",
         Hit::Task(_) => "Read this quest before taking it on, or show the session doing it. Right click for more",
         Hit::TasksGive => "Ask an agent to suggest quests for this project. You pick which go in the log",
-        Hit::TaskApprove(_) => "Mark this task done",
+        Hit::TaskApprove(_) => "Mark this quest completed",
         Hit::Nothing => return None,
     })
 }
