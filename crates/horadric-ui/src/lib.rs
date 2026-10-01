@@ -28,7 +28,7 @@
 //! tile in its cluster. A click on an item starts a session on it, and the
 //! app can work down the list by itself ([`board`], `horadric_core::tasks`).
 //!
-//! [`anim`], [`board`], [`columns`], [`field`], [`files`], [`find`], [`layout`], [`theme`], [`palette`], [`paste`],
+//! [`anim`], [`art`], [`board`], [`columns`], [`field`], [`files`], [`find`], [`layout`], [`theme`], [`palette`], [`paste`],
 //! [`keys`], [`frame`], [`icon`], [`inbox`], [`loot`], [`motion`], [`paths`], [`viewer`],
 //! [`highlight`], [`history`], [`screens`] and [`shell`] are pure and tested, and so is
 //! the list logic in `recent`.
@@ -37,6 +37,7 @@
 //! The rest is Windows only and verified on screen.
 
 pub mod anim;
+pub mod art;
 pub mod board;
 pub mod columns;
 pub mod field;
@@ -90,6 +91,8 @@ mod console;
 mod cube;
 #[cfg(windows)]
 mod dialog;
+#[cfg(windows)]
+pub mod discord;
 #[cfg(windows)]
 pub use dialog::error_alone;
 pub use store::exe_command;

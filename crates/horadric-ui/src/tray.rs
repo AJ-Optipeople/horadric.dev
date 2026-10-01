@@ -18,6 +18,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use horadric_core::experience;
+use horadric_core::saved::Discord;
 
 use crate::menu::{self, Item};
 use crate::screens::{self, Screen};
@@ -63,6 +64,8 @@ pub enum Choice {
     ToggleNotify,
     /// Play, or stop playing, the loot sounds.
     ToggleSounds,
+    /// Show this much on the human's Discord profile.
+    Discord(Discord),
     /// Look for a newer release now, and say what was found.
     CheckUpdates,
     /// Install the newer release the menu offered.
@@ -135,7 +138,8 @@ pub const HISTORY: usize = 1000;
 /// The tray menu. `autostart` is None when the switch is not offered,
 /// `hotkeys` are the shortcuts for the next waiting session and for the
 /// catch-up, where they have one, `notify` whether a session that starts
-/// waiting says so, and `sounds` whether loot drops are heard. `history`
+/// waiting says so, `sounds` whether loot drops are heard, and `discord`
+/// what the Discord profile is allowed to show. `history`
 /// holds a History menu for each of `recent_projects`, in order.
 /// `screens` are offered when there is more than one, with the one named
 /// `shown` checked. `update` is a newer release's version, when a check
@@ -150,6 +154,7 @@ pub fn menu(
     hotkeys: [Option<&str>; 2],
     notify: bool,
     sounds: bool,
+    discord: Discord,
     terminal: bool,
     screens: &[Screen],
     shown: Option<&str>,
@@ -172,6 +177,7 @@ pub fn menu(
     const UPDATE: usize = 12;
     const LISTEN: usize = 13;
     const SOUNDS: usize = 14;
+    const DISCORD: usize = 20;
     const SCREEN: usize = 50;
     const RECENT: usize = 100;
     const FONT: usize = 200;
@@ -263,6 +269,18 @@ pub fn menu(
         label: "Loot sounds".into(),
         checked: sounds,
     });
+    // A submenu, not a switch: what a public profile may say is worth a
+    // second look at, and the choice between names and none is the point.
+    let lines = Discord::ALL
+        .iter()
+        .enumerate()
+        .map(|(i, &d)| Item::Action {
+            id: DISCORD + i,
+            label: d.label().into(),
+            checked: d == discord,
+        })
+        .collect();
+    items.push(Item::Submenu("Show on Discord".into(), lines));
     if let Some(checked) = autostart {
         items.push(Item::Action {
             id: AUTOSTART,
@@ -293,6 +311,9 @@ pub fn menu(
         CHECK => Some(Choice::CheckUpdates),
         UPDATE => Some(Choice::Update),
         END_ALL => Some(Choice::EndAll),
+        i if (DISCORD..SCREEN).contains(&i) => {
+            Discord::ALL.get(i - DISCORD).copied().map(Choice::Discord)
+        }
         i if i >= HISTORY => Some(Choice::History(i)),
         i if (SCREEN..RECENT).contains(&i) => Some(Choice::Screen(i - SCREEN)),
         i if (FONT..HISTORY).contains(&i) => Some(Choice::Font(i - FONT)),

@@ -53,8 +53,9 @@ use horadric_core::diff::{self as changes, Diff, FileDiff, Recount};
 use horadric_core::fleet::{self, Device};
 use horadric_core::journal::{self, Entry, What};
 use horadric_core::overlap::Overlap;
+use horadric_core::presence;
 use horadric_core::release::{self, Manifest};
-use horadric_core::saved::Side;
+use horadric_core::saved::{Discord, Side};
 use horadric_core::ssh;
 use horadric_core::usage::has_flag;
 use horadric_core::worktree::{self as tree, Worktree};
@@ -686,6 +687,9 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             autostart_offered,
             quiet: saved.quiet,
             sounds: saved.sounds,
+            discord: saved.discord,
+            rich: None,
+            run: presence::Run::default(),
             cube_on: saved.cube,
             font_family: saved.font_family.clone(),
             screen: saved.screen.clone(),
@@ -1072,7 +1076,7 @@ fn with_app<R>(f: impl FnOnce(&mut App) -> R) -> Option<R> {
 }
 
 fn tray_menu(hwnd: HWND) {
-    let (recent, hotkeys, notify, sounds, terminal, update, xp) = with_app(|app| {
+    let (recent, hotkeys, notify, sounds, discord, terminal, update, xp) = with_app(|app| {
         let xp = app.experience.lock().ok().and_then(|e| *e);
         app.count_experience();
         (
@@ -1080,6 +1084,7 @@ fn tray_menu(hwnd: HWND) {
             [app.hotkey, app.listen_key],
             !app.quiet,
             app.sounds,
+            app.discord,
             !app.consoles.is_empty(),
             app.update.as_ref().map(|m| m.version.clone()),
             xp,
@@ -1116,6 +1121,7 @@ fn tray_menu(hwnd: HWND) {
         hotkeys,
         notify,
         sounds,
+        discord,
         terminal,
         &screens,
         shown.as_deref(),
@@ -1138,6 +1144,9 @@ fn tray_menu(hwnd: HWND) {
                 // So the choice is heard the moment it is made.
                 app.sound(Loot::Drop);
             });
+        }
+        Some(Choice::Discord(d)) => {
+            with_app(|app| app.set_discord(d));
         }
         Some(Choice::New) => pick_and_start(hwnd, projects.first().map(PathBuf::from)),
         Some(Choice::Recent(path)) => start_logged(PathBuf::from(path)),
@@ -2603,6 +2612,13 @@ struct App {
     quiet: bool,
     /// Loot sounds, from the tray menu.
     sounds: bool,
+    /// What the Discord profile may show, from the tray menu. Changed only
+    /// through [`App::set_discord`].
+    discord: Discord,
+    /// The Rich Presence client, kept while [`App::discord`] is on.
+    rich: Option<crate::discord::Discord>,
+    /// When the current run of work began, which the profile counts from.
+    run: presence::Run,
     /// The cube is shown, from the usage window's menu.
     cube_on: bool,
     /// The terminal font picked from the tray menu. Kept as picked, so a
@@ -5372,6 +5388,8 @@ impl App {
         if let Some(since) = self.away.idle(idle_secs(), unix_now()) {
             self.welcome_back(since);
         }
+        // A run of work ends after a quiet spell no event marks.
+        self.sync_discord();
         self.save();
     }
 
@@ -5476,6 +5494,7 @@ impl App {
             font_size: Some(self.shared.font.size()).filter(|&s| s != keys::FONT_DEFAULT),
             quiet: self.quiet,
             sounds: self.sounds,
+            discord: self.discord,
             cube: self.cube_on,
             font_family: self.font_family.clone(),
             screen: self.screen.clone(),
@@ -5522,6 +5541,12 @@ impl App {
             }
         }
         self.frozen = true;
+        // Quit and reload clear the profile before the pipe closes, since
+        // Discord shows a stale activity for a while after we are gone. The
+        // wait is bounded by the client.
+        if let Some(rich) = self.rich.take() {
+            rich.stop();
+        }
     }
 
     /// Makes the windows match the projects in the registry.
@@ -5631,6 +5656,7 @@ impl App {
             (t, w) => format!("{app}: {t} sessions, {w} waiting"),
         };
         self.tray.set_tip(&tip);
+        self.sync_discord();
         self.identify();
         self.announce();
         self.journal_phases();
@@ -5707,6 +5733,55 @@ impl App {
         // With the beam, which rises the moment the tile turns done.
         if dropped {
             self.sound(Loot::Drop);
+        }
+    }
+
+    /// The one place the "Show on Discord" setting changes, so the presence
+    /// is handed on, or cleared on Off, from here and nowhere else.
+    fn set_discord(&mut self, discord: Discord) {
+        if self.discord == discord {
+            return;
+        }
+        self.discord = discord;
+        self.save();
+        self.sync_discord();
+    }
+
+    /// Hands the Discord client what the profile should say now. Called
+    /// whenever the registry or the setting changes, and from the tick so a
+    /// run of work ends on time; the client drops what did not change. It
+    /// only ever sends on a channel, so the UI thread never waits on the
+    /// pipe.
+    fn sync_discord(&mut self) {
+        if self.discord.is_off() || self.frozen {
+            // Dropped, not stopped: the client clears and closes on its own
+            // thread, and the UI does not wait for a Discord that may hang.
+            self.rich = None;
+            self.run = presence::Run::default();
+            return;
+        }
+        let began = Instant::now();
+        let stage = self.stage.as_ref().map(|s| project_name(&s.project()));
+        let activity = {
+            let Ok(r) = self.shared.registry.lock() else {
+                return;
+            };
+            let named: Vec<(&Session, String)> = r
+                .all()
+                .map(|s| (s, project_name(&project_key(s))))
+                .collect();
+            let seen: Vec<presence::Seen> = named
+                .iter()
+                .map(|(session, project)| presence::Seen { session, project })
+                .collect();
+            let start = self.run.update(&seen, SystemTime::now());
+            presence::presence(&seen, stage.as_deref(), self.discord, start)
+        };
+        self.rich
+            .get_or_insert_with(crate::discord::Discord::start)
+            .set(activity);
+        if std::env::var_os("HORADRIC_DEBUG").is_some() {
+            eprintln!("discord sync took {:?}", began.elapsed());
         }
     }
 
