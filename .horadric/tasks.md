@@ -218,5 +218,6 @@ Horadric on the human's Discord profile through Rich Presence. See "Discord Acti
   Off (the default), "Without project names", "With project names", checked as chosen, kept with the other app settings so a dev instance has its own. Nothing is sent yet: expose the choice where the wiring quest can read it and hear it change. Verify the menu on screen with a dev instance.
 - [x] Discord: wire the presence into the app @discord-wire-57355
   Needs the four above on main. Keep a client while the setting is on, hand it the presence whenever the registry or the setting changes (it drops what did not change), and clear on Off, quit and reload as the plan says. Count that the UI thread never waits on the pipe. Check with a real Discord and a dev instance, the installed one left off.
-- [/] Discord: check it on screen with a real Discord and write it into the README @discord-check-57759
+- [x] Discord: check it on screen with a real Discord and write it into the README @discord-check-57759
   With a dev instance: each setting, a session working, waiting and done, the elapsed time holding across turns, names hidden and shown, quit and reload clearing it. Screenshot the profile. Add a short part to README.md and mark the plan section done.
+- [ ] Discord: keep the clock of a run of work through a reload
