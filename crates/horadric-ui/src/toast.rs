@@ -70,10 +70,10 @@ pub enum Kind {
 impl Kind {
     fn colour(self) -> Color {
         match self {
-            Kind::Waiting => theme::WAITING,
-            Kind::Done => theme::DONE,
-            Kind::Info => theme::WORKING,
-            Kind::Failed => theme::ERROR,
+            Kind::Waiting => theme::waiting(),
+            Kind::Done => theme::done(),
+            Kind::Info => theme::working(),
+            Kind::Failed => theme::error(),
         }
     }
 }

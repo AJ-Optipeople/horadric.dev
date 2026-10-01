@@ -314,7 +314,7 @@ impl TerminalWindow {
         // The window's edge in the project's colour, like its cluster's
         // mark, sunk most of the way into the clay so it tints the edge
         // rather than outlining the window.
-        backdrop::border(self.hwnd, Some(theme::WINDOW_BG.mix(accent, 0.35)));
+        backdrop::border(self.hwnd, Some(theme::window_bg().mix(accent, 0.35)));
         if let Some(c) = self.caption.borrow().as_ref() {
             c.set_accent(accent);
         }
@@ -584,6 +584,12 @@ impl TerminalWindow {
         self.refresh_title();
     }
 
+    /// The theme changed: the window's edge takes the new plate.
+    pub fn retheme(&self) {
+        let accent = theme::accent(&self.project.borrow());
+        backdrop::border(self.hwnd, Some(theme::window_bg().mix(accent, 0.35)));
+    }
+
     /// The font changed size: every pane fits its grid again.
     pub fn refont(&self) {
         for p in self.panes.borrow().iter() {
@@ -798,8 +804,8 @@ impl TerminalWindow {
             let mut r = RECT::default();
             let _ = GetClientRect(self.hwnd, &mut r);
             let verts = [
-                vertex(0, 0, theme::PLATE_TOP),
-                vertex(r.right, r.bottom, theme::PLATE_BOTTOM),
+                vertex(0, 0, theme::plate_top()),
+                vertex(r.right, r.bottom, theme::plate_bottom()),
             ];
             let mesh = GRADIENT_RECT {
                 UpperLeft: 0,
@@ -828,8 +834,8 @@ impl TerminalWindow {
             };
             let black = theme::Color::rgb(0);
             let white = theme::Color::rgb(0xFFFFFF);
-            let light = CreateSolidBrush(colorref(theme::WINDOW_BG.mix(white, 0.05)));
-            let dark = CreateSolidBrush(colorref(theme::WINDOW_BG.mix(black, 0.5)));
+            let light = CreateSolidBrush(colorref(theme::window_bg().mix(white, 0.05)));
+            let dark = CreateSolidBrush(colorref(theme::window_bg().mix(black, 0.5)));
             FrameRect(hdc, &lit, light);
             FrameRect(hdc, &seam, dark);
             let _ = DeleteObject(light.into());

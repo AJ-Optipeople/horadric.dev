@@ -313,7 +313,7 @@ impl CubeWindow {
     fn main_rune(&self) -> Flying {
         Flying {
             from: self.layout.main,
-            ink: theme::TEXT,
+            ink: theme::text(),
             accent: theme::rarity_color(horadric_core::rarity::Rarity::Unique),
         }
     }

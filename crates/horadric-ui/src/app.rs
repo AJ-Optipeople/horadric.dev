@@ -69,8 +69,9 @@ use horadric_hooks::{install, TASKS_ENV};
 use windows::core::{w, BOOL, PCWSTR};
 use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    EnumDisplayMonitors, GetMonitorInfoW, MonitorFromPoint, MonitorFromRect, HDC, HMONITOR,
-    MONITORINFO, MONITORINFOEXW, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTONULL,
+    EnumDisplayMonitors, GetMonitorInfoW, MonitorFromPoint, MonitorFromRect, RedrawWindow, HDC,
+    HMONITOR, MONITORINFO, MONITORINFOEXW, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTONULL,
+    RDW_ALLCHILDREN, RDW_ERASE, RDW_FRAME, RDW_INVALIDATE,
 };
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -78,6 +79,7 @@ use windows::Win32::System::RemoteDesktop::{
     WTSRegisterSessionNotification, NOTIFY_FOR_THIS_SESSION,
 };
 use windows::Win32::System::SystemInformation::{GetLocalTime, GetTickCount};
+use windows::Win32::System::Threading::GetCurrentProcessId;
 use windows::Win32::UI::HiDpi::{
     GetDpiForWindow, SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
@@ -87,12 +89,13 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::Shell::{SHQueryUserNotificationState, NIN_BALLOONUSERCLICK};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, GetWindowRect, KillTimer,
-    PostMessageW, PostQuitMessage, RegisterClassW, RegisterWindowMessageW, SetTimer, SetWindowPos,
-    SystemParametersInfoW, TranslateMessage, MONITORINFOF_PRIMARY, MSG, SPI_GETWORKAREA,
-    SPI_SETWORKAREA, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
-    WM_APP, WM_DISPLAYCHANGE, WM_HOTKEY, WM_LBUTTONUP, WM_QUERYENDSESSION, WM_QUIT, WM_RBUTTONUP,
-    WM_SETTINGCHANGE, WM_TIMER, WNDCLASSW, WS_EX_TOOLWINDOW, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, DispatchMessageW, EnumWindows, GetMessageW, GetWindowRect,
+    GetWindowThreadProcessId, KillTimer, PostMessageW, PostQuitMessage, RegisterClassW,
+    RegisterWindowMessageW, SetTimer, SetWindowPos, SystemParametersInfoW, TranslateMessage,
+    MONITORINFOF_PRIMARY, MSG, SPI_GETWORKAREA, SPI_SETWORKAREA, SWP_NOACTIVATE, SWP_NOSIZE,
+    SWP_NOZORDER, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WM_APP, WM_DISPLAYCHANGE, WM_HOTKEY,
+    WM_LBUTTONUP, WM_QUERYENDSESSION, WM_QUIT, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_TIMER, WNDCLASSW,
+    WS_EX_TOOLWINDOW, WS_POPUP,
 };
 
 use crate::accounts;
@@ -117,6 +120,7 @@ use crate::sound;
 use crate::start::{self, StartWindow};
 use crate::stash::{self, StashWindow};
 use crate::terminal::{self, Place, TerminalWindow};
+use crate::theme::Theme;
 use crate::toast::{self, Kind, Toasts};
 use crate::tray::{self, Choice, Tray};
 use crate::usage::{self, UsageWindow};
@@ -587,6 +591,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
         BTreeMap::new()
     };
 
+    theme::set(Theme::from_key(saved.theme.as_deref()));
     let gpu = Gpu::new()?;
     let font = Font::new(
         &gpu.dw,
@@ -1139,6 +1144,7 @@ fn tray_menu(hwnd: HWND) {
         update.as_deref(),
         &fonts,
         &font,
+        theme::current(),
         xp,
     );
     match menu {
@@ -1194,6 +1200,9 @@ fn tray_menu(hwnd: HWND) {
                 unsafe { SetTimer(Some(hwnd), SCREEN_TIMER, 1000, None) };
             }
         }
+        Some(Choice::Theme(t)) => {
+            with_app(|app| app.set_theme(t));
+        }
         Some(Choice::Font(i)) => {
             if let Some(family) = fonts.get(i) {
                 with_app(|app| app.set_font_family(family));
@@ -1239,6 +1248,29 @@ fn tray_menu(hwnd: HWND) {
             }
         }
         None => {}
+    }
+}
+
+/// Asks every window of the app to paint, its children too, for a change
+/// that touches all of them, such as the theme.
+fn repaint_all() {
+    unsafe extern "system" fn each(hwnd: HWND, _: LPARAM) -> BOOL {
+        let mut pid = 0;
+        unsafe {
+            GetWindowThreadProcessId(hwnd, Some(&mut pid));
+            if pid == GetCurrentProcessId() {
+                let _ = RedrawWindow(
+                    Some(hwnd),
+                    None,
+                    None,
+                    RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN,
+                );
+            }
+        }
+        BOOL(1)
+    }
+    unsafe {
+        let _ = EnumWindows(Some(each), LPARAM(0));
     }
 }
 
@@ -5064,6 +5096,17 @@ impl App {
     }
 
     /// The terminal font's family, for every pane at once.
+    /// Draws every window in `t`. The cached layers know their theme and
+    /// draw again for a new one, so asking each window to paint is enough.
+    fn set_theme(&mut self, t: Theme) {
+        theme::set(t);
+        if let Some(stage) = &self.stage {
+            stage.retheme();
+        }
+        repaint_all();
+        self.save();
+    }
+
     fn set_font_family(&mut self, family: &str) {
         if let Err(e) = self.shared.font.set_family(family) {
             eprintln!("horadric: cannot load the font {family}: {e}");
@@ -5521,6 +5564,7 @@ impl App {
             run: self.run.saved(),
             cube: self.cube_on,
             font_family: self.font_family.clone(),
+            theme: theme::current().saved(),
             screen: self.screen.clone(),
             live: !self.quit,
             recovering: self.recovering.is_some(),
