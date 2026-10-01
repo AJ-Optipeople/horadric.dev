@@ -555,7 +555,7 @@ pub struct UsageLayout {
     pub limits_box: Rect,
     /// One row per limit, or one for the line that says none is known yet.
     pub limits: Vec<Rect>,
-    /// The padlock, which keeps the window from folding or being dragged.
+    /// The padlock, which pins the window to the top of its column.
     /// It is a piece of the plate bitten out of the screen's top right
     /// corner, reaching out into the margin.
     pub lock: Rect,
@@ -798,7 +798,7 @@ pub enum UsageHit {
     Header,
     /// The limits' screen, which folds and unfolds the window.
     Limits,
-    /// The padlock, which locks and unlocks the fold and the drag.
+    /// The padlock, which pins and unpins the window.
     Lock,
     Setting(usize),
     Nothing,
