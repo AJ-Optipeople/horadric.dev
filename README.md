@@ -90,6 +90,14 @@ work. Worktrees are next.
   longest. Press it again to move on to the next one. When a session starts
   waiting and you are not looking at it, Windows shows a notification; a
   click on it shows the session. The tray menu can switch that off.
+- "Show on Discord" in the tray menu puts what your agents do on your
+  Discord profile, "Playing Horadric: 2 agents working, 1 waits for you",
+  with a clock that counts the whole run of work, not each turn. It is
+  off until you choose it, and "Without project names" keeps the project
+  off a profile your friends and servers can see; "With project names"
+  adds the one on the stage, or the busiest. Quit, reload and Off clear
+  it. It talks to the Discord desktop app through its local pipe, so
+  nothing happens while Discord is closed.
 - A Claude window at the top of the stack shows how much of your five hour,
   weekly and spend limits is used and when each resets, and picks the
   model, effort and permission mode for every session Horadric starts or

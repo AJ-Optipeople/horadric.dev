@@ -2672,6 +2672,22 @@ client, what the presence says, the art and the tray setting side by
 side in the shared tree, then wiring them together, then the check on
 screen with a real Discord.
 
+Done, all of it. Checked on screen on 2026-10-01 with a dev instance,
+fake sessions posted to it and the real Discord desktop client, the
+profile popout read from screenshots: "Without project names" showed
+"Playing Horadric, 1 agent working" with no project line; a second
+session working and the first asking for permission gave "1 agent
+working, 1 waits for you"; both stopping gave "2 agents idle"; a new
+turn after that kept the clock going (0:15, 0:45, 1:15 across all of
+it) instead of starting at zero. Picking "With project names" in the
+tray added "in beta" within the 4 s, Off took the card away at once,
+and on again brought it back. Reload cleared it for the 3 s of the
+handover and the new build set it again; Quit, with "Stop them", cleared
+it within 2 s. Two things the check left: the images show as Discord's
+question mark until `docs/discord` is on `main` on GitHub, since their
+URLs are raw GitHub ones, and a reload starts the clock again, since the
+run of work is not handed over.
+
 ### Step 4: worktrees and the git glance
 
 - `git worktree add` per session, branch named from the session name.
