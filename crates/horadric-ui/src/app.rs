@@ -54,7 +54,7 @@ use horadric_core::fleet::{self, Device};
 use horadric_core::journal::{self, Entry, What};
 use horadric_core::overlap::Overlap;
 use horadric_core::release::{self, Manifest};
-use horadric_core::saved::Side;
+use horadric_core::saved::{Discord, Side};
 use horadric_core::ssh;
 use horadric_core::usage::has_flag;
 use horadric_core::worktree::{self as tree, Worktree};
@@ -684,6 +684,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             autostart_offered,
             quiet: saved.quiet,
             sounds: saved.sounds,
+            discord: saved.discord,
             cube_on: saved.cube,
             font_family: saved.font_family.clone(),
             screen: saved.screen.clone(),
@@ -1070,7 +1071,7 @@ fn with_app<R>(f: impl FnOnce(&mut App) -> R) -> Option<R> {
 }
 
 fn tray_menu(hwnd: HWND) {
-    let (recent, hotkeys, notify, sounds, terminal, update, xp) = with_app(|app| {
+    let (recent, hotkeys, notify, sounds, discord, terminal, update, xp) = with_app(|app| {
         let xp = app.experience.lock().ok().and_then(|e| *e);
         app.count_experience();
         (
@@ -1078,6 +1079,7 @@ fn tray_menu(hwnd: HWND) {
             [app.hotkey, app.listen_key],
             !app.quiet,
             app.sounds,
+            app.discord,
             !app.consoles.is_empty(),
             app.update.as_ref().map(|m| m.version.clone()),
             xp,
@@ -1114,6 +1116,7 @@ fn tray_menu(hwnd: HWND) {
         hotkeys,
         notify,
         sounds,
+        discord,
         terminal,
         &screens,
         shown.as_deref(),
@@ -1136,6 +1139,9 @@ fn tray_menu(hwnd: HWND) {
                 // So the choice is heard the moment it is made.
                 app.sound(Loot::Drop);
             });
+        }
+        Some(Choice::Discord(d)) => {
+            with_app(|app| app.set_discord(d));
         }
         Some(Choice::New) => pick_and_start(hwnd, projects.first().map(PathBuf::from)),
         Some(Choice::Recent(path)) => start_logged(PathBuf::from(path)),
@@ -2594,6 +2600,9 @@ struct App {
     quiet: bool,
     /// Loot sounds, from the tray menu.
     sounds: bool,
+    /// What the Discord profile may show, from the tray menu. Changed only
+    /// through [`App::set_discord`].
+    discord: Discord,
     /// The cube is shown, from the usage window's menu.
     cube_on: bool,
     /// The terminal font picked from the tray menu. Kept as picked, so a
@@ -5460,6 +5469,7 @@ impl App {
             font_size: Some(self.shared.font.size()).filter(|&s| s != keys::FONT_DEFAULT),
             quiet: self.quiet,
             sounds: self.sounds,
+            discord: self.discord,
             cube: self.cube_on,
             font_family: self.font_family.clone(),
             screen: self.screen.clone(),
@@ -5692,6 +5702,16 @@ impl App {
         if dropped {
             self.sound(Loot::Drop);
         }
+    }
+
+    /// The one place the "Show on Discord" setting changes, so the presence
+    /// is handed on, or cleared on Off, from here and nowhere else.
+    fn set_discord(&mut self, discord: Discord) {
+        if self.discord == discord {
+            return;
+        }
+        self.discord = discord;
+        self.save();
     }
 
     /// Plays `loot` when the tray says loot is heard.
