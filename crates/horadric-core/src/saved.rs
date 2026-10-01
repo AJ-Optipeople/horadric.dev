@@ -107,6 +107,10 @@ pub struct SavedState {
     /// window's menu.
     #[serde(default)]
     pub cube: bool,
+    /// What the human's Discord profile shows, off until chosen in the
+    /// tray. Kept per instance, so a dev one stays off on its own.
+    #[serde(default, skip_serializing_if = "Discord::is_off")]
+    pub discord: Discord,
     /// The device name of the screen the columns stand on, when it is not
     /// the primary one.
     #[serde(default)]
@@ -125,6 +129,44 @@ pub struct SavedState {
     /// of once, not at every start and every daily check.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub update_told: Option<String>,
+}
+
+/// The "Show on Discord" setting: whether Rich Presence is on, and whether
+/// it may name the project. A Discord profile is public to the human's
+/// friends and servers, so it starts off and names stay hidden until
+/// allowed. The presence and the wiring read this one type.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Discord {
+    #[default]
+    Off,
+    /// The counts and the state, never a project name.
+    Unnamed,
+    /// The project on the stage, or the busiest, as well.
+    Named,
+}
+
+impl Discord {
+    /// The tray's lines, in order.
+    pub const ALL: [Discord; 3] = [Discord::Off, Discord::Unnamed, Discord::Named];
+
+    pub fn is_off(&self) -> bool {
+        *self == Discord::Off
+    }
+
+    /// Whether the presence may say which project.
+    pub fn names(self) -> bool {
+        self == Discord::Named
+    }
+
+    /// Its line in the tray's "Show on Discord" menu.
+    pub fn label(self) -> &'static str {
+        match self {
+            Discord::Off => "Off",
+            Discord::Unnamed => "Without project names",
+            Discord::Named => "With project names",
+        }
+    }
 }
 
 /// The side of the stage a browser pane stands on, beside the grid.
@@ -581,6 +623,7 @@ mod tests {
             font_size: Some(17.0),
             quiet: true,
             sounds: true,
+            discord: Discord::Named,
             screen: Some(r"\\.\DISPLAY2".into()),
             ..Default::default()
         };
@@ -600,6 +643,7 @@ mod tests {
         assert_eq!(back.font_size, state.font_size);
         assert!(back.quiet);
         assert!(back.sounds);
+        assert_eq!(back.discord, Discord::Named);
         assert_eq!(back.screen, state.screen);
         let tile = back.sessions[0].to_session(SystemTime::now());
         assert_eq!(tile.phase, Phase::Paused);
@@ -626,6 +670,28 @@ mod tests {
         assert!(s.quiet);
         assert_eq!(s.grids.keys().collect::<Vec<_>>(), vec!["c:/p"]);
         assert_eq!(s.font_size, None);
+    }
+
+    #[test]
+    fn discord_starts_off_and_a_value_it_does_not_know_turns_it_off() {
+        assert_eq!(SavedState::default().discord, Discord::Off);
+        assert!(!SavedState::default().to_json().contains("discord"));
+        let unnamed = SavedState::from_json(br#"{"discord": "unnamed"}"#);
+        assert_eq!(unnamed.discord, Discord::Unnamed);
+        assert!(!unnamed.discord.names());
+        let odd = SavedState::from_json(br#"{"discord": "loud", "quiet": true}"#);
+        assert_eq!(odd.discord, Discord::Off);
+        assert!(odd.quiet);
+    }
+
+    #[test]
+    fn discord_lines_are_in_order_and_only_named_names() {
+        let labels: Vec<_> = Discord::ALL.iter().map(|d| d.label()).collect();
+        assert_eq!(
+            labels,
+            ["Off", "Without project names", "With project names"]
+        );
+        assert_eq!(Discord::ALL.map(Discord::names), [false, false, true]);
     }
 
     #[test]
