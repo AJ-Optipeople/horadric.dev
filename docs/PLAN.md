@@ -3402,9 +3402,3 @@ Carried from the concept, with what is known now.
   the fallback until the first turn ends.
 - **What about the VS Code extension's Claude?** Still unanswered. Probably
   the answer is to stop using it.
-
-## Name collision
-
-`horadricapp/horadric` is a self-hosted dashboard with more than twenty thousand
-stars on GitHub. The crate name, the binary name and any published package
-need a decision before this goes public. Undecided.
