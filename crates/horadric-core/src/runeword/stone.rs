@@ -5,6 +5,7 @@
 //! of its label, never its steps, so a stone keeps its look while its steps
 //! are edited, and the same label looks the same on every machine.
 
+use super::{Rune, Stone};
 use crate::tasks::one_line;
 
 /// The 33 runes, in the order the game ranks them.
@@ -198,6 +199,52 @@ pub fn smith_prompt(horadric: &str, config: &str, global: &str) -> String {
     )
 }
 
+/// What hovering a stone says: its runeword name, then its steps in
+/// order, so what a click does is never a guess. A cracked stone says why
+/// it does not parse instead, and one marked `changed` that its steps are
+/// not the ones last cast.
+pub fn tip(stone: &Stone, changed: bool) -> String {
+    let mut lines = vec![name(&stone.label)];
+    match &stone.steps {
+        Ok(runes) => lines.extend(
+            runes
+                .iter()
+                .enumerate()
+                .map(|(i, r)| format!("{}. {}", i + 1, cut(&r.describe(), TIP_STEP_CHARS))),
+        ),
+        Err(why) => lines.push(format!("Cracked: {why}")),
+    }
+    if changed {
+        lines.push("Not cast since these steps came in".into());
+    }
+    lines.join("\n")
+}
+
+/// What hovering the empty stone says.
+pub const EMPTY_TIP: &str = "Make a new stone: the Runesmith asks what it should do";
+
+/// The longest a step reads in a stone's tip.
+const TIP_STEP_CHARS: usize = 120;
+
+fn cut(text: &str, most: usize) -> String {
+    if text.chars().count() <= most {
+        return text.to_string();
+    }
+    let cut: String = text.chars().take(most).collect();
+    format!("{}...", cut.trim_end())
+}
+
+/// A stone's steps as one number, kept when it is cast, so a project's
+/// stone whose steps changed after (a pull, an agent's edit) is marked
+/// until it is cast again. FNV-1a over the steps as JSON, the same on
+/// every build, as it is saved.
+pub fn fingerprint(runes: &[Rune]) -> u64 {
+    let text = serde_json::to_string(runes).unwrap_or_default();
+    text.bytes().fold(0xcbf2_9ce4_8422_2325, |h, b| {
+        (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -320,5 +367,54 @@ mod tests {
         assert!(p.contains("for this project or for every project"));
         assert!(p.contains("`horadric runeword list`"));
         assert!(p.contains("runeword name"));
+    }
+
+    fn stone(label: &str, steps: Result<Vec<Rune>, String>) -> Stone {
+        Stone {
+            label: label.into(),
+            steps,
+            source: super::super::Source::Project,
+        }
+    }
+
+    #[test]
+    fn a_tip_names_the_stone_then_its_steps() {
+        let s = stone(
+            "Fresh start",
+            Ok(vec![
+                Rune::Keys("/clear{Enter}".into()),
+                Rune::Say("Take the next quest".into()),
+            ]),
+        );
+        assert_eq!(
+            tip(&s, false),
+            "Um Pul Zod Io\n1. keys /clear{Enter}\n2. say \"Take the next quest\""
+        );
+        assert!(tip(&s, true).ends_with("\nNot cast since these steps came in"));
+    }
+
+    #[test]
+    fn a_cracked_stone_says_why_and_a_long_step_is_cut() {
+        let s = stone("Fresh start", Err("step 2: \"say\" wants some text".into()));
+        assert_eq!(
+            tip(&s, false),
+            "Um Pul Zod Io\nCracked: step 2: \"say\" wants some text"
+        );
+        let long = stone("Fresh start", Ok(vec![Rune::Say("x".repeat(400))]));
+        let line = tip(&long, false).lines().nth(1).unwrap().to_string();
+        assert!(
+            line.ends_with("...") && line.chars().count() < 140,
+            "{line}"
+        );
+    }
+
+    #[test]
+    fn a_fingerprint_changes_with_the_steps_and_only_with_them() {
+        let a = vec![Rune::Test, Rune::Say("Tidy".into())];
+        let b = vec![Rune::Test, Rune::Say("Tidy up".into())];
+        assert_eq!(fingerprint(&a), fingerprint(&a.clone()));
+        assert_ne!(fingerprint(&a), fingerprint(&b));
+        // Pinned, as it is saved: a change to it would mark every stone.
+        assert_eq!(fingerprint(&[]), 675_868_731_199_239_589);
     }
 }

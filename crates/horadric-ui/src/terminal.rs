@@ -630,6 +630,16 @@ impl TerminalWindow {
             .collect()
     }
 
+    /// The session whose pane is at this point on the screen, when the
+    /// stage is what shows there.
+    pub fn session_at(&self, at: POINT) -> Option<String> {
+        self.panes
+            .borrow()
+            .iter()
+            .find(|p| crate::app::window_under(at, p.hwnd))
+            .map(|p| p.session().to_string())
+    }
+
     /// The session that has the keyboard, or last had it.
     pub fn active(&self) -> Option<String> {
         self.active.borrow().clone()

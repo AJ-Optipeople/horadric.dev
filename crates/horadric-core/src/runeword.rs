@@ -26,7 +26,9 @@ use crate::session::Phase;
 use crate::tasks::one_line;
 
 mod stone;
-pub use stone::{carve, name, smith_prompt, Carving, Stroke, EDGE_POINTS, RUNES};
+pub use stone::{
+    carve, fingerprint, name, smith_prompt, tip, Carving, Stroke, EDGE_POINTS, EMPTY_TIP, RUNES,
+};
 
 /// One action a runeword casts on its session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -379,8 +381,7 @@ pub fn stones(project: &str, global: &str) -> Vec<Stone> {
     out
 }
 
-/// The runewords a session's menu offers: every stone that parses, in the
-/// tome's order.
+/// Every stone that parses, by label, in the tome's order.
 pub fn offered(stones: Vec<Stone>) -> Offered {
     stones
         .into_iter()

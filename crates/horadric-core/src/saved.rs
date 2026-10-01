@@ -142,6 +142,11 @@ pub struct SavedState {
     /// that runs through a reload is still followed after it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub runewords: Vec<OnProject>,
+    /// The steps each project stone had when last cast, as
+    /// `runeword::fingerprint`, by project key and label joined with a
+    /// newline. A stone whose steps are not these is marked on the tome.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub stones_cast: BTreeMap<String, u64>,
 }
 
 /// The "Show on Discord" setting: whether Rich Presence is on, and whether
@@ -450,6 +455,9 @@ pub struct SavedCluster {
     /// The tasks tile folded down to its header.
     #[serde(default)]
     pub tasks_collapsed: bool,
+    /// The Runetome folded down to its header.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub tome_collapsed: bool,
 }
 
 /// A window that is not a project's: whether it was folded.
@@ -672,6 +680,7 @@ mod tests {
                 collapsed: false,
                 files_collapsed: true,
                 tasks_collapsed: true,
+                tome_collapsed: true,
             }],
             columns: vec![vec!["horadric:usage".into()], vec!["c:/app".into()]],
             recent: vec!["C:/app".into()],

@@ -63,16 +63,13 @@ use crate::files::{Row, Tree};
 use crate::layout::{
     self, AskLayout, Button, CaptionHit, CaptionLayout, CatchupLayout, CatchupRow, ClusterLayout,
     CubeHit, CubeLayout, DialogLayout, DropdownLayout, FilesLayout, Hit, MenuLayout, Metrics, Rect,
-    SettingRow, StartHit, StartLayout, StashLayout, TasksLayout, ToastLayout, UsageHit,
+    SettingRow, StartHit, StartLayout, StashLayout, TasksLayout, ToastLayout, TomeLayout, UsageHit,
     UsageLayout, KNOB_R,
 };
 use crate::motion::{self, ORBIT};
 use crate::theme::{self, Color};
 
-// Nothing draws a stone until the Runetome tile does.
-#[allow(dead_code)]
 mod stone;
-#[allow(unused_imports)]
 pub(crate) use stone::{StoneLook, StoneState};
 
 const FONT: PCWSTR = w!("Segoe UI Variable Text");
@@ -265,6 +262,7 @@ pub struct Scene<'a> {
     pub now: SystemTime,
     pub files: Option<FilesScene<'a>>,
     pub tasks: Option<TasksScene>,
+    pub tome: Option<TomeScene<'a>>,
     /// What the cursor is over and what the left button is held on, for
     /// the buttons to light up.
     pub hot: Hit,
@@ -310,6 +308,47 @@ pub struct TasksScene {
     pub summary: String,
     pub mode: String,
     pub collapsed: bool,
+}
+
+/// What the Runetome shows.
+pub struct TomeScene<'a> {
+    pub stones: &'a [TomeStone],
+    pub collapsed: bool,
+    /// The stone being dragged, and where the cursor is, in DIPs.
+    pub carried: Option<(usize, (f32, f32))>,
+}
+
+/// One stone of a project's Runetome, as the app hands it to the tile.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TomeStone {
+    /// None for the empty stone, which makes new ones.
+    pub label: Option<String>,
+    pub carving: horadric_core::runeword::Carving,
+    /// What hovering it says.
+    pub tip: String,
+    pub cracked: bool,
+    /// Where it is while it is cast: "2/4".
+    pub progress: Option<String>,
+    /// A project's stone whose steps are not the ones last cast.
+    pub marked: bool,
+}
+
+/// How a stone of the tome draws.
+fn tome_look(s: &TomeStone, hot: bool) -> StoneLook<'_> {
+    let state = if s.label.is_none() {
+        StoneState::Empty
+    } else if s.cracked {
+        StoneState::Cracked
+    } else if s.progress.is_some() {
+        StoneState::Running(0.7)
+    } else {
+        StoneState::Rest
+    };
+    StoneLook {
+        carving: &s.carving,
+        state,
+        hot,
+    }
 }
 
 /// One item on a row of the tasks tile.
@@ -910,6 +949,89 @@ impl Painter<'_> {
         }
         if let (Some(l), Some(f)) = (&scene.layout.files, &scene.files) {
             self.files(gpu, m, l, f);
+        }
+        if let (Some(l), Some(t)) = (&scene.layout.tome, &scene.tome) {
+            self.tome(gpu, m, scene, l, t);
+        }
+    }
+
+    /// The Runetome: its stones standing in a well under a header, the
+    /// built in ones first and the empty stone last. Drawn after the files
+    /// tile, so a stone carried over it stays on top.
+    unsafe fn tome(&self, gpu: &Gpu, m: &Metrics, scene: &Scene, l: &TomeLayout, t: &TomeScene) {
+        self.sunk(gpu, &l.rect, m.tile_radius, theme::WELL);
+        let pad = INNER_PAD;
+        let h = l.header;
+        let chevron = if t.collapsed { '\u{E76C}' } else { '\u{E70D}' };
+        self.icon(
+            &gpu.icon_small,
+            theme::TEXT_DIM,
+            chevron,
+            Rect::new(h.x + pad - 2.0, h.y, 14.0, h.h),
+        );
+        let label_x = h.x + pad + 14.0;
+        // The letters are spaced out, which the measure does not count.
+        let label_w = self.measure(gpu, &gpu.chip, "RUNETOME") + 8.0 + 8.0 * 1.2;
+        self.text_spaced(
+            gpu,
+            &gpu.chip,
+            theme::TEXT_DIM,
+            "RUNETOME",
+            1.2,
+            Rect::new(label_x, h.y, label_w, h.h),
+        );
+        let casting = t.stones.iter().filter(|s| s.progress.is_some()).count();
+        let made = t.stones.iter().filter(|s| s.label.is_some()).count();
+        let summary = match casting {
+            0 => format!("{made} stones"),
+            n => format!("{n} casting"),
+        };
+        let summary_x = label_x + label_w + 4.0;
+        self.text_tabular(
+            gpu,
+            &gpu.small_right,
+            theme::TEXT_DIM,
+            &summary,
+            Rect::new(summary_x, h.y, h.right() - pad - summary_x, h.h),
+        );
+
+        let gold = theme::rarity_color(Rarity::Unique);
+        let look = tome_look;
+        let carried = t.carried.map(|(i, _)| i);
+        for (i, ((r, lr), s)) in l.stones.iter().zip(&l.labels).zip(t.stones).enumerate() {
+            let lifted = carried == Some(i);
+            let hot = !lifted && scene.button(Hit::Stone(i)) != Button::Idle;
+            if lifted {
+                // Its place stays, dim, for where it goes back to.
+                self.fill_rounded(&r.inset(4.0), 10.0, theme::TEXT_DIM.with_alpha(0.08));
+            } else {
+                self.stone(gpu, r, &look(s, hot));
+            }
+            if s.marked && !lifted {
+                let e = D2D1_ELLIPSE {
+                    point: Vector2 {
+                        X: r.right() - 3.0,
+                        Y: r.y + 4.0,
+                    },
+                    radiusX: 3.0,
+                    radiusY: 3.0,
+                };
+                self.brush.SetColor(&color(theme::WAITING));
+                self.rt.FillEllipse(&e, self.brush);
+            }
+            let (text, ink) = match (&s.progress, &s.label) {
+                (Some(p), _) => (p.as_str(), gold),
+                (None, Some(label)) => (label.as_str(), theme::TEXT_DIM),
+                (None, None) => ("New stone", theme::TEXT_DIM.fade(0.7)),
+            };
+            let ink = if hot { ink.mix(theme::TEXT, 0.5) } else { ink };
+            self.text(&gpu.small_centre, ink, text, *lr);
+        }
+        if let Some((i, (x, y))) = t.carried {
+            if let (Some(r), Some(s)) = (l.stones.get(i), t.stones.get(i)) {
+                let at = Rect::new(x - r.w / 2.0, y - r.h / 2.0, r.w, r.h);
+                self.stone(gpu, &at, &look(s, true));
+            }
         }
     }
 

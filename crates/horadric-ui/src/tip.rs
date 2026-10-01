@@ -9,6 +9,7 @@
 //! again on a button just clicked until the cursor leaves it. The plate
 //! lets the mouse through and never takes the focus.
 
+use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::rc::Rc;
@@ -60,7 +61,7 @@ const PAD_Y: f32 = 6.0;
 const BELOW: f32 = 22.0;
 
 /// What the plate should do next.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Do {
     Nothing,
     /// Go, if it shows, and stop waiting.
@@ -68,8 +69,11 @@ pub enum Do {
     /// Wait this many milliseconds, then ask again with [`Tips::due`].
     Wait(u64),
     /// Show the line now, in place of any other.
-    Show(&'static str),
+    Show(Line),
 }
+
+/// A line to show: most are fixed, a rune stone's is made from its steps.
+pub type Line = Cow<'static, str>;
 
 /// When the line shows, apart from drawing it. Times are milliseconds
 /// on any one clock.
@@ -77,7 +81,7 @@ pub enum Do {
 pub struct Tips {
     /// The window the cursor is over, and what it says is under it.
     owner: isize,
-    text: Option<&'static str>,
+    text: Option<Line>,
     showing: bool,
     /// Clicked: nothing shows until the cursor is on something else.
     quiet: bool,
@@ -87,12 +91,12 @@ pub struct Tips {
 
 impl Tips {
     /// The cursor moved over `owner`, and is on something that says `text`.
-    pub fn over(&mut self, owner: isize, text: Option<&'static str>, now: u64) -> Do {
+    pub fn over(&mut self, owner: isize, text: Option<Line>, now: u64) -> Do {
         if owner == self.owner && text == self.text {
             return Do::Nothing;
         }
         self.owner = owner;
-        self.text = text;
+        self.text = text.clone();
         self.quiet = false;
         let Some(text) = text else {
             return self.hide(now);
@@ -132,10 +136,10 @@ impl Tips {
 
     /// The wait asked for is over.
     pub fn due(&mut self) -> Do {
-        match self.text {
+        match &self.text {
             Some(t) if !self.showing && !self.quiet => {
                 self.showing = true;
-                Do::Show(t)
+                Do::Show(t.clone())
             }
             _ => Do::Nothing,
         }
@@ -183,6 +187,8 @@ pub fn cluster(hit: Hit) -> Option<&'static str> {
         Hit::Task(_) => "Read this quest before taking it on, or show the session doing it. Right click for more",
         Hit::TasksGive => "Ask an agent to suggest quests for this project. You pick which go in the log",
         Hit::TaskApprove(_) => "Mark this quest completed",
+        Hit::TomeHeader => "Fold or unfold the Runetome",
+        Hit::Stone(_) => "Cast this stone, or drag it onto a session",
         Hit::Nothing => return None,
     })
 }
@@ -318,6 +324,11 @@ fn now() -> u64 {
 /// The cursor moved over `owner` and is on what `text` describes, or on
 /// nothing that has a line.
 pub fn over(shared: &Rc<Shared>, owner: HWND, text: Option<&'static str>) {
+    over_line(shared, owner, text.map(Cow::Borrowed));
+}
+
+/// As [`over`], for a line made while the app runs.
+pub fn over_line(shared: &Rc<Shared>, owner: HWND, text: Option<Line>) {
     SHARED.with(|s| {
         if s.borrow().is_none() {
             *s.borrow_mut() = Some(Rc::clone(shared));
@@ -380,11 +391,11 @@ fn close() {
     }
 }
 
-fn show(text: &'static str) {
+fn show(text: Line) {
     let Some(shared) = SHARED.with(|s| s.borrow().clone()) else {
         return;
     };
-    match Plate::open(shared, text) {
+    match Plate::open(shared, &text) {
         Ok(p) => PLATE.with(|slot| *slot.borrow_mut() = Some(p)),
         Err(e) => eprintln!("horadric: cannot show the line \"{text}\": {e}"),
     }
@@ -575,66 +586,69 @@ mod tests {
     #[test]
     fn a_line_waits_for_the_cursor_to_rest_then_shows() {
         let mut t = Tips::default();
-        assert_eq!(t.over(1, Some("a"), 0), Do::Wait(DELAY));
-        assert_eq!(t.over(1, Some("a"), 100), Do::Nothing);
-        assert_eq!(t.due(), Do::Show("a"));
+        assert_eq!(t.over(1, Some("a".into()), 0), Do::Wait(DELAY));
+        assert_eq!(t.over(1, Some("a".into()), 100), Do::Nothing);
+        assert_eq!(t.due(), Do::Show("a".into()));
         assert_eq!(t.due(), Do::Nothing);
     }
 
     #[test]
     fn the_next_button_shows_at_once_while_one_shows() {
         let mut t = Tips::default();
-        t.over(1, Some("a"), 0);
+        t.over(1, Some("a".into()), 0);
         t.due();
-        assert_eq!(t.over(1, Some("b"), 700), Do::Show("b"));
+        assert_eq!(t.over(1, Some("b".into()), 700), Do::Show("b".into()));
     }
 
     #[test]
     fn a_short_gap_between_buttons_still_shows_at_once() {
         let mut t = Tips::default();
-        t.over(1, Some("a"), 0);
+        t.over(1, Some("a".into()), 0);
         t.due();
         assert_eq!(t.over(1, None, 1000), Do::Hide);
-        assert_eq!(t.over(1, Some("b"), 1000 + RESHOW - 1), Do::Show("b"));
+        assert_eq!(
+            t.over(1, Some("b".into()), 1000 + RESHOW - 1),
+            Do::Show("b".into())
+        );
     }
 
     #[test]
     fn after_a_long_gap_it_waits_again() {
         let mut t = Tips::default();
-        t.over(1, Some("a"), 0);
+        t.over(1, Some("a".into()), 0);
         t.due();
         t.over(1, None, 1000);
-        assert_eq!(t.over(1, Some("b"), 1000 + RESHOW), Do::Wait(DELAY));
+        assert_eq!(t.over(1, Some("b".into()), 1000 + RESHOW), Do::Wait(DELAY));
     }
 
     #[test]
     fn moving_off_before_the_wait_is_over_shows_nothing() {
         let mut t = Tips::default();
-        t.over(1, Some("a"), 0);
+        t.over(1, Some("a".into()), 0);
         assert_eq!(t.over(1, None, 100), Do::Hide);
         assert_eq!(t.due(), Do::Nothing);
         // And it never showed, so the next one waits.
-        assert_eq!(t.over(1, Some("b"), 150), Do::Wait(DELAY));
+        assert_eq!(t.over(1, Some("b".into()), 150), Do::Wait(DELAY));
     }
 
     #[test]
     fn a_click_hides_it_until_the_cursor_moves_on() {
         let mut t = Tips::default();
-        t.over(1, Some("a"), 0);
+        t.over(1, Some("a".into()), 0);
         t.due();
         assert_eq!(t.press(1), Do::Hide);
-        assert_eq!(t.over(1, Some("a"), 900), Do::Nothing);
+        assert_eq!(t.over(1, Some("a".into()), 900), Do::Nothing);
         assert_eq!(t.due(), Do::Nothing);
-        assert_eq!(t.over(1, Some("b"), 950), Do::Wait(DELAY));
+        assert_eq!(t.over(1, Some("b".into()), 950), Do::Wait(DELAY));
     }
 
     #[test]
     fn a_late_leave_from_the_window_left_behind_changes_nothing() {
         let mut t = Tips::default();
-        t.over(1, Some("a"), 0);
-        t.over(2, Some("b"), 10);
+        t.over(1, Some("a".into()), 0);
+        t.over(2, Some("b".into()), 10);
         assert_eq!(t.away(1, 20), Do::Nothing);
-        assert_eq!(t.due(), Do::Show("b"));
+        assert_eq!(t.due(), Do::Show("b".into()));
         assert_eq!(t.press(1), Do::Nothing);
         assert_eq!(t.away(2, 30), Do::Hide);
     }
@@ -642,8 +656,8 @@ mod tests {
     #[test]
     fn the_same_line_in_another_window_starts_over() {
         let mut t = Tips::default();
-        t.over(1, Some("a"), 0);
-        assert_eq!(t.over(2, Some("a"), 10), Do::Wait(DELAY));
+        t.over(1, Some("a".into()), 0);
+        assert_eq!(t.over(2, Some("a".into()), 10), Do::Wait(DELAY));
     }
 
     #[test]
@@ -689,6 +703,8 @@ mod tests {
             Hit::TasksGive,
             Hit::Task(0),
             Hit::TaskApprove(0),
+            Hit::TomeHeader,
+            Hit::Stone(0),
         ];
         for h in all {
             assert!(cluster(h).is_some(), "{h:?}");

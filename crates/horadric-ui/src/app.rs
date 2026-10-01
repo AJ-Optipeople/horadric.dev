@@ -87,12 +87,13 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::Shell::{SHQueryUserNotificationState, NIN_BALLOONUSERCLICK};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, GetWindowRect, KillTimer,
-    PostMessageW, PostQuitMessage, RegisterClassW, RegisterWindowMessageW, SetTimer, SetWindowPos,
-    SystemParametersInfoW, TranslateMessage, MONITORINFOF_PRIMARY, MSG, SPI_GETWORKAREA,
-    SPI_SETWORKAREA, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
-    WM_APP, WM_DISPLAYCHANGE, WM_HOTKEY, WM_LBUTTONUP, WM_QUERYENDSESSION, WM_QUIT, WM_RBUTTONUP,
-    WM_SETTINGCHANGE, WM_TIMER, WNDCLASSW, WS_EX_TOOLWINDOW, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, GetWindowRect, IsChild,
+    KillTimer, PostMessageW, PostQuitMessage, RegisterClassW, RegisterWindowMessageW, SetTimer,
+    SetWindowPos, SystemParametersInfoW, TranslateMessage, WindowFromPoint, MONITORINFOF_PRIMARY,
+    MSG, SPI_GETWORKAREA, SPI_SETWORKAREA, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER,
+    SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WM_APP, WM_DISPLAYCHANGE, WM_HOTKEY, WM_LBUTTONUP,
+    WM_QUERYENDSESSION, WM_QUIT, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_TIMER, WNDCLASSW,
+    WS_EX_TOOLWINDOW, WS_POPUP,
 };
 
 use crate::accounts;
@@ -192,6 +193,9 @@ const WM_HORADRIC_PANE: u32 = WM_APP + 26;
 const WM_HORADRIC_VERSION: u32 = WM_APP + 27;
 /// A session did not start, and the app's `start_failed` says why.
 const WM_HORADRIC_START_FAILED: u32 = WM_APP + 28;
+/// Cast the stone the app's `stone_for` names, or offer to stop it,
+/// outside the app's borrow since it may ask which session.
+const WM_HORADRIC_STONE: u32 = WM_APP + 29;
 
 /// A button in a session pane's header, handled outside the app's borrow
 /// since it may ask first.
@@ -370,6 +374,13 @@ pub(crate) enum Input {
     TaskAdd(String),
     /// The gold ! beside it: start an agent that suggests quests.
     GiveQuests(String),
+    /// A stone of the Runetome of the project with this key clicked, by
+    /// its label: cast it, or stop it while it is cast. None is the empty
+    /// stone, which starts the Runesmith.
+    Stone(String, Option<String>),
+    /// A stone of that project's tome let go of here, on the screen: cast
+    /// on the tile or pane under it.
+    StoneDrop(String, String, POINT),
     /// A stashed session's slot clicked: bring it back.
     Unstash(String),
     /// A stashed session's slot right clicked.
@@ -612,6 +623,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
         }),
         boards: RefCell::new(HashMap::new()),
         cube: Cell::new(None),
+        tomes: RefCell::new(HashMap::new()),
     });
     menu::init(Rc::clone(&shared));
     let toasts = Toasts::new(Rc::clone(&shared), notify, WM_HORADRIC_TRAY);
@@ -697,7 +709,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             discord: saved.discord,
             rich: None,
             run: presence::Run::from_saved(saved.run),
-            tome: runner::runeword::Tome::new(saved.runewords.clone()),
+            tome: runner::runeword::Tome::new(saved.runewords.clone(), saved.stones_cast.clone()),
             cube_on: saved.cube,
             font_family: saved.font_family.clone(),
             screen: saved.screen.clone(),
@@ -707,6 +719,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             pick_from: None,
             start_failed: None,
             menu_for: None,
+            stone_for: None,
             stash_menu_for: None,
             project_menu_for: None,
             recent_menu_for: None,
@@ -966,6 +979,12 @@ unsafe extern "system" fn app_proc(
         WM_HORADRIC_TILE_MENU => {
             if let Some(id) = with_app(|app| app.menu_for.take()).flatten() {
                 tile_menu(&id);
+            }
+            return LRESULT(0);
+        }
+        WM_HORADRIC_STONE => {
+            if let Some((key, label)) = with_app(|app| app.stone_for.take()).flatten() {
+                runner::runeword::stone_clicked(&key, &label);
             }
             return LRESULT(0);
         }
@@ -1327,7 +1346,6 @@ fn tile_menu(id: &str) {
         Some(false) => Item::action(STASH, "Stash"),
         _ => Item::Disabled("Stash is full".into()),
     };
-    let restful = matches!(kind, TileKind::Live | TileKind::Paused);
     let items = match (kind, shell) {
         (TileKind::Live, false) => vec![
             Item::action(OPEN, "Show terminal"),
@@ -1364,47 +1382,15 @@ fn tile_menu(id: &str) {
         ],
     };
     let mut items = items;
-    let runewords = with_app(|app| app.runewords_of(id)).flatten();
-    let offered = match &runewords {
-        Some((offered, _)) if restful => offered.clone(),
-        _ => Vec::new(),
-    };
-    if let Some((_, word)) = &runewords {
-        let entry = match word {
-            Some(w) => Some(Item::action(
-                STOP_RUNEWORD,
-                format!("Stop {} ({})", w.name, w.progress()),
-            )),
-            None if !offered.is_empty() => Some(Item::Submenu(
-                "Runeword".into(),
-                offered
-                    .iter()
-                    .enumerate()
-                    .map(|(i, (name, _))| Item::action(RUNEWORD + i, name.clone()))
-                    .collect(),
-            )),
-            None => None,
-        };
-        // With the other things done to the session, above ending it.
-        if let (Some(entry), Some(at)) = (
-            entry,
-            items.iter().rposition(|i| matches!(i, Item::Separator)),
-        ) {
-            items.insert(at, entry);
-        }
-    }
-    // Runewords of commands cast on the session's project, which have no
-    // tile of their own to be stopped from until the Runetome.
-    let key = with_app(|app| app.project_of(id)).flatten();
-    let on_project = key
-        .as_ref()
-        .and_then(|k| with_app(|app| app.project_runewords(k)))
-        .unwrap_or_default();
-    if let Some(at) = items.iter().rposition(|i| matches!(i, Item::Separator)) {
-        for (i, w) in on_project.iter().enumerate().rev() {
-            let label = format!("Stop {} ({})", w.name, w.progress());
-            items.insert(at, Item::action(STOP_PROJECT + i, label));
-        }
+    // Runewords are given from the Runetome; the tile stops the one its
+    // session has, with the other things done to it, above ending it.
+    let word = with_app(|app| app.runeword_of(id)).flatten();
+    if let (Some(w), Some(at)) = (
+        word,
+        items.iter().rposition(|i| matches!(i, Item::Separator)),
+    ) {
+        let stop = format!("Stop {} ({})", w.name, w.progress());
+        items.insert(at, Item::action(STOP_RUNEWORD, stop));
     }
     let tree = with_app(|app| app.diff_of(id)).flatten();
     if let Some((w, diff)) = &tree {
@@ -1447,16 +1433,6 @@ fn tile_menu(id: &str) {
         Some(PICK) => runner::tomb::ask_pick(id),
         Some(STOP_RUNEWORD) => {
             with_app(|app| app.stop_runeword(id));
-        }
-        Some(i) if (STOP_PROJECT..STOP_PROJECT + on_project.len()).contains(&i) => {
-            if let Some(key) = &key {
-                let name = &on_project[i - STOP_PROJECT].name;
-                with_app(|app| app.stop_project_runeword(key, name));
-            }
-        }
-        Some(i) if (RUNEWORD..RUNEWORD + offered.len()).contains(&i) => {
-            let (name, runes) = offered[i - RUNEWORD].clone();
-            with_app(|app| app.give_runeword(id, &name, runes));
         }
         Some(STASH) if confirm_stash(id) => {
             with_app(|app| app.stash(id));
@@ -1553,10 +1529,6 @@ fn stash_menu(id: &str) {
 const UNCOMMITTED: usize = 100;
 const COMMITTED: usize = 400;
 const COMMITTED_END: usize = 700;
-/// Where the runewords a session can be given start in its tile menu.
-const RUNEWORD: usize = 800;
-/// Where the runewords cast on the session's project start in its menu.
-const STOP_PROJECT: usize = 900;
 const CODE: usize = 700;
 /// The most files a half of the changes lists. A menu taller than the
 /// screen scrolls by the pixel, which is no way to look at a change.
@@ -2618,6 +2590,8 @@ struct App {
     start_failed: Option<String>,
     /// The tile whose menu is about to show.
     menu_for: Option<String>,
+    /// The stone about to be cast, by project key and label.
+    stone_for: Option<(String, String)>,
     /// The stashed session whose menu is about to show.
     stash_menu_for: Option<String>,
     /// The project whose menu is about to show.
@@ -5468,6 +5442,7 @@ impl App {
                 collapsed: c.collapsed,
                 files_collapsed: c.files_collapsed(),
                 tasks_collapsed: c.tasks_collapsed(),
+                tome_collapsed: c.tome_collapsed(),
             })
             .collect();
         // A project closed for good does not keep a place forever: only
@@ -5557,6 +5532,7 @@ impl App {
             page_docks: web::docks(),
             pages: web::pages(),
             runewords: self.tome.projects.clone(),
+            stones_cast: self.tome.cast.clone(),
             update_told: self.update_told.clone(),
             ..Default::default()
         }
@@ -5651,6 +5627,7 @@ impl App {
                         c.collapsed = place.collapsed;
                         c.set_files_collapsed(place.files_collapsed);
                         c.set_tasks_collapsed(place.tasks_collapsed);
+                        c.set_tome_collapsed(place.tome_collapsed);
                     }
                     self.clusters.push(c);
                 }
@@ -6130,6 +6107,12 @@ impl App {
                 Input::TasksMode(key) => runner::ask_for(self, runner::Menu::Mode(key)),
                 Input::TaskAdd(key) => runner::ask_for(self, runner::Menu::Add(key)),
                 Input::GiveQuests(key) => self.give_quests(&key),
+                Input::Stone(key, None) => self.start_runesmith(&key),
+                Input::Stone(key, Some(label)) => {
+                    self.stone_for = Some((key, label));
+                    post(self.notify.0 as isize, WM_HORADRIC_STONE, 0);
+                }
+                Input::StoneDrop(key, label, at) => self.stone_dropped(&key, &label, at),
             }
         }
         if relayout {
@@ -6700,6 +6683,16 @@ impl Tile<'_> {
 }
 
 /// A window's top left corner on screen.
+/// Whether the window at this point on the screen is `hwnd` or one in
+/// it, so a drop lands on what is on top there and not on a window under
+/// it.
+pub(crate) fn window_under(at: POINT, hwnd: HWND) -> bool {
+    unsafe {
+        let w = WindowFromPoint(at);
+        !w.is_invalid() && (w == hwnd || IsChild(hwnd, w).as_bool())
+    }
+}
+
 fn window_at(hwnd: HWND) -> (i32, i32) {
     let mut r = RECT::default();
     unsafe {

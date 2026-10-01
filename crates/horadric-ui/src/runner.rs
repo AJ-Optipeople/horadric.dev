@@ -677,6 +677,7 @@ impl App {
         self.refresh_boards(false);
         self.run_tasks();
         self.tick_runewords();
+        self.refresh_tomes();
     }
 
     /// One look by the runner at every project's list.

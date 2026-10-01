@@ -9,6 +9,7 @@
 //! with `SWP_NOACTIVATE`. Dragging is handled by hand for the same reason:
 //! the system move loop would activate the window.
 
+use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::c_void;
@@ -38,13 +39,13 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetCursorPos, GetWindow, GetWindowLongPtrW,
     GetWindowLongW, GetWindowRect, IsIconic, IsWindowVisible, KillTimer, LoadCursorW, PostMessageW,
-    RegisterClassW, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, CREATESTRUCTW,
-    CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, GWL_EXSTYLE, GW_HWNDPREV, HWND_NOTOPMOST, HWND_TOPMOST,
-    IDC_ARROW, MA_NOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
-    SW_SHOWNOACTIVATE, WM_APP, WM_CAPTURECHANGED, WM_DPICHANGED, WM_ERASEBKGND, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY,
-    WM_PAINT, WM_RBUTTONUP, WM_SIZE, WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
-    WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_POPUP,
+    RegisterClassW, SetCursor, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+    CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, GWL_EXSTYLE, GW_HWNDPREV, HWND_NOTOPMOST,
+    HWND_TOPMOST, IDC_ARROW, IDC_HAND, MA_NOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    SWP_NOZORDER, SW_SHOWNOACTIVATE, WM_APP, WM_CAPTURECHANGED, WM_DPICHANGED, WM_ERASEBKGND,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE,
+    WM_NCDESTROY, WM_PAINT, WM_RBUTTONUP, WM_SIZE, WM_TIMER, WNDCLASSW, WS_EX_LAYERED,
+    WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
 use crate::anim::{self, TileIn};
@@ -58,7 +59,9 @@ use crate::glyphs::Font;
 use crate::layout::{self, ClusterLayout, Hit, Metrics};
 use crate::motion;
 pub use crate::project::{folder_key, project_key, project_name};
-use crate::render::{FilesScene, Flight, Gpu, Scene, Target, TaskRow, TasksScene, TRACE_BARS};
+use crate::render::{
+    FilesScene, Flight, Gpu, Scene, Target, TaskRow, TasksScene, TomeScene, TomeStone, TRACE_BARS,
+};
 use crate::theme;
 use crate::tip;
 use crate::watch::{self, Slot, Watcher};
@@ -107,6 +110,9 @@ pub struct Shared {
     pub boards: RefCell<HashMap<String, Board>>,
     /// The cube's window while there is one, for what is carried over it.
     pub cube: Cell<Option<HWND>>,
+    /// Each project's Runetome as last read, by project key, the empty
+    /// stone last.
+    pub tomes: RefCell<HashMap<String, Vec<TomeStone>>>,
 }
 
 impl Shared {
@@ -139,6 +145,7 @@ pub struct Cluster {
     dir: Option<PathBuf>,
     files: RefCell<Files>,
     tasks: RefCell<Tasks>,
+    tome: RefCell<Tome>,
     watcher: Option<Watcher>,
     shared: Rc<Shared>,
     target: RefCell<Option<Target>>,
@@ -181,6 +188,7 @@ struct Still {
     layout: ClusterLayout,
     sessions: Vec<Rc<Session>>,
     items: Option<Vec<Item>>,
+    stones: Option<Vec<TomeStone>>,
     board: Option<(String, String)>,
     staged: Vec<bool>,
     active: Option<String>,
@@ -267,6 +275,23 @@ struct Tasks {
     scroll: usize,
 }
 
+/// The Runetome. Every project with a folder has one.
+#[derive(Default)]
+struct Tome {
+    collapsed: bool,
+    /// A stone pressed, and once past the drag threshold carried.
+    carry: Option<Carry>,
+}
+
+/// A stone held down: which, where the button went down on the screen,
+/// and where the cursor is in the window, in DIPs.
+struct Carry {
+    i: usize,
+    start: POINT,
+    at: (f32, f32),
+    moved: bool,
+}
+
 /// A row of the tasks tile as the cluster reads it: which item, and how.
 #[derive(Clone, PartialEq)]
 struct Item {
@@ -333,7 +358,7 @@ impl Cluster {
             .lock()
             .map(|r| r.all().filter(|s| project_key(s) == key).count())
             .unwrap_or(0);
-        let initial = layout::cluster(&shared.metrics, n, false, None, None);
+        let initial = layout::cluster(&shared.metrics, n, false, None, None, None);
 
         let mut cluster = Box::new(Cluster {
             hwnd: HWND::default(),
@@ -343,6 +368,7 @@ impl Cluster {
             dir,
             files: RefCell::new(Files::default()),
             tasks: RefCell::new(Tasks::default()),
+            tome: RefCell::new(Tome::default()),
             watcher: None,
             shared,
             target: RefCell::new(None),
@@ -516,6 +542,54 @@ impl Cluster {
         self.tasks.borrow_mut().collapsed = collapsed;
     }
 
+    pub fn tome_collapsed(&self) -> bool {
+        self.tome.borrow().collapsed
+    }
+
+    pub fn set_tome_collapsed(&self, collapsed: bool) {
+        self.tome.borrow_mut().collapsed = collapsed;
+    }
+
+    /// The project's stones, none for a project with no folder, which has
+    /// no Runetome.
+    fn stones(&self) -> Option<Vec<TomeStone>> {
+        self.dir.as_ref()?;
+        Some(
+            self.shared
+                .tomes
+                .borrow()
+                .get(&self.key)
+                .cloned()
+                .unwrap_or_default(),
+        )
+    }
+
+    /// How many stones the Runetome lays out, none for no tome. Folded, it
+    /// lays out none.
+    fn stone_count(&self, stones: Option<&[TomeStone]>) -> Option<usize> {
+        let n = stones?.len();
+        Some(if self.tome.borrow().collapsed { 0 } else { n })
+    }
+
+    /// The session whose tile is at this point on the screen, if this
+    /// window is the one there.
+    pub fn session_at(&self, at: POINT) -> Option<String> {
+        if !crate::app::window_under(at, self.hwnd) {
+            return None;
+        }
+        let mut p = at;
+        unsafe {
+            let _ = ScreenToClient(self.hwnd, &mut p);
+        }
+        let s = self.scale();
+        match layout::hit(&self.layout.borrow(), p.x as f32 / s, p.y as f32 / s) {
+            Hit::Tile(i) | Hit::Browser(i) | Hit::Code(i) => {
+                self.sessions().get(i).map(|s| s.id.clone())
+            }
+            _ => None,
+        }
+    }
+
     /// The project's items that get a row, in list order, with how each
     /// reads. None for a project with no folder, which gets no tile.
     fn items(&self) -> Option<Vec<Item>> {
@@ -601,11 +675,13 @@ impl Cluster {
         let folded = self.files.borrow().tree.as_ref().map(|_| 0.0);
         let n = self.sessions().len();
         let tasks = self.task_rows(self.items().as_deref());
+        let tome = self.stone_count(self.stones().as_deref());
         let h = layout::cluster(
             &self.shared.metrics,
             n,
             self.collapsed,
             tasks.as_deref(),
+            tome,
             folded,
         )
         .size
@@ -633,11 +709,13 @@ impl Cluster {
             }
         });
         let tasks = self.task_rows(self.items().as_deref());
+        let tome = self.stone_count(self.stones().as_deref());
         let h = layout::cluster(
             m,
             self.sessions().len(),
             self.collapsed,
             tasks.as_deref(),
+            tome,
             body,
         )
         .size
@@ -719,6 +797,7 @@ impl Cluster {
             layout: self.layout.borrow().clone(),
             sessions,
             items,
+            stones: self.stones(),
             board,
             staged,
             active: self.shared.active.borrow().clone(),
@@ -739,7 +818,8 @@ impl Cluster {
         }
         let wanted = self.files.borrow().wanted();
         let tasks = self.task_rows(items.as_deref());
-        let mut l = layout::cluster(m, n, self.collapsed, tasks.as_deref(), wanted);
+        let tome = self.stone_count(self.stones().as_deref());
+        let mut l = layout::cluster(m, n, self.collapsed, tasks.as_deref(), tome, wanted);
         let marked: Vec<bool> = {
             let browsing = self.shared.browsing.borrow();
             sessions.iter().map(|s| browsing.contains(&s.id)).collect()
@@ -843,6 +923,15 @@ impl Cluster {
                 summary: b.map_or_else(|| "empty".to_string(), Board::summary),
                 mode: b.map_or_else(|| Mode::default().label().into(), Board::mode_key),
                 collapsed: t.collapsed,
+            }
+        });
+        let stones = self.stones();
+        let tome_scene = stones.as_ref().map(|stones| {
+            let t = self.tome.borrow();
+            TomeScene {
+                stones,
+                collapsed: t.collapsed,
+                carried: t.carry.as_ref().filter(|c| c.moved).map(|c| (c.i, c.at)),
             }
         });
         let hot = self.hot.get();
@@ -961,6 +1050,7 @@ impl Cluster {
                 collapsed: files.folded(),
             }),
             tasks: tasks_scene,
+            tome: tome_scene,
             hot: self.hot.get(),
             pressed: self.pressed.get(),
         };
@@ -1146,6 +1236,15 @@ impl Cluster {
                 }
                 let hit = self.hit(lparam);
                 self.press(Some(hit));
+                if let Hit::Stone(i) = hit {
+                    self.tome.borrow_mut().carry = Some(Carry {
+                        i,
+                        start: cursor,
+                        at: self.client(lparam),
+                        moved: false,
+                    });
+                    return Some(LRESULT(0));
+                }
                 if let Hit::Tile(i) = hit {
                     if self.start_lift(i, lparam) {
                         return Some(LRESULT(0));
@@ -1162,6 +1261,9 @@ impl Cluster {
             WM_MOUSEMOVE => {
                 self.track();
                 self.hover(self.hit(lparam));
+                if self.carry_stone(lparam) {
+                    return Some(LRESULT(0));
+                }
                 if self.lift.borrow().is_some() {
                     self.carry(lparam);
                     if self.lift.borrow().as_ref().is_some_and(|l| l.moved) {
@@ -1196,8 +1298,19 @@ impl Cluster {
                 // WM_CAPTURECHANGED, which drops a lift or calls off a drag it still finds.
                 let lift = self.lift.borrow_mut().take();
                 let drag = self.drag.borrow_mut().take();
+                let carry = self.tome.borrow_mut().carry.take();
                 unsafe {
                     let _ = ReleaseCapture();
+                }
+                if let Some(c) = carry {
+                    self.press(None);
+                    if c.moved {
+                        self.drop_stone(c.i);
+                        self.invalidate();
+                    } else {
+                        self.click(lparam);
+                    }
+                    return Some(LRESULT(0));
                 }
                 let into_cube = cube::under_cursor(&self.shared);
                 cube::lid(&self.shared, false);
@@ -1251,6 +1364,9 @@ impl Cluster {
                 // The tile goes back where it was.
                 if self.lift.borrow_mut().take().is_some_and(|l| l.moved) {
                     self.fit();
+                }
+                if self.tome.borrow_mut().carry.take().is_some_and(|c| c.moved) {
+                    self.invalidate();
                 }
                 None
             }
@@ -1322,9 +1438,18 @@ impl Cluster {
     /// Notes what the cursor is over, repainting when a button changes.
     fn hover(&self, hot: Hit) {
         // Nothing to read while a tile or the window is carried.
-        let carried = self.drag.borrow().is_some() || self.lift.borrow().is_some();
-        let line = if carried { None } else { tip::cluster(hot) };
-        tip::over(&self.shared, self.hwnd, line);
+        let carried = self.drag.borrow().is_some()
+            || self.lift.borrow().is_some()
+            || self.tome.borrow().carry.as_ref().is_some_and(|c| c.moved);
+        let line = match hot {
+            _ if carried => None,
+            Hit::Stone(i) => self
+                .stones()
+                .and_then(|s| s.into_iter().nth(i))
+                .map(|s| Cow::Owned(s.tip)),
+            _ => tip::cluster(hot).map(Cow::Borrowed),
+        };
+        tip::over_line(&self.shared, self.hwnd, line);
         let old = self.hot.replace(hot);
         if old != hot && (old.lights() || hot.lights()) {
             self.invalidate();
@@ -1415,6 +1540,65 @@ impl Cluster {
         app::push(Input::Reorder(self.key.clone(), shown));
     }
 
+    /// Follows the cursor with a stone held down, once it has gone past
+    /// the drag threshold. False when no stone is held.
+    fn carry_stone(&self, lparam: LPARAM) -> bool {
+        let at = self.client(lparam);
+        let empty = |i: usize| {
+            self.stones()
+                .and_then(|s| s.into_iter().nth(i))
+                .is_none_or(|s| s.label.is_none())
+        };
+        let moved = {
+            let mut t = self.tome.borrow_mut();
+            let Some(c) = t.carry.as_mut() else {
+                return false;
+            };
+            c.at = at;
+            if !c.moved {
+                let mut cursor = POINT::default();
+                unsafe {
+                    let _ = GetCursorPos(&mut cursor);
+                }
+                let far = (cursor.x - c.start.x).abs() > DRAG_THRESHOLD
+                    || (cursor.y - c.start.y).abs() > DRAG_THRESHOLD;
+                // The empty stone makes stones, it is not one to cast.
+                c.moved = far && !empty(c.i);
+            }
+            c.moved
+        };
+        if moved {
+            self.press(None);
+            unsafe {
+                SetCursor(LoadCursorW(None, IDC_HAND).ok());
+            }
+            self.invalidate();
+        }
+        true
+    }
+
+    /// A stone let go of after a drag: cast on the tile or pane under the
+    /// cursor, which the app finds.
+    fn drop_stone(&self, i: usize) {
+        let Some(label) = self.stones().and_then(|s| s.into_iter().nth(i)?.label) else {
+            return;
+        };
+        let mut cursor = POINT::default();
+        unsafe {
+            let _ = GetCursorPos(&mut cursor);
+        }
+        app::push(Input::StoneDrop(self.key.clone(), label, cursor));
+    }
+
+    /// A mouse message's client point, in DIPs.
+    fn client(&self, lparam: LPARAM) -> (f32, f32) {
+        let s = self.scale();
+        (
+            (lparam.0 & 0xffff) as i16 as f32 / s,
+            ((lparam.0 >> 16) & 0xffff) as i16 as f32 / s,
+        )
+    }
+
     /// A mouse message's client y, in DIPs.
     fn client_y(&self, lparam: LPARAM) -> f32 {
         ((lparam.0 >> 16) & 0xffff) as i16 as f32 / self.scale()
@@ -1445,6 +1629,16 @@ impl Cluster {
                 let collapsed = !self.tasks_collapsed();
                 self.set_tasks_collapsed(collapsed);
                 app::push(Input::Arrange);
+            }
+            Hit::TomeHeader => {
+                let collapsed = !self.tome_collapsed();
+                self.set_tome_collapsed(collapsed);
+                app::push(Input::Arrange);
+            }
+            Hit::Stone(i) => {
+                if let Some(s) = self.stones().and_then(|s| s.into_iter().nth(i)) {
+                    app::push(Input::Stone(self.key.clone(), s.label));
+                }
             }
             Hit::TasksMode => app::push(Input::TasksMode(self.key.clone())),
             Hit::TasksAdd => app::push(Input::TaskAdd(self.key.clone())),
