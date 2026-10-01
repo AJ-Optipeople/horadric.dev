@@ -161,7 +161,7 @@ pub struct Cluster {
     /// Lights flying from a task's row to the session that took it.
     handoffs: RefCell<anim::Handoffs>,
     /// Tiles whose sessions have gone, fading out where they were.
-    leaving: RefCell<anim::Leaving<(layout::Rect, Session)>>,
+    leaving: RefCell<anim::Leaving<(layout::Rect, Rc<Session>)>>,
     /// The frame interval the animation timer runs at, if it runs.
     frames: Cell<Option<Duration>>,
     /// Something besides the moving light changed, so the kept layer of
@@ -179,7 +179,7 @@ pub struct Cluster {
 #[derive(PartialEq)]
 struct Still {
     layout: ClusterLayout,
-    sessions: Vec<Session>,
+    sessions: Vec<Rc<Session>>,
     items: Option<Vec<Item>>,
     board: Option<(String, String)>,
     staged: Vec<bool>,
@@ -699,7 +699,12 @@ impl Cluster {
     }
 
     fn still(&self) -> Still {
-        let sessions = self.sessions();
+        let sessions = self.sessions().into_iter().map(Rc::new).collect();
+        self.still_of(sessions, self.items())
+    }
+
+    /// What a paint drew from `sessions` and `items` holds still.
+    fn still_of(&self, sessions: Vec<Rc<Session>>, items: Option<Vec<Item>>) -> Still {
         let staged = {
             let staged = self.shared.staged.borrow();
             sessions.iter().map(|s| staged.contains(&s.id)).collect()
@@ -713,7 +718,7 @@ impl Cluster {
         Still {
             layout: self.layout.borrow().clone(),
             sessions,
-            items: self.items(),
+            items,
             board,
             staged,
             active: self.shared.active.borrow().clone(),
@@ -801,8 +806,10 @@ impl Cluster {
         if std::env::var_os("HORADRIC_DEBUG").is_some() {
             eprintln!("paint {} {}x{} dpi {dpi}", self.name, w, h);
         }
-        let sessions = self.sessions();
-        let refs: Vec<&Session> = sessions.iter().collect();
+        // Shared, so the tiles leaving and what holds still keep them
+        // without a copy each.
+        let sessions: Vec<Rc<Session>> = self.sessions().into_iter().map(Rc::new).collect();
+        let refs: Vec<&Session> = sessions.iter().map(|s| &**s).collect();
         let layout = self.layout.borrow();
         let on_stage = {
             let staged = self.shared.staged.borrow();
@@ -867,13 +874,13 @@ impl Cluster {
         let now = Instant::now();
         let looks = self.tiles.borrow_mut().step(now, &inputs);
         let ambient = backdrop::animations_on();
-        let drawn = refs
+        let drawn = sessions
             .iter()
             .zip(&looks)
             .zip(&layout.tiles)
             .map(|((s, l), r)| {
                 let at = layout::Rect::new(r.x, l.y, r.w, r.h);
-                (s.id.clone(), (at, (*s).clone()))
+                (s.id.clone(), (at, Rc::clone(s)))
             })
             .collect();
         let ghosts: Vec<(layout::Rect, Session, f32)> = self
@@ -882,7 +889,7 @@ impl Cluster {
             .step(now, drawn)
             .into_iter()
             .filter(|_| ambient)
-            .map(|((r, s), t)| (r, s, t))
+            .map(|((r, s), t)| (r, Session::clone(&s), t))
             .collect();
         // A tile on its way somewhere changes what holds still.
         let moving = looks.iter().zip(&inputs).any(|(l, t)| l.moving(t.y));
@@ -930,7 +937,7 @@ impl Cluster {
         let finishing = finishing || !flights.is_empty();
         let rebuild = self.dirty.replace(false) || moving || !ghosts.is_empty() || finishing;
         if rebuild {
-            *self.drawn.borrow_mut() = Some(self.still());
+            *self.drawn.borrow_mut() = Some(self.still_of(sessions.clone(), items.clone()));
         }
         let scene = Scene {
             layout: &layout,

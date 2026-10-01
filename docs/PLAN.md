@@ -2396,10 +2396,34 @@ fixed, and what to keep that way:
   so that style alone does not make a window see-through; layered,
   click-through and overlay tool windows never count as covering.
 
-Left for later: each pane paint makes a new layer and geometry for its
-glass (`glyphs.rs`), characters missing from the terminal font get a
-`DrawText` each, the pane caption repaints on every spinner frame of the
-title, and each paint of a cluster clones its sessions twice.
+A second pass on 2026-10-01 took the stage panes, measured the same way
+on a release build with the stage on top. One pane full of characters
+the font lacks (CJK, `⏺`, `★`) went from 37% of a core to 1.5% when only
+its title's spinner turned, and from 38% to 3.5% with a line of output
+every 50 ms. Two panes of Claude Code like output at ten frames a second
+went from 8% to 5%.
+
+- **Loose characters are laid out once.** A character the terminal font
+  lacks is drawn from an `IDWriteTextLayout` kept in `Font` by text and
+  style, not by a `DrawText` that looked for its fallback font on every
+  paint. A new size or family starts the cache over, and so do more than
+  2048 of them.
+- **The glass's shade needs no layer.** The shade under the glass's top
+  edge, and under a latched tab key's, is the rounded shape filled with
+  the clamped gradient and clipped to the band, instead of a layer and a
+  geometry made on every paint.
+- **A spinner in a title is left out.** `shell::title` drops a braille
+  glyph in front of a title, which is how Claude Code shows it works. The
+  pane's header, the stage's caption and the window title no longer
+  change on every turn of it.
+- **A pane that would draw what it shows presents it again.** The pane
+  keeps what it last drew (`Shown`: the frame, the header, the search,
+  the veil, the size, the font) and only presents the kept frame when a
+  paint would draw the same. Output that changes nothing on screen costs
+  a comparison. Browser panes always draw.
+- **A cluster paint copies its sessions once.** It reads them from the
+  registry once, as `Rc`, and the tiles leaving and the `Still` it keeps
+  share them.
 
 ## Next
 

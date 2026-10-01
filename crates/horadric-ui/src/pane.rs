@@ -162,6 +162,26 @@ struct Resize {
     zoom: f32,
 }
 
+/// Everything a pane's frame is drawn from, besides a browser's bar.
+#[derive(PartialEq)]
+struct Shown {
+    frame: frame::Frame,
+    name: String,
+    detail: String,
+    phase: Option<Color>,
+    accent: Color,
+    active: bool,
+    lifted: bool,
+    stash: bool,
+    zoom: Option<bool>,
+    find: Option<(String, String)>,
+    veil: f32,
+    plate: (f32, f32),
+    size: (i32, i32),
+    dpi: u32,
+    font: (f32, String),
+}
+
 pub struct Pane {
     pub hwnd: HWND,
     console: Arc<Console>,
@@ -178,6 +198,10 @@ pub struct Pane {
     /// one when a neighbour uncovers a strip of this pane, or when this
     /// pane is moved, and neither changes what it shows.
     stale: Cell<bool>,
+    /// What the last frame drawn showed. Output that changed nothing on
+    /// screen, such as a title whose spinner is left out, presents it
+    /// again instead of drawing it.
+    drawn: RefCell<Option<Shown>>,
     target: RefCell<Option<GridTarget>>,
     /// The DPI the render target was made for. A child window hears of a
     /// new monitor only through its parent.
@@ -286,6 +310,7 @@ impl Pane {
             held: Cell::new(false),
             floating: Cell::new(None),
             stale: Cell::new(true),
+            drawn: RefCell::new(None),
             target: RefCell::new(None),
             dpi: Cell::new(0),
             focused: Cell::new(false),
@@ -722,6 +747,7 @@ impl Pane {
                 Ok(t) => {
                     *slot = Some(t);
                     self.dpi.set(dpi);
+                    *self.drawn.borrow_mut() = None;
                 }
                 Err(e) => {
                     eprintln!("horadric: pane render target: {e}");
@@ -866,12 +892,41 @@ impl Pane {
                 self.place_ime(rect);
             }
         }
+        // A browser pane's header has its tabs and address besides, and its
+        // frame is empty and cheap, so it always draws.
+        let look = Shown {
+            frame,
+            name: name.clone(),
+            detail: detail.clone(),
+            phase,
+            accent: header.accent,
+            active: header.active,
+            lifted: header.lifted,
+            stash: header.stash,
+            zoom: header.zoom,
+            find: find
+                .as_ref()
+                .map(|f| (f.query.to_string(), f.status.to_string())),
+            veil,
+            plate,
+            size: (r.right, r.bottom),
+            dpi,
+            font: (font.size(), font.family()),
+        };
+        let same = self.console.web.is_none() && self.drawn.borrow().as_ref() == Some(&look);
+        if same {
+            if let Some(Err(_)) = slot.as_ref().map(GridTarget::present) {
+                *slot = None;
+                self.stale.set(true);
+            }
+            return;
+        }
         let result = slot.as_ref().map(|t| {
             t.draw(
                 &self.shared.gpu,
                 font,
                 &cell,
-                &frame,
+                &look.frame,
                 &header,
                 find.as_ref(),
                 page.as_ref(),
@@ -879,10 +934,12 @@ impl Pane {
                 plate,
             )
         });
-        if let Some(Err(_)) = result {
+        let drawn = matches!(result, Some(Ok(())));
+        if !drawn {
             *slot = None;
             self.stale.set(true);
         }
+        *self.drawn.borrow_mut() = drawn.then_some(look);
     }
 
     /// Whether the cursor is lit in this paint, and a timer for the next
