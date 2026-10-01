@@ -318,6 +318,8 @@ pub struct TaskRow {
 pub struct UsageScene<'a> {
     pub layout: &'a UsageLayout,
     pub collapsed: bool,
+    /// Locked against folding and dragging.
+    pub locked: bool,
     /// Whose limits and settings these are, when there is a header to say.
     pub provider: &'a str,
     /// What the screen says while no limit is known.
@@ -947,9 +949,19 @@ impl Painter<'_> {
                 }
             }
         }
+        // Open, it is only a hint, so it stays faint until pointed at;
+        // closed, it says why a click on the limits does nothing.
+        let ink = match (scene.button(UsageHit::Lock), scene.locked) {
+            (Button::Idle, false) => theme::TEXT_DIM.fade(0.45),
+            (Button::Idle, true) => theme::TEXT_DIM,
+            _ => theme::TEXT,
+        };
+        let glyph = if scene.locked { '\u{E72E}' } else { '\u{E785}' };
+        self.notch(gpu, l.size.1, &l.lock, &l.limits_box, m.tile_radius);
+        self.icon(&gpu.icon_small, ink, glyph, l.lock);
         // The screen folds the window, so it says so as a cluster's name
         // does: a chevron beside the first word, always there when folded.
-        let folding = scene.button(UsageHit::Limits) != Button::Idle;
+        let folding = !scene.locked && scene.button(UsageHit::Limits) != Button::Idle;
         if let (Some(r), true) = (first, scene.collapsed || folding) {
             let name = limits.first().map_or("", |(n, _)| *n);
             let x = r.x + INNER_PAD + self.measure(gpu, &gpu.body, name);
@@ -2188,6 +2200,46 @@ impl Painter<'_> {
             &[(0.0, white.with_alpha(0.035)), (1.0, white.with_alpha(0.0))],
             1.0,
         );
+    }
+
+    /// The plate reaching into `screen` over `bite`, which the screen's
+    /// edge runs round: the plate's shade falls on the glass under its
+    /// rounded inner corner as it does along the screen's top.
+    unsafe fn notch(&self, gpu: &Gpu, h: f32, bite: &Rect, screen: &Rect, radius: f32) {
+        let corner = radius - 4.0;
+        self.masked(gpu, screen, radius, || {
+            for (s, a) in [(3.0, 0.2), (2.0, 0.35), (1.0, 0.5)] {
+                let shade = Rect::new(bite.x - 0.5, bite.y + 1.5, bite.w, bite.h).inset(-s);
+                self.fill_rounded(&shade, corner + s, theme::HOLLOW_SHADE.fade(a));
+            }
+        });
+        self.masked(gpu, bite, corner, || {
+            let stops = [(0.0, theme::PLATE_TOP), (1.0, theme::PLATE_BOTTOM)];
+            self.fill_gradient(bite, (0.0, h), &stops);
+        });
+    }
+
+    /// Draws `paint` clipped to the rounded rectangle `r`.
+    unsafe fn masked(&self, gpu: &Gpu, r: &Rect, radius: f32, paint: impl FnOnce()) {
+        let Ok(mask) = gpu.d2d.CreateRoundedRectangleGeometry(&rounded(r, radius)) else {
+            return;
+        };
+        let Ok(layer) = self.rt.CreateLayer(None) else {
+            return;
+        };
+        let params = D2D1_LAYER_PARAMETERS {
+            contentBounds: rect(r),
+            geometricMask: ManuallyDrop::new(mask.cast::<ID2D1Geometry>().ok()),
+            maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+            maskTransform: Matrix3x2::identity(),
+            opacity: 1.0,
+            opacityBrush: ManuallyDrop::new(None),
+            layerOptions: D2D1_LAYER_OPTIONS_NONE,
+        };
+        self.rt.PushLayer(&params, &layer);
+        paint();
+        self.rt.PopLayer();
+        drop(ManuallyDrop::into_inner(params.geometricMask));
     }
 
     /// A section of the plate, outlined by a groove, holding rows of

@@ -206,10 +206,16 @@ pub fn start(hit: StartHit) -> Option<&'static str> {
     })
 }
 
-/// What a part of the usage window does, `row` naming the setting row.
-pub fn usage(hit: UsageHit, row: Option<Row>) -> Option<&'static str> {
+/// What a part of the usage window does, `row` naming the setting row and
+/// `locked` saying whether the padlock is closed.
+pub fn usage(hit: UsageHit, row: Option<Row>, locked: bool) -> Option<&'static str> {
     Some(match (hit, row) {
         (UsageHit::Header, _) => "Show the next agent's limits",
+        (UsageHit::Lock, _) if locked => {
+            "Unlock, so a click folds the limits and a drag moves this"
+        }
+        (UsageHit::Lock, _) => "Lock, so a click does not fold the limits or a drag move this",
+        (UsageHit::Limits, _) if locked => "Locked: open the padlock to fold the limits",
         (UsageHit::Limits, _) => "Fold or unfold the limits",
         (UsageHit::Setting(_), Some(Row::Model)) => "Pick the model new sessions start with",
         (UsageHit::Setting(_), Some(Row::Effort)) => "Pick how hard new sessions think",
@@ -709,9 +715,17 @@ mod tests {
         assert_eq!(cube(CubeHit::Nothing), None);
         assert!(start(StartHit::Recent(2)).is_some());
         assert_eq!(start(StartHit::Nothing), None);
-        assert!(usage(UsageHit::Setting(0), Some(Row::Account)).is_some());
-        assert_eq!(usage(UsageHit::Setting(0), None), None);
-        assert!(usage(UsageHit::Limits, None).is_some());
+        assert!(usage(UsageHit::Setting(0), Some(Row::Account), false).is_some());
+        assert_eq!(usage(UsageHit::Setting(0), None, false), None);
+        assert!(usage(UsageHit::Limits, None, false).is_some());
+        assert_ne!(
+            usage(UsageHit::Lock, None, true),
+            usage(UsageHit::Lock, None, false)
+        );
+        assert_ne!(
+            usage(UsageHit::Limits, None, true),
+            usage(UsageHit::Limits, None, false)
+        );
     }
 
     #[test]

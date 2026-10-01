@@ -627,6 +627,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
     let usage_window = match UsageWindow::create(
         Rc::clone(&shared),
         saved.usage_window.as_ref().is_some_and(|p| p.collapsed),
+        saved.usage_window.as_ref().is_some_and(|p| p.locked),
         -10_000,
         -10_000,
     ) {
@@ -5556,6 +5557,7 @@ impl App {
                 .unwrap_or_default(),
             usage_window: self.usage_window.as_ref().map(|u| SavedPanel {
                 collapsed: u.collapsed.get(),
+                locked: u.locked.get(),
             }),
             font_size: Some(self.shared.font.size()).filter(|&s| s != keys::FONT_DEFAULT),
             quiet: self.quiet,
