@@ -631,7 +631,7 @@ impl App {
         self.run_tasks();
     }
 
-    /// The lightbulb on the tile: starts a session in the project that
+    /// The gold ! on the tile: starts a session in the project that
     /// suggests quests and adds the ones the human picks, and puts it on
     /// the stage, since it asks.
     pub(super) fn give_quests(&mut self, key: &str) {

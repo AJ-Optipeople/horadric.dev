@@ -1246,6 +1246,47 @@ impl Painter<'_> {
         }
     }
 
+    /// The gold exclamation over a quest giver's head, as the games draw
+    /// it: a bar narrowing to its foot and a dot, edged in black so it
+    /// stands off any surface. The font's glyph is too thin to read as one.
+    unsafe fn quest_mark(&self, gpu: &Gpu, r: &Rect) {
+        let (x, y) = (r.x + r.w / 2.0, r.y + r.h / 2.0);
+        let (top, foot, dot) = (y - 6.5, y + 2.0, y + 4.8);
+        let bar = |grow: f32| {
+            [
+                Vector2 {
+                    X: x - 2.4 - grow,
+                    Y: top - grow,
+                },
+                Vector2 {
+                    X: x + 2.4 + grow,
+                    Y: top - grow,
+                },
+                Vector2 {
+                    X: x + 1.1 + grow,
+                    Y: foot + grow,
+                },
+                Vector2 {
+                    X: x - 1.1 - grow,
+                    Y: foot + grow,
+                },
+            ]
+        };
+        let edge = Color::rgb(0x000000).with_alpha(0.75);
+        for (grow, c) in [(1.0, edge), (0.0, theme::QUEST)] {
+            self.polygon(gpu, &bar(grow), c);
+            self.brush.SetColor(&color(c));
+            let e = D2D1_ELLIPSE {
+                point: Vector2 { X: x, Y: dot },
+                radiusX: 1.6 + grow,
+                radiusY: 1.6 + grow,
+            };
+            self.rt.FillEllipse(&e, self.brush);
+        }
+        let shine = Color::rgb(0xFFFFFF).with_alpha(0.45);
+        self.fill_rounded(&Rect::new(x - 1.6, top + 0.6, 1.0, 3.5), 0.5, shine);
+    }
+
     /// A filled shape through `points`.
     unsafe fn polygon(&self, gpu: &Gpu, points: &[Vector2], c: Color) {
         let Some((first, rest)) = points.split_first() else {
@@ -3010,12 +3051,12 @@ impl Painter<'_> {
         }
         self.icon(&gpu.icon_small, ink, '\u{E710}', l.add);
 
-        // A lightbulb: an agent with ideas for the log.
-        let (fill, ink) = theme::button_look(scene.button(Hit::TasksGive));
+        // The mark over a quest giver's head: an agent with quests to give.
+        let (fill, _) = theme::button_look(scene.button(Hit::TasksGive));
         if let Some(fill) = fill {
             self.fill_rounded(&l.give.inset(4.0), 6.0, fill);
         }
-        self.icon(&gpu.icon_small, ink, '\u{E82F}', l.give);
+        self.quest_mark(gpu, &l.give);
 
         // A row done a moment ago is struck through left to right, then
         // folds away, and the rows under it close up over its place.

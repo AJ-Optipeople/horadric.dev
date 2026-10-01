@@ -668,7 +668,7 @@ pub fn system_prompt(horadric: &str, file: &str, list: Option<&str>) -> String {
     out
 }
 
-/// The first prompt of the quest giver, a session the lightbulb on the
+/// The first prompt of the quest giver, a session the gold ! on the
 /// tile starts to suggest quests. It only suggests: the human picks, since
 /// a project in auto mode would start whatever lands in the log at once.
 pub fn giver_prompt(horadric: &str, file: &str) -> String {

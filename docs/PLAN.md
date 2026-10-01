@@ -2283,8 +2283,9 @@ through the rename too.
   between them where it is, so a quest crosses into the next section.
   Delete asks first and is not offered while a session holds the quest:
   put it back first. Checked on screen with a dev instance.
-- **The quest giver.** A lightbulb left of the plus starts a session named
-  "Quest Giver" in the project, on the stage. Asked for on 2026-10-01. Its
+- **The quest giver.** A gold ! left of the plus, the mark over a quest
+  giver's head in the games, starts a session named "Quest Giver" in the
+  project, on the stage. Asked for on 2026-10-01. Its
   prompt (`tasks::giver_prompt`, tested) has it read the README, the docs,
   the quest log, the git log and the code, change nothing, and suggest three
   to five quests not on the log, each with notes. It asks which to add and
