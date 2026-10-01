@@ -439,11 +439,14 @@ pub struct SavedCluster {
     pub tasks_collapsed: bool,
 }
 
-/// A window that is not a project's: whether it was folded.
+/// A window that is not a project's: whether it was folded, and whether
+/// it was locked against folding and dragging.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct SavedPanel {
     #[serde(default)]
     pub collapsed: bool,
+    #[serde(default)]
+    pub locked: bool,
 }
 
 #[cfg(test)]
@@ -619,7 +622,10 @@ mod tests {
                     ..Default::default()
                 },
             )]),
-            usage_window: Some(SavedPanel { collapsed: true }),
+            usage_window: Some(SavedPanel {
+                collapsed: true,
+                locked: true,
+            }),
             font_size: Some(17.0),
             quiet: true,
             sounds: true,
@@ -731,7 +737,7 @@ mod tests {
         let s = SavedState::from_json(old);
         assert_eq!(s.clusters[0].key, "c:/app");
         assert!(s.clusters[0].collapsed);
-        assert!(s.usage_window.is_some_and(|u| u.collapsed));
+        assert!(s.usage_window.is_some_and(|u| u.collapsed && !u.locked));
         assert!(s.columns.is_empty());
     }
 
