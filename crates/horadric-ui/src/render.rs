@@ -62,9 +62,9 @@ use crate::board::RowState;
 use crate::files::{Row, Tree};
 use crate::layout::{
     self, AskLayout, Button, CaptionHit, CaptionLayout, CatchupLayout, CatchupRow, ClusterLayout,
-    CubeHit, CubeLayout, DialogLayout, DropdownLayout, FilesLayout, Hit, MenuLayout, Metrics, Rect,
-    SettingRow, StartHit, StartLayout, StashLayout, TasksLayout, ToastLayout, TomeLayout, UsageHit,
-    UsageLayout, KNOB_R,
+    CubeHit, CubeLayout, DialogHit, DialogLayout, DropdownLayout, FilesLayout, Hit, MenuLayout,
+    Metrics, Rect, SettingRow, StartHit, StartLayout, StashLayout, TasksLayout, ToastLayout,
+    TomeLayout, UsageHit, UsageLayout, KNOB_R,
 };
 use crate::motion::{self, ORBIT};
 use crate::theme::{self, Color};
@@ -496,8 +496,10 @@ pub struct DialogScene<'a> {
     pub buttons: &'a [String],
     /// The button Enter presses, ringed.
     pub focus: usize,
-    pub hot: Option<usize>,
-    pub pressed: Option<usize>,
+    pub hot: Option<DialogHit>,
+    pub pressed: Option<DialogHit>,
+    /// The check's label and whether it is ticked, when it has one.
+    pub check: Option<(&'a str, bool)>,
 }
 
 /// Everything one frame of the input the app asks with needs.
@@ -1822,8 +1824,13 @@ impl Painter<'_> {
         self.led(l.lamp.0, l.lamp.1, scene.tone);
         self.text(&gpu.title, theme::text(), scene.title, l.title);
         self.draw_layout(scene.text, theme::text_dim(), l.text);
+        let button = |h: Option<DialogHit>| match h {
+            Some(DialogHit::Button(i)) => Some(i),
+            _ => None,
+        };
+        let (hot, pressed) = (button(scene.hot), button(scene.pressed));
         for (i, (r, label)) in l.buttons.iter().zip(scene.buttons).enumerate() {
-            let b = layout::button(Some(i), scene.hot, scene.pressed.map(Some));
+            let b = layout::button(Some(i), hot, pressed.map(Some));
             let depth = match b {
                 Button::Idle => 0.5,
                 Button::Hover => 0.8,
@@ -1848,6 +1855,29 @@ impl Painter<'_> {
             let sink = if b == Button::Pressed { 1.0 } else { 0.0 };
             let at = Rect::new(r.x, r.y + sink, r.w, r.h);
             self.text(&gpu.small_centre, ink, label, at);
+        }
+        if let (Some((boxed, at)), Some((label, ticked))) = (l.check, scene.check) {
+            let lit = scene.hot == Some(DialogHit::Check);
+            // A small well sunk into the plate, as a field is, lit when
+            // ticked.
+            self.sunk(gpu, &boxed, 4.0, theme::well());
+            if lit {
+                self.stroke_rounded(
+                    &boxed.inset(0.5),
+                    4.0,
+                    theme::working().with_alpha(0.55),
+                    1.0,
+                );
+            }
+            if ticked {
+                self.fill_rounded(&boxed.inset(4.0), 2.0, theme::working());
+            }
+            let ink = if lit || ticked {
+                theme::text()
+            } else {
+                theme::text_dim()
+            };
+            self.text(&gpu.small, ink, label, at);
         }
     }
 

@@ -2522,9 +2522,9 @@ saved in `state.json`) stays.
 
 - **The tile.** One Runetome a project, in its cluster beside the
   quest log, shown whenever the project has a cluster. Its stones sit
-  in rows, the built in ones first ("Test, merge", "Test, review,
-  merge", "Review, merge"), then the project's, then the global ones,
-  and last an empty stone.
+  in rows, the built in ones first, then the project's, then the global
+  ones, and last an empty stone. (The built in ones were "Test, merge",
+  "Test, review, merge" and "Review, merge" until the feedback below.)
 - **A stone** is drawn in Direct2D: a rough rounded slab, lit from the
   top left like the cube, with a glyph cut into it and its label under
   it. The glyph and a runeword name ("Tal Eth Ko", two to four of the
@@ -2673,6 +2673,50 @@ What it showed:
 - Claude Code asks whether to trust a folder it has not seen, and a
   stone of keys is how to answer it from the tome: `{Down}{Enter}` there,
   `{Enter}` for a permission prompt.
+
+#### The human's feedback (2026-10-02)
+
+After using the tome: no way to remove a stone, built in stones nobody
+would click, and a click that casts without asking. What changed:
+
+- **Built in stones that show what a stone can do**, one or two of each
+  step kind, each worth a click on day one: Approve (`{Enter}`, which
+  slips in beside a runeword held up on a permission prompt), Interrupt
+  (`Esc`), Recap and Commit (`say`), Fresh start (`/clear{Enter}` then a
+  `say`, a chain), Second opinion (the review rune) and Open folder
+  (`run start "" .`, sessionless). A file's stone with a built in one's
+  label takes its place, as one with the same steps did already.
+- **`"about"`**: a stone in its object form may say in a sentence what
+  it is for. The tooltip, `horadric runeword list` and the question
+  before a cast show it, and the Runesmith is told to write one.
+- **A click asks first.** "Cast <label>?" with what it is for, what it
+  casts on and every step, Cast or Not now, and a "Do not ask again"
+  check (`cast_without_asking` in `state.json`). The dialog took a check
+  for it, beside its buttons. A stone with a command is asked in the
+  warning tone. A project stone whose steps are not the ones last cast
+  asks even when told not to, since that is the trust mark. A pick from
+  "Cast on which session?" and a drag are not asked again: the pick and
+  the drop were the human saying so.
+- **Right click a stone** for its menu: its label and runeword name,
+  Cast (or Stop while cast), and for a stone in a file "Change with the
+  Runesmith" (`runeword::reforge_prompt`, the smith told which stone and
+  file) and "Remove", which asks, then takes it out of the file with
+  `runeword::unwrite`. That edits the text in place rather than through
+  serde, whose maps are sorted (no `preserve_order`), so every other key
+  and all the spacing stay as written, a BOM too. A built
+  in stone offers "Put away" (`stones_hidden` in `state.json`). Every
+  menu, and the one on the empty stone or the tome's header, has "Ask
+  before a click casts" and, once one is put away, "Bring back".
+- **Found on the way**: a toast about a session casting already named the
+  project rather than the session (`on_label` without a session in hand
+  looked the id up as a project key).
+
+Checked on a dev instance with a scratch project whose config was written
+with a BOM: the click asked with the steps and the dot's note, the check
+ticked and was kept, the command ran; the right click menu removed a
+project stone, leaving the file byte for byte but for the stone and its
+comma, BOM included; Approve was put away and brought back from the
+header's menu.
 
 ## Next
 

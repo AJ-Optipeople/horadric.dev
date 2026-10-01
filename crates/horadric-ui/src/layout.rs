@@ -1208,7 +1208,21 @@ pub struct DialogLayout {
     pub title: Rect,
     pub text: Rect,
     pub buttons: Vec<Rect>,
+    /// A check left of the buttons, such as "Do not ask again": its box
+    /// and its label, which a click on either turns.
+    pub check: Option<(Rect, Rect)>,
 }
+
+/// What a click on a dialog lands on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DialogHit {
+    Button(usize),
+    Check,
+}
+
+/// How big a dialog's check box is, and the room between it and its label.
+pub const DIALOG_CHECK: f32 = 16.0;
+const DIALOG_CHECK_GAP: f32 = 8.0;
 
 pub const DIALOG_W: f32 = 440.0;
 const DIALOG_PAD: f32 = 24.0;
@@ -1224,8 +1238,9 @@ pub fn dialog_text_w() -> f32 {
 }
 
 /// Lays out a dialog whose text wraps to `text_h` DIPs at
-/// [`dialog_text_w`], with a button for each of `labels`, their widths.
-pub fn dialog(text_h: f32, labels: &[f32]) -> DialogLayout {
+/// [`dialog_text_w`], with a button for each of `labels`, their widths,
+/// and a check whose label is `check` wide when it has one.
+pub fn dialog(text_h: f32, labels: &[f32], check: Option<f32>) -> DialogLayout {
     let w = dialog_text_w();
     let lamp = (DIALOG_PAD + 4.0, 20.0 + 12.0);
     let title = Rect::new(DIALOG_PAD + 16.0, 20.0, w - 16.0, 24.0);
@@ -1247,17 +1262,35 @@ pub fn dialog(text_h: f32, labels: &[f32]) -> DialogLayout {
         })
         .collect();
     buttons.reverse();
+    let check = check.map(|w| {
+        let boxed = Rect::new(
+            DIALOG_PAD,
+            y + (DIALOG_BUTTON_H - DIALOG_CHECK) / 2.0,
+            DIALOG_CHECK,
+            DIALOG_CHECK,
+        );
+        let x = boxed.right() + DIALOG_CHECK_GAP;
+        // It gives way to the buttons rather than running under them.
+        let room = buttons.first().map_or(DIALOG_W, |b| b.x) - DIALOG_BUTTON_GAP - x;
+        (boxed, Rect::new(x, y, w.ceil().min(room), DIALOG_BUTTON_H))
+    });
     DialogLayout {
         size: (DIALOG_W, y + DIALOG_BUTTON_H + DIALOG_PAD - 4.0),
         lamp,
         title,
         text,
         buttons,
+        check,
     }
 }
 
-pub fn dialog_hit(l: &DialogLayout, x: f32, y: f32) -> Option<usize> {
-    l.buttons.iter().position(|r| r.contains(x, y))
+pub fn dialog_hit(l: &DialogLayout, x: f32, y: f32) -> Option<DialogHit> {
+    if let Some(i) = l.buttons.iter().position(|r| r.contains(x, y)) {
+        return Some(DialogHit::Button(i));
+    }
+    let (boxed, label) = l.check?;
+    let both = Rect::new(boxed.x, label.y, label.right() - boxed.x, label.h);
+    both.contains(x, y).then_some(DialogHit::Check)
 }
 
 /// Where a dialog `size` goes on the work area `work`, both in screen
@@ -2153,8 +2186,9 @@ mod tests {
 
     #[test]
     fn a_dialog_puts_its_buttons_right_aligned_under_the_text() {
-        let l = dialog(60.0, &[40.0, 120.0]);
+        let l = dialog(60.0, &[40.0, 120.0], None);
         assert_eq!(l.text.h, 60.0);
+        assert!(l.check.is_none());
         let [a, b] = [l.buttons[0], l.buttons[1]];
         assert_eq!(a.w, DIALOG_BUTTON_MIN);
         assert_eq!(b.w, 120.0 + 2.0 * DIALOG_BUTTON_PAD);
@@ -2162,8 +2196,33 @@ mod tests {
         assert_eq!(a.right() + DIALOG_BUTTON_GAP, b.x);
         assert!(a.y > l.text.bottom());
         assert!(l.size.1 > b.bottom());
-        assert_eq!(dialog_hit(&l, b.x + 1.0, b.y + 1.0), Some(1));
+        assert_eq!(
+            dialog_hit(&l, b.x + 1.0, b.y + 1.0),
+            Some(DialogHit::Button(1))
+        );
         assert_eq!(dialog_hit(&l, l.text.x + 1.0, l.text.y + 1.0), None);
+    }
+
+    #[test]
+    fn a_dialog_check_sits_left_of_the_buttons_and_never_under_them() {
+        let l = dialog(40.0, &[40.0, 40.0], Some(110.0));
+        let (boxed, label) = l.check.unwrap();
+        let first = l.buttons[0];
+        assert_eq!(boxed.x, DIALOG_PAD);
+        assert_eq!(boxed.y + boxed.h / 2.0, first.y + first.h / 2.0);
+        assert_eq!(label.w, 110.0);
+        assert!(label.right() < first.x);
+        assert_eq!(
+            dialog_hit(&l, boxed.x + 2.0, boxed.y + 2.0),
+            Some(DialogHit::Check)
+        );
+        assert_eq!(
+            dialog_hit(&l, label.right() - 2.0, label.y + 2.0),
+            Some(DialogHit::Check)
+        );
+        let long = dialog(40.0, &[40.0, 40.0], Some(900.0));
+        let (_, label) = long.check.unwrap();
+        assert!(label.right() < long.buttons[0].x);
     }
 
     #[test]

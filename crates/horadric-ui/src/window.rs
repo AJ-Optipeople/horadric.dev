@@ -1398,6 +1398,12 @@ impl Cluster {
                     Hit::TasksHeader | Hit::TasksMode | Hit::TasksAdd | Hit::TasksGive => {
                         app::push(Input::TasksMode(self.key.clone()))
                     }
+                    Hit::Stone(i) => {
+                        if let Some(s) = self.stones().and_then(|s| s.into_iter().nth(i)) {
+                            app::push(Input::StoneMenu(self.key.clone(), s.label));
+                        }
+                    }
+                    Hit::TomeHeader => app::push(Input::StoneMenu(self.key.clone(), None)),
                     _ => {}
                 }
                 Some(LRESULT(0))

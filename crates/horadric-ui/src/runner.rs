@@ -1372,6 +1372,7 @@ pub(super) fn show_menu(menu: Menu) {
                 text: &merge_question(&m.title, &m.branch, &into),
                 buttons: &["Merge", "Not now"],
                 default: 0,
+                check: None,
             });
             if pressed == Some(0) {
                 with_app(|app| app.merge(&m));
@@ -1537,6 +1538,7 @@ fn brief(key: &str, line: usize, title: &str) {
         text: &briefing(&t),
         buttons: &[accept, "Edit quest", "Not now"],
         default: 0,
+        check: None,
     });
     match pressed {
         Some(0) => {
@@ -1617,6 +1619,7 @@ fn confirm_delete(title: &str) -> bool {
         ),
         buttons: &["Delete", "Keep it"],
         default: 1,
+        check: None,
     });
     pressed == Some(0)
 }

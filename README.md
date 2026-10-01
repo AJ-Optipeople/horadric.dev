@@ -95,11 +95,17 @@ work. Worktrees are next.
   merges. Click a stone to cast it on the session with the keyboard on the
   stage, or pick a session; drag it onto any tile or pane to cast it
   there. A stone of only commands needs no session. Hover one to read its
-  steps first. While it runs it glows with its step, and a click stops it.
-  The empty stone starts the Runesmith, an agent that asks what the new
-  stone should do and writes it into `.horadric/config.json`, or into
-  `runewords.json` beside Horadric's state for every project. A stone that
-  came with the project and changed since you last cast it carries a dot.
+  steps first. A click asks before it casts, showing every step, until you
+  tick "Do not ask again". While it runs it glows with its step, and a
+  click stops it. Built in stones answer a prompt (Approve), stop a turn
+  (Interrupt), ask for a recap, commit, start fresh, get a second opinion
+  from a reviewer and open the folder. The empty stone starts the
+  Runesmith, an agent that asks what the new stone should do and writes it
+  into `.horadric/config.json`, or into `runewords.json` beside Horadric's
+  state for every project. Right click a stone to remove it, have the
+  Runesmith change it, or put a built in one away. A stone that came with
+  the project and changed since you last cast it carries a dot, and asks
+  before it casts even when you said not to.
 - Right click a tile to rename its session, or a project's header to open
   its folder in VS Code or Explorer.
 - Ctrl+Alt+Space, from anywhere, shows the session that has waited on you

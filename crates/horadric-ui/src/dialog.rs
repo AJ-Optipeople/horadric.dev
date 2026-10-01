@@ -41,7 +41,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use crate::appear;
 use crate::backdrop;
-use crate::layout::{self, DialogLayout, Metrics};
+use crate::layout::{self, DialogHit, DialogLayout, Metrics};
 use crate::render::{self, DialogScene, Gpu, Target};
 use crate::theme::{self, Color};
 
@@ -74,6 +74,9 @@ pub struct Dialog<'a> {
     pub buttons: &'a [&'a str],
     /// The one Enter presses at first.
     pub default: usize,
+    /// A check beside the buttons, such as "Do not ask again", and where
+    /// it is kept: ticked as it was, and as the human left it after.
+    pub check: Option<(&'a str, &'a Cell<bool>)>,
 }
 
 pub fn register_class() -> Result<()> {
@@ -115,6 +118,9 @@ pub fn show(gpu: &Gpu, metrics: &Metrics, d: &Dialog) -> Option<usize> {
     unsafe {
         let _ = DestroyWindow(popup.hwnd.get());
     }
+    if let (Some((_, kept)), Some((_, ticked))) = (d.check, &popup.check) {
+        kept.set(ticked.get());
+    }
     popup.outcome.get().flatten()
 }
 
@@ -140,6 +146,7 @@ pub fn error_alone(title: &str, text: &str) {
             text,
             buttons: &["Close"],
             default: 0,
+            check: None,
         },
     );
 }
@@ -154,9 +161,11 @@ struct Popup<'a> {
     title: String,
     text: IDWriteTextLayout,
     buttons: Vec<String>,
+    /// The check's label and whether it is ticked.
+    check: Option<(String, Cell<bool>)>,
     focus: Cell<usize>,
-    hot: Cell<Option<usize>>,
-    pressed: Cell<Option<usize>>,
+    hot: Cell<Option<DialogHit>>,
+    pressed: Cell<Option<DialogHit>>,
     /// The window that had the focus before, which gets it back.
     before: HWND,
     /// Some once closed, holding the button pressed if one was.
@@ -185,7 +194,12 @@ impl<'a> Popup<'a> {
                     .unwrap_or(60.0)
             })
             .collect();
-        let layout = layout::dialog(render::text_size(&text).1.ceil(), &widths);
+        let check_w = d.check.map(|(label, _)| {
+            render::wrapped(gpu, &gpu.small, label, 10_000.0)
+                .map(|l| render::text_size(&l).0)
+                .unwrap_or(120.0)
+        });
+        let layout = layout::dialog(render::text_size(&text).1.ceil(), &widths, check_w);
         let size = (
             (layout.size.0 * s).round() as i32,
             (layout.size.1 * s).round() as i32,
@@ -202,6 +216,9 @@ impl<'a> Popup<'a> {
             title: d.title.to_string(),
             text,
             buttons: d.buttons.iter().map(|b| b.to_string()).collect(),
+            check: d
+                .check
+                .map(|(label, ticked)| (label.to_string(), Cell::new(ticked.get()))),
             focus: Cell::new(d.default.min(d.buttons.len().saturating_sub(1))),
             hot: Cell::new(None),
             pressed: Cell::new(None),
@@ -279,6 +296,7 @@ impl<'a> Popup<'a> {
             focus: self.focus.get(),
             hot: self.hot.get(),
             pressed: self.pressed.get(),
+            check: self.check.as_ref().map(|(l, t)| (l.as_str(), t.get())),
         };
         let failed = slot
             .as_ref()
@@ -301,7 +319,7 @@ impl<'a> Popup<'a> {
         x >= 0.0 && y >= 0.0 && x < w && y < h
     }
 
-    fn hit(&self, lparam: LPARAM) -> Option<usize> {
+    fn hit(&self, lparam: LPARAM) -> Option<DialogHit> {
         let (x, y) = self.point(lparam);
         layout::dialog_hit(&self.layout, x, y)
     }
@@ -369,7 +387,15 @@ impl<'a> Popup<'a> {
             WM_LBUTTONUP => {
                 let pressed = self.pressed.take();
                 match (pressed, self.hit(lparam)) {
-                    (Some(p), Some(h)) if p == h => self.close(Some(h)),
+                    (Some(DialogHit::Check), Some(DialogHit::Check)) => {
+                        if let Some((_, ticked)) = &self.check {
+                            ticked.set(!ticked.get());
+                        }
+                        self.invalidate();
+                    }
+                    (Some(p), Some(DialogHit::Button(h))) if p == DialogHit::Button(h) => {
+                        self.close(Some(h))
+                    }
                     _ => self.invalidate(),
                 }
                 Some(LRESULT(0))

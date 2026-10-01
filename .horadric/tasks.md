@@ -255,11 +255,11 @@ Runewords as rune stones in a tile of their own. See "The Runetome" under Next i
 
 From the human on 2026-10-01, after using the tome.
 
-- [/] Remove a stone by right click on it @horadric.dev-78569
+- [x] Remove a stone by right click on it @horadric.dev-78569
   Today there is no way to remove a runeword short of editing the JSON. A right click on a project or global stone offers "Remove <label>" (with a confirm), which deletes it from `.horadric/config.json` or `runewords.json`, keeping the rest of either file as it was. Built in stones cannot be removed, so the menu says so or leaves the item out.
-- [/] Better built in stones that show what a stone can do @horadric.dev-78569
+- [x] Better built in stones that show what a stone can do @horadric.dev-78569
   "Test, merge", "Test, review, merge" and "Review, merge" are not useful. Replace them with a few that each show off a step kind and are worth a click on day one: keys, say chains, a run command.
-- [/] Ask before casting, with "Do not ask again" @horadric.dev-78569
+- [x] Ask before casting, with "Do not ask again" @horadric.dev-78569
   A click on a stone asks whether to cast it, showing what it will do, with a "Do not ask again" check kept in state.json.
-- [/] Review the runeword and Runetome implementation for other quality of life fixes @horadric.dev-78569
+- [x] Review the runeword and Runetome implementation for other quality of life fixes @horadric.dev-78569
   Read the tile, casting and the engine end to end and fix what gets in the way. List what was found and done in the plan.

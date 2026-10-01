@@ -200,6 +200,9 @@ const WM_HORADRIC_START_FAILED: u32 = WM_APP + 28;
 /// Cast the stone the app's `stone_for` names, or offer to stop it,
 /// outside the app's borrow since it may ask which session.
 const WM_HORADRIC_STONE: u32 = WM_APP + 29;
+/// Offer what can be done with the stone the app's `stone_menu_for`
+/// names, outside the app's borrow since a menu runs a loop of its own.
+const WM_HORADRIC_STONE_MENU: u32 = WM_APP + 30;
 
 /// A button in a session pane's header, handled outside the app's borrow
 /// since it may ask first.
@@ -387,6 +390,10 @@ pub(crate) enum Input {
     /// A stone of that project's tome let go of here, on the screen: cast
     /// on the tile or pane under it.
     StoneDrop(String, String, POINT),
+    /// A stone of that project's tome right clicked, by its label, None
+    /// for the empty stone or the tome's header: offer what can be done
+    /// with it.
+    StoneMenu(String, Option<String>),
     /// A stashed session's slot clicked: bring it back.
     Unstash(String),
     /// A stashed session's slot right clicked.
@@ -719,7 +726,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             discord: saved.discord,
             rich: None,
             run: presence::Run::from_saved(saved.run),
-            tome: runner::runeword::Tome::new(saved.runewords.clone(), saved.stones_cast.clone()),
+            tome: runner::runeword::Tome::new(&saved),
             cube_on: saved.cube,
             font_family: saved.font_family.clone(),
             screen: saved.screen.clone(),
@@ -730,6 +737,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             start_failed: None,
             menu_for: None,
             stone_for: None,
+            stone_menu_for: None,
             stash_menu_for: None,
             project_menu_for: None,
             recent_menu_for: None,
@@ -982,6 +990,7 @@ unsafe extern "system" fn app_proc(
                     text: &why,
                     buttons: &["OK"],
                     default: 0,
+                    check: None,
                 });
             }
             return LRESULT(0);
@@ -995,6 +1004,12 @@ unsafe extern "system" fn app_proc(
         WM_HORADRIC_STONE => {
             if let Some((key, label)) = with_app(|app| app.stone_for.take()).flatten() {
                 runner::runeword::stone_clicked(&key, &label);
+            }
+            return LRESULT(0);
+        }
+        WM_HORADRIC_STONE_MENU => {
+            if let Some((key, label)) = with_app(|app| app.stone_menu_for.take()).flatten() {
+                runner::runeword::stone_menu(&key, label.as_deref());
             }
             return LRESULT(0);
         }
@@ -1263,6 +1278,7 @@ fn tray_menu(hwnd: HWND) {
                     text: &q,
                     buttons: &["Keep running", "Stop them", "Cancel"],
                     default: if working > 0 { 0 } else { 1 },
+                    check: None,
                 })
                 .and_then(|b| (b < 2).then_some(b == 0)),
                 None => Some(false),
@@ -1501,6 +1517,7 @@ fn confirm_stash(id: &str) -> bool {
                on it in the stash resumes the conversation.",
         buttons: &["Stash", "Cancel"],
         default: 1,
+        check: None,
     });
     pressed == Some(0)
 }
@@ -1531,6 +1548,7 @@ fn stash_has_room() -> bool {
         text: "End a stashed session or bring one back to make room.",
         buttons: &["OK"],
         default: 0,
+        check: None,
     });
     false
 }
@@ -1652,6 +1670,7 @@ fn offer_update(m: &Manifest) {
         text,
         buttons: &["Update now", "Not now"],
         default: 0,
+        check: None,
     });
     if pressed == Some(0) {
         with_app(|app| app.install_update());
@@ -2384,6 +2403,7 @@ fn confirm_end(key: Option<&str>) -> bool {
                 text: &q,
                 buttons: &["End", "Cancel"],
                 default: 0,
+                check: None,
             });
             pressed == Some(0)
         }
@@ -2635,6 +2655,9 @@ struct App {
     menu_for: Option<String>,
     /// The stone about to be cast, by project key and label.
     stone_for: Option<(String, String)>,
+    /// The stone whose menu is about to show, by project key and label,
+    /// None for the empty stone.
+    stone_menu_for: Option<(String, Option<String>)>,
     /// The stashed session whose menu is about to show.
     stash_menu_for: Option<String>,
     /// The project whose menu is about to show.
@@ -5593,6 +5616,8 @@ impl App {
             pages: web::pages(),
             runewords: self.tome.projects.clone(),
             stones_cast: self.tome.cast.clone(),
+            cast_without_asking: !self.tome.ask,
+            stones_hidden: self.tome.hidden.clone(),
             update_told: self.update_told.clone(),
             ..Default::default()
         }
@@ -6187,12 +6212,16 @@ impl App {
                 Input::TasksMode(key) => runner::ask_for(self, runner::Menu::Mode(key)),
                 Input::TaskAdd(key) => runner::ask_for(self, runner::Menu::Add(key)),
                 Input::GiveQuests(key) => self.give_quests(&key),
-                Input::Stone(key, None) => self.start_runesmith(&key),
+                Input::Stone(key, None) => self.start_runesmith(&key, None),
                 Input::Stone(key, Some(label)) => {
                     self.stone_for = Some((key, label));
                     post(self.notify.0 as isize, WM_HORADRIC_STONE, 0);
                 }
                 Input::StoneDrop(key, label, at) => self.stone_dropped(&key, &label, at),
+                Input::StoneMenu(key, label) => {
+                    self.stone_menu_for = Some((key, label));
+                    post(self.notify.0 as isize, WM_HORADRIC_STONE_MENU, 0);
+                }
             }
         }
         if relayout {

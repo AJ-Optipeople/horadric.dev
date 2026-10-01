@@ -403,6 +403,7 @@ pub(in crate::app) fn ask_pick(winner: &str) {
         text: &asked,
         buttons: &["Merge it", "Keep its branch", "Cancel"],
         default: 2,
+        check: None,
     });
     if let Some(merge @ (0 | 1)) = pressed {
         with_app(|app| app.pick_tomb(winner, merge == 0));
