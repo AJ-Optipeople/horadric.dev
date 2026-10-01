@@ -20,6 +20,9 @@ use crate::cube::{self, Subject};
 use crate::session::Phase;
 use crate::tasks::one_line;
 
+mod stone;
+pub use stone::{carve, name, smith_prompt, Carving, Stroke, EDGE_POINTS, RUNES};
+
 /// One action a runeword casts on its session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
