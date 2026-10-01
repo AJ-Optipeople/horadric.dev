@@ -91,6 +91,8 @@ mod cube;
 #[cfg(windows)]
 mod dialog;
 #[cfg(windows)]
+pub mod discord;
+#[cfg(windows)]
 pub use dialog::error_alone;
 pub use store::exe_command;
 #[cfg(windows)]
