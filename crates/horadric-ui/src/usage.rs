@@ -7,9 +7,9 @@
 //! in a cluster, and it sits at the top of the first column of tiles. It
 //! behaves like a cluster: it never takes the focus, and it drags to
 //! another place in the columns the same way. A click on the limits folds
-//! it down to the session's budget alone, unless the padlock beside them is
-//! closed, which keeps the window as it is and where it is. A list setting drops its list,
-//! which the app opens, since it owns the defaults. Effort is a slider in
+//! it down to the session's budget alone. Closed, the padlock beside them
+//! pins it to the top of its column, the tiles below scrolling under it,
+//! and a drag does not move it. A list setting drops its list, which the app opens, since it owns the defaults. Effort is a slider in
 //! the window itself. Under the settings, the provider's account in use,
 //! whose row opens its accounts to switch to.
 
@@ -56,8 +56,8 @@ const WM_MOUSELEAVE: u32 = 0x02A3;
 pub struct UsageWindow {
     pub hwnd: HWND,
     pub collapsed: Cell<bool>,
-    /// Locked, a click on the limits does not fold it and a drag does not
-    /// move it, so a stray click leaves the column as it was.
+    /// Locked, it stays at the top of its column while the tiles below it
+    /// scroll, and a drag does not move it.
     pub locked: Cell<bool>,
     shared: Rc<Shared>,
     target: RefCell<Option<Target>>,
@@ -490,8 +490,8 @@ impl UsageWindow {
                 self.locked.set(!self.locked.get());
                 tip::over(&self.shared, self.hwnd, self.tip(UsageHit::Lock));
                 self.invalidate();
+                app::push(Input::Arrange);
             }
-            UsageHit::Limits if self.locked.get() => {}
             UsageHit::Limits => {
                 self.collapsed.set(!self.collapsed.get());
                 self.fit();
@@ -663,7 +663,7 @@ impl UsageWindow {
                     return Some(LRESULT(0));
                 }
                 let (x, y) = self.position();
-                // Locked, it still clicks: the drag is only never moved.
+                // Locked, it still clicks: it is only never moved.
                 *self.drag.borrow_mut() = Some(Drag {
                     start_cursor: cursor,
                     start_window: POINT { x, y },

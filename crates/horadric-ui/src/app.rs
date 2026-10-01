@@ -681,7 +681,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             toasts,
             glides: RefCell::default(),
             glided: Cell::new(None),
-            column_bounds: None,
+            column_bounds: HashMap::new(),
             clipped: RefCell::default(),
             arranged: false,
             carried: None,
@@ -2618,9 +2618,10 @@ struct App {
     glides: RefCell<Glides>,
     /// When the glides last moved on, while they move.
     glided: Cell<Option<Instant>>,
-    /// The top and bottom of the columns on screen when last arranged,
-    /// which every window in them is cut to.
-    column_bounds: Option<(i32, i32)>,
+    /// The top and bottom each window in the columns is cut to, by its
+    /// handle, as last arranged: the column's, or for the windows below a
+    /// pinned one, from the pin's bottom down.
+    column_bounds: HashMap<isize, (i32, i32)>,
     /// The cut each window in the columns has now, by its handle, with the
     /// width it was made for, so a frame that changes neither sets none.
     clipped: RefCell<Clipped>,
@@ -6398,25 +6399,39 @@ impl App {
         }
 
         let shown = self.columns.shown(g.fits, is_present);
-        self.column_bounds = Some((g.top, g.top + g.height));
+        let bottom = g.top + g.height;
+        let mut bounds = HashMap::new();
         let mut scrolls = Vec::new();
         let mut seen = HashSet::new();
         for (i, (model, keys)) in shown.iter().enumerate() {
             let x = g.x(i);
             let tiles = self.column_windows(keys, i == 0);
             let items: Vec<columns::Stacked> = tiles.iter().map(Tile::stacked).collect();
+            // A locked usage window stays at the top, with whatever is
+            // above it, and the rest of its column scrolls below it.
+            let pinned = tiles
+                .iter()
+                .position(|t| matches!(t, Tile::Usage(u) if u.locked.get()))
+                .map_or(0, |at| at + 1);
             let scroll = self.columns.cols[*model].scroll;
-            let (filled, room) = columns::fill(&items, g.top, g.height, g.gap, g.min_files, scroll);
+            let (filled, room, below) =
+                columns::fill_pinned(&items, g.top, g.height, g.gap, g.min_files, scroll, pinned);
             scrolls.push((*model, scroll.clamp(0, room)));
-            for (t, f) in tiles.iter().zip(filled) {
-                seen.insert(t.hwnd().0 as isize);
+            for (n, (t, f)) in tiles.iter().zip(filled).enumerate() {
+                let id = t.hwnd().0 as isize;
+                seen.insert(id);
+                bounds.insert(id, (if n < pinned { g.top } else { below }, bottom));
                 // The one being dragged is where the cursor holds it, whole.
                 if t.key().is_some() && t.key() == self.carried.as_deref() {
                     clip_window(&mut self.clipped.borrow_mut(), t.hwnd(), None);
                     continue;
                 }
                 t.place(x, f, &mut self.glides.borrow_mut(), animate, self.arranged);
-                clip_window(&mut self.clipped.borrow_mut(), t.hwnd(), self.column_bounds);
+                clip_window(
+                    &mut self.clipped.borrow_mut(),
+                    t.hwnd(),
+                    bounds.get(&id).copied(),
+                );
             }
         }
         if shown.is_empty() {
@@ -6436,6 +6451,7 @@ impl App {
         for (model, scroll) in scrolls {
             self.columns.cols[model].scroll = scroll;
         }
+        self.column_bounds = bounds;
         // A handle Windows gives a new window must not inherit a cut.
         self.clipped.borrow_mut().retain(|id, _| seen.contains(id));
         // Mid drag the columns are not settled yet, so the stage waits for
@@ -6476,7 +6492,7 @@ impl App {
                 clip_window(
                     &mut self.clipped.borrow_mut(),
                     HWND(id as *mut c_void),
-                    self.column_bounds,
+                    self.column_bounds.get(&id).copied(),
                 );
             }
             if !glides.moving() {
