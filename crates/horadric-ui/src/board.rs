@@ -33,16 +33,13 @@ impl Board {
     }
 
     /// What the header says about the whole list: how many are left, the
-    /// same count as the rows under it, and short enough to fit beside the
-    /// mode key on a narrow tile.
+    /// same count as the rows under it. A bare number, since the header
+    /// also holds the mode key and two buttons, and nothing when none are
+    /// left, which the empty tile already says.
     pub fn summary(&self) -> String {
-        let named = self.tasks.iter().filter(|t| !t.title.trim().is_empty());
-        let total = named.clone().count();
-        let left = named.filter(|t| t.mark != Mark::Done).count();
-        match (left, total) {
-            (_, 0) => "empty".into(),
-            (0, _) => "all done".into(),
-            (l, _) => format!("{l} to do"),
+        match self.shown().len() {
+            0 => String::new(),
+            n => n.to_string(),
         }
     }
 
@@ -226,10 +223,10 @@ mod tests {
     fn done_and_unnamed_items_get_no_row() {
         let b = board("- [x] A\n- [ ]\n- [/] B @b-1\n- [ ] C\n");
         assert_eq!(b.shown(), [2, 3]);
-        assert_eq!(b.summary(), "2 to do");
-        assert_eq!(board("- [x] A\n").summary(), "all done");
-        assert_eq!(board("- [ ] A\n- [ ] B\n").summary(), "2 to do");
-        assert_eq!(board("").summary(), "empty");
+        assert_eq!(b.summary(), "2");
+        assert_eq!(board("- [x] A\n").summary(), "");
+        assert_eq!(board("- [ ] A\n- [ ] B\n").summary(), "2");
+        assert_eq!(board("").summary(), "");
     }
 
     #[test]

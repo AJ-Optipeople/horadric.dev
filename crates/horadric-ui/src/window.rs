@@ -926,7 +926,7 @@ impl Cluster {
                     .collect(),
                 total: items.len(),
                 scroll: t.scroll,
-                summary: b.map_or_else(|| "empty".to_string(), Board::summary),
+                summary: b.map_or_else(String::new, Board::summary),
                 mode: b.map_or_else(|| Mode::default().label().into(), Board::mode_key),
                 collapsed: t.collapsed,
             }

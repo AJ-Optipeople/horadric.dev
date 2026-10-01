@@ -3216,7 +3216,8 @@ impl Painter<'_> {
             Rect::new(h.x + pad - 2.0, h.y, 14.0, h.h),
         );
         let label_x = h.x + pad + 14.0;
-        let label_w = self.measure(gpu, &gpu.chip, "QUESTS") + 8.0;
+        // The letters are spaced out, which the measure does not count.
+        let label_w = self.measure(gpu, &gpu.chip, "QUESTS") + 8.0 + 6.0 * 1.2;
         self.text_spaced(
             gpu,
             &gpu.chip,
@@ -3225,10 +3226,10 @@ impl Painter<'_> {
             1.2,
             Rect::new(label_x, h.y, label_w, h.h),
         );
-        let summary_x = label_x + label_w + 4.0;
+        let summary_x = label_x + label_w + 2.0;
         self.text_tabular(
             gpu,
-            &gpu.small_right,
+            &gpu.small,
             theme::text_dim(),
             &t.summary,
             Rect::new(summary_x, h.y, l.mode.x - 10.0 - summary_x, h.h),
