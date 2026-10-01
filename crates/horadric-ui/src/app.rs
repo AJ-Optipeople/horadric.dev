@@ -69,8 +69,9 @@ use horadric_hooks::{install, TASKS_ENV};
 use windows::core::{w, BOOL, PCWSTR};
 use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    EnumDisplayMonitors, GetMonitorInfoW, MonitorFromPoint, MonitorFromRect, HDC, HMONITOR,
-    MONITORINFO, MONITORINFOEXW, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTONULL,
+    CreateRectRgn, EnumDisplayMonitors, GetMonitorInfoW, MonitorFromPoint, MonitorFromRect,
+    SetWindowRgn, HDC, HMONITOR, MONITORINFO, MONITORINFOEXW, MONITOR_DEFAULTTONEAREST,
+    MONITOR_DEFAULTTONULL,
 };
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -669,6 +670,8 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             toasts,
             glides: RefCell::default(),
             glided: Cell::new(None),
+            column_bounds: None,
+            clipped: RefCell::default(),
             arranged: false,
             carried: None,
             carry_at: None,
@@ -2551,6 +2554,12 @@ struct App {
     glides: RefCell<Glides>,
     /// When the glides last moved on, while they move.
     glided: Cell<Option<Instant>>,
+    /// The top and bottom of the columns on screen when last arranged,
+    /// which every window in them is cut to.
+    column_bounds: Option<(i32, i32)>,
+    /// The cut each window in the columns has now, by its handle, with the
+    /// width it was made for, so a frame that changes neither sets none.
+    clipped: RefCell<Clipped>,
     /// The columns have been laid out with windows in them once.
     arranged: bool,
     /// The key of the window being dragged, which the layout leaves where
@@ -6294,7 +6303,9 @@ impl App {
         }
 
         let shown = self.columns.shown(g.fits, is_present);
+        self.column_bounds = Some((g.top, g.top + g.height));
         let mut scrolls = Vec::new();
+        let mut seen = HashSet::new();
         for (i, (model, keys)) in shown.iter().enumerate() {
             let x = g.x(i);
             let tiles = self.column_windows(keys, i == 0);
@@ -6303,11 +6314,14 @@ impl App {
             let (filled, room) = columns::fill(&items, g.top, g.height, g.gap, g.min_files, scroll);
             scrolls.push((*model, scroll.clamp(0, room)));
             for (t, f) in tiles.iter().zip(filled) {
-                // The one being dragged is where the cursor holds it.
+                seen.insert(t.hwnd().0 as isize);
+                // The one being dragged is where the cursor holds it, whole.
                 if t.key().is_some() && t.key() == self.carried.as_deref() {
+                    clip_window(&mut self.clipped.borrow_mut(), t.hwnd(), None);
                     continue;
                 }
                 t.place(x, f, &mut self.glides.borrow_mut(), animate, self.arranged);
+                clip_window(&mut self.clipped.borrow_mut(), t.hwnd(), self.column_bounds);
             }
         }
         if shown.is_empty() {
@@ -6327,6 +6341,8 @@ impl App {
         for (model, scroll) in scrolls {
             self.columns.cols[model].scroll = scroll;
         }
+        // A handle Windows gives a new window must not inherit a cut.
+        self.clipped.borrow_mut().retain(|id, _| seen.contains(id));
         // Mid drag the columns are not settled yet, so the stage waits for
         // the drop.
         if self.carried.is_none() {
@@ -6361,6 +6377,11 @@ impl App {
                     0,
                     0,
                     SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOSIZE,
+                );
+                clip_window(
+                    &mut self.clipped.borrow_mut(),
+                    HWND(id as *mut c_void),
+                    self.column_bounds,
                 );
             }
             if !glides.moving() {
@@ -6647,6 +6668,33 @@ impl Tile<'_> {
             let rise = (appear::CLUSTER_RISE * dpi / 96.0).round() as i32;
             appear::begin(hwnd, appear::CLUSTER, rise);
         }
+    }
+}
+
+/// The cut of each window in the columns by its handle, with the width it
+/// was made for.
+type Clipped = HashMap<isize, (i32, Option<(i32, i32)>)>;
+
+/// Cuts a window in the columns to `bounds`, the column's top and bottom
+/// on screen, or shows all of it when None. Clicks fall through the cut
+/// part as well, to whatever is below.
+fn clip_window(clipped: &mut Clipped, hwnd: HWND, bounds: Option<(i32, i32)>) {
+    let mut r = RECT::default();
+    if unsafe { GetWindowRect(hwnd, &mut r) }.is_err() {
+        return;
+    }
+    let w = r.right - r.left;
+    let cut = bounds.and_then(|(top, bottom)| columns::clip(top, bottom, r.top, r.bottom - r.top));
+    let id = hwnd.0 as isize;
+    let was = clipped.get(&id).copied();
+    if was == Some((w, cut)) || (was.is_none() && cut.is_none()) {
+        return;
+    }
+    clipped.insert(id, (w, cut));
+    unsafe {
+        // The window owns the region once it is set.
+        let region = cut.map(|(from, to)| CreateRectRgn(0, from, w, to));
+        SetWindowRgn(hwnd, region, true);
     }
 }
 
