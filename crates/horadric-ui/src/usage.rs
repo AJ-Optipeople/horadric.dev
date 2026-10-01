@@ -43,6 +43,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use crate::app::{self, Input};
 use crate::layout::{self, UsageHit, UsageLayout};
 use crate::render::{SettingLook, Target, UsageScene};
+use crate::tip;
 use crate::window::Shared;
 use crate::{backdrop, columns};
 
@@ -427,7 +428,24 @@ impl UsageWindow {
         layout::usage_hit(&self.layout.borrow(), x, y)
     }
 
+    /// The line for what the cursor is on, which for a setting depends on
+    /// which row of the screen showing it is.
+    fn tip(&self, hot: UsageHit) -> Option<&'static str> {
+        let row = match hot {
+            UsageHit::Setting(i) => rows(self.screen.get()).get(i).map(|r| match r {
+                Row::Setting(Setting::Model) => tip::Row::Model,
+                Row::Setting(Setting::Effort) => tip::Row::Effort,
+                Row::Setting(Setting::Permissions) => tip::Row::Permissions,
+                Row::Account => tip::Row::Account,
+                Row::Version => tip::Row::Version,
+            }),
+            _ => None,
+        };
+        tip::usage(hot, row)
+    }
+
     fn hover(&self, hot: UsageHit) {
+        tip::over(&self.shared, self.hwnd, self.tip(hot));
         if self.hot.replace(hot) != hot {
             self.invalidate();
         }
@@ -571,6 +589,7 @@ impl UsageWindow {
                 Some(LRESULT(0))
             }
             WM_RBUTTONUP => {
+                tip::press(self.hwnd);
                 app::push(Input::UsageMenu);
                 Some(LRESULT(0))
             }
@@ -611,6 +630,7 @@ impl UsageWindow {
                 Some(LRESULT(0))
             }
             WM_LBUTTONDOWN => {
+                tip::press(self.hwnd);
                 self.raise();
                 let mut cursor = POINT::default();
                 unsafe {
@@ -695,6 +715,7 @@ impl UsageWindow {
             WM_MOUSELEAVE => {
                 self.tracking.set(false);
                 self.hover(UsageHit::Nothing);
+                tip::away(self.hwnd);
                 Some(LRESULT(0))
             }
             WM_CAPTURECHANGED => {

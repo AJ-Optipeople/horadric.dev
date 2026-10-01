@@ -2330,6 +2330,17 @@ through the rename too.
   between them where it is, so a quest crosses into the next section.
   Delete asks first and is not offered while a session holds the quest:
   put it back first. Checked on screen with a dev instance.
+- **The quest giver.** A gold ! left of the plus, the mark over a quest
+  giver's head in the games, starts a session named "Quest Giver" in the
+  project, on the stage. Asked for on 2026-10-01. Its
+  prompt (`tasks::giver_prompt`, tested) has it read the README, the docs,
+  the quest log, the git log and the code, change nothing, and suggest three
+  to five quests not on the log, each with notes. It asks which to add and
+  adds only those, with `quest add "title" --notes "..."`. It suggests
+  rather than writes, since a project in auto mode starts whatever lands in
+  the log at once. It holds no quest, so it gets no quest system prompt and
+  the runner leaves it alone. Checked on screen with a dev instance and
+  `cmd.exe` as the agent: the session starts and takes the stage.
 - **Left alone**: the `"tasks"` key in `config.json`, the
   `/horadric/tasks` path, its header and `HORADRIC_TASKS`. They are what
   builds on either side of the rename say to each other, and no one reads

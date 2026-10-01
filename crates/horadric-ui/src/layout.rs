@@ -165,6 +165,8 @@ pub struct TasksLayout {
     pub mode: Rect,
     /// The plus at the header's right end, which adds an item.
     pub add: Rect,
+    /// The quest giver left of the plus, which asks an agent for quests.
+    pub give: Rect,
     /// One rect per visible row, top to bottom.
     pub rows: Vec<Rect>,
     /// The approve button at the right end of each row waiting for review.
@@ -308,7 +310,8 @@ fn tasks_tile(m: &Metrics, y: f32, approve: &[bool]) -> TasksLayout {
         header.h,
         header.h,
     );
-    let mode = Rect::new(add.x - 4.0 - m.mode_w, y + 4.0, m.mode_w, header.h - 8.0);
+    let give = Rect::new(add.x - header.h, y, header.h, header.h);
+    let mode = Rect::new(give.x - 4.0 - m.mode_w, y + 4.0, m.mode_w, header.h - 8.0);
     let mut rows = Vec::new();
     let mut buttons = Vec::new();
     let mut row_y = header.bottom();
@@ -329,6 +332,7 @@ fn tasks_tile(m: &Metrics, y: f32, approve: &[bool]) -> TasksLayout {
         header,
         mode,
         add,
+        give,
         rows,
         approve: buttons,
     }
@@ -422,6 +426,8 @@ pub enum Hit {
     TasksMode,
     /// The plus in the tasks tile's header.
     TasksAdd,
+    /// The quest giver beside it.
+    TasksGive,
     /// A row of the tasks tile, counted from the top one showing.
     Task(usize),
     /// The approve button on that row.
@@ -444,6 +450,7 @@ impl Hit {
                 | Hit::Shell
                 | Hit::TasksMode
                 | Hit::TasksAdd
+                | Hit::TasksGive
                 | Hit::Task(_)
                 | Hit::TaskApprove(_)
         )
@@ -505,6 +512,9 @@ pub fn hit(layout: &ClusterLayout, x: f32, y: f32) -> Hit {
         }
         if t.add.contains(x, y) {
             return Hit::TasksAdd;
+        }
+        if t.give.contains(x, y) {
+            return Hit::TasksGive;
         }
         if t.header.contains(x, y) {
             return Hit::TasksHeader;
@@ -2398,7 +2408,9 @@ mod tests {
         assert_eq!(hit(&l, 20.0, t.header.y + 1.0), Hit::TasksHeader);
         assert_eq!(hit(&l, a.x + 1.0, a.y + 1.0), Hit::TaskApprove(1));
         assert_eq!(hit(&l, 20.0, t.rows[1].y + 1.0), Hit::Task(1));
-        assert!(t.mode.right() <= t.add.x && t.add.right() == t.header.right() - TASKS_ADD_IN);
+        assert_eq!(hit(&l, t.give.x + 1.0, t.give.y + 1.0), Hit::TasksGive);
+        assert!(t.mode.right() <= t.give.x && t.give.right() <= t.add.x);
+        assert_eq!(t.add.right(), t.header.right() - TASKS_ADD_IN);
     }
 
     #[test]

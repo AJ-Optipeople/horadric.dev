@@ -60,6 +60,7 @@ use crate::motion;
 pub use crate::project::{folder_key, project_key, project_name};
 use crate::render::{FilesScene, Flight, Gpu, Scene, Target, TaskRow, TasksScene, TRACE_BARS};
 use crate::theme;
+use crate::tip;
 use crate::watch::{self, Slot, Watcher};
 
 pub(crate) const CLASS: PCWSTR = w!("HoradricCluster");
@@ -1129,6 +1130,7 @@ impl Cluster {
                 Some(LRESULT(0))
             }
             WM_LBUTTONDOWN => {
+                tip::press(self.hwnd);
                 self.raise();
                 let mut cursor = POINT::default();
                 unsafe {
@@ -1227,6 +1229,7 @@ impl Cluster {
             WM_MOUSELEAVE => {
                 self.tracking.set(false);
                 self.hover(Hit::Nothing);
+                tip::away(self.hwnd);
                 Some(LRESULT(0))
             }
             // Capture taken away mid press, by alt tab or a menu: no button
@@ -1245,6 +1248,7 @@ impl Cluster {
                 None
             }
             WM_RBUTTONUP => {
+                tip::press(self.hwnd);
                 let s = self.scale();
                 let x = (lparam.0 & 0xffff) as i16 as f32 / s;
                 let y = ((lparam.0 >> 16) & 0xffff) as i16 as f32 / s;
@@ -1262,7 +1266,7 @@ impl Cluster {
                             app::push(Input::TaskMenu(self.key.clone(), item.line, item.title));
                         }
                     }
-                    Hit::TasksHeader | Hit::TasksMode | Hit::TasksAdd => {
+                    Hit::TasksHeader | Hit::TasksMode | Hit::TasksAdd | Hit::TasksGive => {
                         app::push(Input::TasksMode(self.key.clone()))
                     }
                     _ => {}
@@ -1310,6 +1314,10 @@ impl Cluster {
 
     /// Notes what the cursor is over, repainting when a button changes.
     fn hover(&self, hot: Hit) {
+        // Nothing to read while a tile or the window is carried.
+        let carried = self.drag.borrow().is_some() || self.lift.borrow().is_some();
+        let line = if carried { None } else { tip::cluster(hot) };
+        tip::over(&self.shared, self.hwnd, line);
         let old = self.hot.replace(hot);
         if old != hot && (old.lights() || hot.lights()) {
             self.invalidate();
@@ -1433,6 +1441,7 @@ impl Cluster {
             }
             Hit::TasksMode => app::push(Input::TasksMode(self.key.clone())),
             Hit::TasksAdd => app::push(Input::TaskAdd(self.key.clone())),
+            Hit::TasksGive => app::push(Input::GiveQuests(self.key.clone())),
             Hit::Task(i) => {
                 if let Some(item) = self.item_at(i) {
                     app::push(Input::TaskClick(self.key.clone(), item.line, item.title));

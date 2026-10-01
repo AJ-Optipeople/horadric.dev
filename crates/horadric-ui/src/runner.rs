@@ -513,12 +513,7 @@ impl App {
         let result = match self.row_state(&task) {
             RowState::Open => self.take_task(key, line, title, true).map(drop),
             RowState::Gone => self.start_again(key, line, title),
-            _ => {
-                if let Some(h) = task.holder.as_deref().and_then(|h| self.shown_for(h)) {
-                    self.reveal(&h, false);
-                }
-                Ok(())
-            }
+            _ => Ok(()),
         };
         if let Err(e) = result {
             eprintln!("horadric: cannot start the task: {e}");
@@ -628,6 +623,39 @@ impl App {
         }
         self.refresh_boards(true);
         self.run_tasks();
+    }
+
+    /// The gold ! on the tile: starts a session in the project that
+    /// suggests quests and adds the ones the human picks, and puts it on
+    /// the stage, since it asks.
+    pub(super) fn give_quests(&mut self, key: &str) {
+        let Some(dir) = self.project_dir(key) else {
+            return;
+        };
+        let id = self.unique_id("quest-giver");
+        self.tasks.prompts.insert(
+            id.clone(),
+            tasks::giver_prompt(&horadric_command(), file::rel(&dir)),
+        );
+        if let Err(e) = self.launch(
+            &id,
+            "Quest Giver",
+            dir,
+            Vec::new(),
+            Run::Agent(horadric_core::Agent::Claude),
+            false,
+        ) {
+            self.tasks.prompts.remove(&id);
+            eprintln!("horadric: cannot start the quest giver: {e}");
+            self.toasts
+                .show(Kind::Failed, "Cannot start the quest giver", &e);
+            return;
+        }
+        if self.fill_stage(key) {
+            if let Some(stage) = &self.stage {
+                stage.focus_session(&id);
+            }
+        }
     }
 
     /// Once a second: the Enter of a nudge that is due, and a look at the
