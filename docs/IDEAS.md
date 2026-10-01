@@ -50,9 +50,6 @@ once, which is what Horadric is for.
 - **Forge.** One session goes in and forks into three, each trying a
   different approach from the same point. When all three are done the cube
   reviews them and hands back the winner. Best of three on demand.
-- **Pipeline.** A, then B. B waits paused until A finishes, then starts
-  with what A did as its prompt. The order of the drops is the order of the
-  work: write it, test it, review it.
 - **Wait for.** A session goes in with a condition (CI green, another
   session done, nine in the morning) and wakes by itself when it holds.
 - **Ingredients.** Files from Explorer, a screenshot or a URL go in with a
@@ -62,8 +59,8 @@ once, which is what Horadric is for.
   for CLAUDE.md, a memory, or a skill. The session ends; what it learned
   stays.
 
-Pipeline and Forge are the strongest: both orchestrate several agents, and
-dragging really is quicker than a menu for them.
+Forge is the strongest: it orchestrates several agents, and dragging
+really is quicker than a menu for it.
 
 ### Identify
 

@@ -95,7 +95,7 @@ use crate::viewer::Hit;
 use crate::viewport::{self, Fit, Grip};
 use crate::web::{self, TabStep};
 use crate::window::Shared;
-use crate::{find, frame, watch};
+use crate::{find, frame, tip, watch};
 
 const CLASS: PCWSTR = w!("HoradricPane");
 const SYNC_TIMER: usize = 1;
@@ -1965,21 +1965,64 @@ impl Pane {
     /// none or Ctrl is up.
     fn hover(&self, lparam: Option<LPARAM>) {
         let cells = lparam.and_then(|at| self.link_at(at)).map(|l| l.0);
-        if cells.is_some() && !self.tracking.replace(true) {
-            let mut track = TRACKMOUSEEVENT {
-                cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
-                dwFlags: TME_LEAVE,
-                hwndTrack: self.hwnd,
-                dwHoverTime: 0,
-            };
-            unsafe {
-                let _ = TrackMouseEvent(&mut track);
-            }
+        if cells.is_some() {
+            self.track();
         }
         if *self.link.borrow() != cells {
             *self.link.borrow_mut() = cells;
             self.invalidate();
         }
+    }
+
+    /// Asks for WM_MOUSELEAVE, once until it comes.
+    fn track(&self) {
+        if self.tracking.replace(true) {
+            return;
+        }
+        let mut track = TRACKMOUSEEVENT {
+            cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+            dwFlags: TME_LEAVE,
+            hwndTrack: self.hwnd,
+            dwHoverTime: 0,
+        };
+        unsafe {
+            let _ = TrackMouseEvent(&mut track);
+        }
+    }
+
+    /// What the pane shows, for what its cross says.
+    fn shows(&self) -> tip::Shows {
+        if self.console.web.is_some() {
+            tip::Shows::Browser
+        } else if self.console.is_view() {
+            tip::Shows::File
+        } else if self.console.shell {
+            tip::Shows::Shell
+        } else {
+            tip::Shows::Agent
+        }
+    }
+
+    /// The line for what in the header or the tab strip is under a client
+    /// point, in the order a press there is taken.
+    fn tip_at(&self, lparam: LPARAM) -> Option<&'static str> {
+        if let Some(hit) = self.bar_at(lparam) {
+            let docked = self.console.web.as_deref().and_then(web::dock);
+            return tip::bar(hit, docked.map(|d| d.side));
+        }
+        if let Some(hit) = self.tab_at(lparam) {
+            return Some(tip::tab(hit));
+        }
+        let key = if self.on_close(lparam) {
+            tip::Key::Close
+        } else if self.on_stash(lparam) {
+            tip::Key::Stash
+        } else if self.on_zoom(lparam) {
+            tip::Key::Zoom
+        } else {
+            return None;
+        };
+        Some(tip::pane(key, self.shows(), self.zoom.get() == Some(true)))
     }
 
     /// The mouse's client point, when it is over the pane.
@@ -2201,6 +2244,12 @@ impl Pane {
     }
 
     fn handle(&self, msg: u32, wparam: WPARAM, lparam: LPARAM) -> Option<LRESULT> {
+        if matches!(
+            msg,
+            WM_LBUTTONDOWN | WM_LBUTTONDBLCLK | WM_MBUTTONDOWN | WM_RBUTTONDOWN
+        ) {
+            tip::press(self.hwnd);
+        }
         match msg {
             WM_PAINT => {
                 self.paint();
@@ -2413,6 +2462,7 @@ impl Pane {
             }
             WM_MOUSELEAVE => {
                 self.tracking.set(false);
+                tip::away(self.hwnd);
                 self.hover(None);
                 Some(LRESULT(0))
             }
@@ -2421,6 +2471,13 @@ impl Pane {
                 Some(LRESULT(0))
             }
             WM_MOUSEMOVE => {
+                let line = (!self.selecting.get())
+                    .then(|| self.tip_at(lparam))
+                    .flatten();
+                if line.is_some() {
+                    self.track();
+                }
+                tip::over(&self.shared, self.hwnd, line);
                 if !self.selecting.get() {
                     self.hover(Some(lparam));
                 }

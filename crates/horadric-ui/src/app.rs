@@ -581,6 +581,11 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
         Vec::new()
     };
     let on_stage = saved.on_stage.clone().filter(|_| how.resumes());
+    let pages = if how.resumes() {
+        saved.pages.clone()
+    } else {
+        BTreeMap::new()
+    };
 
     let gpu = Gpu::new()?;
     let font = Font::new(
@@ -734,6 +739,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
         app.reconcile(false);
         app.count_experience();
         app.attach_hosts();
+        app.restore_webs(&pages);
         app.carry_on(&carry, on_stage.as_deref());
         // Written before anything resumed can crash it, so that crash is
         // known for what it is.
@@ -5158,6 +5164,18 @@ impl App {
         self.open_web(key, None);
     }
 
+    /// Opens the browsers left open before a reload or a crash, each in
+    /// its project's grid, as an agent's would be: no stage, no keyboard.
+    fn restore_webs(&mut self, pages: &BTreeMap<String, horadric_core::saved::SavedPages>) {
+        for (key, saved) in pages {
+            let serial = self.next_serial;
+            self.next_serial += 1;
+            let page = Console::web(format!("{WEB}{key}"), serial, key.clone());
+            self.webs.insert(key.clone(), page);
+            web::restore(key, saved);
+        }
+    }
+
     fn close_web(&mut self, key: &str) {
         self.webs.remove(key);
         self.sync_stage();
@@ -5509,6 +5527,7 @@ impl App {
             page_sizes: web::sizes(),
             accents: theme::accents(),
             page_docks: web::docks(),
+            pages: web::pages(),
             update_told: self.update_told.clone(),
             ..Default::default()
         }
