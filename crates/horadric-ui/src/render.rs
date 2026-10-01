@@ -952,9 +952,9 @@ impl Painter<'_> {
         // Open, it is only a hint, so it stays faint until pointed at;
         // closed, it says why a click on the limits does nothing.
         let ink = match (scene.button(UsageHit::Lock), scene.locked) {
-            (Button::Idle, false) => theme::TEXT_DIM.fade(0.45),
-            (Button::Idle, true) => theme::TEXT_DIM,
-            _ => theme::TEXT,
+            (Button::Idle, false) => theme::text_dim().fade(0.45),
+            (Button::Idle, true) => theme::text_dim(),
+            _ => theme::text(),
         };
         let glyph = if scene.locked { '\u{E72E}' } else { '\u{E785}' };
         self.notch(gpu, l.size.1, &l.lock, &l.limits_box, m.tile_radius);
@@ -2210,11 +2210,11 @@ impl Painter<'_> {
         self.masked(gpu, screen, radius, || {
             for (s, a) in [(3.0, 0.2), (2.0, 0.35), (1.0, 0.5)] {
                 let shade = Rect::new(bite.x - 0.5, bite.y + 1.5, bite.w, bite.h).inset(-s);
-                self.fill_rounded(&shade, corner + s, theme::HOLLOW_SHADE.fade(a));
+                self.fill_rounded(&shade, corner + s, theme::hollow_shade().fade(a));
             }
         });
         self.masked(gpu, bite, corner, || {
-            let stops = [(0.0, theme::PLATE_TOP), (1.0, theme::PLATE_BOTTOM)];
+            let stops = [(0.0, theme::plate_top()), (1.0, theme::plate_bottom())];
             self.fill_gradient(bite, (0.0, h), &stops);
         });
     }
