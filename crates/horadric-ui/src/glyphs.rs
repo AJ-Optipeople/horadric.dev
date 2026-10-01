@@ -30,15 +30,15 @@ use windows::Win32::Graphics::DirectWrite::{
     IDWriteFactory, IDWriteFont1, IDWriteFontCollection, IDWriteFontFace, IDWriteFontFamily,
     IDWriteTextFormat, IDWriteTextLayout, DWRITE_FONT_METRICS, DWRITE_FONT_STRETCH_NORMAL,
     DWRITE_FONT_STYLE, DWRITE_FONT_STYLE_ITALIC, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT,
-    DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_GLYPH_METRICS, DWRITE_GLYPH_RUN,
-    DWRITE_MEASURING_MODE_NATURAL, DWRITE_WORD_WRAPPING_NO_WRAP,
+    DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_GLYPH_METRICS, DWRITE_GLYPH_OFFSET,
+    DWRITE_GLYPH_RUN, DWRITE_MEASURING_MODE_NATURAL, DWRITE_WORD_WRAPPING_NO_WRAP,
 };
-use windows_numerics::Vector2;
+use windows_numerics::{Matrix3x2, Vector2};
 
 use crate::frame::{Decoration, Frame, BOLD, ITALIC};
 use crate::render::{self, hwnd_target, Gpu};
 use crate::theme::{self, Color};
-use crate::viewport;
+use crate::{rain, viewport};
 use horadric_core::saved::Side;
 
 /// Cascadia ships with Windows 11. Consolas is on every Windows since Vista.
@@ -381,7 +381,9 @@ const FIND_INSET: f32 = 8.0;
 
 /// Behind the search bar: the plate, tinted toward the blue of a
 /// selection.
-const HEADER_BG: Color = theme::WINDOW_BG;
+fn header_bg() -> Color {
+    theme::window_bg()
+}
 
 /// Cell geometry in DIPs, snapped so every cell edge is a whole device pixel.
 /// Without the snap, backgrounds of neighbouring cells leave hairline seams.
@@ -409,6 +411,9 @@ pub struct Font {
     /// The characters drawn one at a time, laid out once. Laying one out
     /// finds its fallback font, which is most of what drawing it costs.
     layouts: RefCell<HashMap<(String, u8), IDWriteTextLayout>>,
+    /// The face the Matrix rain is drawn in and its glyphs, loaded the
+    /// first time it rains.
+    rain: RefCell<Option<(IDWriteFontFace, Vec<u16>)>>,
 }
 
 /// Loose characters kept laid out, at most. A screen of a script the font
@@ -467,6 +472,30 @@ pub fn families(chosen: Option<&str>) -> Vec<&str> {
         }
     }
     names
+}
+
+/// The regular face of `family`, when it is installed.
+unsafe fn regular_face(dw: &IDWriteFactory, family: &str) -> Option<IDWriteFontFace> {
+    let collection = system_fonts(dw).ok()?;
+    let mut index = 0u32;
+    let mut exists = BOOL(0);
+    collection
+        .FindFamilyName(&HSTRING::from(family), &mut index, &mut exists)
+        .ok()?;
+    if !exists.as_bool() {
+        return None;
+    }
+    collection
+        .GetFontFamily(index)
+        .ok()?
+        .GetFirstMatchingFont(
+            DWRITE_FONT_WEIGHT_NORMAL,
+            DWRITE_FONT_STRETCH_NORMAL,
+            DWRITE_FONT_STYLE_NORMAL,
+        )
+        .ok()?
+        .CreateFontFace()
+        .ok()
 }
 
 fn system_fonts(dw: &IDWriteFactory) -> Result<IDWriteFontCollection> {
@@ -530,7 +559,29 @@ impl Font {
             size: Cell::new(size),
             cache: RefCell::new(HashMap::new()),
             layouts: RefCell::new(HashMap::new()),
+            rain: RefCell::new(None),
         })
+    }
+
+    /// The face for the rain and the glyphs of [`rain::CHARS`] it has: a
+    /// Japanese face for the katakana where one is installed, otherwise the
+    /// terminal's own with the digits and signs.
+    fn rain_glyphs(&self) -> (IDWriteFontFace, Vec<u16>) {
+        if let Some(r) = self.rain.borrow().as_ref() {
+            return r.clone();
+        }
+        let japanese = ["MS Gothic", "Yu Gothic", "Meiryo"]
+            .iter()
+            .find_map(|name| unsafe { regular_face(&self.dw, name) })
+            .filter(|f| glyph_index(f, '\u{FF71}') != 0);
+        let face = japanese.unwrap_or_else(|| self.faces.borrow().faces[0].clone());
+        let glyphs: Vec<u16> = rain::CHARS
+            .chars()
+            .map(|c| glyph_index(&face, c))
+            .filter(|&g| g != 0)
+            .collect();
+        *self.rain.borrow_mut() = Some((face.clone(), glyphs.clone()));
+        (face, glyphs)
     }
 
     pub fn size(&self) -> f32 {
@@ -694,6 +745,8 @@ pub struct GridTarget {
     shade: ID2D1LinearGradientBrush,
     /// A key's face, lit from above.
     face: ID2D1LinearGradientBrush,
+    /// The theme the gradients were made in.
+    theme: theme::Theme,
 }
 
 impl GridTarget {
@@ -707,14 +760,14 @@ impl GridTarget {
             rt.SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
             let brush = rt.CreateSolidColorBrush(&color(Rgb { r: 0, g: 0, b: 0 }), None)?;
             let black = Color::rgb(0);
-            let plate = gradient(&rt, &[theme::PLATE_TOP, theme::PLATE_BOTTOM])?;
+            let plate = gradient(&rt, &[theme::plate_top(), theme::plate_bottom()])?;
             let shade = gradient(&rt, &[black.with_alpha(0.55), black.with_alpha(0.0)])?;
             let white = Color::rgb(0xFFFFFF);
             let face = gradient(
                 &rt,
                 &[
-                    theme::SURFACE.mix(white, 0.07),
-                    theme::SURFACE.mix(black, 0.1),
+                    theme::surface().mix(white, 0.07),
+                    theme::surface().mix(black, 0.1),
                 ],
             )?;
             Ok(GridTarget {
@@ -723,6 +776,7 @@ impl GridTarget {
                 plate,
                 shade,
                 face,
+                theme: theme::current(),
             })
         }
     }
@@ -733,6 +787,11 @@ impl GridTarget {
 
     pub fn set_dpi(&self, dpi: u32) {
         unsafe { self.rt.SetDpi(dpi as f32, dpi as f32) }
+    }
+
+    /// Whether its gradients and its kept frame are of another theme.
+    pub fn outdated(&self) -> bool {
+        self.theme != theme::current()
     }
 
     /// Shows the frame drawn last again. `Err` means the target must be
@@ -762,6 +821,7 @@ impl GridTarget {
         page: Option<&PageFrame>,
         veil: f32,
         plate: (f32, f32),
+        rain: Option<(u64, f32)>,
     ) -> Result<()> {
         let (ox, oy) = grid_origin();
         let x = |col: usize| ox + col as f32 * cell.w;
@@ -797,6 +857,10 @@ impl GridTarget {
             };
             self.rt
                 .PushAxisAlignedClip(&inner, D2D1_ANTIALIAS_MODE_ALIASED);
+
+            if let Some((seed, t)) = rain {
+                self.rain(font, cell, &inner, seed, t);
+            }
 
             for f in &frame.fills {
                 self.brush.SetColor(&color(f.color));
@@ -985,9 +1049,9 @@ impl GridTarget {
             let text_right = cross.unwrap_or(right - 4.0);
             let name: Vec<u16> = name.encode_utf16().collect();
             self.brush.SetColor(&render::color(if shown {
-                theme::TEXT
+                theme::text()
             } else {
-                theme::TEXT_DIM
+                theme::text_dim()
             }));
             self.rt.DrawText(
                 &name,
@@ -1004,9 +1068,9 @@ impl GridTarget {
             );
             if let Some(c) = cross {
                 let ink = if shown {
-                    theme::TEXT_DIM
+                    theme::text_dim()
                 } else {
-                    theme::TEXT_DIM.with_alpha(0.6)
+                    theme::text_dim().with_alpha(0.6)
                 };
                 glyph("\u{E711}", c, c + TAB_CROSS, ink);
             }
@@ -1021,7 +1085,7 @@ impl GridTarget {
             bottom: top + d,
         };
         self.raised_key(&new, d / 2.0);
-        glyph("\u{E710}", new.left, new.right, theme::TEXT_DIM);
+        glyph("\u{E710}", new.left, new.right, theme::text_dim());
     }
 
     /// A key standing off the plate: its shadow on the plate, its side
@@ -1042,7 +1106,7 @@ impl GridTarget {
                 .FillRoundedRectangle(&rounded(&s, radius + grow), &self.brush);
         }
         self.brush
-            .SetColor(&render::color(theme::SURFACE.mix(Color::rgb(0), 0.6)));
+            .SetColor(&render::color(theme::surface().mix(Color::rgb(0), 0.6)));
         let below = D2D_RECT_F {
             top: r.top + side,
             bottom: r.bottom + side,
@@ -1053,7 +1117,7 @@ impl GridTarget {
         // The face drawn a pixel down over a lighter copy leaves the lit
         // top edge.
         self.brush.SetColor(&render::color(
-            theme::SURFACE.mix(Color::rgb(0xFFFFFF), 0.12),
+            theme::surface().mix(Color::rgb(0xFFFFFF), 0.12),
         ));
         self.rt
             .FillRoundedRectangle(&rounded(r, radius), &self.brush);
@@ -1081,11 +1145,11 @@ impl GridTarget {
             bottom: r.bottom + 1.5,
         };
         self.brush
-            .SetColor(&render::color(theme::ENGRAVE_LIGHT.fade(1.6)));
+            .SetColor(&render::color(theme::engrave_light().fade(1.6)));
         self.rt
             .FillRoundedRectangle(&rounded(&lip, radius + 0.5), &self.brush);
         self.brush
-            .SetColor(&render::color(theme::WELL.mix(theme::SURFACE, 0.15)));
+            .SetColor(&render::color(theme::well().mix(theme::surface(), 0.15)));
         self.rt
             .FillRoundedRectangle(&rounded(r, radius), &self.brush);
         self.sink(r, radius, 6.0);
@@ -1095,7 +1159,7 @@ impl GridTarget {
             right: r.right - 0.5,
             bottom: r.bottom - 0.5,
         };
-        self.brush.SetColor(&render::color(theme::ENGRAVE_DARK));
+        self.brush.SetColor(&render::color(theme::engrave_dark()));
         self.rt
             .DrawRoundedRectangle(&rounded(&edge, radius - 0.5), &self.brush, 1.0, None);
     }
@@ -1122,7 +1186,7 @@ impl GridTarget {
             }
             None => {
                 dot(3.5, Color::rgb(0).with_alpha(0.55));
-                dot(2.5, theme::LAMP_OFF);
+                dot(2.5, theme::lamp_off());
             }
         }
     }
@@ -1167,12 +1231,12 @@ impl GridTarget {
     unsafe fn page_frame(&self, gpu: &Gpu, p: &PageFrame) {
         let [l, t, r, b] = p.page;
         let lit = if p.dragging {
-            theme::TEXT
+            theme::text()
         } else {
-            theme::TEXT_DIM
+            theme::text_dim()
         };
         self.brush
-            .SetColor(&render::color(theme::TEXT_DIM.with_alpha(0.35)));
+            .SetColor(&render::color(theme::text_dim().with_alpha(0.35)));
         self.rt.DrawRectangle(
             &D2D_RECT_F {
                 left: l - 0.5,
@@ -1237,6 +1301,81 @@ impl GridTarget {
 
     /// The plate round the glass and the glass itself, with the plate's lit
     /// lip along the glass's bottom edge where it is sunk in.
+    /// The code falling down the glass at `t` seconds in the pattern of `seed`, dim enough that the
+    /// text over it reads as if it were not there. Mirrored, as in the film,
+    /// and drawn as one glyph run for each step of brightness.
+    unsafe fn rain(&self, font: &Font, cell: &CellSize, inner: &D2D_RECT_F, seed: u64, t: f32) {
+        const STEPS: usize = 6;
+        // Dimmed again on top of the steps, so the text over it always reads
+        // first.
+        const STRENGTH: f32 = 0.85;
+        let (face, glyphs) = font.rain_glyphs();
+        if glyphs.is_empty() {
+            return;
+        }
+        let (ox, oy) = grid_origin();
+        let cols = ((inner.right - ox) / cell.w).ceil().max(0.0) as usize;
+        let rows = ((inner.bottom - oy) / cell.h).ceil().max(0.0) as usize;
+        let mut steps: [(Vec<u16>, Vec<DWRITE_GLYPH_OFFSET>); STEPS] = Default::default();
+        for d in rain::drops(seed, cols, rows, t, glyphs.len()) {
+            let step = ((d.light * STEPS as f32).ceil() as usize).clamp(1, STEPS) - 1;
+            steps[step].0.push(glyphs[d.pick]);
+            steps[step].1.push(DWRITE_GLYPH_OFFSET {
+                advanceOffset: d.col as f32 * cell.w,
+                ascenderOffset: -(d.row as f32 * cell.h),
+            });
+        }
+        let mut kept = Matrix3x2::default();
+        self.rt.GetTransform(&mut kept);
+        let mid = (inner.left + inner.right) / 2.0;
+        let mirror = Matrix3x2 {
+            M11: -1.0,
+            M12: 0.0,
+            M21: 0.0,
+            M22: 1.0,
+            M31: 2.0 * mid,
+            M32: 0.0,
+        };
+        self.rt.SetTransform(&(mirror * kept));
+        let p = theme::palette();
+        for (i, (indices, offsets)) in steps.iter().enumerate() {
+            if indices.is_empty() {
+                continue;
+            }
+            let level = (i + 1) as f32 / STEPS as f32;
+            let ink = if i + 1 == STEPS {
+                p.term_cursor.with_alpha(0.3 * STRENGTH)
+            } else {
+                p.term_fg
+                    .with_alpha((0.03 + 0.15 * level * level) * STRENGTH)
+            };
+            let advances = vec![0.0f32; indices.len()];
+            let run = DWRITE_GLYPH_RUN {
+                fontFace: ManuallyDrop::new(Some(face.clone())),
+                fontEmSize: font.size.get(),
+                glyphCount: indices.len() as u32,
+                glyphIndices: indices.as_ptr(),
+                glyphAdvances: advances.as_ptr(),
+                glyphOffsets: offsets.as_ptr(),
+                isSideways: false.into(),
+                bidiLevel: 0,
+            };
+            self.brush.SetColor(&render::color(ink));
+            self.rt.DrawGlyphRun(
+                Vector2 {
+                    X: ox,
+                    Y: oy + cell.baseline,
+                },
+                &run,
+                &self.brush,
+                DWRITE_MEASURING_MODE_NATURAL,
+            );
+            let mut run = run;
+            ManuallyDrop::drop(&mut run.fontFace);
+        }
+        self.rt.SetTransform(&kept);
+    }
+
     unsafe fn bezel(
         &self,
         screen: &D2D_RECT_F,
@@ -1270,10 +1409,10 @@ impl GridTarget {
             bottom: groove.bottom + 1.0,
             ..groove
         };
-        self.brush.SetColor(&render::color(theme::ENGRAVE_LIGHT));
+        self.brush.SetColor(&render::color(theme::engrave_light()));
         self.rt
             .DrawRoundedRectangle(&rounded(&lit, PANE_RADIUS), &self.brush, 1.0, None);
-        self.brush.SetColor(&render::color(theme::ENGRAVE_DARK));
+        self.brush.SetColor(&render::color(theme::engrave_dark()));
         self.rt
             .DrawRoundedRectangle(&rounded(&groove, PANE_RADIUS), &self.brush, 1.0, None);
         let lip = D2D_RECT_F {
@@ -1283,7 +1422,7 @@ impl GridTarget {
             bottom: screen.bottom + 1.5,
         };
         self.brush
-            .SetColor(&render::color(theme::ENGRAVE_LIGHT.fade(1.6)));
+            .SetColor(&render::color(theme::engrave_light().fade(1.6)));
         self.rt
             .FillRoundedRectangle(&rounded(&lip, SCREEN_RADIUS + 0.5), &self.brush);
         self.brush.SetColor(&color(glass));
@@ -1299,7 +1438,7 @@ impl GridTarget {
         let rim = if header.active && !header.lifted {
             header.accent.with_alpha(0.55)
         } else {
-            theme::ENGRAVE_DARK
+            theme::engrave_dark()
         };
         let edge = D2D_RECT_F {
             left: screen.left + 0.5,
@@ -1353,7 +1492,7 @@ impl GridTarget {
             self.rt
                 .PushAxisAlignedClip(&band, D2D1_ANTIALIAS_MODE_ALIASED);
             self.brush
-                .SetColor(&render::color(theme::WORKING.with_alpha(0.22)));
+                .SetColor(&render::color(theme::working().with_alpha(0.22)));
             self.rt.FillRoundedRectangle(
                 &rounded(
                     &D2D_RECT_F {
@@ -1386,7 +1525,7 @@ impl GridTarget {
             }
             None => {
                 dot(3.5, Color::rgb(0).with_alpha(0.55));
-                dot(2.5, theme::LAMP_OFF);
+                dot(2.5, theme::lamp_off());
             }
         }
 
@@ -1399,7 +1538,7 @@ impl GridTarget {
         };
         let button = |glyph: &str, at: f32| {
             let glyph: Vec<u16> = glyph.encode_utf16().collect();
-            self.brush.SetColor(&render::color(theme::TEXT_DIM));
+            self.brush.SetColor(&render::color(theme::text_dim()));
             self.rt.DrawText(
                 &glyph,
                 &gpu.icon_small,
@@ -1444,9 +1583,9 @@ impl GridTarget {
             })
             .unwrap_or(right - left);
         let text = if h.active {
-            theme::TEXT
+            theme::text()
         } else {
-            theme::TEXT_DIM
+            theme::text_dim()
         };
         self.brush.SetColor(&render::color(text));
         self.rt.DrawText(
@@ -1465,7 +1604,7 @@ impl GridTarget {
         let detail_left = left + name_w + 10.0;
         if !h.detail.is_empty() && detail_left < right {
             let detail: Vec<u16> = h.detail.encode_utf16().collect();
-            self.brush.SetColor(&render::color(theme::TEXT_DIM));
+            self.brush.SetColor(&render::color(theme::text_dim()));
             self.rt.DrawText(
                 &detail,
                 &gpu.small,
@@ -1505,9 +1644,9 @@ impl GridTarget {
         };
         let dim = |on: bool| {
             if on {
-                theme::TEXT_DIM
+                theme::text_dim()
             } else {
-                theme::TEXT_DIM.with_alpha(0.35)
+                theme::text_dim().with_alpha(0.35)
             }
         };
         button("\u{E72B}", l.back, dim(bar.back));
@@ -1516,16 +1655,16 @@ impl GridTarget {
         // A phone for a page at a size of its own, a screen for one that
         // fills the pane.
         let (glyph, ink) = if bar.sized {
-            ("\u{E8EA}", accent.mix(theme::TEXT, 0.35))
+            ("\u{E8EA}", accent.mix(theme::text(), 0.35))
         } else {
-            ("\u{E7F4}", theme::TEXT_DIM)
+            ("\u{E7F4}", theme::text_dim())
         };
         button(glyph, l.size, ink);
         for &(side, at) in &l.places {
             let ink = if bar.dock == Some(side) {
-                accent.mix(theme::TEXT, 0.35)
+                accent.mix(theme::text(), 0.35)
             } else {
-                theme::TEXT_DIM
+                theme::text_dim()
             };
             self.place_icon(side, at, ink, bar.dock == Some(side));
         }
@@ -1540,13 +1679,13 @@ impl GridTarget {
             return;
         }
         let radius = (HEADER_H - 2.0 * BAR_MARGIN) / 2.0;
-        self.brush.SetColor(&render::color(theme::WELL));
+        self.brush.SetColor(&render::color(theme::well()));
         self.rt
             .FillRoundedRectangle(&rounded(&field, radius), &self.brush);
         let rim = if bar.edit.is_some() {
-            theme::WORKING.with_alpha(0.55)
+            theme::working().with_alpha(0.55)
         } else {
-            theme::ENGRAVE_DARK
+            theme::engrave_dark()
         };
         let edge = D2D_RECT_F {
             left: field.left + 0.5,
@@ -1585,7 +1724,7 @@ impl GridTarget {
                 let (a, b) = e.selection;
                 for r in render::range_rects(&layout, a, b - a) {
                     self.brush
-                        .SetColor(&render::color(theme::WORKING.with_alpha(0.4)));
+                        .SetColor(&render::color(theme::working().with_alpha(0.4)));
                     self.rt.FillRectangle(
                         &D2D_RECT_F {
                             left: x + r.x,
@@ -1598,9 +1737,9 @@ impl GridTarget {
                 }
             }
             let ink = match (placeholder, bar.edit.is_some()) {
-                (true, _) => theme::TEXT_DIM.with_alpha(0.55),
-                (false, true) => theme::TEXT,
-                (false, false) => theme::TEXT_DIM,
+                (true, _) => theme::text_dim().with_alpha(0.55),
+                (false, true) => theme::text(),
+                (false, false) => theme::text_dim(),
             };
             self.brush.SetColor(&render::color(ink));
             self.rt.DrawTextLayout(
@@ -1615,7 +1754,7 @@ impl GridTarget {
                 _ => None,
             };
             if let Some(cx) = caret {
-                self.brush.SetColor(&render::color(theme::TEXT));
+                self.brush.SetColor(&render::color(theme::text()));
                 self.rt.FillRectangle(
                     &D2D_RECT_F {
                         left: cx.round() - 0.5,
@@ -1641,10 +1780,10 @@ impl GridTarget {
             bottom: screen.top + FIND_INSET + FIND_H,
         };
         self.brush
-            .SetColor(&render::color(HEADER_BG.mix(theme::WORKING, 0.12)));
+            .SetColor(&render::color(header_bg().mix(theme::working(), 0.12)));
         self.rt.FillRectangle(&bar, &self.brush);
         self.brush
-            .SetColor(&render::color(theme::WORKING.with_alpha(0.6)));
+            .SetColor(&render::color(theme::working().with_alpha(0.6)));
         let edge = D2D_RECT_F {
             left: bar.left + 0.5,
             top: bar.top + 0.5,
@@ -1673,14 +1812,14 @@ impl GridTarget {
         text(
             "\u{E721}",
             &gpu.icon_small,
-            theme::TEXT_DIM,
+            theme::text_dim(),
             bar.left,
             bar.left + FIND_H,
         );
         let left = bar.left + FIND_H;
         let right = bar.right - 10.0;
-        text(f.status, &gpu.small_right, theme::TEXT_DIM, left, right);
-        text(f.query, &gpu.body, theme::TEXT, left, right);
+        text(f.status, &gpu.small_right, theme::text_dim(), left, right);
+        text(f.query, &gpu.body, theme::text(), left, right);
         // The caret after the query, where the next character goes.
         let wide: Vec<u16> = f.query.encode_utf16().collect();
         let query_w = gpu
@@ -1693,7 +1832,7 @@ impl GridTarget {
             })
             .unwrap_or(0.0);
         let x = (left + query_w + 1.0).min(right);
-        self.brush.SetColor(&render::color(theme::TEXT));
+        self.brush.SetColor(&render::color(theme::text()));
         self.rt.FillRectangle(
             &D2D_RECT_F {
                 left: x,

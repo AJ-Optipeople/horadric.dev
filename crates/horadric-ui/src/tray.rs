@@ -22,6 +22,7 @@ use horadric_core::saved::Discord;
 
 use crate::menu::{self, Item};
 use crate::screens::{self, Screen};
+use crate::theme::Theme;
 use crate::{icon, recent};
 
 const ID: u32 = 1;
@@ -56,6 +57,8 @@ pub enum Choice {
     Arrange,
     /// Stand the columns on the screen at this place in the list given.
     Screen(usize),
+    /// Draw the whole app in this theme.
+    Theme(Theme),
     /// Draw the terminals in this font family, by its place in the list
     /// given.
     Font(usize),
@@ -144,7 +147,7 @@ pub const HISTORY: usize = 1000;
 /// `screens` are offered when there is more than one, with the one named
 /// `shown` checked. `update` is a newer release's version, when a check
 /// found one. `fonts` are the families the terminals can be drawn in,
-/// with `font` checked. `xp` is the experience counted from git, None
+/// with `font` checked, and `theme` is the one the app is drawn in. `xp` is the experience counted from git, None
 /// until the first count is back.
 #[allow(clippy::too_many_arguments)]
 pub fn menu(
@@ -161,6 +164,7 @@ pub fn menu(
     update: Option<&str>,
     fonts: &[String],
     font: &str,
+    theme: Theme,
     xp: Option<u64>,
 ) -> Option<Choice> {
     const NEW: usize = 1;
@@ -178,6 +182,7 @@ pub fn menu(
     const LISTEN: usize = 13;
     const SOUNDS: usize = 14;
     const DISCORD: usize = 20;
+    const THEME: usize = 40;
     const SCREEN: usize = 50;
     const RECENT: usize = 100;
     const FONT: usize = 200;
@@ -244,6 +249,16 @@ pub fn menu(
             .collect();
         items.push(Item::Submenu("Tiles on screen".into(), lines));
     }
+    let lines = Theme::ALL
+        .iter()
+        .enumerate()
+        .map(|(i, &t)| Item::Action {
+            id: THEME + i,
+            label: t.label().into(),
+            checked: t == theme,
+        })
+        .collect();
+    items.push(Item::Submenu("Theme".into(), lines));
     if !fonts.is_empty() {
         // Up to the first History id, which is more families than anyone
         // has installed.
@@ -311,7 +326,8 @@ pub fn menu(
         CHECK => Some(Choice::CheckUpdates),
         UPDATE => Some(Choice::Update),
         END_ALL => Some(Choice::EndAll),
-        i if (DISCORD..SCREEN).contains(&i) => {
+        i if (THEME..SCREEN).contains(&i) => Theme::ALL.get(i - THEME).copied().map(Choice::Theme),
+        i if (DISCORD..THEME).contains(&i) => {
             Discord::ALL.get(i - DISCORD).copied().map(Choice::Discord)
         }
         i if i >= HISTORY => Some(Choice::History(i)),

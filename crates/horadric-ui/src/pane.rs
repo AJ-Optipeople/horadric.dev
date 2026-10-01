@@ -54,17 +54,17 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::Shell::{DragAcceptFiles, DragFinish, HDROP};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetCaretBlinkTime, GetClientRect, GetCursorPos,
-    GetParent, GetWindowLongPtrW, KillTimer, LoadCursorW, PeekMessageW, RegisterClassW,
-    SendMessageW, SetCursor, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, CREATESTRUCTW,
-    CS_DBLCLKS, GWLP_USERDATA, HTCLIENT, IDC_ARROW, IDC_HAND, IDC_IBEAM, IDC_SIZENS, IDC_SIZENWSE,
-    IDC_SIZEWE, MSG, PM_NOREMOVE, PM_REMOVE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
-    SW_HIDE, SW_SHOWNA, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CAPTURECHANGED, WM_CHAR, WM_DEADCHAR,
-    WM_DESTROY, WM_DPICHANGED_AFTERPARENT, WM_DROPFILES, WM_ERASEBKGND, WM_IME_STARTCOMPOSITION,
-    WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE,
-    WM_NCDESTROY, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SETFOCUS, WM_SIZE,
-    WM_SYSCHAR, WM_SYSDEADCHAR, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WM_USER, WNDCLASSW, WS_CHILD,
-    WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_VISIBLE,
+    GetParent, GetWindowLongPtrW, IsWindowVisible, KillTimer, LoadCursorW, PeekMessageW,
+    RegisterClassW, SendMessageW, SetCursor, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+    CREATESTRUCTW, CS_DBLCLKS, GWLP_USERDATA, HTCLIENT, IDC_ARROW, IDC_HAND, IDC_IBEAM, IDC_SIZENS,
+    IDC_SIZENWSE, IDC_SIZEWE, MSG, PM_NOREMOVE, PM_REMOVE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    SWP_NOZORDER, SW_HIDE, SW_SHOWNA, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CAPTURECHANGED, WM_CHAR,
+    WM_DEADCHAR, WM_DESTROY, WM_DPICHANGED_AFTERPARENT, WM_DROPFILES, WM_ERASEBKGND,
+    WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL,
+    WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SETFOCUS,
+    WM_SIZE, WM_SYSCHAR, WM_SYSDEADCHAR, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WM_USER, WNDCLASSW,
+    WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_VISIBLE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowRect, SetParent, GWLP_HWNDPARENT, GWL_EXSTYLE, GWL_STYLE, HWND_TOP, SWP_FRAMECHANGED,
@@ -103,6 +103,11 @@ const SYNC_TIMER: usize = 1;
 const ANIM_TIMER: usize = 2;
 /// Fires when a blinking cursor next turns on or off.
 const BLINK_TIMER: usize = 3;
+/// The next step of the Matrix rain behind a terminal's text.
+const RAIN_TIMER: usize = 4;
+/// How often the rain moves on, about as often as it did on the film's
+/// monitors.
+const RAIN_MS: u32 = 80;
 /// How far a pane without the keyboard steps back: the background laid
 /// over it at this strength.
 const DIMMED: f32 = 0.32;
@@ -180,6 +185,7 @@ struct Shown {
     size: (i32, i32),
     dpi: u32,
     font: (f32, String),
+    theme: theme::Theme,
 }
 
 pub struct Pane {
@@ -202,6 +208,8 @@ pub struct Pane {
     /// screen, such as a title whose spinner is left out, presents it
     /// again instead of drawing it.
     drawn: RefCell<Option<Shown>>,
+    /// Its rain timer runs.
+    raining: Cell<bool>,
     target: RefCell<Option<GridTarget>>,
     /// The DPI the render target was made for. A child window hears of a
     /// new monitor only through its parent.
@@ -311,6 +319,7 @@ impl Pane {
             floating: Cell::new(None),
             stale: Cell::new(true),
             drawn: RefCell::new(None),
+            raining: Cell::new(false),
             target: RefCell::new(None),
             dpi: Cell::new(0),
             focused: Cell::new(false),
@@ -656,6 +665,22 @@ impl Pane {
         self.invalidate();
     }
 
+    /// The time the rain behind the text is at, while the theme rains on a
+    /// terminal, with its timer kept running, and the pane's own pattern.
+    fn rain(&self) -> Option<(u64, f32)> {
+        static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+        if !theme::rains() || !self.is_session() {
+            return None;
+        }
+        if !self.raining.replace(true) {
+            unsafe {
+                SetTimer(Some(self.hwnd), RAIN_TIMER, RAIN_MS, None);
+            }
+        }
+        let t = START.get_or_init(Instant::now).elapsed().as_secs_f32();
+        Some((self.serial() as u64, t))
+    }
+
     /// A session's own pane, not a file view or a browser pane.
     fn is_session(&self) -> bool {
         !self.console.is_view() && self.console.web.is_none()
@@ -709,6 +734,10 @@ impl Pane {
     }
 
     fn paint(&self) {
+        if self.target.borrow().as_ref().is_some_and(|t| t.outdated()) {
+            *self.target.borrow_mut() = None;
+            self.stale.set(true);
+        }
         if !self.stale.get() {
             let shown = self.target.borrow().as_ref().map(|t| t.present());
             match shown {
@@ -892,8 +921,10 @@ impl Pane {
                 self.place_ime(rect);
             }
         }
+        let rain = self.rain();
         // A browser pane's header has its tabs and address besides, and its
-        // frame is empty and cheap, so it always draws.
+        // frame is empty and cheap, so it always draws, and so does a pane
+        // the rain moves behind.
         let look = Shown {
             frame,
             name: name.clone(),
@@ -912,8 +943,11 @@ impl Pane {
             size: (r.right, r.bottom),
             dpi,
             font: (font.size(), font.family()),
+            theme: theme::current(),
         };
-        let same = self.console.web.is_none() && self.drawn.borrow().as_ref() == Some(&look);
+        let same = self.console.web.is_none()
+            && rain.is_none()
+            && self.drawn.borrow().as_ref() == Some(&look);
         if same {
             if let Some(Err(_)) = slot.as_ref().map(GridTarget::present) {
                 *slot = None;
@@ -932,6 +966,7 @@ impl Pane {
                 page.as_ref(),
                 veil,
                 plate,
+                rain,
             )
         });
         let drawn = matches!(result, Some(Ok(())));
@@ -2286,6 +2321,20 @@ impl Pane {
                     let _ = KillTimer(Some(self.hwnd), BLINK_TIMER);
                 }
                 self.invalidate();
+                Some(LRESULT(0))
+            }
+            WM_TIMER if wparam.0 == RAIN_TIMER => {
+                if theme::rains() {
+                    if unsafe { IsWindowVisible(self.hwnd) }.as_bool() {
+                        self.invalidate();
+                    }
+                } else {
+                    unsafe {
+                        let _ = KillTimer(Some(self.hwnd), RAIN_TIMER);
+                    }
+                    self.raining.set(false);
+                    self.invalidate();
+                }
                 Some(LRESULT(0))
             }
             WM_TIMER if wparam.0 == SYNC_TIMER => {

@@ -14,7 +14,7 @@
 //! breathes and backlights its whole key, an ended one is dark and its key
 //! latched down.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::mem::ManuallyDrop;
 use std::time::{Duration, SystemTime};
@@ -583,6 +583,8 @@ pub struct Target {
     brush: ID2D1SolidColorBrush,
     /// What holds still, kept between frames, and the size it was made at.
     layer: RefCell<Option<(ID2D1BitmapRenderTarget, D2D_SIZE_U)>>,
+    /// The theme the layer was drawn in, so a new one draws it again.
+    theme: Cell<theme::Theme>,
     gradients: Gradients,
 }
 
@@ -669,11 +671,12 @@ pub fn resize_target(rt: &ID2D1HwndRenderTarget, width_px: u32, height_px: u32) 
 impl Target {
     pub fn new(gpu: &Gpu, hwnd: HWND, width_px: u32, height_px: u32, dpi: u32) -> Result<Self> {
         let rt = hwnd_target(gpu, hwnd, width_px, height_px, dpi, false)?;
-        let brush = unsafe { rt.CreateSolidColorBrush(&color(theme::TEXT), None)? };
+        let brush = unsafe { rt.CreateSolidColorBrush(&color(theme::text()), None)? };
         Ok(Target {
             rt,
             brush,
             layer: RefCell::new(None),
+            theme: Cell::new(theme::current()),
             gradients: Gradients::default(),
         })
     }
@@ -696,7 +699,8 @@ impl Target {
         unsafe {
             let size = self.rt.GetPixelSize();
             let mut layer = self.layer.borrow_mut();
-            let stale = scene.rebuild || layer.as_ref().is_none_or(|(_, s)| *s != size);
+            let retheme = self.theme.replace(theme::current()) != theme::current();
+            let stale = scene.rebuild || retheme || layer.as_ref().is_none_or(|(_, s)| *s != size);
             if stale {
                 let bitmap = match layer.take() {
                     Some((b, s)) if s == size => b,
@@ -844,7 +848,7 @@ impl Target {
             self.rt.BeginDraw();
             let p = self.painter(&self.rt);
             p.plate(m, size);
-            p.draw_layout(text, theme::TEXT, Rect::new(pad.0, pad.1, size.0, size.1));
+            p.draw_layout(text, theme::text(), Rect::new(pad.0, pad.1, size.0, size.1));
             self.rt.EndDraw(None, None)
         }
     }
@@ -896,7 +900,7 @@ impl Painter<'_> {
             if let Some((r, s, look)) = tiles(scene).nth(i) {
                 self.tile(gpu, m, scene, i, &r, s, &look);
                 // Blue, as a pane is while it is dragged.
-                self.stroke_rounded(&r, m.tile_radius, theme::WORKING.with_alpha(0.7), 1.5);
+                self.stroke_rounded(&r, m.tile_radius, theme::working().with_alpha(0.7), 1.5);
             }
         }
         self.beams(scene);
@@ -924,8 +928,8 @@ impl Painter<'_> {
         self.plate(m, l.size);
         if let Some(h) = l.header {
             let ink = match scene.button(UsageHit::Header) {
-                Button::Idle => theme::TEXT_DIM,
-                _ => theme::TEXT,
+                Button::Idle => theme::text_dim(),
+                _ => theme::text(),
             };
             let label = Rect::new(h.x + 4.0, h.y, h.w - 8.0, h.h);
             self.text(&gpu.small, ink, scene.provider, label);
@@ -943,7 +947,7 @@ impl Painter<'_> {
         match (limits.first(), first) {
             (None, Some(r)) => {
                 let r = Rect::new(r.x + INNER_PAD, r.y, r.w - 2.0 * INNER_PAD, r.h);
-                self.text(&gpu.small, theme::TEXT_DIM, scene.empty, r);
+                self.text(&gpu.small, theme::text_dim(), scene.empty, r);
             }
             _ => {
                 for (r, (name, limit)) in l.limits.iter().zip(&limits) {
@@ -954,9 +958,9 @@ impl Painter<'_> {
         // Open, it is only a hint, so it stays faint until pointed at;
         // closed, it says why a click on the limits does nothing.
         let ink = match (scene.button(UsageHit::Lock), scene.locked) {
-            (Button::Idle, false) => theme::TEXT_DIM.fade(0.45),
-            (Button::Idle, true) => theme::TEXT_DIM,
-            _ => theme::TEXT,
+            (Button::Idle, false) => theme::text_dim().fade(0.45),
+            (Button::Idle, true) => theme::text_dim(),
+            _ => theme::text(),
         };
         let glyph = if scene.locked { '\u{E72E}' } else { '\u{E785}' };
         self.notch(gpu, l.size.1, &l.lock, &l.limits_box, m.tile_radius);
@@ -975,7 +979,7 @@ impl Painter<'_> {
             if !name.is_empty() {
                 self.icon(
                     &gpu.icon_small,
-                    theme::TEXT_DIM,
+                    theme::text_dim(),
                     chevron,
                     Rect::new(x + 5.0, r.y + 6.0, 14.0, 22.0),
                 );
@@ -1000,10 +1004,10 @@ impl Painter<'_> {
         self.plate(m, l.size);
         let h = &l.header;
         let label = Rect::new(h.x + 4.0, h.y, h.w - 8.0, h.h);
-        self.text(&gpu.small, theme::TEXT_DIM, "Stash", label);
+        self.text(&gpu.small, theme::text_dim(), "Stash", label);
         let count = format!("{} of {}", scene.items.len(), l.slots.len());
-        self.text_tabular(gpu, &gpu.small_right, theme::TEXT_DIM, &count, label);
-        self.sunk(gpu, &l.well, m.tile_radius, theme::WELL);
+        self.text_tabular(gpu, &gpu.small_right, theme::text_dim(), &count, label);
+        self.sunk(gpu, &l.well, m.tile_radius, theme::well());
         let radius = m.tile_radius - 4.0;
         for (i, r) in l.slots.iter().enumerate() {
             let Some(item) = scene.items.get(i) else {
@@ -1016,7 +1020,7 @@ impl Painter<'_> {
                 Button::Idle => 0.45,
                 Button::Pressed => 0.1,
             };
-            self.key(gpu, r, radius, theme::SURFACE, depth, 1.0);
+            self.key(gpu, r, radius, theme::surface(), depth, 1.0);
             let pad = 8.0;
             let line_h = (r.h - 8.0) / 2.0;
             let name = Rect::new(r.x + pad, r.y + 4.0, r.w - 2.0 * pad, line_h);
@@ -1029,7 +1033,7 @@ impl Painter<'_> {
                 line_h,
             );
             self.led(led_x, project.y + project.h / 2.0, item.accent);
-            self.text(&gpu.small, theme::TEXT_DIM, &item.project, project);
+            self.text(&gpu.small, theme::text_dim(), &item.project, project);
         }
     }
 
@@ -1069,10 +1073,10 @@ impl Painter<'_> {
             }
             (None, Some(name)) => {
                 let b = layout::button(CubeHit::Transmute, scene.hot, scene.pressed);
-                self.key(gpu, t, radius, theme::SURFACE, depth(b), 1.0);
+                self.key(gpu, t, radius, theme::surface(), depth(b), 1.0);
                 let half = inner.h / 2.0;
                 let line = Rect::new(inner.x, inner.y + 4.0, inner.w, half - 4.0);
-                self.text(&gpu.small, theme::TEXT_DIM, "Transmute", line);
+                self.text(&gpu.small, theme::text_dim(), "Transmute", line);
                 let below = Rect::new(inner.x, inner.y + half, inner.w, half - 4.0);
                 self.text(&gpu.small, gold, name, below);
             }
@@ -1081,7 +1085,7 @@ impl Painter<'_> {
                 if let Some(lay) = self.layout(gpu, &gpu.small, scene.hint, inner) {
                     let _ = lay.SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
                     let _ = lay.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-                    self.draw_layout(&lay, theme::TEXT_DIM, inner);
+                    self.draw_layout(&lay, theme::text_dim(), inner);
                 }
             }
         }
@@ -1089,24 +1093,24 @@ impl Painter<'_> {
         let label = Rect::new(r.x, r.y + 18.0, r.w, r.h - 20.0);
         if scene.main {
             let b = layout::button(CubeHit::Main, scene.hot, scene.pressed);
-            self.key(gpu, r, radius, theme::SURFACE, depth(b), 1.0);
+            self.key(gpu, r, radius, theme::surface(), depth(b), 1.0);
             self.led(r.x + r.w / 2.0, r.y + 11.0, gold);
-            self.text(&gpu.small_centre, theme::TEXT, "main", label);
+            self.text(&gpu.small_centre, theme::text(), "main", label);
         } else {
             self.latched(gpu, r, radius, 0.5);
             if scene.hot == CubeHit::Main {
-                self.fill_rounded(r, radius, theme::HOVER_FILL);
+                self.fill_rounded(r, radius, theme::hover_fill());
             }
-            self.text(&gpu.small_centre, theme::TEXT_DIM, "main", label);
+            self.text(&gpu.small_centre, theme::text_dim(), "main", label);
         }
-        self.sunk(gpu, &l.well, m.tile_radius, theme::WELL);
+        self.sunk(gpu, &l.well, m.tile_radius, theme::well());
         for (i, r) in l.slots.iter().enumerate() {
             let Some(item) = scene.items.get(i) else {
                 self.latched(gpu, r, radius, 0.5);
                 continue;
             };
             let b = layout::button(CubeHit::Slot(i), scene.hot, scene.pressed);
-            self.key(gpu, r, radius, theme::SURFACE, depth(b), 1.0);
+            self.key(gpu, r, radius, theme::surface(), depth(b), 1.0);
             let pad = 7.0;
             let line_h = (r.h - 6.0) / 2.0;
             let name = Rect::new(r.x + pad, r.y + 3.0, r.w - 2.0 * pad, line_h);
@@ -1115,7 +1119,7 @@ impl Painter<'_> {
             let w = r.right() - pad - led_x - 7.0;
             let project = Rect::new(led_x + 7.0, name.bottom(), w, line_h);
             self.led(led_x, project.y + project.h / 2.0, item.accent);
-            self.text(&gpu.small, theme::TEXT_DIM, &item.project, project);
+            self.text(&gpu.small, theme::text_dim(), &item.project, project);
         }
         if let Some(tr) = &scene.transmute {
             self.transmuting(&l.cube, tr, gold);
@@ -1139,7 +1143,7 @@ impl Painter<'_> {
                 let (w, h) = (f.from.w * k, f.from.h * k);
                 let r = Rect::new(x - w / 2.0, y - h / 2.0, w, h);
                 let radius = (6.0 * k).max(1.5);
-                self.fill_rounded(&r, radius, theme::SURFACE.mix(gold, 0.2 * own).fade(fade));
+                self.fill_rounded(&r, radius, theme::surface().mix(gold, 0.2 * own).fade(fade));
                 let bar = Rect::new(r.x + 3.0 * k, r.y + h * 0.3, (w - 6.0 * k) * 0.7, h * 0.14);
                 self.fill_rounded(&bar, bar.h / 2.0, f.ink.fade(fade));
                 self.led(r.x + 6.0 * k, r.y + h * 0.72, f.accent.fade(fade));
@@ -1215,7 +1219,7 @@ impl Painter<'_> {
         let bottom = top + s + dy;
         let white = Color::rgb(0xFFFFFF);
         let black = Color::rgb(0);
-        let face = theme::SURFACE.mix(gold, 0.18);
+        let face = theme::surface().mix(gold, 0.18);
         let pt = |x: f32, y: f32| Vector2 { X: x, Y: y };
         let lift = s * 0.45 * lift.clamp(0.0, 1.0);
         let diamond = |up: f32| {
@@ -1238,12 +1242,12 @@ impl Painter<'_> {
             pt(cx + dx, bottom - dy),
             pt(cx, bottom),
         ];
-        self.glow_dot(cx, bottom + 1.0, s * 1.1, theme::CAST, 0.6);
+        self.glow_dot(cx, bottom + 1.0, s * 1.1, theme::cast(), 0.6);
         self.polygon(gpu, &left, face.mix(black, 0.25));
         self.polygon(gpu, &right, face.mix(black, 0.5));
         if open {
             // The mouth, lit from inside.
-            self.polygon(gpu, &diamond(0.0), theme::WELL);
+            self.polygon(gpu, &diamond(0.0), theme::well());
             self.glow_dot(cx, top - lift / 2.0, s * 1.2, gold, 0.9);
         } else if ready {
             self.glow_dot(cx, top, s * 1.2, gold, 0.4);
@@ -1291,7 +1295,7 @@ impl Painter<'_> {
             ]
         };
         let edge = Color::rgb(0x000000).with_alpha(0.75);
-        for (grow, c) in [(1.0, edge), (0.0, theme::QUEST)] {
+        for (grow, c) in [(1.0, edge), (0.0, theme::quest())] {
             self.polygon(gpu, &bar(grow), c);
             self.brush.SetColor(&color(c));
             let e = D2D1_ELLIPSE {
@@ -1346,15 +1350,15 @@ impl Painter<'_> {
             row.line.h,
         );
         let ink = if look.value == "Default" {
-            theme::TEXT_DIM
+            theme::text_dim()
         } else {
-            theme::TEXT
+            theme::text()
         };
         let Some(track) = row.track else {
             if let (Some(fill), _) = theme::button_look(b) {
                 self.fill_rounded(&row.rect.inset(3.0), 8.0, fill);
             }
-            self.text(&gpu.small, theme::TEXT_DIM, look.label, inner);
+            self.text(&gpu.small, theme::text_dim(), look.label, inner);
             if !look.list {
                 self.text(&gpu.small_right, ink, &look.value, inner);
                 return;
@@ -1363,7 +1367,7 @@ impl Painter<'_> {
             let glyph = if open { '\u{E70E}' } else { '\u{E70D}' };
             self.icon(
                 &gpu.icon_small,
-                theme::TEXT_DIM,
+                theme::text_dim(),
                 glyph,
                 Rect::new(inner.right() - chevron, inner.y + 1.0, chevron, inner.h),
             );
@@ -1371,7 +1375,7 @@ impl Painter<'_> {
             self.text(&gpu.small_right, ink, &look.value, value_r);
             return;
         };
-        self.text(&gpu.small, theme::TEXT_DIM, look.label, inner);
+        self.text(&gpu.small, theme::text_dim(), look.label, inner);
         self.text(&gpu.small_right, ink, &look.value, inner);
         let (stop, n) = look.stop.unwrap_or((0, 1));
         self.slider(gpu, &track, stop, n, b);
@@ -1383,18 +1387,18 @@ impl Painter<'_> {
     unsafe fn slider(&self, gpu: &Gpu, track: &Rect, stop: usize, n: usize, b: Button) {
         let cy = track.y + track.h / 2.0;
         let slot = Rect::new(track.x - 3.0, cy - 2.5, track.w + 6.0, 5.0);
-        self.sunk(gpu, &slot, 2.5, theme::WELL);
+        self.sunk(gpu, &slot, 2.5, theme::well());
         let knob_x = layout::slider_x(track, n, stop);
         if stop > 0 {
             let lit = Rect::new(track.x, cy - 1.0, knob_x - track.x, 2.0);
-            self.fill_rounded(&lit, 1.0, theme::TEXT_DIM.fade(0.8));
+            self.fill_rounded(&lit, 1.0, theme::text_dim().fade(0.8));
         }
         for i in 0..n {
             let x = layout::slider_x(track, n, i);
             let c = if i <= stop && stop > 0 {
-                theme::TEXT
+                theme::text()
             } else {
-                theme::LAMP_OFF.mix(theme::TEXT_DIM, 0.3)
+                theme::lamp_off().mix(theme::text_dim(), 0.3)
             };
             let notch = Rect::new(x - 1.0, cy + 5.0, 2.0, 3.0);
             self.fill_rounded(&notch, 1.0, c);
@@ -1405,7 +1409,7 @@ impl Painter<'_> {
             Button::Pressed => 0.2,
         };
         let knob = Rect::new(knob_x - KNOB_R, cy - KNOB_R, 2.0 * KNOB_R, 2.0 * KNOB_R);
-        self.key(gpu, &knob, KNOB_R, theme::SURFACE, depth, 1.0);
+        self.key(gpu, &knob, KNOB_R, theme::surface(), depth, 1.0);
     }
 
     /// A setting's list, on a plate of its own: when a pick takes hold,
@@ -1417,7 +1421,7 @@ impl Painter<'_> {
         let n = l.note;
         self.text(
             &gpu.small,
-            theme::LEGEND,
+            theme::legend(),
             scene.note,
             Rect::new(n.x + pad, n.y, n.w - 2.0 * pad, n.h),
         );
@@ -1429,12 +1433,12 @@ impl Painter<'_> {
             let current = i == scene.current;
             let cy = r.y + r.h / 2.0;
             if current {
-                self.led(r.x + pad + 3.0, cy, theme::TEXT);
+                self.led(r.x + pad + 3.0, cy, theme::text());
             }
             let ink = if current || b == Button::Hover {
-                theme::TEXT
+                theme::text()
             } else {
-                theme::TEXT_DIM
+                theme::text_dim()
             };
             let text = Rect::new(r.x + pad + 14.0, r.y, r.w - 2.0 * pad - 14.0, r.h);
             self.text(&gpu.small, ink, label, text);
@@ -1462,18 +1466,18 @@ impl Painter<'_> {
             }
             let lit = line.enabled && (scene.hot == Some(i) || line.open);
             if lit {
-                self.fill_rounded(&r.inset(1.0), 7.0, theme::HOVER_FILL);
+                self.fill_rounded(&r.inset(1.0), 7.0, theme::hover_fill());
             }
             let ink = if !line.enabled {
-                theme::LEGEND.fade(0.7)
+                theme::legend().fade(0.7)
             } else if lit {
-                theme::TEXT
+                theme::text()
             } else {
-                theme::TEXT_DIM.mix(theme::TEXT, 0.35)
+                theme::text_dim().mix(theme::text(), 0.35)
             };
             let cy = r.y + r.h / 2.0;
             if line.checked {
-                self.led(r.x + layout::MENU_TEXT_X / 2.0, cy, theme::TEXT);
+                self.led(r.x + layout::MENU_TEXT_X / 2.0, cy, theme::text());
             }
             let right = r.right() - layout::MENU_ARROW_W;
             let text = Rect::new(
@@ -1496,9 +1500,9 @@ impl Painter<'_> {
             );
             if !line.detail.is_empty() {
                 let faint = if line.enabled {
-                    theme::LEGEND
+                    theme::legend()
                 } else {
-                    theme::LEGEND.fade(0.6)
+                    theme::legend().fade(0.6)
                 };
                 self.text(&gpu.small_right, faint, line.detail, text);
             }
@@ -1526,8 +1530,8 @@ impl Painter<'_> {
         let s = scene.seam;
         let black = Color::rgb(0);
         let white = Color::rgb(0xFFFFFF);
-        let dark = theme::WINDOW_BG.mix(black, 0.5);
-        let light = theme::WINDOW_BG.mix(white, 0.05);
+        let dark = theme::window_bg().mix(black, 0.5);
+        let light = theme::window_bg().mix(white, 0.05);
         self.fill_rounded(
             &Rect::new(s + 1.0, s + 1.0, w - 2.0 * s - 2.0, 1.0),
             0.0,
@@ -1546,11 +1550,11 @@ impl Painter<'_> {
             .unwrap_or(0.0)
             .min(l.title.w);
         let name = Rect::new(l.title.x, l.title.y, name_w, l.title.h);
-        self.text(&gpu.name, quiet(theme::TEXT), scene.project, name);
+        self.text(&gpu.name, quiet(theme::text()), scene.project, name);
         if !scene.detail.is_empty() {
             let x = name.right() + 12.0;
             let rest = Rect::new(x, l.title.y, l.title.right() - x, l.title.h);
-            self.text(&gpu.small, quiet(theme::TEXT_DIM), scene.detail, rest);
+            self.text(&gpu.small, quiet(theme::text_dim()), scene.detail, rest);
         }
 
         let restore = if scene.maximized {
@@ -1567,16 +1571,16 @@ impl Painter<'_> {
             let b = layout::button(Some(which), scene.hot, scene.pressed.map(Some));
             let close = which == CaptionHit::Close;
             let ink = match b {
-                Button::Idle => quiet(theme::TEXT_DIM),
+                Button::Idle => quiet(theme::text_dim()),
                 Button::Hover if close => white,
-                Button::Hover => theme::TEXT,
+                Button::Hover => theme::text(),
                 Button::Pressed if close => white.fade(0.8),
-                Button::Pressed => theme::TEXT_DIM,
+                Button::Pressed => theme::text_dim(),
             };
             let fill = match b {
                 Button::Idle => None,
-                Button::Hover if close => Some(theme::ERROR.mix(black, 0.15)),
-                Button::Pressed if close => Some(theme::ERROR.mix(black, 0.35)),
+                Button::Hover if close => Some(theme::error().mix(black, 0.15)),
+                Button::Pressed if close => Some(theme::error().mix(black, 0.35)),
                 _ => theme::button_look(b).0,
             };
             if let Some(f) = fill {
@@ -1592,11 +1596,11 @@ impl Painter<'_> {
         let l = scene.layout;
         self.plate(m, l.size);
         self.led(l.lamp.0, l.lamp.1, scene.tone);
-        self.text(&gpu.name, theme::TEXT, scene.title, l.title);
+        self.text(&gpu.name, theme::text(), scene.title, l.title);
         if let Some(text) = scene.text {
             self.rt
                 .PushAxisAlignedClip(&rect(&l.text), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-            self.draw_layout(text, theme::TEXT_DIM, l.text);
+            self.draw_layout(text, theme::text_dim(), l.text);
             self.rt.PopAxisAlignedClip();
         }
         if scene.hover {
@@ -1619,12 +1623,12 @@ impl Painter<'_> {
     unsafe fn catchup(&self, gpu: &Gpu, m: &Metrics, scene: &CatchupScene) {
         let l = scene.layout;
         self.plate(m, l.size);
-        self.text(&gpu.title, theme::TEXT, scene.title, l.title);
-        self.text(&gpu.small, theme::TEXT_DIM, scene.sub, l.sub);
+        self.text(&gpu.title, theme::text(), scene.title, l.title);
+        self.text(&gpu.small, theme::text_dim(), scene.sub, l.sub);
         for (i, (row, look)) in l.rows.iter().zip(scene.rows).enumerate() {
             match *row {
                 CatchupRow::Heading(r) => {
-                    self.text_spaced(gpu, &gpu.chip, theme::LEGEND, look.text, 1.2, r);
+                    self.text_spaced(gpu, &gpu.chip, theme::legend(), look.text, 1.2, r);
                 }
                 CatchupRow::Line {
                     rect: r,
@@ -1635,13 +1639,13 @@ impl Painter<'_> {
                 } => {
                     let hot = scene.hot == Some(i);
                     if hot {
-                        self.fill_rounded(&r.inset(1.0), 7.0, theme::HOVER_FILL);
+                        self.fill_rounded(&r.inset(1.0), 7.0, theme::hover_fill());
                     }
-                    self.led(lamp.0, lamp.1, look.tone.unwrap_or(theme::LAMP_OFF));
+                    self.led(lamp.0, lamp.1, look.tone.unwrap_or(theme::lamp_off()));
                     let ink = if look.tone.is_some() || hot {
-                        theme::TEXT
+                        theme::text()
                     } else {
-                        theme::TEXT_DIM.mix(theme::TEXT, 0.35)
+                        theme::text_dim().mix(theme::text(), 0.35)
                     };
                     let text = if look.background {
                         let room = Rect::new(text.x, text.y, text.w - MARK_W, text.h);
@@ -1649,21 +1653,26 @@ impl Painter<'_> {
                         // far end of the room they may have.
                         let fits = self.measure(gpu, &gpu.name, look.text).min(room.w);
                         let mark = Rect::new(text.x + fits + 2.0, text.y, MARK_W, text.h);
-                        self.icon(&gpu.icon_small, theme::LEGEND, theme::BACKGROUND_ICON, mark);
+                        self.icon(
+                            &gpu.icon_small,
+                            theme::legend(),
+                            theme::BACKGROUND_ICON,
+                            mark,
+                        );
                         room
                     } else {
                         text
                     };
                     self.text(&gpu.name, ink, look.text, text);
                     if let Some(d) = detail {
-                        self.text(&gpu.small, theme::TEXT_DIM, look.detail, d);
+                        self.text(&gpu.small, theme::text_dim(), look.detail, d);
                     }
-                    self.text(&gpu.small_right, theme::LEGEND, look.age, age);
+                    self.text(&gpu.small_right, theme::legend(), look.age, age);
                 }
             }
         }
         if let Some(r) = l.more {
-            self.text(&gpu.small, theme::LEGEND, scene.more, r);
+            self.text(&gpu.small, theme::legend(), scene.more, r);
         }
         let b = if scene.close_hot {
             Button::Hover
@@ -1683,8 +1692,8 @@ impl Painter<'_> {
         let l = scene.layout;
         self.plate(m, l.size);
         self.led(l.lamp.0, l.lamp.1, scene.tone);
-        self.text(&gpu.title, theme::TEXT, scene.title, l.title);
-        self.draw_layout(scene.text, theme::TEXT_DIM, l.text);
+        self.text(&gpu.title, theme::text(), scene.title, l.title);
+        self.draw_layout(scene.text, theme::text_dim(), l.text);
         for (i, (r, label)) in l.buttons.iter().zip(scene.buttons).enumerate() {
             let b = layout::button(Some(i), scene.hot, scene.pressed.map(Some));
             let depth = match b {
@@ -1693,15 +1702,20 @@ impl Painter<'_> {
                 Button::Pressed => 0.2,
             };
             let radius = 8.0;
-            self.key(gpu, r, radius, theme::SURFACE, depth, 1.0);
+            self.key(gpu, r, radius, theme::surface(), depth, 1.0);
             let focused = i == scene.focus;
             if focused {
-                self.stroke_rounded(&r.inset(0.5), radius, theme::WORKING.with_alpha(0.55), 1.0);
+                self.stroke_rounded(
+                    &r.inset(0.5),
+                    radius,
+                    theme::working().with_alpha(0.55),
+                    1.0,
+                );
             }
             let ink = if focused || b == Button::Hover {
-                theme::TEXT
+                theme::text()
             } else {
-                theme::TEXT_DIM
+                theme::text_dim()
             };
             let sink = if b == Button::Pressed { 1.0 } else { 0.0 };
             let at = Rect::new(r.x, r.y + sink, r.w, r.h);
@@ -1714,10 +1728,10 @@ impl Painter<'_> {
     unsafe fn ask(&self, gpu: &Gpu, m: &Metrics, scene: &AskScene) {
         let l = scene.layout;
         self.plate(m, l.size);
-        self.text(&gpu.title, theme::TEXT, scene.title, l.title);
-        self.draw_layout(scene.prompt, theme::TEXT_DIM, l.prompt);
+        self.text(&gpu.title, theme::text(), scene.title, l.title);
+        self.draw_layout(scene.prompt, theme::text_dim(), l.prompt);
         if let Some(r) = l.notes_label {
-            self.text_spaced(gpu, &gpu.chip, theme::LEGEND, scene.notes_label, 1.2, r);
+            self.text_spaced(gpu, &gpu.chip, theme::legend(), scene.notes_label, 1.2, r);
         }
         for f in &scene.fields {
             self.input(gpu, f);
@@ -1725,21 +1739,25 @@ impl Painter<'_> {
         for (i, (r, (label, detail))) in l.list.iter().zip(scene.list).enumerate() {
             let lit = scene.picked == Some(i);
             if lit {
-                self.fill_rounded(&r.inset(1.0), 7.0, theme::HOVER_FILL);
+                self.fill_rounded(&r.inset(1.0), 7.0, theme::hover_fill());
             }
-            let ink = if lit { theme::TEXT } else { theme::TEXT_DIM };
+            let ink = if lit {
+                theme::text()
+            } else {
+                theme::text_dim()
+            };
             let glyph = Rect::new(r.x + 4.0, r.y, 22.0, r.h);
             self.icon(&gpu.icon_small, ink, scene.glyph, glyph);
             let text = Rect::new(r.x + 32.0, r.y, r.w - 32.0 - 10.0, r.h);
             self.text(&gpu.small, ink, label, text);
             if !detail.is_empty() {
-                self.text(&gpu.small_right, theme::LEGEND, detail, text);
+                self.text(&gpu.small_right, theme::legend(), detail, text);
             }
         }
         let hint = if scene.refused {
-            theme::ERROR.mix(theme::TEXT, 0.2)
+            theme::error().mix(theme::text(), 0.2)
         } else {
-            theme::LEGEND
+            theme::legend()
         };
         self.text(&gpu.small, hint, scene.hint, l.hint);
         if let Some(b) = l.browse {
@@ -1748,11 +1766,11 @@ impl Painter<'_> {
                 Button::Hover => 0.8,
                 Button::Pressed => 0.2,
             };
-            self.key(gpu, &b, 8.0, theme::SURFACE, depth, 1.0);
+            self.key(gpu, &b, 8.0, theme::surface(), depth, 1.0);
             let ink = if scene.browse == Button::Hover {
-                theme::TEXT
+                theme::text()
             } else {
-                theme::TEXT_DIM
+                theme::text_dim()
             };
             self.text(&gpu.small_centre, ink, "Browse\u{2026}", b);
         }
@@ -1760,12 +1778,12 @@ impl Painter<'_> {
 
     unsafe fn input(&self, gpu: &Gpu, f: &FieldLook) {
         let radius = 8.0;
-        self.sunk(gpu, &f.rect, radius, theme::WELL);
+        self.sunk(gpu, &f.rect, radius, theme::well());
         if f.focused {
             self.stroke_rounded(
                 &f.rect.inset(0.5),
                 radius,
-                theme::WORKING.with_alpha(0.55),
+                theme::working().with_alpha(0.55),
                 1.0,
             );
         }
@@ -1778,19 +1796,19 @@ impl Painter<'_> {
         let shade = if f.focused { 0.4 } else { 0.18 };
         for r in &f.selection {
             let r = Rect::new(ox + r.x, oy + r.y, r.w.max(3.0), r.h);
-            self.fill_rounded(&r, 2.0, theme::WORKING.with_alpha(shade));
+            self.fill_rounded(&r, 2.0, theme::working().with_alpha(shade));
         }
         match f.placeholder {
             Some(p) => {
                 let h = if f.multiline { FIELD_LINE_H } else { inner.h };
                 let at = Rect::new(inner.x, inner.y, inner.w, h);
-                self.text(&gpu.body, theme::TEXT_DIM.with_alpha(0.55), p, at);
+                self.text(&gpu.body, theme::text_dim().with_alpha(0.55), p, at);
             }
-            None => self.draw_layout(f.text, theme::TEXT, Rect::new(ox, oy, inner.w, inner.h)),
+            None => self.draw_layout(f.text, theme::text(), Rect::new(ox, oy, inner.w, inner.h)),
         }
         if let Some(c) = f.caret {
             let r = Rect::new((ox + c.x).round() - 0.5, oy + c.y, 1.5, c.h);
-            self.fill_rounded(&r, 0.0, theme::TEXT);
+            self.fill_rounded(&r, 0.0, theme::text());
         }
         self.rt.PopAxisAlignedClip();
     }
@@ -1803,7 +1821,7 @@ impl Painter<'_> {
         let h = l.header;
         self.text(
             &gpu.display,
-            theme::TEXT_DIM,
+            theme::text_dim(),
             "No project open",
             Rect::new(h.x + NAME_INSET, h.y, h.w - NAME_INSET, h.h),
         );
@@ -1824,13 +1842,13 @@ impl Painter<'_> {
         let row_h = r.h / 2.0;
         self.text(
             &gpu.name,
-            theme::TEXT,
+            theme::text(),
             "Open a project",
             Rect::new(left, r.y + 5.0, width, row_h - 3.0),
         );
         self.text(
             &gpu.small,
-            theme::TEXT_DIM,
+            theme::text_dim(),
             "Pick a folder, or drop one here",
             Rect::new(left, r.y + row_h - 1.0, width, row_h - 5.0),
         );
@@ -1843,7 +1861,7 @@ impl Painter<'_> {
         self.text_spaced(
             gpu,
             &gpu.chip,
-            theme::LEGEND,
+            theme::legend(),
             "RECENT",
             1.2,
             Rect::new(label.x + pad, label.y, label.w - 2.0 * pad, label.h),
@@ -1856,7 +1874,7 @@ impl Painter<'_> {
             let name_w = self.measure(gpu, &gpu.small, name).min(inner.w * 0.6);
             self.text(
                 &gpu.small,
-                theme::TEXT,
+                theme::text(),
                 name,
                 Rect::new(inner.x, inner.y, name_w + 1.0, inner.h),
             );
@@ -1865,7 +1883,7 @@ impl Painter<'_> {
             let place_x = inner.x + name_w + 12.0;
             self.text(
                 &gpu.small_right,
-                theme::TEXT_DIM.with_alpha(0.7),
+                theme::text_dim().with_alpha(0.7),
                 place,
                 Rect::new(place_x, inner.y, inner.right() - place_x, inner.h),
             );
@@ -1877,12 +1895,12 @@ impl Painter<'_> {
     unsafe fn limit(&self, gpu: &Gpu, r: &Rect, name: &str, limit: &Limit, now: u64) {
         let (used, left) = limit.at(now);
         let inner = Rect::new(r.x + INNER_PAD, r.y + 5.0, r.w - 2.0 * INNER_PAD, 22.0);
-        self.text(&gpu.body, theme::TEXT, name, inner);
+        self.text(&gpu.body, theme::text(), name, inner);
         let numbers = match left {
             Some(s) => format!("{}% \u{00B7} resets in {}", used.round(), format_until(s)),
             None => format!("{}%", used.round()),
         };
-        self.text(&gpu.small_right, theme::TEXT_DIM, &numbers, inner);
+        self.text(&gpu.small_right, theme::text_dim(), &numbers, inner);
         let track = Rect::new(inner.x, inner.bottom() + 5.0, inner.w, 5.0);
         self.meter(&track, used / 100.0, theme::fullness_color(used), 32);
     }
@@ -1952,7 +1970,7 @@ impl Painter<'_> {
     /// A light leaving a task's row for the lamp of the session that took
     /// it, a short tail behind it, flaring as it lands.
     unsafe fn flights(&self, scene: &Scene) {
-        let c = theme::WORKING;
+        let c = theme::working();
         let white = Color::rgb(0xFFFFFF);
         for f in scene.flights {
             let ((fx, fy), (tx, ty), p) = (f.from, f.to, f.done);
@@ -2034,7 +2052,7 @@ impl Painter<'_> {
         let name_w = self.measure(gpu, &gpu.display, name).min(h.w * 0.62);
         self.text(
             &gpu.display,
-            theme::TEXT,
+            theme::text(),
             name,
             Rect::new(name_x, h.y, name_w + 1.0, h.h),
         );
@@ -2044,7 +2062,7 @@ impl Painter<'_> {
             let chevron = if collapsed { '\u{E76C}' } else { '\u{E70D}' };
             self.icon(
                 &gpu.icon_small,
-                theme::TEXT_DIM,
+                theme::text_dim(),
                 chevron,
                 Rect::new(name_x + name_w + 4.0, h.y + 1.0, 14.0, h.h),
             );
@@ -2057,8 +2075,8 @@ impl Painter<'_> {
             .count();
         let mut right = layout.new.x - 2.0;
         for (n, label, c) in [
-            (waiting, "waiting", theme::WAITING),
-            (working, "working", theme::WORKING),
+            (waiting, "waiting", theme::waiting()),
+            (working, "working", theme::working()),
         ] {
             if n == 0 {
                 continue;
@@ -2072,7 +2090,7 @@ impl Painter<'_> {
             }
             self.led(x + 3.0, cy, c);
             let at = Rect::new(x + 12.0, cy - 9.0, text_w, 18.0);
-            self.text(&gpu.chip, theme::TEXT_DIM, &text, at);
+            self.text(&gpu.chip, theme::text_dim(), &text, at);
             right = x - 10.0;
         }
 
@@ -2086,19 +2104,19 @@ impl Painter<'_> {
             Button::Pressed => 0.1,
         };
         let cap = layout.new.inset(4.0);
-        self.key(gpu, &cap, cap.h / 2.0, theme::SURFACE, depth, 1.0);
+        self.key(gpu, &cap, cap.h / 2.0, theme::surface(), depth, 1.0);
         self.icon(&gpu.icon_small, ink, '\u{E710}', layout.new);
     }
 
     /// The faceplate: matte metal, lighter at the top where the light
     /// falls, with a seam cut round it inside the window's edge.
     unsafe fn plate(&self, m: &Metrics, (w, h): (f32, f32)) {
-        self.rt.Clear(Some(&color(theme::PLATE_BOTTOM)));
+        self.rt.Clear(Some(&color(theme::plate_bottom())));
         let all = Rect::new(0.0, 0.0, w, h);
         self.fill_gradient(
             &all,
             (0.0, h),
-            &[(0.0, theme::PLATE_TOP), (1.0, theme::PLATE_BOTTOM)],
+            &[(0.0, theme::plate_top()), (1.0, theme::plate_bottom())],
         );
         let seam = Rect::new(5.5, 5.5, w - 11.0, h - 11.0);
         self.engrave(&seam, (m.window_radius - 3.0).max(2.0));
@@ -2108,8 +2126,8 @@ impl Painter<'_> {
     /// edge under it.
     unsafe fn engrave(&self, r: &Rect, radius: f32) {
         let lit = Rect::new(r.x, r.y + 1.0, r.w, r.h);
-        self.stroke_rounded(&lit, radius, theme::ENGRAVE_LIGHT, 1.0);
-        self.stroke_rounded(r, radius, theme::ENGRAVE_DARK, 1.0);
+        self.stroke_rounded(&lit, radius, theme::engrave_light(), 1.0);
+        self.stroke_rounded(r, radius, theme::engrave_dark(), 1.0);
     }
 
     /// A straight groove across the plate, from `x0` to `x1` at `y`.
@@ -2117,9 +2135,9 @@ impl Painter<'_> {
         self.fill_rounded(
             &Rect::new(x0, y + 1.0, x1 - x0, 1.0),
             0.0,
-            theme::ENGRAVE_LIGHT,
+            theme::engrave_light(),
         );
-        self.fill_rounded(&Rect::new(x0, y, x1 - x0, 1.0), 0.0, theme::ENGRAVE_DARK);
+        self.fill_rounded(&Rect::new(x0, y, x1 - x0, 1.0), 0.0, theme::engrave_dark());
     }
 
     /// A key standing `depth` off the plate: its face lit from above, a
@@ -2134,7 +2152,7 @@ impl Painter<'_> {
         }
         let d = depth.clamp(0.0, 2.5);
         let side = 1.0 + 2.5 * d;
-        let shadow = theme::CAST.fade(opacity * (0.35 + 0.35 * d.min(1.0)));
+        let shadow = theme::cast().fade(opacity * (0.35 + 0.35 * d.min(1.0)));
         self.cast(r, radius, (0.0, side + 1.5 * d), 3.0 + 6.0 * d, shadow);
         let below = Rect::new(r.x, r.y + side, r.w, r.h);
         let black = Color::rgb(0);
@@ -2147,17 +2165,17 @@ impl Painter<'_> {
             opacity,
         );
         let bevel = (1.0, 2.0);
-        let shade = theme::BEVEL_SHADE.fade(0.6);
-        self.inner(gpu, r, radius, bevel, theme::BEVEL_LIGHT, shade, opacity);
+        let shade = theme::bevel_shade().fade(0.6);
+        self.inner(gpu, r, radius, bevel, theme::bevel_light(), shade, opacity);
     }
 
     /// Something sunk into the plate: its floor in `fill`, shade under its
     /// top edge, and the plate's lit lip along its bottom.
     unsafe fn sunk(&self, gpu: &Gpu, r: &Rect, radius: f32, fill: Color) {
         let lip = Rect::new(r.x, r.y + 1.0, r.w, r.h).inset(-0.5);
-        self.stroke_rounded(&lip, radius + 0.5, theme::ENGRAVE_LIGHT, 1.0);
+        self.stroke_rounded(&lip, radius + 0.5, theme::engrave_light(), 1.0);
         self.fill_rounded(r, radius, fill);
-        let (near, far) = (theme::HOLLOW_SHADE, theme::HOLLOW_LIGHT);
+        let (near, far) = (theme::hollow_shade(), theme::hollow_light());
         self.inner(gpu, r, radius, (1.5, 5.0), near, far, 1.0);
     }
 
@@ -2166,15 +2184,20 @@ impl Painter<'_> {
     /// round a bay.
     unsafe fn latched(&self, gpu: &Gpu, r: &Rect, radius: f32, opacity: f32) {
         let lip = Rect::new(r.x, r.y + 1.0, r.w, r.h).inset(-0.5);
-        self.stroke_rounded(&lip, radius + 0.5, theme::ENGRAVE_LIGHT.fade(opacity), 1.0);
-        let (near, far) = (theme::HOLLOW_SHADE, theme::HOLLOW_LIGHT);
+        self.stroke_rounded(
+            &lip,
+            radius + 0.5,
+            theme::engrave_light().fade(opacity),
+            1.0,
+        );
+        let (near, far) = (theme::hollow_shade(), theme::hollow_light());
         self.inner(gpu, r, radius, (2.0, 6.0), near, far, opacity);
     }
 
     /// A screen sunk into the plate, for anything that scrolls: black
     /// glass with a faint sheen across its top.
     unsafe fn screen(&self, gpu: &Gpu, r: &Rect, radius: f32) {
-        self.sunk(gpu, r, radius, theme::SCREEN);
+        self.sunk(gpu, r, radius, theme::screen());
         let white = Color::rgb(0xFFFFFF);
         let sheen = Rect::new(r.x, r.y, r.w, (r.h * 0.4).min(60.0));
         self.fill_rounded_gradient(
@@ -2193,11 +2216,11 @@ impl Painter<'_> {
         self.masked(gpu, screen, radius, || {
             for (s, a) in [(3.0, 0.2), (2.0, 0.35), (1.0, 0.5)] {
                 let shade = Rect::new(bite.x - 0.5, bite.y + 1.5, bite.w, bite.h).inset(-s);
-                self.fill_rounded(&shade, corner + s, theme::HOLLOW_SHADE.fade(a));
+                self.fill_rounded(&shade, corner + s, theme::hollow_shade().fade(a));
             }
         });
         self.masked(gpu, bite, corner, || {
-            let stops = [(0.0, theme::PLATE_TOP), (1.0, theme::PLATE_BOTTOM)];
+            let stops = [(0.0, theme::plate_top()), (1.0, theme::plate_bottom())];
             self.fill_gradient(bite, (0.0, h), &stops);
         });
     }
@@ -2240,7 +2263,7 @@ impl Painter<'_> {
         let black = Color::rgb(0);
         self.fill_rounded(&housing, round + 1.5, black.with_alpha(0.55));
         if level <= 0.0 {
-            self.fill_rounded(r, round, theme::LAMP_OFF);
+            self.fill_rounded(r, round, theme::lamp_off());
             let glint = Rect::new(r.x + 1.0, r.y + 2.0, r.w - 2.0, r.h * 0.3);
             self.fill_rounded(&glint, 1.0, Color::rgb(0xFFFFFF).with_alpha(0.08));
             return;
@@ -2254,7 +2277,7 @@ impl Painter<'_> {
             let spill = c.with_alpha(level * 0.16 * k * k);
             self.stroke_rounded(&r.inset(-s), round + s, spill, 2.0);
         }
-        self.fill_rounded(r, round, theme::LAMP_OFF.mix(c, level));
+        self.fill_rounded(r, round, theme::lamp_off().mix(c, level));
         let hot = c.mix(Color::rgb(0xFFFFFF), 0.45).fade(level);
         self.fill_rounded(&r.inset(1.0), (round - 1.0).max(0.5), hot);
     }
@@ -2329,7 +2352,7 @@ impl Painter<'_> {
         let lit = (fraction.clamp(0.0, 1.0) * segments as f32).ceil() as usize;
         for i in 0..segments {
             let seg = Rect::new(r.x + i as f32 * (w + gap), r.y, w, r.h);
-            let c = if i < lit { c } else { theme::LAMP_OFF };
+            let c = if i < lit { c } else { theme::lamp_off() };
             self.fill_rounded(&seg, 1.0, c);
         }
     }
@@ -2342,7 +2365,7 @@ impl Painter<'_> {
         let level = fraction.clamp(0.0, 1.0) * segments as f32;
         for i in 0..segments {
             let seg = Rect::new(r.x + i as f32 * (w + gap), r.y, w, r.h);
-            self.fill_rounded(&seg, 1.0, theme::LAMP_OFF);
+            self.fill_rounded(&seg, 1.0, theme::lamp_off());
             let full = (level - i as f32).clamp(0.0, 1.0);
             if full > 0.0 {
                 let lit = Rect::new(seg.x, seg.y, seg.w * full, seg.h);
@@ -2670,9 +2693,9 @@ impl Painter<'_> {
         };
         let held = if scene.held == Some(i) { 1.0 } else { 0.0 };
         let depth = rest + lift + held + 0.9 * landing;
-        let face = theme::phase_fill(phase).mix(theme::TEXT, 0.03 * look.hover);
+        let face = theme::phase_fill(phase).mix(theme::text(), 0.03 * look.hover);
         let face = if selected {
-            face.mix(theme::WELL, 0.25)
+            face.mix(theme::well(), 0.25)
         } else {
             face
         };
@@ -2723,7 +2746,7 @@ impl Painter<'_> {
 
         // The icon: what the agent is doing, in the phase's light.
         let icon_c = if matches!(lit, Phase::Idle | Phase::Ended | Phase::Paused) {
-            theme::TEXT_DIM
+            theme::text_dim()
         } else {
             c
         };
@@ -2740,7 +2763,7 @@ impl Painter<'_> {
             let ink = if c >= 75.0 {
                 theme::fullness_color(c)
             } else {
-                theme::TEXT_DIM.with_alpha(0.7)
+                theme::text_dim().with_alpha(0.7)
             };
             let track = Rect::new(ix - 10.0, iy + 14.0, 20.0, 3.0);
             let level = if ambient { look.context } else { c / 100.0 };
@@ -2795,7 +2818,7 @@ impl Painter<'_> {
             let tag_w = self.measure(gpu, &gpu.small, tag);
             if tag_w < name_rect.w * 0.4 {
                 let at = Rect::new(name_rect.x, top.y, name_rect.w, top.h);
-                let ink = theme::TEXT_DIM.with_alpha(0.75).fade(presence);
+                let ink = theme::text_dim().with_alpha(0.75).fade(presence);
                 self.text(&gpu.small_right, ink, tag, at);
                 name_rect.w -= tag_w + 8.0;
             }
@@ -2805,7 +2828,7 @@ impl Painter<'_> {
         self.text(&gpu.name, ink, s.label(), name_rect);
         let age_c = match phase {
             Phase::Waiting(_) => c,
-            _ => theme::TEXT_DIM,
+            _ => theme::text_dim(),
         };
         self.text_tabular(gpu, &gpu.small_right, age_c.fade(presence), &age, top);
 
@@ -2857,12 +2880,12 @@ impl Painter<'_> {
             self.text_tabular(
                 gpu,
                 &gpu.small_right,
-                ink(theme::GIT_DELETED),
+                ink(theme::git_deleted()),
                 &minus,
                 bottom,
             );
             let left = Rect::new(bottom.x, bottom.y, bottom.w - minus_w - 4.0, bottom.h);
-            self.text_tabular(gpu, &gpu.small_right, ink(theme::GIT_ADDED), &plus, left);
+            self.text_tabular(gpu, &gpu.small_right, ink(theme::git_added()), &plus, left);
             bottom.w -= minus_w + 4.0 + plus_w + gap;
         }
         if let Some(c) = crowded.filter(|_| parts.context) {
@@ -2877,8 +2900,8 @@ impl Painter<'_> {
             bottom.w -= crowded_w + gap;
         }
         if parts.trace {
-            let trace_c = if icon_c == theme::TEXT_DIM {
-                theme::TEXT_DIM.with_alpha(0.45)
+            let trace_c = if icon_c == theme::text_dim() {
+                theme::text_dim().with_alpha(0.45)
             } else {
                 c.with_alpha(0.7)
             };
@@ -2906,7 +2929,7 @@ impl Painter<'_> {
                 bottom.w -= word_w + gap;
             }
         }
-        self.text(&gpu.small, theme::TEXT_DIM.fade(presence), last, bottom);
+        self.text(&gpu.small, theme::text_dim().fade(presence), last, bottom);
         if let Some(mark) = mark {
             self.browser_mark(&mark, scene.button(Hit::Browser(i)));
         }
@@ -3010,9 +3033,9 @@ impl Painter<'_> {
     /// dashed. The cursor raises a key into it, as if offering one.
     unsafe fn slot(&self, gpu: &Gpu, m: &Metrics, r: &Rect, b: Button) {
         match b {
-            Button::Hover => self.key(gpu, r, m.tile_radius, theme::SURFACE, 0.6, 1.0),
+            Button::Hover => self.key(gpu, r, m.tile_radius, theme::surface(), 0.6, 1.0),
             Button::Idle | Button::Pressed => {
-                self.sunk(gpu, r, m.tile_radius, theme::WELL);
+                self.sunk(gpu, r, m.tile_radius, theme::well());
                 self.dashed(gpu, m, r);
             }
         }
@@ -3039,7 +3062,8 @@ impl Painter<'_> {
             },
             Some(&[unit * 0.35, unit * 0.65]),
         );
-        self.brush.SetColor(&color(theme::LEGEND.with_alpha(0.35)));
+        self.brush
+            .SetColor(&color(theme::legend().with_alpha(0.35)));
         self.rt.DrawRoundedRectangle(
             &rounded(&edge, radius),
             self.brush,
@@ -3059,7 +3083,7 @@ impl Painter<'_> {
         let chevron = if t.collapsed { '\u{E76C}' } else { '\u{E70D}' };
         self.icon(
             &gpu.icon_small,
-            theme::TEXT_DIM,
+            theme::text_dim(),
             chevron,
             Rect::new(h.x + pad - 2.0, h.y, 14.0, h.h),
         );
@@ -3068,7 +3092,7 @@ impl Painter<'_> {
         self.text_spaced(
             gpu,
             &gpu.chip,
-            theme::TEXT_DIM,
+            theme::text_dim(),
             "QUESTS",
             1.2,
             Rect::new(label_x, h.y, label_w, h.h),
@@ -3077,7 +3101,7 @@ impl Painter<'_> {
         self.text_tabular(
             gpu,
             &gpu.small_right,
-            theme::TEXT_DIM,
+            theme::text_dim(),
             &t.summary,
             Rect::new(summary_x, h.y, l.mode.x - 10.0 - summary_x, h.h),
         );
@@ -3085,7 +3109,11 @@ impl Painter<'_> {
         // The mode, as a small key: a click offers the others.
         let mode = scene.button(Hit::TasksMode);
         let (fill, ink) = theme::button_look(mode);
-        self.fill_rounded(&l.mode, 5.0, fill.unwrap_or(theme::SURFACE.with_alpha(0.6)));
+        self.fill_rounded(
+            &l.mode,
+            5.0,
+            fill.unwrap_or(theme::surface().with_alpha(0.6)),
+        );
         let word_w = self.measure(gpu, &gpu.chip, &t.mode);
         let (caret_gap, caret_w) = (3.0, 10.0);
         let x = l.mode.x + (l.mode.w - word_w - caret_gap - caret_w) / 2.0;
@@ -3133,7 +3161,7 @@ impl Painter<'_> {
                 }
             }
             let (c, glyph) = if row.finish.is_some() {
-                (theme::DONE, '\u{E73E}')
+                (theme::done(), '\u{E73E}')
             } else {
                 (row.state.color(), row.state.icon())
             };
@@ -3156,11 +3184,11 @@ impl Painter<'_> {
                     gpu,
                     a,
                     5.0,
-                    theme::SURFACE.mix(theme::DONE, 0.25),
+                    theme::surface().mix(theme::done(), 0.25),
                     depth,
                     1.0,
                 );
-                self.icon(&gpu.icon_small, theme::DONE, '\u{E8FB}', *a);
+                self.icon(&gpu.icon_small, theme::done(), '\u{E8FB}', *a);
                 right = a.x - 6.0;
             }
             let word = if row.finish.is_some() {
@@ -3183,18 +3211,18 @@ impl Painter<'_> {
             }
             let title_x = r.x + pad + 16.0;
             let ink = if row.finish.is_some() {
-                theme::TEXT_DIM
+                theme::text_dim()
             } else if row.state.needs_you() || row.state == RowState::Working {
-                theme::TEXT
+                theme::text()
             } else {
-                theme::TEXT.mix(theme::TEXT_DIM, 0.35)
+                theme::text().mix(theme::text_dim(), 0.35)
             };
             let title_r = Rect::new(title_x, r.y, right - word_w - 8.0 - title_x, r.h);
             self.text(&gpu.body, ink.fade(shown), &row.title, title_r);
             if strike > 0.0 {
                 let long = self.measure(gpu, &gpu.body, &row.title).min(title_r.w);
                 let y = (r.y + r.h / 2.0).round() + 0.5;
-                self.brush.SetColor(&color(theme::DONE.fade(0.9 * shown)));
+                self.brush.SetColor(&color(theme::done().fade(0.9 * shown)));
                 self.rt.DrawLine(
                     Vector2 { X: title_x, Y: y },
                     Vector2 {
@@ -3220,7 +3248,7 @@ impl Painter<'_> {
             self.fill_rounded(
                 &Rect::new(body.right() - 4.0, thumb_y, 3.0, thumb_h),
                 1.5,
-                theme::TEXT_DIM.with_alpha(0.5),
+                theme::text_dim().with_alpha(0.5),
             );
         }
     }
@@ -3236,21 +3264,21 @@ impl Painter<'_> {
         let chevron = if f.collapsed { '\u{E76C}' } else { '\u{E70D}' };
         self.icon(
             &gpu.icon_small,
-            theme::TEXT_DIM,
+            theme::text_dim(),
             chevron,
             Rect::new(h.x + pad - 2.0, h.y, 14.0, h.h),
         );
         self.text_spaced(
             gpu,
             &gpu.chip,
-            theme::TEXT_DIM,
+            theme::text_dim(),
             "FILES",
             1.2,
             Rect::new(h.x + pad + 14.0, h.y, h.w * 0.5, h.h),
         );
         let (summary, c) = match f.tree.changed {
-            0 => ("no changes".to_string(), theme::TEXT_DIM),
-            n => (format!("{n} changed"), theme::GIT_MODIFIED),
+            0 => ("no changes".to_string(), theme::text_dim()),
+            n => (format!("{n} changed"), theme::git_modified()),
         };
         self.text_tabular(
             gpu,
@@ -3269,12 +3297,12 @@ impl Painter<'_> {
                 let chevron = if row.open { '\u{E70D}' } else { '\u{E76C}' };
                 self.icon(
                     &gpu.icon_small,
-                    theme::TEXT_DIM.with_alpha(0.8),
+                    theme::text_dim().with_alpha(0.8),
                     chevron,
                     Rect::new(x - 2.0, r.y, 14.0, r.h),
                 );
             }
-            let name_c = node.change.map_or(theme::TEXT, theme::change_color);
+            let name_c = node.change.map_or(theme::text(), theme::change_color);
             let name_x = x + 14.0;
             let name = Rect::new(name_x, r.y, r.right() - pad - badge_w - name_x, r.h);
             self.text(&gpu.body, name_c, &row.label, name);
@@ -3314,7 +3342,7 @@ impl Painter<'_> {
             self.fill_rounded(
                 &Rect::new(body.right() - 4.0, thumb_y, 3.0, thumb_h),
                 1.5,
-                theme::TEXT_DIM.with_alpha(0.5),
+                theme::text_dim().with_alpha(0.5),
             );
         }
     }

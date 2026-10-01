@@ -15,6 +15,7 @@
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use horadric_core::rarity::Rarity;
 use horadric_core::{Phase, Session, WaitReason};
@@ -65,67 +66,530 @@ impl Color {
     }
 }
 
-/// The faceplate every window is, a dark matte metal, a shade lighter at
-/// the top where the light falls.
-pub const WINDOW_BG: Color = Color::rgb(0x141518);
-pub const PLATE_TOP: Color = Color::rgb(0x191A1E);
-pub const PLATE_BOTTOM: Color = Color::rgb(0x111214);
-/// A key's face: a session's tile, a button.
-pub const SURFACE: Color = Color::rgb(0x202227);
-/// A bay sunk into the plate, where a key is yet to go, and the face of a
-/// key latched down.
-pub const WELL: Color = Color::rgb(0x0C0D0F);
-/// The glass of a screen: the files list, the limits, the terminals.
-pub const SCREEN: Color = Color::rgb(0x08090B);
-/// A lamp with nothing behind it.
-pub const LAMP_OFF: Color = Color::rgb(0x2A2C32);
-pub const TEXT: Color = Color::rgb(0xE8E9ED);
-pub const TEXT_DIM: Color = Color::rgb(0x8F939E);
-/// Printed on the plate: labels, section names.
-pub const LEGEND: Color = Color::rgb(0x6E727C);
+/// Every colour a theme decides. The look of the app is these and the
+/// shapes, and the shapes never change: a theme that wants no bevels makes
+/// them transparent.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Palette {
+    /// The plate every window is, a shade lighter at the top where the
+    /// light falls.
+    pub window_bg: Color,
+    pub plate_top: Color,
+    pub plate_bottom: Color,
+    /// A key's face: a session's tile, a button.
+    pub surface: Color,
+    /// A bay sunk into the plate, where a key is yet to go, and the face of
+    /// a key latched down.
+    pub well: Color,
+    /// The glass of a screen: the files list, the limits.
+    pub screen: Color,
+    /// A lamp with nothing behind it.
+    pub lamp_off: Color,
+    pub text: Color,
+    pub text_dim: Color,
+    /// Printed on the plate: labels, section names.
+    pub legend: Color,
+    /// The shadow a key casts on the plate.
+    pub cast: Color,
+    /// The light catching the top edge of anything raised, and the shade
+    /// along its bottom.
+    pub bevel_light: Color,
+    pub bevel_shade: Color,
+    /// Inside anything sunk: shade under its top edge, light on its bottom.
+    pub hollow_shade: Color,
+    pub hollow_light: Color,
+    /// A line cut into the plate: its dark groove and the lit edge under it.
+    pub engrave_dark: Color,
+    pub engrave_light: Color,
+    /// Behind a button under the cursor and one held down, laid over
+    /// whatever is there, as Windows 11 does it, so it works on any surface.
+    pub hover_fill: Color,
+    pub press_fill: Color,
+    pub working: Color,
+    pub waiting: Color,
+    pub error: Color,
+    pub done: Color,
+    pub idle: Color,
+    /// The gold of the mark over a quest giver's head in the games, so the
+    /// button that asks an agent for quests reads as one at a glance.
+    pub quest: Color,
+    /// Git change colours, VS Code's ones for a plate this light, so a file
+    /// looks the same in the tile as in the editor.
+    pub git_modified: Color,
+    pub git_added: Color,
+    pub git_untracked: Color,
+    pub git_deleted: Color,
+    pub git_conflict: Color,
+    /// The inks of the rarities past normal, which is `text`.
+    pub magic: Color,
+    pub rare: Color,
+    pub set: Color,
+    pub unique: Color,
+    /// The terminals stay dark in every theme, since near black is what
+    /// every agent's own colours are made for. Only the tint follows.
+    pub term_bg: Color,
+    pub term_fg: Color,
+    pub term_cursor: Color,
+    pub term_selection: Color,
+}
 
-/// The shadow a key casts on the plate.
-pub const CAST: Color = Color::rgb(0x000000).with_alpha(0.6);
-/// The light catching the top edge of anything raised, and the shade
-/// along its bottom.
-pub const BEVEL_LIGHT: Color = Color::rgb(0xFFFFFF).with_alpha(0.11);
-pub const BEVEL_SHADE: Color = Color::rgb(0x000000).with_alpha(0.35);
-/// Inside anything sunk: shade under its top edge, light on its bottom.
-pub const HOLLOW_SHADE: Color = Color::rgb(0x000000).with_alpha(0.55);
-pub const HOLLOW_LIGHT: Color = Color::rgb(0xFFFFFF).with_alpha(0.05);
-/// A line cut into the plate: its dark groove and the lit edge under it.
-pub const ENGRAVE_DARK: Color = Color::rgb(0x000000).with_alpha(0.5);
-pub const ENGRAVE_LIGHT: Color = Color::rgb(0xFFFFFF).with_alpha(0.05);
+const BLACK: Color = Color::rgb(0x000000);
+const WHITE: Color = Color::rgb(0xFFFFFF);
 
-/// Behind a button under the cursor and one held down: white laid over
-/// whatever is there, as Windows 11 does it, so it works on any surface.
-pub const HOVER_FILL: Color = Color::rgb(0xFFFFFF).with_alpha(0.06);
-pub const PRESS_FILL: Color = Color::rgb(0xFFFFFF).with_alpha(0.025);
+/// A hardware control panel in the dark: matte metal faceplates lit from
+/// above, keys that stand up off the plate, screens sunk into it.
+const SKEUOMORPH: Palette = Palette {
+    window_bg: Color::rgb(0x141518),
+    plate_top: Color::rgb(0x191A1E),
+    plate_bottom: Color::rgb(0x111214),
+    surface: Color::rgb(0x202227),
+    well: Color::rgb(0x0C0D0F),
+    screen: Color::rgb(0x08090B),
+    lamp_off: Color::rgb(0x2A2C32),
+    text: Color::rgb(0xE8E9ED),
+    text_dim: Color::rgb(0x8F939E),
+    legend: Color::rgb(0x6E727C),
+    cast: BLACK.with_alpha(0.6),
+    bevel_light: WHITE.with_alpha(0.11),
+    bevel_shade: BLACK.with_alpha(0.35),
+    hollow_shade: BLACK.with_alpha(0.55),
+    hollow_light: WHITE.with_alpha(0.05),
+    engrave_dark: BLACK.with_alpha(0.5),
+    engrave_light: WHITE.with_alpha(0.05),
+    hover_fill: WHITE.with_alpha(0.06),
+    press_fill: WHITE.with_alpha(0.025),
+    working: Color::rgb(0x3DB4FF),
+    waiting: Color::rgb(0xFFB224),
+    error: Color::rgb(0xFF5D66),
+    done: Color::rgb(0x3DD68C),
+    idle: Color::rgb(0x6E6882),
+    quest: Color::rgb(0xFFD100),
+    git_modified: Color::rgb(0xE2C08D),
+    git_added: Color::rgb(0x81B88B),
+    git_untracked: Color::rgb(0x73C991),
+    git_deleted: Color::rgb(0xC74E39),
+    git_conflict: Color::rgb(0xE4676B),
+    magic: Color::rgb(0x9A9CFF),
+    rare: Color::rgb(0xF2E27A),
+    set: Color::rgb(0x9BE06A),
+    unique: Color::rgb(0xCFAE72),
+    term_bg: Color::rgb(0x08090B),
+    term_fg: Color::rgb(0xE8E9ED),
+    term_cursor: Color::rgb(0xF5F5F7),
+    term_selection: Color::rgb(0x1E3A5C),
+};
 
-pub const WORKING: Color = Color::rgb(0x3DB4FF);
-pub const WAITING: Color = Color::rgb(0xFFB224);
-pub const ERROR: Color = Color::rgb(0xFF5D66);
-pub const DONE: Color = Color::rgb(0x3DD68C);
-pub const IDLE: Color = Color::rgb(0x6E6882);
-/// The gold of the mark over a quest giver's head in the games, so the
-/// button that asks an agent for quests reads as one at a glance.
-pub const QUEST: Color = Color::rgb(0xFFD100);
+/// Flat design, the Swiss way: white paper, no light and no depth, every
+/// edge said by a change of tone alone, and lamps in strong pure colour.
+const FLAT: Palette = Palette {
+    window_bg: Color::rgb(0xF4F5F7),
+    plate_top: Color::rgb(0xF4F5F7),
+    plate_bottom: Color::rgb(0xF4F5F7),
+    surface: Color::rgb(0xFFFFFF),
+    well: Color::rgb(0xE3E6EB),
+    screen: Color::rgb(0xFFFFFF),
+    lamp_off: Color::rgb(0xD5D9E0),
+    text: Color::rgb(0x111318),
+    text_dim: Color::rgb(0x5B6270),
+    legend: Color::rgb(0x7A818E),
+    cast: BLACK.with_alpha(0.0),
+    bevel_light: WHITE.with_alpha(0.0),
+    bevel_shade: BLACK.with_alpha(0.0),
+    hollow_shade: BLACK.with_alpha(0.0),
+    hollow_light: WHITE.with_alpha(0.0),
+    engrave_dark: BLACK.with_alpha(0.1),
+    engrave_light: WHITE.with_alpha(0.0),
+    hover_fill: BLACK.with_alpha(0.06),
+    press_fill: BLACK.with_alpha(0.03),
+    working: Color::rgb(0x0A6CFF),
+    waiting: Color::rgb(0xF08C00),
+    error: Color::rgb(0xE5243B),
+    done: Color::rgb(0x0E9F5A),
+    idle: Color::rgb(0x8A8F9C),
+    quest: Color::rgb(0xD9A400),
+    git_modified: Color::rgb(0x895503),
+    git_added: Color::rgb(0x587C0C),
+    git_untracked: Color::rgb(0x007100),
+    git_deleted: Color::rgb(0xAD0707),
+    git_conflict: Color::rgb(0x6C6CC4),
+    magic: Color::rgb(0x3F44D6),
+    rare: Color::rgb(0x9A7A00),
+    set: Color::rgb(0x2F7D14),
+    unique: Color::rgb(0xA0522D),
+    term_bg: Color::rgb(0x111318),
+    term_fg: Color::rgb(0xECEEF2),
+    term_cursor: Color::rgb(0xFFFFFF),
+    term_selection: Color::rgb(0x1D3D6E),
+};
 
-/// Git change colours, VS Code's dark theme ones, so a file looks the same
-/// in the tile as in the editor.
-pub const GIT_MODIFIED: Color = Color::rgb(0xE2C08D);
-pub const GIT_ADDED: Color = Color::rgb(0x81B88B);
-pub const GIT_UNTRACKED: Color = Color::rgb(0x73C991);
-pub const GIT_DELETED: Color = Color::rgb(0xC74E39);
-pub const GIT_CONFLICT: Color = Color::rgb(0xE4676B);
+/// Neumorphism, soft UI: one grey clay for plate and keys alike, every
+/// shape pressed out of it or into it by a pale light from the top left
+/// and a soft shade under it. No colour but the lamps.
+const NEUMORPH: Palette = Palette {
+    window_bg: Color::rgb(0xE4E8EE),
+    plate_top: Color::rgb(0xE7EBF1),
+    plate_bottom: Color::rgb(0xE0E5EC),
+    surface: Color::rgb(0xE6EAF0),
+    well: Color::rgb(0xD9DEE6),
+    screen: Color::rgb(0xDDE2E9),
+    lamp_off: Color::rgb(0xC9D0DA),
+    text: Color::rgb(0x3B4454),
+    text_dim: Color::rgb(0x6F7889),
+    legend: Color::rgb(0x8A93A3),
+    cast: Color::rgb(0x8B9AB2).with_alpha(0.5),
+    bevel_light: WHITE.with_alpha(0.95),
+    bevel_shade: Color::rgb(0x8B9AB2).with_alpha(0.35),
+    hollow_shade: Color::rgb(0x8B9AB2).with_alpha(0.45),
+    hollow_light: WHITE.with_alpha(0.9),
+    engrave_dark: Color::rgb(0x8B9AB2).with_alpha(0.35),
+    engrave_light: WHITE.with_alpha(0.9),
+    hover_fill: WHITE.with_alpha(0.45),
+    press_fill: Color::rgb(0x8B9AB2).with_alpha(0.12),
+    working: Color::rgb(0x4A7CF0),
+    waiting: Color::rgb(0xE8930C),
+    error: Color::rgb(0xE5485F),
+    done: Color::rgb(0x23A876),
+    idle: Color::rgb(0x9AA2B1),
+    quest: Color::rgb(0xC99A00),
+    git_modified: Color::rgb(0x895503),
+    git_added: Color::rgb(0x587C0C),
+    git_untracked: Color::rgb(0x007100),
+    git_deleted: Color::rgb(0xAD0707),
+    git_conflict: Color::rgb(0x6C6CC4),
+    magic: Color::rgb(0x4247C9),
+    rare: Color::rgb(0x8F7400),
+    set: Color::rgb(0x3B7F24),
+    unique: Color::rgb(0xA0522D),
+    term_bg: Color::rgb(0x2A303B),
+    term_fg: Color::rgb(0xE6EAF0),
+    term_cursor: Color::rgb(0xFFFFFF),
+    term_selection: Color::rgb(0x46546E),
+};
+
+/// Brutalism: the raw material and nothing to soften it. Pure black, pure
+/// white, hard grooves, no gradient, and lamps at full saturation.
+const BRUTAL: Palette = Palette {
+    window_bg: Color::rgb(0x000000),
+    plate_top: Color::rgb(0x000000),
+    plate_bottom: Color::rgb(0x000000),
+    surface: Color::rgb(0x1A1A1A),
+    well: Color::rgb(0x000000),
+    screen: Color::rgb(0x000000),
+    lamp_off: Color::rgb(0x333333),
+    text: Color::rgb(0xFFFFFF),
+    text_dim: Color::rgb(0xB0B0B0),
+    legend: Color::rgb(0x8C8C8C),
+    cast: BLACK.with_alpha(0.0),
+    bevel_light: WHITE.with_alpha(0.35),
+    bevel_shade: BLACK.with_alpha(0.0),
+    hollow_shade: BLACK.with_alpha(0.0),
+    hollow_light: WHITE.with_alpha(0.35),
+    engrave_dark: WHITE.with_alpha(0.3),
+    engrave_light: WHITE.with_alpha(0.0),
+    hover_fill: WHITE.with_alpha(0.14),
+    press_fill: WHITE.with_alpha(0.07),
+    working: Color::rgb(0x00A3FF),
+    waiting: Color::rgb(0xFFE600),
+    error: Color::rgb(0xFF1F1F),
+    done: Color::rgb(0x00FF66),
+    idle: Color::rgb(0x8C8C8C),
+    quest: Color::rgb(0xFF9900),
+    git_modified: Color::rgb(0xE2C08D),
+    git_added: Color::rgb(0x81B88B),
+    git_untracked: Color::rgb(0x73C991),
+    git_deleted: Color::rgb(0xC74E39),
+    git_conflict: Color::rgb(0xE4676B),
+    magic: Color::rgb(0x8A8CFF),
+    rare: Color::rgb(0xFFF59A),
+    set: Color::rgb(0x9BE06A),
+    unique: Color::rgb(0xD9A35B),
+    term_bg: Color::rgb(0x000000),
+    term_fg: Color::rgb(0xFFFFFF),
+    term_cursor: Color::rgb(0xFFFFFF),
+    term_selection: Color::rgb(0x2A2A2A),
+};
+
+/// Glassmorphism: frosted panes over a deep night sky, their faces a pale
+/// wash of the light behind them, with bright rims where the glass is cut.
+const GLASS: Palette = Palette {
+    window_bg: Color::rgb(0x111A33),
+    plate_top: Color::rgb(0x18234A),
+    plate_bottom: Color::rgb(0x0D1328),
+    surface: Color::rgb(0x26335C),
+    well: Color::rgb(0x0B1124),
+    screen: Color::rgb(0x0A1020),
+    lamp_off: Color::rgb(0x34416B),
+    text: Color::rgb(0xF0F4FF),
+    text_dim: Color::rgb(0xA3B0D6),
+    legend: Color::rgb(0x7F8DB8),
+    cast: Color::rgb(0x02040C).with_alpha(0.55),
+    bevel_light: WHITE.with_alpha(0.28),
+    bevel_shade: WHITE.with_alpha(0.04),
+    hollow_shade: BLACK.with_alpha(0.4),
+    hollow_light: WHITE.with_alpha(0.14),
+    engrave_dark: WHITE.with_alpha(0.08),
+    engrave_light: WHITE.with_alpha(0.08),
+    hover_fill: WHITE.with_alpha(0.1),
+    press_fill: WHITE.with_alpha(0.05),
+    working: Color::rgb(0x5CD0FF),
+    waiting: Color::rgb(0xFFB547),
+    error: Color::rgb(0xFF6B81),
+    done: Color::rgb(0x4CE6A8),
+    idle: Color::rgb(0x8890B5),
+    quest: Color::rgb(0xFFD84D),
+    git_modified: Color::rgb(0xE2C08D),
+    git_added: Color::rgb(0x81B88B),
+    git_untracked: Color::rgb(0x73C991),
+    git_deleted: Color::rgb(0xC74E39),
+    git_conflict: Color::rgb(0xE4676B),
+    magic: Color::rgb(0xA9AAFF),
+    rare: Color::rgb(0xF2E27A),
+    set: Color::rgb(0xA6E07A),
+    unique: Color::rgb(0xD8B57A),
+    term_bg: Color::rgb(0x0A1020),
+    term_fg: Color::rgb(0xF0F4FF),
+    term_cursor: Color::rgb(0xFFFFFF),
+    term_selection: Color::rgb(0x2B4580),
+};
+
+/// Winamp's classic skin: brushed grey-blue chrome with hard bevels like
+/// a Windows 95 button, a black LCD with green text, a gold title bar for
+/// the legends, and lamps in the colours of the spectrum analyser.
+const WINAMP: Palette = Palette {
+    window_bg: Color::rgb(0x26263A),
+    plate_top: Color::rgb(0x34344E),
+    plate_bottom: Color::rgb(0x1E1E2E),
+    surface: Color::rgb(0x34344C),
+    well: Color::rgb(0x0A0A12),
+    screen: Color::rgb(0x000000),
+    lamp_off: Color::rgb(0x2E3A2E),
+    text: Color::rgb(0x30FF30),
+    text_dim: Color::rgb(0x9AB89A),
+    legend: Color::rgb(0xC8B464),
+    cast: BLACK.with_alpha(0.7),
+    bevel_light: WHITE.with_alpha(0.32),
+    bevel_shade: BLACK.with_alpha(0.65),
+    hollow_shade: BLACK.with_alpha(0.7),
+    hollow_light: WHITE.with_alpha(0.18),
+    engrave_dark: BLACK.with_alpha(0.6),
+    engrave_light: WHITE.with_alpha(0.12),
+    hover_fill: WHITE.with_alpha(0.08),
+    press_fill: WHITE.with_alpha(0.03),
+    working: Color::rgb(0x3AA0FF),
+    waiting: Color::rgb(0xFFC800),
+    error: Color::rgb(0xFF2A1A),
+    done: Color::rgb(0x00C8A0),
+    idle: Color::rgb(0x7878A0),
+    quest: Color::rgb(0xFFE14D),
+    git_modified: Color::rgb(0xE2C08D),
+    git_added: Color::rgb(0x81B88B),
+    git_untracked: Color::rgb(0x73C991),
+    git_deleted: Color::rgb(0xC74E39),
+    git_conflict: Color::rgb(0xE4676B),
+    magic: Color::rgb(0x9A9CFF),
+    rare: Color::rgb(0xF2E27A),
+    set: Color::rgb(0xB0E07A),
+    unique: Color::rgb(0xD8A86A),
+    term_bg: Color::rgb(0x000000),
+    term_fg: Color::rgb(0x28E828),
+    term_cursor: Color::rgb(0x30FF30),
+    term_selection: Color::rgb(0x1E3A7A),
+};
+
+/// The Matrix: the code raining down a black screen. Everything is that
+/// green on black, rims glow instead of catching light, and the lamps are
+/// the pills, blue while it works and red when it fails.
+const MATRIX: Palette = Palette {
+    window_bg: Color::rgb(0x000000),
+    plate_top: Color::rgb(0x020A04),
+    plate_bottom: Color::rgb(0x000000),
+    surface: Color::rgb(0x03140A),
+    well: Color::rgb(0x000000),
+    screen: Color::rgb(0x000000),
+    lamp_off: Color::rgb(0x0A2412),
+    text: Color::rgb(0x00FF41),
+    text_dim: Color::rgb(0x00A82B),
+    legend: Color::rgb(0x0D7A2B),
+    cast: BLACK.with_alpha(0.0),
+    bevel_light: Color::rgb(0x00FF41).with_alpha(0.22),
+    bevel_shade: BLACK.with_alpha(0.0),
+    hollow_shade: BLACK.with_alpha(0.5),
+    hollow_light: Color::rgb(0x00FF41).with_alpha(0.12),
+    engrave_dark: Color::rgb(0x00FF41).with_alpha(0.16),
+    engrave_light: WHITE.with_alpha(0.0),
+    hover_fill: Color::rgb(0x00FF41).with_alpha(0.1),
+    press_fill: Color::rgb(0x00FF41).with_alpha(0.04),
+    working: Color::rgb(0x2E7BFF),
+    waiting: Color::rgb(0xFFC400),
+    error: Color::rgb(0xFF2B2B),
+    done: Color::rgb(0x7CFFB0),
+    idle: Color::rgb(0x2F6B40),
+    quest: Color::rgb(0xE8FFE8),
+    git_modified: Color::rgb(0xE2C08D),
+    git_added: Color::rgb(0x81B88B),
+    git_untracked: Color::rgb(0x73C991),
+    git_deleted: Color::rgb(0xC74E39),
+    git_conflict: Color::rgb(0xE4676B),
+    magic: Color::rgb(0x9A9CFF),
+    rare: Color::rgb(0xF2E27A),
+    set: Color::rgb(0xC8FF5A),
+    unique: Color::rgb(0xCFAE72),
+    term_bg: Color::rgb(0x000000),
+    term_fg: Color::rgb(0x00FF41),
+    term_cursor: Color::rgb(0xB8FFC8),
+    term_selection: Color::rgb(0x003B12),
+};
+
+/// A look for the whole app, picked from the tray.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Theme {
+    Skeuomorph,
+    Flat,
+    Neumorph,
+    Brutal,
+    Glass,
+    Winamp,
+    Matrix,
+}
+
+impl Theme {
+    pub const ALL: [Theme; 7] = [
+        Theme::Skeuomorph,
+        Theme::Flat,
+        Theme::Neumorph,
+        Theme::Brutal,
+        Theme::Glass,
+        Theme::Winamp,
+        Theme::Matrix,
+    ];
+
+    pub fn palette(self) -> &'static Palette {
+        match self {
+            Theme::Skeuomorph => &SKEUOMORPH,
+            Theme::Flat => &FLAT,
+            Theme::Neumorph => &NEUMORPH,
+            Theme::Brutal => &BRUTAL,
+            Theme::Glass => &GLASS,
+            Theme::Winamp => &WINAMP,
+            Theme::Matrix => &MATRIX,
+        }
+    }
+
+    /// Its name in the tray menu.
+    pub fn label(self) -> &'static str {
+        match self {
+            Theme::Skeuomorph => "Skeuomorphism",
+            Theme::Flat => "Flat",
+            Theme::Neumorph => "Neumorphism",
+            Theme::Brutal => "Brutalism",
+            Theme::Glass => "Glass",
+            Theme::Winamp => "Winamp",
+            Theme::Matrix => "The Matrix",
+        }
+    }
+
+    /// Its name in state.json, which never changes once given.
+    pub fn key(self) -> &'static str {
+        match self {
+            Theme::Skeuomorph => "skeuomorph",
+            Theme::Flat => "flat",
+            Theme::Neumorph => "neumorph",
+            Theme::Brutal => "brutal",
+            Theme::Glass => "glass",
+            Theme::Winamp => "winamp",
+            Theme::Matrix => "matrix",
+        }
+    }
+
+    /// The theme saved as `key`, the first one for none or one this build
+    /// does not know.
+    pub fn from_key(key: Option<&str>) -> Theme {
+        Theme::ALL
+            .into_iter()
+            .find(|t| Some(t.key()) == key)
+            .unwrap_or(Theme::Skeuomorph)
+    }
+
+    /// What state.json keeps: nothing for the default, so a file from
+    /// before themes and one that never picked one read alike.
+    pub fn saved(self) -> Option<String> {
+        (self != Theme::Skeuomorph).then(|| self.key().to_string())
+    }
+}
+
+/// The theme every window draws in, as its place in [`Theme::ALL`]. An
+/// atomic, not a thread local, so a window drawn on any thread agrees.
+static CURRENT: AtomicUsize = AtomicUsize::new(0);
+
+pub fn current() -> Theme {
+    Theme::ALL[CURRENT.load(Ordering::Relaxed) % Theme::ALL.len()]
+}
+
+/// Draws everything in `t` from the next paint on. The caller repaints.
+pub fn set(t: Theme) {
+    let i = Theme::ALL.iter().position(|&x| x == t).unwrap_or(0);
+    CURRENT.store(i, Ordering::Relaxed);
+}
+
+/// Whether the terminals have the code falling behind their text.
+pub fn rains() -> bool {
+    current() == Theme::Matrix
+}
+
+pub fn palette() -> &'static Palette {
+    current().palette()
+}
+
+macro_rules! colours {
+    ($($name:ident),* $(,)?) => {
+        $(
+            pub fn $name() -> Color {
+                palette().$name
+            }
+        )*
+    };
+}
+
+colours!(
+    window_bg,
+    plate_top,
+    plate_bottom,
+    surface,
+    well,
+    screen,
+    lamp_off,
+    text,
+    text_dim,
+    legend,
+    cast,
+    bevel_light,
+    bevel_shade,
+    hollow_shade,
+    hollow_light,
+    engrave_dark,
+    engrave_light,
+    hover_fill,
+    press_fill,
+    working,
+    waiting,
+    error,
+    done,
+    idle,
+    quest,
+    git_modified,
+    git_added,
+    git_untracked,
+    git_deleted,
+    git_conflict,
+);
 
 pub fn change_color(change: Change) -> Color {
     match change {
-        Change::Modified => GIT_MODIFIED,
-        Change::Added => GIT_ADDED,
-        Change::Untracked | Change::Renamed => GIT_UNTRACKED,
-        Change::Deleted => GIT_DELETED,
-        Change::Conflict => GIT_CONFLICT,
+        Change::Modified => git_modified(),
+        Change::Added => git_added(),
+        Change::Untracked | Change::Renamed => git_untracked(),
+        Change::Deleted => git_deleted(),
+        Change::Conflict => git_conflict(),
     }
 }
 
@@ -133,9 +597,9 @@ pub fn change_color(change: Change) -> Color {
 /// below hover, which is what makes the press read as a push.
 pub fn button_look(b: Button) -> (Option<Color>, Color) {
     match b {
-        Button::Idle => (None, TEXT_DIM),
-        Button::Hover => (Some(HOVER_FILL), TEXT),
-        Button::Pressed => (Some(PRESS_FILL), TEXT_DIM),
+        Button::Idle => (None, text_dim()),
+        Button::Hover => (Some(hover_fill()), text()),
+        Button::Pressed => (Some(press_fill()), text_dim()),
     }
 }
 
@@ -339,11 +803,11 @@ pub fn presence(phase: &Phase) -> f32 {
 /// The full strength colour for a phase.
 pub fn phase_color(phase: &Phase) -> Color {
     match phase {
-        Phase::Working => WORKING,
-        Phase::Waiting(WaitReason::Error(_)) => ERROR,
-        Phase::Waiting(_) => WAITING,
-        Phase::Done => DONE,
-        Phase::Idle | Phase::Ended | Phase::Paused => IDLE,
+        Phase::Working => working(),
+        Phase::Waiting(WaitReason::Error(_)) => error(),
+        Phase::Waiting(_) => waiting(),
+        Phase::Done => done(),
+        Phase::Idle | Phase::Ended | Phase::Paused => idle(),
     }
 }
 
@@ -352,9 +816,9 @@ pub fn phase_color(phase: &Phase) -> Color {
 /// say what they do, and one that has stopped is latched down, darker.
 pub fn phase_fill(phase: &Phase) -> Color {
     match phase {
-        Phase::Waiting(_) => SURFACE.mix(phase_color(phase), 0.22),
-        Phase::Working | Phase::Done | Phase::Idle => SURFACE,
-        Phase::Ended | Phase::Paused => WELL.mix(SURFACE, 0.5),
+        Phase::Waiting(_) => surface().mix(phase_color(phase), 0.22),
+        Phase::Working | Phase::Done | Phase::Idle => surface(),
+        Phase::Ended | Phase::Paused => well().mix(surface(), 0.5),
     }
 }
 
@@ -364,11 +828,11 @@ pub fn phase_fill(phase: &Phase) -> Color {
 /// lemon, set towards leaf.
 pub fn rarity_color(r: Rarity) -> Color {
     match r {
-        Rarity::Normal => TEXT,
-        Rarity::Magic => Color::rgb(0x9A9CFF),
-        Rarity::Rare => Color::rgb(0xF2E27A),
-        Rarity::Set => Color::rgb(0x9BE06A),
-        Rarity::Unique => Color::rgb(0xCFAE72),
+        Rarity::Normal => text(),
+        Rarity::Magic => palette().magic,
+        Rarity::Rare => palette().rare,
+        Rarity::Set => palette().set,
+        Rarity::Unique => palette().unique,
     }
 }
 
@@ -376,11 +840,11 @@ pub fn rarity_color(r: Rarity) -> Color {
 /// colour: calm while there is room, amber getting close, red at the end.
 pub fn fullness_color(percent: f32) -> Color {
     if percent >= 90.0 {
-        ERROR
+        error()
     } else if percent >= 75.0 {
-        WAITING
+        waiting()
     } else {
-        WORKING
+        working()
     }
 }
 
@@ -416,7 +880,7 @@ mod tests {
             Rarity::Set,
             Rarity::Unique,
         ];
-        assert_eq!(rarity_color(Rarity::Normal), TEXT);
+        assert_eq!(rarity_color(Rarity::Normal), text());
         for (i, a) in all.iter().enumerate() {
             for b in &all[i + 1..] {
                 assert!(
@@ -424,10 +888,65 @@ mod tests {
                     "{a:?} {b:?}"
                 );
             }
-            for lamp in [WORKING, WAITING, DONE, ERROR] {
+            for lamp in [working(), waiting(), done(), error()] {
                 assert!(distance(rarity_color(*a), lamp) > 0.2, "{a:?}");
             }
         }
+    }
+
+    #[test]
+    fn every_theme_keeps_its_lamps_apart_from_the_accents_and_the_rarities() {
+        for t in Theme::ALL {
+            let p = t.palette();
+            let lamps = [p.working, p.waiting, p.error, p.done, p.idle];
+            for (a, _) in ACCENTS {
+                for l in lamps {
+                    let d = (a.r - l.r).abs() + (a.g - l.g).abs() + (a.b - l.b).abs();
+                    assert!(d > 0.25, "{t:?}: {a:?} is too close to {l:?}");
+                }
+            }
+            let inks = [p.text, p.magic, p.rare, p.set, p.unique];
+            for (i, a) in inks.iter().enumerate() {
+                for b in &inks[i + 1..] {
+                    assert!(distance(*a, *b) > 0.2, "{t:?}: {a:?} {b:?}");
+                }
+                for l in &lamps[..4] {
+                    assert!(distance(*a, *l) > 0.2, "{t:?}: {a:?} {l:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_theme_reads_text_on_its_plate_and_its_terminal() {
+        let luma = |c: Color| 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
+        for t in Theme::ALL {
+            let p = t.palette();
+            for back in [p.window_bg, p.surface, p.screen] {
+                assert!(
+                    (luma(p.text) - luma(back)).abs() > 0.5,
+                    "{t:?}: text on {back:?}"
+                );
+            }
+            assert!(luma(p.term_bg) < 0.2, "{t:?}: the terminal stays dark");
+            assert!(luma(p.term_fg) - luma(p.term_bg) > 0.6, "{t:?}");
+            assert!(p.hover_fill.a > p.press_fill.a, "{t:?}");
+        }
+    }
+
+    #[test]
+    fn the_themes_differ_and_are_saved_by_a_key_that_reads_back() {
+        for (i, a) in Theme::ALL.iter().enumerate() {
+            for b in &Theme::ALL[i + 1..] {
+                assert_ne!(a.palette(), b.palette());
+                assert_ne!(a.label(), b.label());
+            }
+            assert_eq!(Theme::from_key(a.saved().as_deref()), *a);
+        }
+        assert_eq!(Theme::Skeuomorph.saved(), None);
+        assert_eq!(Theme::from_key(None), Theme::Skeuomorph);
+        assert_eq!(Theme::from_key(Some("vaporwave")), Theme::Skeuomorph);
+        assert_eq!(Theme::from_key(Some("glass")), Theme::Glass);
     }
 
     #[test]
@@ -446,24 +965,24 @@ mod tests {
         let (press, press_ink) = button_look(Button::Pressed);
         assert!(idle.is_none());
         assert!(hover.unwrap().a > press.unwrap().a);
-        assert_eq!(hover_ink, TEXT);
+        assert_eq!(hover_ink, text());
         assert_eq!(idle_ink, press_ink);
     }
 
     #[test]
     fn fuller_turns_amber_then_red() {
-        assert_eq!(fullness_color(10.0), WORKING);
-        assert_eq!(fullness_color(75.0), WAITING);
-        assert_eq!(fullness_color(99.5), ERROR);
-        assert_eq!(fullness_color(140.0), ERROR);
+        assert_eq!(fullness_color(10.0), working());
+        assert_eq!(fullness_color(75.0), waiting());
+        assert_eq!(fullness_color(99.5), error());
+        assert_eq!(fullness_color(140.0), error());
     }
 
     #[test]
     fn only_waiting_is_backlit_and_a_stopped_key_is_latched_down() {
         for p in [Phase::Working, Phase::Done, Phase::Idle] {
-            assert_eq!(phase_fill(&p), SURFACE);
+            assert_eq!(phase_fill(&p), surface());
         }
-        assert_ne!(phase_fill(&Phase::Waiting(WaitReason::Input)), SURFACE);
+        assert_ne!(phase_fill(&Phase::Waiting(WaitReason::Input)), surface());
         for p in [Phase::Ended, Phase::Paused] {
             assert!(depth(&p) < depth(&Phase::Idle));
             assert!(depth(&p) > 0.0);
@@ -545,7 +1064,7 @@ mod tests {
     #[test]
     fn no_accent_is_a_phase_colour() {
         for (a, _) in ACCENTS {
-            for p in [WORKING, WAITING, ERROR, DONE, IDLE] {
+            for p in [working(), waiting(), error(), done(), idle()] {
                 let d = (a.r - p.r).abs() + (a.g - p.g).abs() + (a.b - p.b).abs();
                 assert!(d > 0.25, "{a:?} is too close to {p:?}");
             }
@@ -582,15 +1101,15 @@ mod tests {
 
     #[test]
     fn fading_scales_alpha_and_nothing_else() {
-        let c = WORKING.with_alpha(0.5).fade(0.5);
+        let c = working().with_alpha(0.5).fade(0.5);
         assert_eq!(c.a, 0.25);
-        assert_eq!(c.r, WORKING.r);
-        assert_eq!(WORKING.fade(2.0).a, 1.0);
+        assert_eq!(c.r, working().r);
+        assert_eq!(working().fade(2.0).a, 1.0);
     }
 
     #[test]
     fn waiting_is_tinted_hardest() {
-        let dist = |c: Color| (c.r - SURFACE.r).abs() + (c.b - SURFACE.b).abs();
+        let dist = |c: Color| (c.r - surface().r).abs() + (c.b - surface().b).abs();
         let waiting = phase_fill(&Phase::Waiting(WaitReason::Input));
         let working = phase_fill(&Phase::Working);
         assert!(dist(waiting) > dist(working));

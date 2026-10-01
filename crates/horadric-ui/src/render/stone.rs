@@ -68,7 +68,7 @@ impl Painter<'_> {
         let empty = look.state == StoneState::Empty;
         let mut rock = match look.state {
             StoneState::Cracked => ROCK.mix(black, 0.2),
-            StoneState::Empty => ROCK.mix(theme::PLATE_TOP, 0.45),
+            StoneState::Empty => ROCK.mix(theme::plate_top(), 0.45),
             StoneState::Running(_) => ROCK.mix(gold, 0.12),
             StoneState::Rest => ROCK,
         };
@@ -83,7 +83,7 @@ impl Painter<'_> {
         // Its shadow falls down and to the right, away from the light.
         for (k, a) in [(1.0, 0.18), (0.6, 0.22), (0.3, 0.3)] {
             let d = thick + size * 0.06 * k;
-            self.fill_at(&slab, (d * 0.6, d), theme::CAST.fade(a));
+            self.fill_at(&slab, (d * 0.6, d), theme::cast().fade(a));
         }
         // Its side, showing below the face where the slab is thick.
         self.fill_at(&slab, (thick * 0.35, thick), rock.mix(black, 0.55));
@@ -367,7 +367,9 @@ mod tests {
                 .CreateWicBitmapRenderTarget(&bitmap, &props)
                 .unwrap();
             let rt: windows::Win32::Graphics::Direct2D::ID2D1RenderTarget = rt.cast().unwrap();
-            let brush = rt.CreateSolidColorBrush(&color(theme::TEXT), None).unwrap();
+            let brush = rt
+                .CreateSolidColorBrush(&color(theme::text()), None)
+                .unwrap();
             let gradients = Gradients::default();
             let p = Painter {
                 rt: &rt,
@@ -375,12 +377,12 @@ mod tests {
                 gradients: &gradients,
             };
             rt.BeginDraw();
-            rt.Clear(Some(&color(theme::PLATE_BOTTOM)));
+            rt.Clear(Some(&color(theme::plate_bottom())));
             let half = h as f32 / 2.0;
             p.fill_gradient(
                 &Rect::new(0.0, 0.0, w as f32, half),
                 (0.0, half),
-                &[(0.0, theme::PLATE_TOP), (1.0, theme::PLATE_BOTTOM)],
+                &[(0.0, theme::plate_top()), (1.0, theme::plate_bottom())],
             );
             p.fill_rounded(
                 &Rect::new(0.0, half, w as f32, half),
@@ -416,7 +418,7 @@ mod tests {
                         x += size + 40.0;
                     }
                     let ink = if ground == 0 {
-                        theme::TEXT_DIM
+                        theme::text_dim()
                     } else {
                         Color::rgb(0x333333)
                     };
