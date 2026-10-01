@@ -80,7 +80,7 @@ use crate::field::{self, Field};
 use crate::frame::{Decoration, Stroke};
 use crate::glyphs::{
     self, Bar, BarEdit, BarHit, BarLayout, Buttons, CellSize, FindBar, GridTarget, Header,
-    PageFrame, BAR_INSET, HEADER_H,
+    PageFrame, TabHit, BAR_INSET, HEADER_H,
 };
 use crate::keys::{
     self, Button, CharAction, Chord, FontStep, Key, KeyEvent, Kitty, Mods, MouseEncoding,
@@ -93,7 +93,7 @@ use crate::paste::{self, Source};
 use crate::theme::{self, Color};
 use crate::viewer::Hit;
 use crate::viewport::{self, Fit, Grip};
-use crate::web;
+use crate::web::{self, TabStep};
 use crate::window::Shared;
 use crate::{find, frame, watch};
 
@@ -576,11 +576,18 @@ impl Pane {
         ]
     }
 
+    /// The glass below a browser pane's tab strip, in DIPs: what its page
+    /// has.
+    fn page_glass(&self) -> [f32; 4] {
+        let [left, top, right, bottom] = self.glass();
+        [left, (top + glyphs::TABS_H).min(bottom), right, bottom]
+    }
+
     /// Where a browser pane's page goes in the glass, in DIPs: all of it,
     /// or its own size when it has one.
     fn page_fit(&self) -> Option<(Fit, Option<(u32, u32)>)> {
         let size = web::size(self.console.web.as_deref()?);
-        Some((viewport::fit(self.glass(), size), size))
+        Some((viewport::fit(self.page_glass(), size), size))
     }
 
     /// The page's bounds in the pane's pixels and its zoom factor.
@@ -589,7 +596,7 @@ impl Pane {
             return (RECT::default(), 1.0);
         };
         if let Some(key) = &self.console.web {
-            web::set_room(key, viewport::unscaled(self.glass()));
+            web::set_room(key, viewport::unscaled(self.page_glass()));
         }
         let scale = self.dpi_now() as f32 / 96.0;
         let ([left, top, right, bottom], zoom) = viewport::pixels(&fit, size, scale);
@@ -754,9 +761,17 @@ impl Pane {
             None if detail == "about:blank" => String::new(),
             None => detail.clone(),
         };
+        let (tab_names, tab) = self
+            .console
+            .web
+            .as_deref()
+            .and_then(web::tabs)
+            .unwrap_or_default();
         let bar = self.console.web.as_deref().map(|key| {
             let (back, forward) = web::history(key);
             Bar {
+                tabs: &tab_names,
+                tab,
                 text: &shown,
                 edit: edit.as_ref().map(|f| {
                     let (a, b) = f.selection();
@@ -816,9 +831,12 @@ impl Pane {
             }
         };
         // A browser pane's grid is empty and unseen, but a page smaller
-        // than the glass would show its cursor beside it.
+        // than the glass, or the tab strip over it, would show its cursor.
         if self.console.web.is_some() {
             frame.caret = None;
+            frame.fills.clear();
+            frame.runs.clear();
+            frame.loose.clear();
         }
         if let Some(cells) = self.link.borrow().as_ref() {
             let rows = self.console.size().rows as i32;
@@ -1572,6 +1590,59 @@ impl Pane {
         glyphs::bar_hit(&self.bar_layout(), self.dip(lparam).0)
     }
 
+    /// What in a browser pane's tab strip is under a client point.
+    fn tab_at(&self, lparam: LPARAM) -> Option<TabHit> {
+        let key = self.console.web.as_deref()?;
+        let (x, y) = self.dip(lparam);
+        let top = glyphs::SCREEN_TOP;
+        if !(top..top + glyphs::TABS_H).contains(&y) {
+            return None;
+        }
+        let mut r = RECT::default();
+        unsafe {
+            let _ = GetClientRect(self.hwnd, &mut r);
+        }
+        let width = r.right as f32 * 96.0 / self.dpi_now() as f32;
+        let count = web::tabs(key).map_or(0, |(t, _)| t.len());
+        glyphs::tab_hit(&glyphs::tab_layout(width, count), x)
+    }
+
+    /// Whether a client point is in a browser pane's tab strip, on a tab
+    /// or not.
+    fn in_tabs(&self, lparam: LPARAM) -> bool {
+        let y = self.dip(lparam).1;
+        self.console.web.is_some()
+            && (glyphs::SCREEN_TOP..glyphs::SCREEN_TOP + glyphs::TABS_H).contains(&y)
+    }
+
+    /// A press in a browser pane's tab strip: a tab shown, closed with its
+    /// cross or the middle button, or a new one. False anywhere else.
+    fn on_tabs(&self, lparam: LPARAM, middle: bool) -> bool {
+        let Some(key) = &self.console.web else {
+            return false;
+        };
+        if !self.in_tabs(lparam) {
+            return false;
+        }
+        // What was typed is for the tab it was typed in.
+        if self.address.take().is_some() {
+            self.invalidate();
+        }
+        let step = match (self.tab_at(lparam), middle) {
+            (Some(TabHit::Tab(i) | TabHit::Close(i)), true) => TabStep::Close(Some(i)),
+            (Some(TabHit::Tab(i)), false) => TabStep::Select(i),
+            (Some(TabHit::Close(i)), false) => TabStep::Close(Some(i)),
+            (Some(TabHit::New), false) => TabStep::New,
+            _ => return true,
+        };
+        web::tab(key, step);
+        // A new tab puts the keyboard in its address field instead.
+        if step != TabStep::New {
+            self.focus();
+        }
+        true
+    }
+
     /// A press on a browser pane's back, forward or reload, or in its
     /// address field. False anywhere else.
     fn on_bar(&self, lparam: LPARAM, double: bool) -> bool {
@@ -1606,6 +1677,24 @@ impl Pane {
             self.invalidate();
         }
         web::go(key, step);
+        true
+    }
+
+    /// A browser's tab key while the pane, not its page, has the keyboard,
+    /// as it does while the address is typed.
+    fn web_tab_key(&self, vk: VIRTUAL_KEY) -> bool {
+        let Some(key) = &self.console.web else {
+            return false;
+        };
+        let m = Self::mods();
+        let Some(step) = web::tab_key(vk, m.ctrl, m.shift, m.alt) else {
+            return false;
+        };
+        self.drop_char();
+        if step != TabStep::New && self.address.take().is_some() {
+            self.invalidate();
+        }
+        web::tab(key, step);
         true
     }
 
@@ -2141,7 +2230,7 @@ impl Pane {
                     let _ = ScreenToClient(self.hwnd, &mut p);
                 }
                 let at = LPARAM(((p.y as u16 as isize) << 16) | p.x as u16 as isize);
-                if self.in_header(at) {
+                if self.in_header(at) || self.in_tabs(at) {
                     let cursor = if self.bar_at(at) == Some(BarHit::Field) {
                         IDC_IBEAM
                     } else {
@@ -2203,7 +2292,8 @@ impl Pane {
                 if wparam.0 == VK_CONTROL.0 as usize && !repeat {
                     self.hover(self.mouse_here());
                 }
-                if self.bar_key(VIRTUAL_KEY(wparam.0 as u16), Self::mods())
+                if self.web_tab_key(VIRTUAL_KEY(wparam.0 as u16))
+                    || self.bar_key(VIRTUAL_KEY(wparam.0 as u16), Self::mods())
                     || self.on_key(wparam.0 as u16, Self::mods(), repeat)
                 {
                     Some(LRESULT(0))
@@ -2220,6 +2310,9 @@ impl Pane {
             }
             WM_LBUTTONDOWN | WM_LBUTTONDBLCLK => {
                 if self.on_bar(lparam, msg == WM_LBUTTONDBLCLK) {
+                    return Some(LRESULT(0));
+                }
+                if self.on_tabs(lparam, false) {
                     return Some(LRESULT(0));
                 }
                 if let (Some(grip), Some(key)) = (self.grip_at(lparam), &self.console.web) {
@@ -2319,6 +2412,7 @@ impl Pane {
                 }
                 Some(LRESULT(0))
             }
+            WM_MBUTTONDOWN if self.on_tabs(lparam, true) => Some(LRESULT(0)),
             WM_RBUTTONDOWN | WM_MBUTTONDOWN if !self.in_header(lparam) => {
                 let button = if msg == WM_RBUTTONDOWN {
                     Button::Right
