@@ -97,6 +97,48 @@ and their worktrees are cleaned up.
 
 Built: see "Tal Rasha's tombs" in [PLAN.md](PLAN.md).
 
+### Town Portal
+
+Horadric from your phone, so work goes on wherever you are: see every
+session on the PC, answer it, and start new ones. Asked for on
+2026-10-01.
+
+Much of it is there already. Each session's host keeps the last 4 MB of
+output and speaks five messages (input, resize, output, exit, kill), and
+the registry holds every session's phase from the hooks. A phone needs
+the session list, a stream from a host's ring, and a way to send input
+back. The UI passes these on, since the host pipes refuse remote
+clients.
+
+- **A PWA first, a native app maybe later.** A page Horadric serves
+  needs no app store and works on iOS and Android, with xterm.js for the
+  terminal. It means an HTTP and WebSocket server in Horadric, and maybe
+  TLS, so it touches the "no web view" and "dependencies one at a time"
+  decisions and has to be settled with the human before it is built.
+- **An API, not pages.** The PWA is written as if it were a third party
+  client, against a versioned API: JSON over WebSocket for events and
+  session state, binary frames for terminal output. Then a native app is
+  a second client of the same server, and the server, the protocol, the
+  pairing and the network all carry over. Only the UI is written again,
+  and push gets a second sender (APNs and FCM beside Web Push), while
+  the part that decides when to notify stays.
+- **Reaching the PC through Tailscale**, not a relay of our own or an
+  open port. It brings the encryption and the identity.
+- **Off by default.** This is remote control of a machine whose agents
+  may run with permissions bypassed. Each phone is paired by a device
+  token the human approves on the PC, and the server listens only on the
+  tailnet.
+- **An inbox first, not a terminal.** Typing into a terminal on a phone
+  is slow. Away from the desk the need is "2 sessions wait for you":
+  approve a permission, answer a question, send a short prompt, and a
+  push notification when one waits. Then a live terminal to read, then
+  starting a session in a project. Step 5 in the plan names an inbox
+  already, and the two should be one.
+
+Claude Code's own Remote Control covers a single Claude session. This
+covers the fleet: every project, Codex and Grok Build too, and starting
+sessions.
+
 ## Visual
 
 ### Item rarity colours
