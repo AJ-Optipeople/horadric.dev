@@ -308,6 +308,8 @@ pub(crate) enum Input {
     Link(String),
     /// A browser pane's cross: close the page of the project with this key.
     CloseWeb(String),
+    /// A tab key in a browser pane's page, or its page closing itself.
+    WebTab(String, web::TabStep),
     /// A browser pane's header right clicked, or Ctrl+L in its page: what
     /// can be done with the page of the project with this key.
     WebAsk(String, WebAsk),
@@ -1801,8 +1803,13 @@ fn web_menu(key: &str) {
     const RELOAD: usize = 4;
     const OUTSIDE: usize = 5;
     const CLOSE: usize = 6;
+    const NEW_TAB: usize = 7;
+    const CLOSE_TAB: usize = 8;
     const SIZE: usize = 100;
     let items = vec![
+        Item::action(NEW_TAB, "New tab\tCtrl+T"),
+        Item::action(CLOSE_TAB, "Close tab\tCtrl+W"),
+        Item::Separator,
         Item::action(ADDRESS, "Go to...\tCtrl+L"),
         Item::action(BACK, "Back\tAlt+Left"),
         Item::action(FORWARD, "Forward\tAlt+Right"),
@@ -1815,6 +1822,8 @@ fn web_menu(key: &str) {
     ];
     match menu::popup(&items) {
         Some(ADDRESS) => go_to(key),
+        Some(NEW_TAB) => web::tab(key, web::TabStep::New),
+        Some(CLOSE_TAB) => web::tab(key, web::TabStep::Close(None)),
         Some(BACK) => web::go(key, web::Step::Back),
         Some(FORWARD) => web::go(key, web::Step::Forward),
         Some(RELOAD) => web::go(key, web::Step::Reload),
@@ -5121,6 +5130,13 @@ impl App {
         }
     }
 
+    /// Opens `url` in a new tab of the project's browser pane, shown on
+    /// the stage with the keyboard.
+    fn open_web_tab(&mut self, key: &str, url: &str) {
+        web::open_tab(key, Some(url));
+        self.open_web(key, None);
+    }
+
     fn close_web(&mut self, key: &str) {
         self.webs.remove(key);
         self.sync_stage();
@@ -5900,10 +5916,11 @@ impl App {
                     }
                 }
                 Input::Link(url) => match self.stage.as_ref().map(|s| s.project()) {
-                    Some(key) if self.webs.contains_key(&key) => self.open_web(&key, Some(&url)),
+                    Some(key) if self.webs.contains_key(&key) => self.open_web_tab(&key, &url),
                     _ => watch::open_link(&crate::links::Target::Web(url), None),
                 },
                 Input::CloseWeb(key) => self.close_web(&key),
+                Input::WebTab(key, step) => web::tab(&key, step),
                 Input::WebAsk(key, what) => {
                     self.web_ask = Some((key, what));
                     post(self.notify.0 as isize, WM_HORADRIC_WEB, 0);

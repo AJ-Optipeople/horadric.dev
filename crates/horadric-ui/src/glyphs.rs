@@ -21,7 +21,7 @@ use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Direct2D::Common::{D2D1_COLOR_F, D2D1_GRADIENT_STOP, D2D_RECT_F};
 use windows::Win32::Graphics::Direct2D::{
     ID2D1Geometry, ID2D1HwndRenderTarget, ID2D1LinearGradientBrush, ID2D1SolidColorBrush,
-    D2D1_ANTIALIAS_MODE_ALIASED, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+    D2D1_ANTIALIAS_MODE_ALIASED, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_DRAW_TEXT_OPTIONS_CLIP,
     D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT, D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE,
     D2D1_EXTEND_MODE_CLAMP, D2D1_GAMMA_2_2, D2D1_LAYER_OPTIONS_NONE, D2D1_LAYER_PARAMETERS,
     D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES, D2D1_ROUNDED_RECT,
@@ -131,6 +131,81 @@ pub struct Bar<'a> {
     /// The side the pane stands on beside the grid, whose place button is
     /// lit. None in the grid.
     pub dock: Option<Side>,
+    /// What each tab is called, in the strip along the glass's top.
+    pub tabs: &'a [String],
+    /// The tab shown.
+    pub tab: usize,
+}
+
+/// Height of a browser pane's tab strip, along the top of its glass, the
+/// page below it.
+pub const TABS_H: f32 = HEADER_H + 4.0;
+/// A tab's widest. Past that many tabs share the strip.
+const TAB_MAX: f32 = 220.0;
+/// The new tab button's width, after the last tab.
+const TAB_NEW: f32 = HEADER_H;
+/// A tab's cross, at its right end.
+const TAB_CROSS: f32 = 20.0;
+/// Between two tabs.
+const TAB_GAP: f32 = 2.0;
+/// Between the strip's ends and the glass's edges.
+const TAB_INSET: f32 = 6.0;
+
+/// Where a browser pane's tabs go, in DIPs from its left.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TabLayout {
+    /// Each tab's left and right edges.
+    pub tabs: Vec<(f32, f32)>,
+    /// Where each tab's cross starts, where it is wide enough for one.
+    pub crosses: Vec<Option<f32>>,
+    /// Where the new tab button starts.
+    pub new: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TabHit {
+    Tab(usize),
+    Close(usize),
+    New,
+}
+
+/// `count` tabs in a pane `width` DIPs wide: as wide as [`TAB_MAX`] while
+/// they fit, sharing the strip when they do not, then the new tab button.
+pub fn tab_layout(width: f32, count: usize) -> TabLayout {
+    let left = BEZEL + TAB_INSET;
+    let room = (width - BEZEL - TAB_INSET - left - TAB_NEW).max(0.0);
+    let each = if count == 0 {
+        0.0
+    } else {
+        (room / count as f32).min(TAB_MAX)
+    };
+    let tabs: Vec<(f32, f32)> = (0..count)
+        .map(|i| {
+            let l = left + i as f32 * each;
+            (l, (l + each - TAB_GAP).max(l))
+        })
+        .collect();
+    let crosses = tabs
+        .iter()
+        .map(|&(l, r)| (r - l >= 3.0 * TAB_CROSS).then_some(r - TAB_CROSS))
+        .collect();
+    TabLayout {
+        tabs,
+        crosses,
+        new: left + count as f32 * each,
+    }
+}
+
+/// What in the tab strip is under `x`, a point in it.
+pub fn tab_hit(l: &TabLayout, x: f32) -> Option<TabHit> {
+    if x >= l.new && x < l.new + TAB_NEW {
+        return Some(TabHit::New);
+    }
+    let i = l.tabs.iter().position(|&(a, b)| x >= a && x < b)?;
+    match l.crosses[i] {
+        Some(c) if x >= c => Some(TabHit::Close(i)),
+        _ => Some(TabHit::Tab(i)),
+    }
 }
 
 /// A browser pane's page laid out at a size of its own: a rim round it,
@@ -784,6 +859,9 @@ impl GridTarget {
             self.rt.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
 
             self.glass(gpu, &screen, header);
+            if let Some(bar) = &header.bar {
+                self.tab_strip(gpu, bar, size.width, header.accent);
+            }
             if let Some(p) = page {
                 self.page_frame(gpu, p);
             }
@@ -805,6 +883,106 @@ impl GridTarget {
             }
             self.rt.EndDraw(None, None)
         }
+    }
+
+    /// A browser pane's tabs along the top of its glass, the one shown lit
+    /// and joined to the page below, each with its cross, then the new
+    /// tab button.
+    unsafe fn tab_strip(&self, gpu: &Gpu, bar: &Bar, width: f32, accent: Color) {
+        let l = tab_layout(width, bar.tabs.len());
+        let (top, bottom) = (SCREEN_TOP + 4.0, SCREEN_TOP + TABS_H);
+        let glyph = |g: &str, left: f32, right: f32, ink: Color| {
+            let g: Vec<u16> = g.encode_utf16().collect();
+            self.brush.SetColor(&render::color(ink));
+            self.rt.DrawText(
+                &g,
+                &gpu.icon_small,
+                &D2D_RECT_F {
+                    left,
+                    top,
+                    right,
+                    bottom,
+                },
+                &self.brush,
+                D2D1_DRAW_TEXT_OPTIONS_NONE,
+                DWRITE_MEASURING_MODE_NATURAL,
+            );
+        };
+        for (i, (name, &(left, right))) in bar.tabs.iter().zip(&l.tabs).enumerate() {
+            let shown = i == bar.tab;
+            let rect = D2D_RECT_F {
+                left,
+                top,
+                right,
+                bottom,
+            };
+            if shown {
+                // Square at the bottom, where it meets the page.
+                self.rt
+                    .PushAxisAlignedClip(&rect, D2D1_ANTIALIAS_MODE_ALIASED);
+                self.brush
+                    .SetColor(&render::color(theme::WINDOW_BG.mix(theme::TEXT, 0.1)));
+                self.rt.FillRoundedRectangle(
+                    &rounded(
+                        &D2D_RECT_F {
+                            bottom: bottom + 6.0,
+                            ..rect
+                        },
+                        6.0,
+                    ),
+                    &self.brush,
+                );
+                self.rt.PopAxisAlignedClip();
+                self.brush.SetColor(&render::color(accent.with_alpha(0.8)));
+                self.rt.FillRectangle(
+                    &D2D_RECT_F {
+                        left: left + 6.0,
+                        top,
+                        right: right - 6.0,
+                        bottom: top + 2.0,
+                    },
+                    &self.brush,
+                );
+            } else if i + 1 != bar.tab && i + 1 < bar.tabs.len() {
+                // A line between two tabs neither of which is shown.
+                self.brush
+                    .SetColor(&render::color(theme::TEXT_DIM.with_alpha(0.25)));
+                self.rt.FillRectangle(
+                    &D2D_RECT_F {
+                        left: right + TAB_GAP / 2.0 - 0.5,
+                        top: top + 7.0,
+                        right: right + TAB_GAP / 2.0 + 0.5,
+                        bottom: bottom - 7.0,
+                    },
+                    &self.brush,
+                );
+            }
+            let cross = l.crosses[i];
+            let text_right = cross.unwrap_or(right - 4.0);
+            let name: Vec<u16> = name.encode_utf16().collect();
+            self.brush.SetColor(&render::color(if shown {
+                theme::TEXT
+            } else {
+                theme::TEXT_DIM
+            }));
+            self.rt.DrawText(
+                &name,
+                &gpu.small,
+                &D2D_RECT_F {
+                    left: left + 10.0,
+                    top,
+                    right: text_right.max(left + 10.0),
+                    bottom,
+                },
+                &self.brush,
+                D2D1_DRAW_TEXT_OPTIONS_CLIP,
+                DWRITE_MEASURING_MODE_NATURAL,
+            );
+            if let Some(c) = cross {
+                glyph("\u{E711}", c, c + TAB_CROSS, theme::TEXT_DIM);
+            }
+        }
+        glyph("\u{E710}", l.new, l.new + TAB_NEW, theme::TEXT_DIM);
     }
 
     /// A stage in outline with its browser's part of it filled: the left
@@ -1559,5 +1737,36 @@ mod tests {
         assert_eq!(r[1], ((oy + 32.0) * 1.5).round() as i32);
         assert_eq!(r[2] - r[0], 12);
         assert_eq!(r[3] - r[1], 24);
+    }
+
+    #[test]
+    fn tabs_share_the_strip_once_they_no_longer_fit() {
+        let wide = tab_layout(1000.0, 2);
+        assert_eq!(wide.tabs[0].0, BEZEL + TAB_INSET);
+        assert_eq!(wide.tabs[0].1 - wide.tabs[0].0, TAB_MAX - TAB_GAP);
+        assert_eq!(wide.new, BEZEL + TAB_INSET + 2.0 * TAB_MAX);
+        assert!(wide.crosses.iter().all(Option::is_some));
+
+        let many = tab_layout(400.0, 10);
+        let each = many.tabs[1].0 - many.tabs[0].0;
+        assert!(each < TAB_MAX);
+        assert!(many.new + TAB_NEW <= 400.0 - BEZEL - TAB_INSET + 0.01);
+        // Too narrow for a cross: a middle click or Ctrl+W closes it.
+        assert!(many.crosses.iter().all(Option::is_none));
+
+        let none = tab_layout(400.0, 0);
+        assert!(none.tabs.is_empty());
+        assert_eq!(none.new, BEZEL + TAB_INSET);
+    }
+
+    #[test]
+    fn a_click_in_the_strip_finds_its_tab() {
+        let l = tab_layout(1000.0, 3);
+        assert_eq!(tab_hit(&l, l.tabs[1].0 + 1.0), Some(TabHit::Tab(1)));
+        let cross = l.crosses[2].unwrap();
+        assert_eq!(tab_hit(&l, cross + 1.0), Some(TabHit::Close(2)));
+        assert_eq!(tab_hit(&l, l.new + 1.0), Some(TabHit::New));
+        assert_eq!(tab_hit(&l, l.new + TAB_NEW + 1.0), None);
+        assert_eq!(tab_hit(&l, 0.0), None);
     }
 }
