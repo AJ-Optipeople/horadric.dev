@@ -298,6 +298,13 @@ pub fn sessionless(runes: &[Rune]) -> bool {
     !runes.is_empty() && !runes.iter().any(Rune::needs_session)
 }
 
+/// Whether a runeword of these steps is only keystrokes, which wait for
+/// no turn, so it can be typed into a session casting another runeword
+/// (an answer to a permission prompt) without stopping that one.
+pub fn only_keys(runes: &[Rune]) -> bool {
+    !runes.is_empty() && runes.iter().all(|r| matches!(r, Rune::Keys(_)))
+}
+
 /// A stone's steps, or why they do not parse.
 pub type Steps = Result<Vec<Rune>, String>;
 
@@ -1026,6 +1033,16 @@ mod tests {
             act(&w, Some(&s), None, Some(&Ran::Gone)),
             Act::Stop("its pane was closed".into())
         );
+    }
+
+    #[test]
+    fn a_runeword_of_only_keys_waits_for_no_turn() {
+        let keys = |k: &str| Rune::Keys(k.into());
+        assert!(only_keys(&[keys("1")]));
+        assert!(only_keys(&[keys("1"), keys("{enter}")]));
+        assert!(!only_keys(&[keys("1"), Rune::Say("x".into())]));
+        assert!(!only_keys(&[Rune::Test]));
+        assert!(!only_keys(&[]));
     }
 
     #[test]

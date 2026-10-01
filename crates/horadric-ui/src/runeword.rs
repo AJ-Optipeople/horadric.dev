@@ -765,6 +765,11 @@ impl App {
         };
         let runes = stone.runes().map(<[Rune]>::to_vec).unwrap_or_default();
         match on {
+            Some(id) if self.runeword_of(id).is_some() && runeword::only_keys(&runes) => {
+                if !self.slip_keys(id, label, &runes) {
+                    return;
+                }
+            }
             Some(id) => {
                 if let Some(w) = self.runeword_of(id) {
                     let who = self.on_label(&On::Session(id.to_string()), None);
@@ -786,6 +791,37 @@ impl App {
             self.save();
         }
         self.redraw_tiles();
+    }
+
+    /// Types a stone of only keys into a session casting another
+    /// runeword, leaving that one where it is: keys wait for no turn, so
+    /// they answer a prompt the other runeword is held up on.
+    /// False, with a toast, when they could not be typed.
+    fn slip_keys(&mut self, id: &str, label: &str, runes: &[Rune]) -> bool {
+        let pieces: Result<Vec<Vec<u8>>, String> = runes
+            .iter()
+            .filter_map(|r| match r {
+                Rune::Keys(spec) => Some(runeword::keys(spec)),
+                _ => None,
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(|p| p.into_iter().flatten().collect());
+        let why = match pieces {
+            Ok(pieces) => {
+                if self.type_keys(id, pieces) {
+                    return true;
+                }
+                "its terminal is not running".to_string()
+            }
+            Err(e) => e,
+        };
+        let who = self.on_label(&On::Session(id.to_string()), None);
+        self.toasts.show(
+            Kind::Failed,
+            &format!("Cannot cast {label}"),
+            &format!("{who}: {why}"),
+        );
+        false
     }
 
     /// A stone let go of over the screen: cast on the tile or pane there.

@@ -2560,6 +2560,11 @@ saved in `state.json`) stays.
   sessionless runeword lives on the project rather than a session, so
   it is saved beside the sessions in `state.json` and goes on through a
   reload too.
+  A session casts one runeword at a time, and any other stone cast on
+  it says to stop that first, except a stone of only `keys` steps:
+  keys wait for no turn, so they are typed in beside the runeword
+  already running, which is how a permission prompt that holds it up
+  is answered from the tome without stopping it.
 - **While one runs** the stone glows in the cube's gold and shows its
   step ("2/4"); a click on it then offers Stop. The tile it casts on
   shows "rune 2/4" as today. The tile menu keeps "Stop <name>" and
