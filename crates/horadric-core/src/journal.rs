@@ -653,6 +653,7 @@ mod tests {
             title: title.to_string(),
             holder: holder.map(str::to_string),
             reason: (mark == Mark::Blocked).then(|| "needs keys".to_string()),
+            wait: None,
             notes: Vec::new(),
         };
         let old = [

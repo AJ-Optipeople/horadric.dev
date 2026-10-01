@@ -28,7 +28,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use horadric_core::journal::{self, Commit, Entry, What};
-use horadric_core::tasks::{self, Holder, Mark, Mode, Next, Task};
+use horadric_core::tasks::{self, Holder, Mark, Mode, Next, Task, Wait};
 use horadric_core::usage::format_until;
 use horadric_core::worktree::{self, Worktree};
 use horadric_core::{fleet, ssh, tombs, Phase, WaitReason};
@@ -95,10 +95,27 @@ pub(super) struct State {
     pub(super) merge_for: Option<Merge>,
     /// The limit last journaled, by when it resets, so each is written once.
     limit_journaled: Option<u64>,
+    /// What the waits that need git or a command last came to, by project
+    /// and wait, filled in by the threads that look.
+    checks: Arc<Mutex<HashMap<(String, String), Check>>>,
     /// Set while the runner acts. Starting a session reconciles, and
     /// nothing in there may start the runner again.
     busy: bool,
 }
+
+/// The last look at a wait that git or a command answers.
+#[derive(Clone, Copy)]
+struct Check {
+    at: Instant,
+    met: bool,
+    /// A thread is looking now.
+    running: bool,
+}
+
+/// The least time between two looks at a wait that runs git or a command.
+const CHECK_GAP: Duration = Duration::from_secs(15);
+/// How long a wait's command may run before it counts as not met.
+const CHECK_LONGEST: Duration = Duration::from_secs(30);
 
 type Stamp = [Option<(SystemTime, u64)>; 2];
 
@@ -165,6 +182,48 @@ pub(super) fn command_for(exe: &str) -> String {
         format!("\"{exe}\"")
     } else {
         exe
+    }
+}
+
+/// Whether `program` run in `dir` with no window exits 0 within
+/// `CHECK_LONGEST`. `cmd.exe` takes its one argument as the command to run,
+/// as typed, since its quoting is not a C program's.
+fn exits_zero(program: &str, args: &[String], dir: &Path) -> bool {
+    use std::os::windows::process::CommandExt;
+    use std::process::{Command, Stdio};
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let mut cmd = Command::new(program);
+    if program == "cmd.exe" {
+        cmd.arg("/d").arg("/c");
+        for a in args {
+            cmd.raw_arg(a);
+        }
+    } else {
+        cmd.args(args);
+    }
+    let Ok(mut child) = cmd
+        .current_dir(dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()
+    else {
+        return false;
+    };
+    let start = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) if start.elapsed() < CHECK_LONGEST => {
+                std::thread::sleep(Duration::from_millis(100))
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+        }
     }
 }
 
@@ -512,7 +571,7 @@ impl App {
         };
         let result = match self.row_state(&task) {
             RowState::Open => self.take_task(key, line, title, true).map(drop),
-            RowState::Gone => self.start_again(key, line, title),
+            RowState::Gone => self.start_again(key, line, title, true),
             _ => Ok(()),
         };
         if let Err(e) = result {
@@ -529,15 +588,137 @@ impl App {
     }
 
     /// Starts an item whose session is gone again, in as many tombs as it
-    /// had.
-    fn start_again(&mut self, key: &str, line: usize, title: &str) -> Result<(), String> {
+    /// had. With `show`, its project comes onto the stage.
+    fn start_again(
+        &mut self,
+        key: &str,
+        line: usize,
+        title: &str,
+        show: bool,
+    ) -> Result<(), String> {
         let tombs = self
             .task_at(key, line, title)
             .and_then(|t| tombs::count(t.holder.as_deref()?));
         self.set_task(key, line, title, Mark::Open);
         match tombs {
             Some(n) => self.take_tombs(key, line, title, n),
-            None => self.take_task(key, line, title, true).map(drop),
+            None => self.take_task(key, line, title, show).map(drop),
+        }
+    }
+
+    /// Whether what the blocked `t` of project `key` waits on is over. The
+    /// list and the clock answer at once, a file by a look at the disk;
+    /// git and a command run on a thread at most every `CHECK_GAP`, and
+    /// until one has answered the wait is not over.
+    fn wait_met(&self, key: &str, tasks: &[Task], t: &Task, now: u64) -> bool {
+        let Some(wait) = &t.wait else {
+            return false;
+        };
+        if let Some(met) = wait.met(tasks, now) {
+            return met;
+        }
+        let Some(dir) = self.project_dir(key) else {
+            return false;
+        };
+        let (program, args): (&str, Vec<String>) = match wait {
+            Wait::File(f) => return dir.join(f).exists(),
+            Wait::Main(r) => (
+                "git",
+                vec![
+                    "merge-base".into(),
+                    "--is-ancestor".into(),
+                    r.clone(),
+                    "HEAD".into(),
+                ],
+            ),
+            Wait::Cmd(c) => ("cmd.exe", vec![c.clone()]),
+            Wait::Quest(_) | Wait::Until(_) => return false,
+        };
+        let id = (key.to_string(), wait.spell());
+        let Ok(mut checks) = self.tasks.checks.lock() else {
+            return false;
+        };
+        let last = checks.get(&id).copied();
+        if last.is_some_and(|c| c.running || c.at.elapsed() < CHECK_GAP) {
+            return last.is_some_and(|c| c.met);
+        }
+        checks.insert(
+            id.clone(),
+            Check {
+                at: Instant::now(),
+                met: last.is_some_and(|c| c.met),
+                running: true,
+            },
+        );
+        // The runner looks every second, so it hears the answer without
+        // being told.
+        let checks = Arc::clone(&self.tasks.checks);
+        std::thread::spawn(move || {
+            let met = exits_zero(program, &args, &dir);
+            if let Ok(mut c) = checks.lock() {
+                let at = Instant::now();
+                c.insert(
+                    id,
+                    Check {
+                        at,
+                        met,
+                        running: false,
+                    },
+                );
+            }
+        });
+        last.is_some_and(|c| c.met)
+    }
+
+    /// A blocked item whose wait is over: a session still there is told to
+    /// go on, typed into its terminal between turns, and an item whose
+    /// session is gone starts again.
+    fn resume_blocked(&mut self, key: &str, t: &Task) {
+        let Some(wait) = t.wait.clone() else {
+            return;
+        };
+        // A session that ended, or whose terminal exited, is as gone as one
+        // the registry no longer has.
+        let h = t.holder.clone().filter(|h| {
+            self.holder(h) != Holder::Gone
+                && self.phase_of(h) != Some(Phase::Ended)
+                && !self
+                    .consoles
+                    .get(h)
+                    .is_some_and(|c| c.exit_code().is_some())
+        });
+        match h {
+            None => {
+                if let Err(e) = self.start_again(key, t.line, &t.title, false) {
+                    eprintln!(
+                        "horadric: the runner cannot start \"{}\" again: {e}",
+                        t.title
+                    );
+                    return;
+                }
+            }
+            Some(h) => {
+                // Typed only into a terminal that is there and between turns,
+                // so going on never starts an agent.
+                if !self.live(&h) || self.phase_of(&h).is_none_or(|p| p.mid_turn()) {
+                    return;
+                }
+                self.set_task(key, t.line, &t.title, Mark::Working);
+                let Some(c) = self.consoles.get(&h) else {
+                    return;
+                };
+                c.write(tasks::waited(&horadric_command(), &wait).into_bytes());
+                self.tasks.enters.push((h.clone(), Instant::now()));
+                self.tasks.nudged.remove(&h);
+            }
+        }
+        self.tasks.ran.insert(key.to_string());
+        if !self.quiet {
+            self.toasts.show(
+                Kind::Info,
+                &format!("Quest goes on: {}", t.title),
+                &wait.over(),
+            );
         }
     }
 
@@ -714,8 +895,14 @@ impl App {
                 }
             } else if b.mode.runs() {
                 waiting |= matches!(
-                    tasks::next(&b.tasks, b.mode, b.parallel, |id| self.holder(id)),
-                    Next::Start(_)
+                    tasks::next(
+                        &b.tasks,
+                        b.mode,
+                        b.parallel,
+                        |id| self.holder(id),
+                        |t| self.wait_met(key, &b.tasks, t, now),
+                    ),
+                    Next::Start(_) | Next::Resume(_)
                 ) || b.tasks.iter().any(|t| {
                     t.holder
                         .as_ref()
@@ -929,7 +1116,8 @@ impl App {
                     "Ready for review".to_string(),
                     t.title.clone(),
                 )),
-                Mark::Blocked => out.push((
+                // One that waits on a check needs nobody.
+                Mark::Blocked if t.wait.is_none() => out.push((
                     format!("blocked:{h}"),
                     format!("Blocked: {}", t.title),
                     t.reason.clone().unwrap_or_default(),
@@ -943,7 +1131,8 @@ impl App {
             }
         }
         if b.mode.runs() && self.tasks.ran.contains(key) {
-            if let Next::Finished = tasks::next(&b.tasks, b.mode, b.parallel, |_| Holder::Live) {
+            let finished = tasks::next(&b.tasks, b.mode, b.parallel, |_| Holder::Live, |_| false);
+            if let Next::Finished = finished {
                 out.push((
                     format!("finished:{key}"),
                     "Quest log completed".to_string(),
@@ -984,9 +1173,17 @@ impl App {
     }
 
     /// Starts the next open item when the list runs by itself and nothing
-    /// is in hand.
+    /// is in hand, or wakes the blocked one whose wait is over.
     fn start_next(&mut self, key: &str, b: &Board) {
-        let Next::Start(i) = tasks::next(&b.tasks, b.mode, b.parallel, |id| self.holder(id)) else {
+        let now = unix_now();
+        let next = tasks::next(
+            &b.tasks,
+            b.mode,
+            b.parallel,
+            |id| self.holder(id),
+            |t| self.wait_met(key, &b.tasks, t, now),
+        );
+        let (Next::Start(i) | Next::Resume(i)) = next else {
             return;
         };
         if self
@@ -999,6 +1196,10 @@ impl App {
         }
         self.tasks.started.insert(key.to_string(), Instant::now());
         let t = &b.tasks[i];
+        if let Next::Resume(_) = next {
+            self.resume_blocked(key, t);
+            return;
+        }
         match self.take_task(key, t.line, &t.title, false) {
             Ok(_) => {
                 self.tasks.ran.insert(key.to_string());
@@ -1523,6 +1724,7 @@ mod tests {
             title: "Fix  the	clock".into(),
             holder: None,
             reason: None,
+            wait: None,
             notes: Vec::new(),
         };
         assert_eq!(

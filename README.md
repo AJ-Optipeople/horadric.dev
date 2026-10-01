@@ -83,7 +83,10 @@ work. Worktrees are next.
   shows where it is. The mode button picks how the list is worked: Manual,
   one click per item; Review, the next item starts once you approve the
   last; Auto, down the list until it is done. The `+` adds an item, and so
-  does `horadric quest add` from any shell.
+  does `horadric quest add` from any shell. A quest blocked with
+  `--on-quest "title"`, `--on-main ref`, `--on-file path`, `--on-cmd
+  "command"` or `--until +30m` goes on by itself once that holds, and the
+  list works on past it meanwhile.
 - Right click a tile to rename its session, or a project's header to open
   its folder in VS Code or Explorer.
 - Ctrl+Alt+Space, from anywhere, shows the session that has waited on you

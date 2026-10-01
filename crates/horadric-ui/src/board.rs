@@ -57,6 +57,15 @@ impl Board {
     }
 }
 
+/// What the right end of `task`'s row says when its state's word is not
+/// enough: what a blocked item waits on.
+pub fn note(task: &Task, now: u64) -> Option<String> {
+    task.wait
+        .as_ref()
+        .filter(|_| task.mark == Mark::Blocked)
+        .map(|w| w.label(now))
+}
+
 /// How an item reads on its row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RowState {
@@ -71,7 +80,11 @@ pub enum RowState {
     /// Its session no longer exists. A click starts the item again.
     Gone,
     Review,
+    /// Its agent can not go on without the human.
     Blocked,
+    /// Blocked on something the runner checks, and goes on by itself once
+    /// that holds.
+    Waits,
     /// Its tombs are at it.
     Tombs,
     /// Every tomb still there says it is done: the human picks one.
@@ -129,6 +142,7 @@ pub fn row_state(task: &Task, holder: Option<&Phase>) -> RowState {
     match task.mark {
         Mark::Open | Mark::Done => RowState::Open,
         Mark::Review => RowState::Review,
+        Mark::Blocked if task.wait.is_some() => RowState::Waits,
         Mark::Blocked => RowState::Blocked,
         Mark::Working => match holder {
             None | Some(Phase::Ended) => RowState::Gone,
@@ -150,6 +164,7 @@ impl RowState {
             RowState::Gone => "session gone",
             RowState::Review => "review",
             RowState::Blocked => "blocked",
+            RowState::Waits => "waits",
             RowState::Tombs => "tombs",
             RowState::Pick => "pick one",
         }
@@ -165,6 +180,7 @@ impl RowState {
             RowState::Gone => '\u{E711}',
             RowState::Review => '\u{E73E}',
             RowState::Blocked => '\u{E7BA}',
+            RowState::Waits => '\u{E823}',
             RowState::Tombs => '\u{E716}',
             RowState::Pick => '\u{E734}',
         }
@@ -178,7 +194,7 @@ impl RowState {
             RowState::Working | RowState::Tombs => theme::working(),
             RowState::Asks | RowState::Review | RowState::Pick => theme::waiting(),
             RowState::Blocked => theme::error(),
-            RowState::Paused | RowState::Gone => theme::idle(),
+            RowState::Paused | RowState::Gone | RowState::Waits => theme::idle(),
         }
     }
 
@@ -238,6 +254,17 @@ mod tests {
         assert_eq!(row_state(t, Some(&Phase::Paused)), RowState::Paused);
         assert_eq!(row_state(t, Some(&Phase::Ended)), RowState::Gone);
         assert_eq!(row_state(t, None), RowState::Gone);
+    }
+
+    #[test]
+    fn a_blocked_item_that_waits_on_a_check_says_on_what_and_does_not_call_you() {
+        let t = &parse("- [!] A @a-1: later {on quest: Build it}\n")[0];
+        assert_eq!(row_state(t, Some(&Phase::Done)), RowState::Waits);
+        assert!(!RowState::Waits.needs_you());
+        assert_eq!(note(t, 0).as_deref(), Some("after Build it"));
+        let t = &parse("- [!] A @a-1: why\n")[0];
+        assert_eq!(row_state(t, None), RowState::Blocked);
+        assert_eq!(note(t, 0), None);
     }
 
     #[test]

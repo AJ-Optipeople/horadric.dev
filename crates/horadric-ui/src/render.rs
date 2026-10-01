@@ -316,6 +316,8 @@ pub struct TasksScene {
 pub struct TaskRow {
     pub title: String,
     pub state: RowState,
+    /// What the right end says in place of the state's word.
+    pub note: Option<String>,
     /// Done a moment ago: how far through being struck out and folded.
     pub finish: Option<f32>,
 }
@@ -3194,7 +3196,7 @@ impl Painter<'_> {
             let word = if row.finish.is_some() {
                 ""
             } else {
-                row.state.label()
+                row.note.as_deref().unwrap_or(row.state.label())
             };
             let word_w = if word.is_empty() {
                 0.0

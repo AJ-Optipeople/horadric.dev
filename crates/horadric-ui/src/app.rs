@@ -6802,7 +6802,7 @@ fn window_at(hwnd: HWND) -> (i32, i32) {
     (r.left, r.top)
 }
 
-fn unix_now() -> u64 {
+pub(crate) fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs())
