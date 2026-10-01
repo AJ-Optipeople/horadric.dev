@@ -16,6 +16,7 @@ pub mod experience;
 pub mod fleet;
 pub mod journal;
 pub mod overlap;
+pub mod presence;
 pub mod rarity;
 pub mod registry;
 pub mod release;
