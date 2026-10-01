@@ -2660,8 +2660,9 @@ not this: Horadric is not a web page and has nothing to embed.)
 - **The Discord application.** Rich Presence needs an application in
   Discord's developer portal, whose name is what the profile shows
   ("Playing Horadric") and whose id goes in the handshake. The id is
-  public, so it is a constant in the code; `HORADRIC_DISCORD_CLIENT_ID`
-  overrides it for testing. Creating the application is the human's
+  public, so it is a constant in the code, `1555242626897416212`, made by
+  the human on 2026-10-01; `HORADRIC_DISCORD_CLIENT_ID`
+  overrides it for testing. Creating the application was the human's
   step. The images are uploaded to it as Rich Presence art assets and
   named by key, unless Discord takes an `https` URL for them, which the
   art quest checks first; then they live in this repository.
