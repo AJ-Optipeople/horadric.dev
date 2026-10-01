@@ -227,4 +227,10 @@ Horadric on the human's Discord profile through Rich Presence. See "Discord Acti
   Needs the four above on main. Keep a client while the setting is on, hand it the presence whenever the registry or the setting changes (it drops what did not change), and clear on Off, quit and reload as the plan says. Count that the UI thread never waits on the pipe. Check with a real Discord and a dev instance, the installed one left off.
 - [x] Discord: check it on screen with a real Discord and write it into the README @discord-check-57759
   With a dev instance: each setting, a session working, waiting and done, the elapsed time holding across turns, names hidden and shown, quit and reload clearing it. Screenshot the profile. Add a short part to README.md and mark the plan section done.
-- [ ] Discord: keep the clock of a run of work through a reload
+- [x] Discord: keep the clock of a run of work through a reload @discord-keep-the-clock-of-a-run-of-work-58450
+- [x] Lock Tiles @lock-tiles-71913
+  Lav en lille padlock ikon på session Tilen, som forhindrer den i at scrolle når man klikker paa den.
+- [x] Theme Switcher @theme-switcher-72599
+  Branch out and create 5 disctint themes for the app, changable via the tray icon menu.
+- [?] Padlock not working @padlock-not-working-75760
+  Padlock on session usage tile doesnt work. Its supposed to lock the tile at the very top and allow the tiles under it to continue scrolling from its bottom. Currently it does nothing.
