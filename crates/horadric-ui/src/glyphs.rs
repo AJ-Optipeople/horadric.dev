@@ -30,15 +30,15 @@ use windows::Win32::Graphics::DirectWrite::{
     IDWriteFactory, IDWriteFont1, IDWriteFontCollection, IDWriteFontFace, IDWriteFontFamily,
     IDWriteTextFormat, IDWriteTextLayout, DWRITE_FONT_METRICS, DWRITE_FONT_STRETCH_NORMAL,
     DWRITE_FONT_STYLE, DWRITE_FONT_STYLE_ITALIC, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT,
-    DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_GLYPH_METRICS, DWRITE_GLYPH_RUN,
-    DWRITE_MEASURING_MODE_NATURAL, DWRITE_WORD_WRAPPING_NO_WRAP,
+    DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_GLYPH_METRICS, DWRITE_GLYPH_OFFSET,
+    DWRITE_GLYPH_RUN, DWRITE_MEASURING_MODE_NATURAL, DWRITE_WORD_WRAPPING_NO_WRAP,
 };
 use windows_numerics::{Matrix3x2, Vector2};
 
 use crate::frame::{Decoration, Frame, BOLD, ITALIC};
 use crate::render::{self, hwnd_target, Gpu};
 use crate::theme::{self, Color};
-use crate::viewport;
+use crate::{rain, viewport};
 use horadric_core::saved::Side;
 
 /// Cascadia ships with Windows 11. Consolas is on every Windows since Vista.
@@ -408,6 +408,9 @@ pub struct Font {
     /// In DIPs, the same for every pane.
     size: Cell<f32>,
     cache: RefCell<HashMap<(char, u8), u16>>,
+    /// The face the Matrix rain is drawn in and its glyphs, loaded the
+    /// first time it rains.
+    rain: RefCell<Option<(IDWriteFontFace, Vec<u16>)>>,
 }
 
 struct Faces {
@@ -462,6 +465,30 @@ pub fn families(chosen: Option<&str>) -> Vec<&str> {
         }
     }
     names
+}
+
+/// The regular face of `family`, when it is installed.
+unsafe fn regular_face(dw: &IDWriteFactory, family: &str) -> Option<IDWriteFontFace> {
+    let collection = system_fonts(dw).ok()?;
+    let mut index = 0u32;
+    let mut exists = BOOL(0);
+    collection
+        .FindFamilyName(&HSTRING::from(family), &mut index, &mut exists)
+        .ok()?;
+    if !exists.as_bool() {
+        return None;
+    }
+    collection
+        .GetFontFamily(index)
+        .ok()?
+        .GetFirstMatchingFont(
+            DWRITE_FONT_WEIGHT_NORMAL,
+            DWRITE_FONT_STRETCH_NORMAL,
+            DWRITE_FONT_STYLE_NORMAL,
+        )
+        .ok()?
+        .CreateFontFace()
+        .ok()
 }
 
 fn system_fonts(dw: &IDWriteFactory) -> Result<IDWriteFontCollection> {
@@ -524,7 +551,29 @@ impl Font {
             dw: dw.clone(),
             size: Cell::new(size),
             cache: RefCell::new(HashMap::new()),
+            rain: RefCell::new(None),
         })
+    }
+
+    /// The face for the rain and the glyphs of [`rain::CHARS`] it has: a
+    /// Japanese face for the katakana where one is installed, otherwise the
+    /// terminal's own with the digits and signs.
+    fn rain_glyphs(&self) -> (IDWriteFontFace, Vec<u16>) {
+        if let Some(r) = self.rain.borrow().as_ref() {
+            return r.clone();
+        }
+        let japanese = ["MS Gothic", "Yu Gothic", "Meiryo"]
+            .iter()
+            .find_map(|name| unsafe { regular_face(&self.dw, name) })
+            .filter(|f| glyph_index(f, '\u{FF71}') != 0);
+        let face = japanese.unwrap_or_else(|| self.faces.borrow().faces[0].clone());
+        let glyphs: Vec<u16> = rain::CHARS
+            .chars()
+            .map(|c| glyph_index(&face, c))
+            .filter(|&g| g != 0)
+            .collect();
+        *self.rain.borrow_mut() = Some((face.clone(), glyphs.clone()));
+        (face, glyphs)
     }
 
     pub fn size(&self) -> f32 {
@@ -739,6 +788,7 @@ impl GridTarget {
         page: Option<&PageFrame>,
         veil: f32,
         plate: (f32, f32),
+        rain: Option<(u64, f32)>,
     ) -> Result<()> {
         let (ox, oy) = grid_origin();
         let x = |col: usize| ox + col as f32 * cell.w;
@@ -774,6 +824,10 @@ impl GridTarget {
             };
             self.rt
                 .PushAxisAlignedClip(&inner, D2D1_ANTIALIAS_MODE_ALIASED);
+
+            if let Some((seed, t)) = rain {
+                self.rain(font, cell, &inner, seed, t);
+            }
 
             for f in &frame.fills {
                 self.brush.SetColor(&color(f.color));
@@ -1241,6 +1295,81 @@ impl GridTarget {
 
     /// The plate round the glass and the glass itself, with the plate's lit
     /// lip along the glass's bottom edge where it is sunk in.
+    /// The code falling down the glass at `t` seconds in the pattern of `seed`, dim enough that the
+    /// text over it reads as if it were not there. Mirrored, as in the film,
+    /// and drawn as one glyph run for each step of brightness.
+    unsafe fn rain(&self, font: &Font, cell: &CellSize, inner: &D2D_RECT_F, seed: u64, t: f32) {
+        const STEPS: usize = 6;
+        // Dimmed again on top of the steps, so the text over it always reads
+        // first.
+        const STRENGTH: f32 = 0.85;
+        let (face, glyphs) = font.rain_glyphs();
+        if glyphs.is_empty() {
+            return;
+        }
+        let (ox, oy) = grid_origin();
+        let cols = ((inner.right - ox) / cell.w).ceil().max(0.0) as usize;
+        let rows = ((inner.bottom - oy) / cell.h).ceil().max(0.0) as usize;
+        let mut steps: [(Vec<u16>, Vec<DWRITE_GLYPH_OFFSET>); STEPS] = Default::default();
+        for d in rain::drops(seed, cols, rows, t, glyphs.len()) {
+            let step = ((d.light * STEPS as f32).ceil() as usize).clamp(1, STEPS) - 1;
+            steps[step].0.push(glyphs[d.pick]);
+            steps[step].1.push(DWRITE_GLYPH_OFFSET {
+                advanceOffset: d.col as f32 * cell.w,
+                ascenderOffset: -(d.row as f32 * cell.h),
+            });
+        }
+        let mut kept = Matrix3x2::default();
+        self.rt.GetTransform(&mut kept);
+        let mid = (inner.left + inner.right) / 2.0;
+        let mirror = Matrix3x2 {
+            M11: -1.0,
+            M12: 0.0,
+            M21: 0.0,
+            M22: 1.0,
+            M31: 2.0 * mid,
+            M32: 0.0,
+        };
+        self.rt.SetTransform(&(mirror * kept));
+        let p = theme::palette();
+        for (i, (indices, offsets)) in steps.iter().enumerate() {
+            if indices.is_empty() {
+                continue;
+            }
+            let level = (i + 1) as f32 / STEPS as f32;
+            let ink = if i + 1 == STEPS {
+                p.term_cursor.with_alpha(0.3 * STRENGTH)
+            } else {
+                p.term_fg
+                    .with_alpha((0.03 + 0.15 * level * level) * STRENGTH)
+            };
+            let advances = vec![0.0f32; indices.len()];
+            let run = DWRITE_GLYPH_RUN {
+                fontFace: ManuallyDrop::new(Some(face.clone())),
+                fontEmSize: font.size.get(),
+                glyphCount: indices.len() as u32,
+                glyphIndices: indices.as_ptr(),
+                glyphAdvances: advances.as_ptr(),
+                glyphOffsets: offsets.as_ptr(),
+                isSideways: false.into(),
+                bidiLevel: 0,
+            };
+            self.brush.SetColor(&render::color(ink));
+            self.rt.DrawGlyphRun(
+                Vector2 {
+                    X: ox,
+                    Y: oy + cell.baseline,
+                },
+                &run,
+                &self.brush,
+                DWRITE_MEASURING_MODE_NATURAL,
+            );
+            let mut run = run;
+            ManuallyDrop::drop(&mut run.fontFace);
+        }
+        self.rt.SetTransform(&kept);
+    }
+
     unsafe fn bezel(
         &self,
         screen: &D2D_RECT_F,
