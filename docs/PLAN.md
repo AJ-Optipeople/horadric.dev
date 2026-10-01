@@ -2757,6 +2757,92 @@ saved state (its last work cut to the minute, so a working session does
 not write the file every tick), and a start finds it there and carries
 on, unless the ten minute gap passed meanwhile.
 
+### The Runetome
+
+Asked for on 2026-10-01. Runewords become shortcuts: programmable
+buttons that do anything, from one prompt to a chain of prompts, keys
+and commands. Each is a rune stone with a generated runeword carved on
+it, kept in a tile of its own, the Runetome. Builds on "Runewords"
+above, whose engine (one step a turn, the human taking over stops it,
+saved in `state.json`) stays.
+
+- **The tile.** One Runetome a project, in its cluster beside the
+  quest log, shown whenever the project has a cluster. Its stones sit
+  in rows, the built in ones first ("Test, merge", "Test, review,
+  merge", "Review, merge"), then the project's, then the global ones,
+  and last an empty stone.
+- **A stone** is drawn in Direct2D: a rough rounded slab, lit from the
+  top left like the cube, with a glyph cut into it and its label under
+  it. The glyph and a runeword name ("Tal Eth Ko", two to four of the
+  33 rune names) both come from a hash of the stone's label, so a
+  stone keeps its look when its steps are edited and two stones rarely
+  match. `runeword::carve` (strokes from the hash) and `runeword::name`
+  are pure and tested. Hovering a stone shows its name and its steps
+  in a tooltip (tip.rs), so what a click does is never a guess.
+- **Steps.** A stone is a list of steps, cast in order:
+  - `say`: typed to the session, done when its turn ends (the said
+    rune of today).
+  - `keys`: keystrokes into the session's terminal at once, such as
+    `"Esc"`, `"Ctrl+C"` or `"/clear{Enter}"`. Parsed by a pure, tested
+    `runeword::keys`. Done once written; it waits for no turn.
+  - `run`: a command run with `cmd /c` in the project's folder (or the
+    session's worktree when it has one), hidden. Done when it exits; a
+    non zero exit stops the runeword with a toast carrying the
+    command's last line of output. `"show": true` runs it in a plain
+    terminal pane on the stage instead, for a command worth watching.
+  - `test`, `review`, `merge`: the runes as they are.
+- **Keys stay inside Horadric.** A `keys` step only reaches Horadric's
+  own terminals. Input sent to other programs' windows is fragile and
+  fights the window manager; anything outside Horadric is a `run` step
+  (a script, AutoHotkey, `start ms-settings:`), which needs no new
+  dependency.
+- **Casting.** A stone with any step that needs a session (`say`,
+  `keys`, `review`, `merge`, `test`) casts on the session focused on
+  the stage when that session is this project's, and asks "Cast on
+  which session?" with the project's sessions otherwise. Dragging a
+  stone onto a tile or a pane casts on that one, the way a tile goes
+  into the cube. A stone of only `run` steps needs no session and
+  casts at once, with the project's folder as its directory. A
+  sessionless runeword lives on the project rather than a session, so
+  it is saved beside the sessions in `state.json` and goes on through a
+  reload too.
+- **While one runs** the stone glows in the cube's gold and shows its
+  step ("2/4"); a click on it then offers Stop. The tile it casts on
+  shows "rune 2/4" as today. The tile menu keeps "Stop <name>" and
+  loses the "Runeword" submenu, since the tome is where they are given.
+- **Where stones live.** A project's in `.horadric/config.json`, every
+  project's in `%APPDATA%\Horadric\runewords.json`, same shape:
+
+  ```json
+  { "runewords": {
+      "Fresh start": { "steps": [ { "keys": "/clear{Enter}" },
+                                  { "say": "Read docs/PLAN.md and take the next quest" } ] },
+      "Open the site": { "steps": [ { "run": "start http://localhost:3000" } ] },
+      "Ship": ["test", "Update the changelog", "merge"] } }
+  ```
+
+  The list form of today is still read: a bare word is a rune or a
+  `say`. The tome reads both files again when they change, so a stone
+  an agent adds appears without a restart. `runeword::parse` is pure
+  and tested, and a stone that does not parse shows cracked, with the
+  reason in its tooltip, rather than vanishing.
+- **The empty stone** makes new ones, the way the quest giver makes
+  quests. A click starts a session named "Runesmith" in the project, on
+  the stage. Its prompt (`runeword::smith_prompt`, tested) says what a
+  stone is, the step kinds, both files and their shape, and asks the
+  human what the stone should do and whether it is for this project or
+  every one. It writes the stone, then runs `horadric runeword list` to
+  check it parses, and reports the stone's runeword name. Agents make
+  stones; a human never has to write the JSON, though they can.
+- **Trust.** A `run` step is any command, and a project's config comes
+  with its repository, so a cloned project can carry stones. Nothing
+  runs without a click, and the tooltip shows the command before it.
+  A stone from a project's config whose steps changed since it was
+  last cast shows a small mark until it is cast once, so a pull that
+  changes a command is seen.
+- **Left alone**: the cube and its recipes, and how runes are cast
+  turn by turn.
+
 ### Step 4: worktrees and the git glance
 
 - `git worktree add` per session, branch named from the session name.
