@@ -2429,6 +2429,11 @@ a new session. One `cmd.exe` at any time. A killed terminal read as
 paused, so its quest waited for a click. Not checked on screen: `--on-cmd`,
 `--on-main` and `--until`.
 
+Built as the quest asked, with every kind of wait, before Orchestration
+below was written. If its `After:` lines are built, `--on-quest` should
+write one of those instead of `{on quest: ...}`, and `tasks::next`
+already passes a quest that waits and wakes it in the same place.
+
 ### Performance
 
 On 2026-09-26 everything felt less smooth: typing in the stage, right
