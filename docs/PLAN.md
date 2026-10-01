@@ -2685,8 +2685,11 @@ and on again brought it back. Reload cleared it for the 3 s of the
 handover and the new build set it again; Quit, with "Stop them", cleared
 it within 2 s. Two things the check left: the images show as Discord's
 question mark until `docs/discord` is on `main` on GitHub, since their
-URLs are raw GitHub ones, and a reload starts the clock again, since the
-run of work is not handed over.
+URLs are raw GitHub ones, and a reload started the clock again, since the
+run of work was not handed over. It is now: the last save before a reload
+or a quit writes the run down (when it began, when a session last worked)
+and the next build counts on from it, or starts afresh if the gap has
+passed by then.
 
 ### Step 4: worktrees and the git glance
 

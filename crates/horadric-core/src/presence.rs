@@ -6,7 +6,7 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::discord::Activity;
-use crate::saved::Discord;
+use crate::saved::{Discord, SavedRun};
 use crate::session::{Phase, Session};
 
 /// The art. Discord takes an `https` URL where it would take the key of
@@ -178,6 +178,25 @@ impl Run {
             self.last_work = Some(now);
         }
         self.start
+    }
+
+    /// The run to write down as the app goes away, if one is going.
+    pub fn to_saved(&self) -> Option<SavedRun> {
+        let secs = |t: SystemTime| t.duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
+        Some(SavedRun {
+            start: secs(self.start?)?,
+            last_work: secs(self.last_work?)?,
+        })
+    }
+
+    /// The run a reload handed over. One that is over by now ends at the
+    /// next [`Run::update`], as it would have without the reload.
+    pub fn from_saved(saved: Option<SavedRun>) -> Run {
+        let at = |secs: u64| UNIX_EPOCH + Duration::from_secs(secs);
+        saved.map_or_else(Run::default, |s| Run {
+            start: Some(at(s.start)),
+            last_work: Some(at(s.last_work)),
+        })
     }
 }
 
@@ -370,6 +389,46 @@ mod tests {
         next.since = at(5000);
         let again = [(next, "a")];
         assert_eq!(run.update(&seen(&again), at(5000)), Some(at(5000)));
+    }
+
+    #[test]
+    fn a_run_carries_over_a_reload() {
+        let mut run = Run::default();
+        let working = [(session(Phase::Working), "a")];
+        run.update(&seen(&working), at(1500));
+        let saved = run.to_saved();
+        assert_eq!(
+            saved,
+            Some(SavedRun {
+                start: 1000,
+                last_work: 1500
+            })
+        );
+        let mut back = Run::from_saved(saved);
+        assert_eq!(back, run);
+        // The new build sees the same session still working, started anew.
+        let mut again = session(Phase::Working);
+        again.since = at(1510);
+        let after = [(again, "a")];
+        assert_eq!(back.update(&seen(&after), at(1510)), Some(at(1000)));
+    }
+
+    #[test]
+    fn a_run_handed_over_after_the_gap_is_over() {
+        let saved = SavedRun {
+            start: 1000,
+            last_work: 1500,
+        };
+        let mut back = Run::from_saved(Some(saved));
+        let done = [(session(Phase::Done), "a")];
+        let late = at(1500 + RUN_GAP.as_secs());
+        assert_eq!(back.update(&seen(&done), late), None);
+    }
+
+    #[test]
+    fn no_run_hands_over_nothing() {
+        assert_eq!(Run::default().to_saved(), None);
+        assert_eq!(Run::from_saved(None), Run::default());
     }
 
     #[test]

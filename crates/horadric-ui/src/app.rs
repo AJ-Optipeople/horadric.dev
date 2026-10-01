@@ -687,7 +687,8 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             sounds: saved.sounds,
             discord: saved.discord,
             rich: None,
-            run: presence::Run::default(),
+            run: presence::Run::from_saved(saved.run),
+            parting: false,
             cube_on: saved.cube,
             font_family: saved.font_family.clone(),
             screen: saved.screen.clone(),
@@ -2610,6 +2611,9 @@ struct App {
     rich: Option<crate::discord::Discord>,
     /// When the current run of work began, which the profile counts from.
     run: presence::Run,
+    /// Set while [`App::freeze`] saves for the last time, so only that save
+    /// writes the run down for the next build.
+    parting: bool,
     /// The cube is shown, from the usage window's menu.
     cube_on: bool,
     /// The terminal font picked from the tray menu. Kept as picked, so a
@@ -5479,6 +5483,7 @@ impl App {
             quiet: self.quiet,
             sounds: self.sounds,
             discord: self.discord,
+            run: self.parting.then(|| self.run.to_saved()).flatten(),
             cube: self.cube_on,
             font_family: self.font_family.clone(),
             screen: self.screen.clone(),
@@ -5514,7 +5519,9 @@ impl App {
 
     /// Saves one last time and stops saving.
     fn freeze(&mut self) {
+        self.parting = true;
         self.save();
+        self.parting = false;
         // Nothing brings an attached pane back, so its host must not
         // outlive this app. The session itself runs on in the daemon.
         if let Ok(r) = self.shared.registry.lock() {
@@ -5765,7 +5772,11 @@ impl App {
             .get_or_insert_with(crate::discord::Discord::start)
             .set(activity);
         if std::env::var_os("HORADRIC_DEBUG").is_some() {
-            eprintln!("discord sync took {:?}", began.elapsed());
+            eprintln!(
+                "discord sync took {:?}, run {:?}",
+                began.elapsed(),
+                self.run
+            );
         }
     }
 
