@@ -1228,47 +1228,6 @@ impl Painter<'_> {
         }
     }
 
-    /// The gold exclamation over a quest giver's head, as the games draw
-    /// it: a bar narrowing to its foot and a dot, edged in black so it
-    /// stands off any surface. The font's glyph is too thin to read as one.
-    unsafe fn quest_mark(&self, gpu: &Gpu, r: &Rect) {
-        let (x, y) = (r.x + r.w / 2.0, r.y + r.h / 2.0);
-        let (top, foot, dot) = (y - 6.5, y + 2.0, y + 4.8);
-        let bar = |grow: f32| {
-            [
-                Vector2 {
-                    X: x - 2.4 - grow,
-                    Y: top - grow,
-                },
-                Vector2 {
-                    X: x + 2.4 + grow,
-                    Y: top - grow,
-                },
-                Vector2 {
-                    X: x + 1.1 + grow,
-                    Y: foot + grow,
-                },
-                Vector2 {
-                    X: x - 1.1 - grow,
-                    Y: foot + grow,
-                },
-            ]
-        };
-        let edge = Color::rgb(0x000000).with_alpha(0.75);
-        for (grow, c) in [(1.0, edge), (0.0, theme::QUEST)] {
-            self.polygon(gpu, &bar(grow), c);
-            self.brush.SetColor(&color(c));
-            let e = D2D1_ELLIPSE {
-                point: Vector2 { X: x, Y: dot },
-                radiusX: 1.6 + grow,
-                radiusY: 1.6 + grow,
-            };
-            self.rt.FillEllipse(&e, self.brush);
-        }
-        let shine = Color::rgb(0xFFFFFF).with_alpha(0.45);
-        self.fill_rounded(&Rect::new(x - 1.6, top + 0.6, 1.0, 3.5), 0.5, shine);
-    }
-
     /// A filled shape through `points`.
     unsafe fn polygon(&self, gpu: &Gpu, points: &[Vector2], c: Color) {
         let Some((first, rest)) = points.split_first() else {
@@ -3055,12 +3014,12 @@ impl Painter<'_> {
                 (row.state.color(), row.state.icon())
             };
             let c = c.fade(shown);
-            let mark = Rect::new(r.x + pad - 3.0, r.y, 14.0, r.h);
-            if row.finish.is_none() && row.state == RowState::Open {
-                self.quest_mark(gpu, &mark);
-            } else {
-                self.icon(&gpu.icon_small, c, glyph, mark);
-            }
+            self.icon(
+                &gpu.icon_small,
+                c,
+                glyph,
+                Rect::new(r.x + pad - 3.0, r.y, 14.0, r.h),
+            );
             let mut right = r.right() - pad;
             if let Some(Some(a)) = l.approve.get(i) {
                 let b = scene.button(Hit::TaskApprove(i));
