@@ -10,6 +10,7 @@ pub mod agent;
 pub mod background;
 pub mod cube;
 pub mod diff;
+pub mod discord;
 pub mod event;
 pub mod experience;
 pub mod fleet;
