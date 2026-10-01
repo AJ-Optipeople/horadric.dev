@@ -42,9 +42,15 @@ pub fn ssh_program(
 /// What a console's title is worth showing. Windows names a console after
 /// its executable until the program says otherwise, and `cmd.exe` puts the
 /// running command after it, so `C:\...\pwsh.exe` says nothing and
-/// `C:\...\cmd.exe - npm run dev` says `npm run dev`.
+/// `C:\...\cmd.exe - npm run dev` says `npm run dev`. The spinner Claude
+/// Code turns through braille in front of its title while it works is
+/// left out: shown, it redrew the pane and the caption on every frame.
 pub fn title(raw: &str) -> Option<String> {
     let t = raw.trim();
+    let t = match t.split_once(' ') {
+        Some((spin, rest)) if is_spinner(spin) => rest.trim_start(),
+        _ => t,
+    };
     let t = t.strip_prefix("Administrator: ").unwrap_or(t);
     let is_exe = |s: &str| s.trim().to_ascii_lowercase().ends_with(".exe");
     let t = match t.split_once(" - ") {
@@ -52,6 +58,15 @@ pub fn title(raw: &str) -> Option<String> {
         _ => t,
     };
     (!t.is_empty() && !is_exe(t)).then(|| t.to_string())
+}
+
+/// One braille pattern, which is what terminal spinners turn through.
+fn is_spinner(s: &str) -> bool {
+    let mut chars = s.chars();
+    matches!(
+        (chars.next(), chars.next()),
+        (Some('\u{2800}'..='\u{28FF}'), None)
+    )
 }
 
 /// A name for the `n`th terminal of a project, counting from zero.
@@ -136,6 +151,23 @@ mod tests {
         assert_eq!(
             title("\u{2733} Fix the login").as_deref(),
             Some("\u{2733} Fix the login")
+        );
+    }
+
+    #[test]
+    fn a_spinner_in_front_of_a_title_is_left_out() {
+        assert_eq!(
+            title("\u{2802} Fix the login").as_deref(),
+            Some("Fix the login")
+        );
+        assert_eq!(
+            title("\u{2810}  Fix the login").as_deref(),
+            Some("Fix the login")
+        );
+        assert_eq!(title("\u{2810}").as_deref(), Some("\u{2810}"));
+        assert_eq!(
+            title("\u{2802}\u{2810} two").as_deref(),
+            Some("\u{2802}\u{2810} two")
         );
     }
 

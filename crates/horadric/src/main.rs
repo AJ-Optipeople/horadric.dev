@@ -3,7 +3,8 @@
 //! it must not take every session with it. `app` runs the app in the
 //! foreground instead, for its log. `new` asks the running app for a session
 //! in a terminal of its own, `run` starts a tagged `claude` in the current
-//! terminal, `task` reports on an item of the task list, `serve` shows the
+//! terminal, `quest` reports on an item of the quest log, `runeword list` shows a
+//! project's stones, `serve` shows the
 //! state stream as a table, `reload` hands the running app over to this
 //! build, `release` signs a build for the updater, and the rest set
 //! Horadric up on this machine. `host` is not for people: the app starts
@@ -17,6 +18,8 @@ mod mcp;
 mod release;
 mod reload;
 mod run;
+mod runestep;
+mod runeword;
 mod setup;
 mod status;
 mod task;
@@ -46,6 +49,8 @@ Usage:
                                Report on the quest this session works, or add to
                                the project's quest log (.horadric/quests.md).
                                `horadric task` is the same, from before the rename
+  horadric runeword list         Every stone of this project's Runetome: its runeword name,
+                               label and steps, and why any does not parse
   horadric serve                 Listen for Claude Code hook events and show a live table
   horadric hooks install         Add Horadric hooks to ~/.claude/settings.json
   horadric hooks uninstall       Remove them
@@ -96,7 +101,9 @@ fn main() -> ExitCode {
         Some("run") => run::run(&args[1..]),
         // `task` is how sessions started before the rename report back.
         Some("quest" | "task") => task::run(&args[1..]),
+        Some("runeword") => runeword::run(&args[1..]),
         Some("setup") => setup::run(&args[1..]),
+        Some("runestep") => runestep::run(&args[1..]),
         Some("host") => host(),
         Some("hooks") => hooks(args.get(1).map(String::as_str)),
         Some("explorer") => explorer_command(args.get(1).map(String::as_str)),

@@ -822,7 +822,18 @@ settled "no web view" for web pages only: Horadric's own UI stays Direct2D.
   (`attach`, the pane has `WS_CLIPCHILDREN` so its own drawing leaves the
   page alone), and on the pane's `WM_DESTROY` it goes, hidden, onto the
   app's window (`detach`). Closing the stage keeps it too. Only its cross
-  or Close ends it. Not yet kept over a reload of Horadric itself.
+  or Close ends it.
+- **Kept over a reload** (`SavedState::pages`, `web::pages`,
+  `web::restore`). Every ship dropped the open pages, so each project's
+  tabs are saved with their address, title and the one shown, and a
+  start that resumes sessions (a reload, or after a crash) opens them
+  again in their project's grid, off the stage like an agent's open. A
+  blank tab is not kept (`SavedPages::of`, pure). After Quit they are
+  not reopened, as sessions are not resumed. Only the address: WebView2
+  has no way to give a page its back and forward history again. Tested
+  with a dev instance on its own port and `APPDATA`: two saved tabs came
+  back after `app --reload`, and again after `horadric reload`, the new
+  process writing them, titles and the shown tab as they were.
 - **One profile for everything**, `%LOCALAPPDATA%\Horadric\web`, for every
   project, session and Horadric, dev instances included, so a login made
   once stays. WebView2 lets two processes share a profile when they start
@@ -830,10 +841,10 @@ settled "no web view" for web pages only: Horadric's own UI stays Direct2D.
   chosen once and kept in the profile folder rather than per instance.
 - **Agents drive it** (`horadric mcp`, `drive.rs`). Every Claude Code
   session gets `--mcp-config=` a file naming `horadric mcp` (Codex gets
-  `-c mcp_servers.horadric...`; Grok keeps its servers in its own config,
-  so not yet). The server finds its session by the `HORADRIC_SESSION` it
-  inherits and posts each call to `/horadric/browser`, the one listener
-  path that waits for the app's answer. The session names the project, so
+  `-c mcp_servers.horadric...`; Grok gets a `[mcp_servers.horadric]`
+  table in `~/.grok/config.toml`, see below). The server finds its
+  session by the `HORADRIC_SESSION` it inherits and posts each call to
+  `/horadric/browser`, the one listener path that waits for the app's answer. The session names the project, so
   an agent only reaches its own project's page. The app does open, close,
   navigate, back, forward, reload, info, and any DevTools call on that
   page through WebView2's `CallDevToolsProtocolMethod`, no port needed.
@@ -850,6 +861,23 @@ settled "no web view" for web pages only: Horadric's own UI stays Direct2D.
   Tested: a script through every tool against a test page and
   example.com, and a Haiku session told to fill in a form, which opened,
   typed, ticked, clicked, looked and closed by itself.
+- **Grok's way in** (2026-10-01). Grok Build 1.0.44 has no per session
+  way to be given a server: the TUI has no `--mcp-config` or
+  `--plugin-dir` (only `grok agent` has the latter), its `GROK_CONFIG`
+  overlay keeps only soft settings and drops `mcp_servers` and
+  `plugins`, a plugin in `~/.grok/plugins` is put on the disabled list
+  when first seen, and `--agent` swaps the whole system prompt. So
+  `install` and `reload` write a `[mcp_servers.horadric]` table into
+  `~/.grok/config.toml`, beside the hook file, and `uninstall` takes it
+  out (`with_grok_mcp`, pure): the only part of that file Horadric
+  touches, the dev instance never. Grok passes a stdio server its own
+  environment, so the session's tag arrives. Every `grok` starts the
+  server, so without a `HORADRIC_SESSION` it offers no tools and no
+  instructions. Live check: the table pointing at a debug build, a dev
+  instance on its own port, `horadric new --agent grok` told to open
+  example.com; Grok found `horadric__browser_open` by `search_tool`, the
+  pane for its project opened there, and `browser_snapshot` read it.
+  `grok mcp doctor` from a shell outside Horadric shows 0 tools.
 - The browser still listens for the DevTools protocol on 127.0.0.1, on
   the port in `web\devtools-port`, for tools outside Horadric. While it
   is open, any program on the machine can drive that logged in browser.
@@ -869,8 +897,7 @@ settled "no web view" for web pages only: Horadric's own UI stays Direct2D.
   `AcceleratorKeyPressed` and in the pane while the address is typed. A
   tab is named by its page's title, else its address (`web::tab_name`).
   An address Ctrl+clicked in a terminal opens in a new tab. An agent's
-  tools drive the shown tab. The tabs are not kept over a reload of
-  Horadric, as the page was not before.
+  tools drive the shown tab. The tabs are kept over a reload, see above.
 - Popups and links to a new window (a middle click, `target=_blank`, an
   OAuth login) open in a new tab: `NewWindowRequested` is deferred until
   the tab's WebView is made and then handed it, so the popup keeps its
@@ -2396,10 +2423,34 @@ fixed, and what to keep that way:
   so that style alone does not make a window see-through; layered,
   click-through and overlay tool windows never count as covering.
 
-Left for later: each pane paint makes a new layer and geometry for its
-glass (`glyphs.rs`), characters missing from the terminal font get a
-`DrawText` each, the pane caption repaints on every spinner frame of the
-title, and each paint of a cluster clones its sessions twice.
+A second pass on 2026-10-01 took the stage panes, measured the same way
+on a release build with the stage on top. One pane full of characters
+the font lacks (CJK, `⏺`, `★`) went from 37% of a core to 1.5% when only
+its title's spinner turned, and from 38% to 3.5% with a line of output
+every 50 ms. Two panes of Claude Code like output at ten frames a second
+went from 8% to 5%.
+
+- **Loose characters are laid out once.** A character the terminal font
+  lacks is drawn from an `IDWriteTextLayout` kept in `Font` by text and
+  style, not by a `DrawText` that looked for its fallback font on every
+  paint. A new size or family starts the cache over, and so do more than
+  2048 of them.
+- **The glass's shade needs no layer.** The shade under the glass's top
+  edge, and under a latched tab key's, is the rounded shape filled with
+  the clamped gradient and clipped to the band, instead of a layer and a
+  geometry made on every paint.
+- **A spinner in a title is left out.** `shell::title` drops a braille
+  glyph in front of a title, which is how Claude Code shows it works. The
+  pane's header, the stage's caption and the window title no longer
+  change on every turn of it.
+- **A pane that would draw what it shows presents it again.** The pane
+  keeps what it last drew (`Shown`: the frame, the header, the search,
+  the veil, the size, the font) and only presents the kept frame when a
+  paint would draw the same. Output that changes nothing on screen costs
+  a comparison. Browser panes always draw.
+- **A cluster paint copies its sessions once.** It reads them from the
+  registry once, as `Rc`, and the tiles leaving and the `Still` it keeps
+  share them.
 
 ## Next
 
@@ -2724,11 +2775,121 @@ and on again brought it back. Reload cleared it for the 3 s of the
 handover and the new build set it again; Quit, with "Stop them", cleared
 it within 2 s. Two things the check left: the images show as Discord's
 question mark until `docs/discord` is on `main` on GitHub, since their
-URLs are raw GitHub ones, and a reload started the clock again, since the
-run of work was not handed over. It is now: the last save before a reload
-or a quit writes the run down (when it began, when a session last worked)
-and the next build counts on from it, or starts afresh if the gap has
-passed by then.
+URLs are raw GitHub ones, and a reload started the clock again, since
+the run of work was not handed over. It is now: the run is kept in the
+saved state (its last work cut to the minute, so a working session does
+not write the file every tick), and a start finds it there and carries
+on, unless the ten minute gap passed meanwhile.
+
+### The Runetome
+
+Asked for on 2026-10-01. Runewords become shortcuts: programmable
+buttons that do anything, from one prompt to a chain of prompts, keys
+and commands. Each is a rune stone with a generated runeword carved on
+it, kept in a tile of its own, the Runetome. Builds on "Runewords"
+above, whose engine (one step a turn, the human taking over stops it,
+saved in `state.json`) stays.
+
+- **The tile.** One Runetome a project, in its cluster beside the
+  quest log, shown whenever the project has a cluster. Its stones sit
+  in rows, the built in ones first ("Test, merge", "Test, review,
+  merge", "Review, merge"), then the project's, then the global ones,
+  and last an empty stone.
+- **A stone** is drawn in Direct2D: a rough rounded slab, lit from the
+  top left like the cube, with a glyph cut into it and its label under
+  it. The glyph and a runeword name ("Tal Eth Ko", two to four of the
+  33 rune names) both come from a hash of the stone's label, so a
+  stone keeps its look when its steps are edited and two stones rarely
+  match. `runeword::carve` (strokes from the hash) and `runeword::name`
+  are pure and tested. Hovering a stone shows its name and its steps
+  in a tooltip (tip.rs), so what a click does is never a guess.
+- **Steps.** A stone is a list of steps, cast in order:
+  - `say`: typed to the session, done when its turn ends (the said
+    rune of today).
+  - `keys`: keystrokes into the session's terminal at once, such as
+    `"Esc"`, `"Ctrl+C"` or `"/clear{Enter}"`. Parsed by a pure, tested
+    `runeword::keys`. Done once written; it waits for no turn.
+  - `run`: a command run with `cmd /c` in the project's folder (or the
+    session's worktree when it has one), hidden. Done when it exits; a
+    non zero exit stops the runeword with a toast carrying the
+    command's last line of output. `"show": true` runs it in a plain
+    terminal pane on the stage instead, for a command worth watching.
+  - `test`, `review`, `merge`: the runes as they are.
+- **Keys stay inside Horadric.** A `keys` step only reaches Horadric's
+  own terminals. Input sent to other programs' windows is fragile and
+  fights the window manager; anything outside Horadric is a `run` step
+  (a script, AutoHotkey, `start ms-settings:`), which needs no new
+  dependency.
+- **Casting.** A stone with any step that needs a session (`say`,
+  `keys`, `review`, `merge`, `test`) casts on the session focused on
+  the stage when that session is this project's, and asks "Cast on
+  which session?" with the project's sessions otherwise. Dragging a
+  stone onto a tile or a pane casts on that one, the way a tile goes
+  into the cube. A stone of only `run` steps needs no session and
+  casts at once, with the project's folder as its directory. A
+  sessionless runeword lives on the project rather than a session, so
+  it is saved beside the sessions in `state.json` and goes on through a
+  reload too.
+- **While one runs** the stone glows in the cube's gold and shows its
+  step ("2/4"); a click on it then offers Stop. The tile it casts on
+  shows "rune 2/4" as today. The tile menu keeps "Stop <name>" and
+  loses the "Runeword" submenu, since the tome is where they are given.
+- **Where stones live.** A project's in `.horadric/config.json`, every
+  project's in `%APPDATA%\Horadric\runewords.json`, same shape:
+
+  ```json
+  { "runewords": {
+      "Fresh start": { "steps": [ { "keys": "/clear{Enter}" },
+                                  { "say": "Read docs/PLAN.md and take the next quest" } ] },
+      "Open the site": { "steps": [ { "run": "start http://localhost:3000" } ] },
+      "Ship": ["test", "Update the changelog", "merge"] } }
+  ```
+
+  The list form of today is still read: a bare word is a rune or a
+  `say`. The tome reads both files again when they change, so a stone
+  an agent adds appears without a restart. `runeword::parse` is pure
+  and tested, and a stone that does not parse shows cracked, with the
+  reason in its tooltip, rather than vanishing.
+- **The empty stone** makes new ones, the way the quest giver makes
+  quests. A click starts a session named "Runesmith" in the project, on
+  the stage. Its prompt (`runeword::smith_prompt`, tested) says what a
+  stone is, the step kinds, both files and their shape, and asks the
+  human what the stone should do and whether it is for this project or
+  every one. It writes the stone, then runs `horadric runeword list` to
+  check it parses, and reports the stone's runeword name. Agents make
+  stones; a human never has to write the JSON, though they can.
+- **Trust.** A `run` step is any command, and a project's config comes
+  with its repository, so a cloned project can carry stones. Nothing
+  runs without a click, and the tooltip shows the command before it.
+  A stone from a project's config whose steps changed since it was
+  last cast shows a small mark until it is cast once, so a pull that
+  changes a command is seen.
+- **Left alone**: the cube and its recipes, and how runes are cast
+  turn by turn.
+
+The engine is built (2026-10-01). `runeword::parse` reads both forms
+and every step kind, `runeword::stones` lays out built in, project and
+global stones with a cracked one's reason, and `runeword::keys` turns
+a spec into pieces written 400 ms apart, a run of text one piece and
+each key in braces one of its own, so `/clear{Enter}` lands as typed.
+A `run` step goes through `horadric runestep <file> [--show]
+<command>`, started out of the app's job, which writes the exit code
+to `<file>.exit` (and, hidden, the output to `<file>.log`) under
+`runes` in the app's folder. That file is how a build after a reload
+learns how a command it did not start ended. A shown one runs in a
+plain pane that waits for Enter after a failure. Stones of only `run`
+steps cast on the project (`OnProject`, saved as `runewords` in
+`state.json`). The global file is `runewords.json` beside the state,
+in `Horadric-dev` for a dev instance, and both files are read again
+when their time or size changes. Until the tome exists, the tile menu's
+Runeword submenu offers every stone that parses, picking one of only
+commands casts it on the project, and "Stop <name>" items stop those.
+Checked on a dev instance with `cmd.exe` as the agent: `keys` typed
+`echo ...{Enter}` and cmd ran it, keys then a hidden `run` wrote its
+file in the project, a failing command toasted "it exited with 3:
+boom went the command", a shown one opened a pane and closed it on
+exit 0, the global stone ran, and a 30 second command cast before a
+`reload` finished after it, the new build completing the runeword.
 
 ### Step 4: worktrees and the git glance
 
@@ -3392,9 +3553,3 @@ Carried from the concept, with what is known now.
   the fallback until the first turn ends.
 - **What about the VS Code extension's Claude?** Still unanswered. Probably
   the answer is to stop using it.
-
-## Name collision
-
-`horadricapp/horadric` is a self-hosted dashboard with more than twenty thousand
-stars on GitHub. The crate name, the binary name and any published package
-need a decision before this goes public. Undecided.

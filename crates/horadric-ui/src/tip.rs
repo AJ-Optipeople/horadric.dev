@@ -34,7 +34,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
+use horadric_core::saved::Side;
+
 use crate::backdrop;
+use crate::glyphs::{BarHit, TabHit};
 use crate::layout::{CaptionHit, CubeHit, Hit, StartHit, UsageHit};
 use crate::render::{self, Target};
 use crate::window::Shared;
@@ -174,12 +177,12 @@ pub fn cluster(hit: Hit) -> Option<&'static str> {
         Hit::Shell => "Open a terminal in this project",
         Hit::FilesHeader => "Fold or unfold the changed files",
         Hit::File(_) => "Open on the stage, or with Ctrl in your editor. A folder opens or closes",
-        Hit::TasksHeader => "Fold or unfold the tasks. Right click to pick how they run",
-        Hit::TasksMode => "Pick how the tasks run",
-        Hit::TasksAdd => "Add a task",
+        Hit::TasksHeader => "Fold or unfold the quest log. Right click to pick how quests run",
+        Hit::TasksMode => "Pick how the quests run",
+        Hit::TasksAdd => "Add a quest",
         Hit::Task(_) => "Read this quest before taking it on, or show the session doing it. Right click for more",
         Hit::TasksGive => "Ask an agent to suggest quests for this project. You pick which go in the log",
-        Hit::TaskApprove(_) => "Mark this task done",
+        Hit::TaskApprove(_) => "Mark this quest completed",
         Hit::Nothing => return None,
     })
 }
@@ -242,6 +245,62 @@ pub fn caption(hit: CaptionHit, zoomed: bool) -> Option<&'static str> {
         CaptionHit::Close => "Close the stage. The sessions keep running",
         CaptionHit::Bar => return None,
     })
+}
+
+/// A key of a pane's header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Key {
+    Stash,
+    Zoom,
+    Close,
+}
+
+/// What a pane shows, as far as what its cross does goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Shows {
+    Agent,
+    Shell,
+    File,
+    Browser,
+}
+
+/// What a key of a pane's header does, `zoomed` while the pane fills the
+/// stage.
+pub fn pane(key: Key, shows: Shows, zoomed: bool) -> &'static str {
+    match (key, shows) {
+        (Key::Stash, _) => "Stash this session. It stops, and its conversation waits in the stash",
+        (Key::Zoom, _) if zoomed => "Put this pane back beside the others",
+        (Key::Zoom, _) => "Fill the stage with this pane",
+        (Key::Close, Shows::Agent) => "End this session for good",
+        (Key::Close, Shows::Shell) => "Close this terminal",
+        (Key::Close, Shows::File) => "Close this file",
+        (Key::Close, Shows::Browser) => "Close the browser",
+    }
+}
+
+/// What a key of the browser's bar does, `docked` naming the side of the
+/// stage the browser stands on. The address field says so itself.
+pub fn bar(hit: BarHit, docked: Option<Side>) -> Option<&'static str> {
+    Some(match hit {
+        BarHit::Back => "Back",
+        BarHit::Forward => "Forward",
+        BarHit::Reload => "Reload",
+        BarHit::Size => "Pick the size the page is laid out at",
+        BarHit::Place(side) if docked == Some(side) => "Put the browser back in the grid",
+        BarHit::Place(Side::Left) => "Stand the browser on the left of the stage",
+        BarHit::Place(Side::Top) => "Stand the browser along the top of the stage",
+        BarHit::Place(Side::Right) => "Stand the browser on the right of the stage",
+        BarHit::Field => return None,
+    })
+}
+
+/// What a part of the browser's tab strip does.
+pub fn tab(hit: TabHit) -> &'static str {
+    match hit {
+        TabHit::Tab(_) => "Show this tab. A middle click closes it",
+        TabHit::Close(_) => "Close this tab",
+        TabHit::New => "Open a new tab",
+    }
 }
 
 /// What a stashed session's row does.
@@ -663,11 +722,50 @@ mod tests {
     }
 
     #[test]
+    fn the_zoom_key_says_which_way_it_goes() {
+        assert_ne!(
+            pane(Key::Zoom, Shows::Agent, false),
+            pane(Key::Zoom, Shows::Agent, true)
+        );
+    }
+
+    #[test]
+    fn the_cross_says_what_it_closes() {
+        let all = [Shows::Agent, Shows::Shell, Shows::File, Shows::Browser];
+        for (i, a) in all.iter().enumerate() {
+            for b in &all[i + 1..] {
+                assert_ne!(pane(Key::Close, *a, false), pane(Key::Close, *b, false));
+            }
+        }
+    }
+
+    #[test]
+    fn a_place_key_on_the_side_the_browser_is_on_puts_it_back() {
+        let back = bar(BarHit::Place(Side::Left), Some(Side::Left));
+        assert_eq!(back, Some("Put the browser back in the grid"));
+        assert_ne!(bar(BarHit::Place(Side::Left), Some(Side::Right)), back);
+        assert_ne!(bar(BarHit::Place(Side::Top), None), back);
+        assert_eq!(bar(BarHit::Field, None), None);
+    }
+
+    #[test]
     fn no_line_uses_a_dash() {
         let mut lines: Vec<&str> = Vec::new();
         lines.extend(cluster(Hit::Tile(0)));
         lines.extend(cluster(Hit::File(0)));
         lines.push(STASHED);
+        for k in [Key::Stash, Key::Zoom, Key::Close] {
+            for s in [Shows::Agent, Shows::Shell, Shows::File, Shows::Browser] {
+                lines.push(pane(k, s, false));
+                lines.push(pane(k, s, true));
+            }
+        }
+        for h in [BarHit::Back, BarHit::Size, BarHit::Place(Side::Top)] {
+            lines.extend(bar(h, None));
+        }
+        for h in [TabHit::Tab(0), TabHit::Close(0), TabHit::New] {
+            lines.push(tab(h));
+        }
         for l in lines {
             assert!(!l.contains('\u{2014}') && !l.contains('\u{2013}') && !l.contains("--"));
         }

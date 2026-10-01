@@ -14,7 +14,7 @@ use serde_json::{Map, Value};
 
 use crate::agent::Agent;
 use crate::rarity::Loot;
-use crate::runeword::Runeword;
+use crate::runeword::{OnProject, Runeword};
 use crate::session::{Phase, Session};
 use crate::title::Title;
 use crate::usage::{Defaults, Usage};
@@ -69,6 +69,11 @@ pub struct SavedState {
     /// where it is not in it.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub page_docks: BTreeMap<String, Dock>,
+    /// Each project's browser tabs as left, so a reload or a crash opens
+    /// them again. Only the address: WebView2 has no way to give a page
+    /// back its history.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub pages: BTreeMap<String, SavedPages>,
     /// Each project's colour, by project key, as its place in the list of
     /// project colours.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -114,9 +119,8 @@ pub struct SavedState {
     /// tray. Kept per instance, so a dev one stays off on its own.
     #[serde(default, skip_serializing_if = "Discord::is_off")]
     pub discord: Discord,
-    /// The run of work the Discord clock counts, written as the app goes
-    /// away so a reload carries it on instead of starting at zero. Only
-    /// then: while running it changes at every tick of work.
+    /// The run of work the Discord presence counts from, so a reload
+    /// carries on the clock on the profile instead of starting at zero.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run: Option<SavedRun>,
     /// The device name of the screen the columns stand on, when it is not
@@ -137,6 +141,10 @@ pub struct SavedState {
     /// of once, not at every start and every daily check.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub update_told: Option<String>,
+    /// Runewords cast on a project rather than a session, so a command
+    /// that runs through a reload is still followed after it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runewords: Vec<OnProject>,
 }
 
 /// The "Show on Discord" setting: whether Rich Presence is on, and whether
@@ -175,15 +183,6 @@ impl Discord {
             Discord::Named => "With project names",
         }
     }
-}
-
-/// A run of work as kept on disk, in Unix seconds: when it began and when
-/// a session last worked, which says whether it is over by the time the
-/// next build reads it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SavedRun {
-    pub start: u64,
-    pub last_work: u64,
 }
 
 /// The side of the stage a browser pane stands on, beside the grid.
@@ -466,9 +465,78 @@ pub struct SavedPanel {
     pub locked: bool,
 }
 
+/// A run of work as kept on disk, in unix seconds. See
+/// `presence::Run`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedRun {
+    pub start: u64,
+    pub last_work: u64,
+}
+
+/// A project's browser tabs, left to right, and the one shown.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedPages {
+    pub tabs: Vec<SavedTab>,
+    #[serde(default)]
+    pub active: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedTab {
+    pub url: String,
+    /// Names the tab until its page loads and says its own.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub title: String,
+}
+
+impl SavedPages {
+    /// The tabs worth opening again, from each tab's address and title.
+    /// A tab still blank has nothing to open, so it is left out and the
+    /// shown one keeps its place among the rest. None when none is left.
+    pub fn of(tabs: Vec<SavedTab>, active: usize) -> Option<SavedPages> {
+        let blank = |t: &SavedTab| t.url.is_empty() || t.url == "about:blank";
+        let before = tabs.iter().take(active).filter(|t| blank(t)).count();
+        let tabs: Vec<SavedTab> = tabs.into_iter().filter(|t| !blank(t)).collect();
+        if tabs.is_empty() {
+            return None;
+        }
+        let active = active.saturating_sub(before).min(tabs.len() - 1);
+        Some(SavedPages { tabs, active })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tab(url: &str) -> SavedTab {
+        SavedTab {
+            url: url.to_string(),
+            title: String::new(),
+        }
+    }
+
+    #[test]
+    fn blank_tabs_are_not_kept_and_the_shown_one_keeps_its_place() {
+        let urls = |p: &SavedPages| p.tabs.iter().map(|t| t.url.clone()).collect::<Vec<_>>();
+        let p = SavedPages::of(
+            vec![
+                tab("about:blank"),
+                tab("https://a/"),
+                tab(""),
+                tab("https://b/"),
+            ],
+            3,
+        )
+        .unwrap();
+        assert_eq!(urls(&p), ["https://a/", "https://b/"]);
+        assert_eq!(p.active, 1);
+        // A blank tab shown: its neighbour before it is.
+        let p = SavedPages::of(vec![tab("https://a/"), tab("")], 1).unwrap();
+        assert_eq!(p.active, 0);
+        assert_eq!(SavedPages::of(vec![tab("about:blank")], 0), None);
+        assert_eq!(SavedPages::of(Vec::new(), 0), None);
+    }
 
     #[test]
     fn a_dock_reads_its_side_and_an_old_bare_width_as_the_right() {
@@ -649,14 +717,25 @@ mod tests {
             sounds: true,
             discord: Discord::Named,
             run: Some(SavedRun {
-                start: 1000,
-                last_work: 1600,
+                start: 100,
+                last_work: 160,
             }),
             screen: Some(r"\\.\DISPLAY2".into()),
+            runewords: vec![OnProject {
+                project: "c:/app".into(),
+                word: Runeword::new(
+                    "Open the site",
+                    vec![crate::runeword::Rune::Run {
+                        command: "start http://localhost:3000".into(),
+                        show: false,
+                    }],
+                ),
+            }],
             ..Default::default()
         };
         let back = SavedState::from_json(state.to_json().as_bytes());
         assert_eq!(back.version, VERSION);
+        assert_eq!(back.runewords, state.runewords);
         assert_eq!(back.sessions, state.sessions);
         assert_eq!(back.clusters, state.clusters);
         assert_eq!(back.columns, state.columns);

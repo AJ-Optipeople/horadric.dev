@@ -180,22 +180,25 @@ impl Run {
         self.start
     }
 
-    /// The run to write down as the app goes away, if one is going.
-    pub fn to_saved(&self) -> Option<SavedRun> {
+    /// The run as kept on disk, so a reload carries on its clock. The last
+    /// work is cut to the minute, since it moves at every tick while a
+    /// session works and the state is only written when it changed; a
+    /// minute off a ten minute gap does not matter.
+    pub fn saved(&self) -> Option<SavedRun> {
         let secs = |t: SystemTime| t.duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
         Some(SavedRun {
             start: secs(self.start?)?,
-            last_work: secs(self.last_work?)?,
+            last_work: secs(self.last_work?)? / 60 * 60,
         })
     }
 
-    /// The run a reload handed over. One that is over by now ends at the
-    /// next [`Run::update`], as it would have without the reload.
+    /// A run brought back from disk. One whose gap has passed by the time
+    /// it is looked at ends then, as it would have without the restart.
     pub fn from_saved(saved: Option<SavedRun>) -> Run {
         let at = |secs: u64| UNIX_EPOCH + Duration::from_secs(secs);
-        saved.map_or_else(Run::default, |s| Run {
-            start: Some(at(s.start)),
-            last_work: Some(at(s.last_work)),
+        saved.map_or_else(Run::default, |r| Run {
+            start: Some(at(r.start)),
+            last_work: Some(at(r.last_work)),
         })
     }
 }
@@ -392,46 +395,6 @@ mod tests {
     }
 
     #[test]
-    fn a_run_carries_over_a_reload() {
-        let mut run = Run::default();
-        let working = [(session(Phase::Working), "a")];
-        run.update(&seen(&working), at(1500));
-        let saved = run.to_saved();
-        assert_eq!(
-            saved,
-            Some(SavedRun {
-                start: 1000,
-                last_work: 1500
-            })
-        );
-        let mut back = Run::from_saved(saved);
-        assert_eq!(back, run);
-        // The new build sees the same session still working, started anew.
-        let mut again = session(Phase::Working);
-        again.since = at(1510);
-        let after = [(again, "a")];
-        assert_eq!(back.update(&seen(&after), at(1510)), Some(at(1000)));
-    }
-
-    #[test]
-    fn a_run_handed_over_after_the_gap_is_over() {
-        let saved = SavedRun {
-            start: 1000,
-            last_work: 1500,
-        };
-        let mut back = Run::from_saved(Some(saved));
-        let done = [(session(Phase::Done), "a")];
-        let late = at(1500 + RUN_GAP.as_secs());
-        assert_eq!(back.update(&seen(&done), late), None);
-    }
-
-    #[test]
-    fn no_run_hands_over_nothing() {
-        assert_eq!(Run::default().to_saved(), None);
-        assert_eq!(Run::from_saved(None), Run::default());
-    }
-
-    #[test]
     fn a_waiting_session_does_not_start_a_run() {
         let mut run = Run::default();
         let waits = [(session(Phase::Waiting(WaitReason::Input)), "a")];
@@ -445,5 +408,46 @@ mod tests {
         s.since = at(9000);
         let all = [(s, "a")];
         assert_eq!(run.update(&seen(&all), at(2000)), Some(at(2000)));
+    }
+
+    #[test]
+    fn a_run_comes_back_from_disk() {
+        let mut run = Run::default();
+        let working = [(session(Phase::Working), "a")];
+        run.update(&seen(&working), at(1150));
+        let saved = run.saved().unwrap();
+        assert_eq!(
+            saved,
+            SavedRun {
+                start: 1000,
+                last_work: 1140
+            }
+        );
+        let mut back = Run::from_saved(Some(saved));
+        let done = [(session(Phase::Done), "a")];
+        assert_eq!(back.update(&seen(&done), at(1200)), Some(at(1000)));
+        let mut next = session(Phase::Working);
+        next.since = at(1300);
+        assert_eq!(back.update(&seen(&[(next, "a")]), at(1300)), Some(at(1000)));
+    }
+
+    #[test]
+    fn a_run_saved_long_ago_is_over() {
+        let saved = SavedRun {
+            start: 1000,
+            last_work: 1140,
+        };
+        let mut back = Run::from_saved(Some(saved));
+        let gap = RUN_GAP.as_secs();
+        let mut s = session(Phase::Working);
+        s.since = at(1140 + gap);
+        let later = at(1140 + gap);
+        assert_eq!(back.update(&seen(&[(s, "a")]), later), Some(later));
+    }
+
+    #[test]
+    fn no_run_saves_nothing() {
+        assert_eq!(Run::default().saved(), None);
+        assert_eq!(Run::from_saved(None), Run::default());
     }
 }

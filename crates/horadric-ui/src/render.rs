@@ -69,6 +69,12 @@ use crate::layout::{
 use crate::motion::{self, ORBIT};
 use crate::theme::{self, Color};
 
+// Nothing draws a stone until the Runetome tile does.
+#[allow(dead_code)]
+mod stone;
+#[allow(unused_imports)]
+pub(crate) use stone::{StoneLook, StoneState};
+
 const FONT: PCWSTR = w!("Segoe UI Variable Text");
 /// For the project's name: the optical size cut for larger text.
 const FONT_DISPLAY: PCWSTR = w!("Segoe UI Variable Display");
@@ -3150,12 +3156,12 @@ impl Painter<'_> {
             Rect::new(h.x + pad - 2.0, h.y, 14.0, h.h),
         );
         let label_x = h.x + pad + 14.0;
-        let label_w = self.measure(gpu, &gpu.chip, "TASKS") + 8.0;
+        let label_w = self.measure(gpu, &gpu.chip, "QUESTS") + 8.0;
         self.text_spaced(
             gpu,
             &gpu.chip,
             theme::text_dim(),
-            "TASKS",
+            "QUESTS",
             1.2,
             Rect::new(label_x, h.y, label_w, h.h),
         );

@@ -95,7 +95,7 @@ use crate::viewer::Hit;
 use crate::viewport::{self, Fit, Grip};
 use crate::web::{self, TabStep};
 use crate::window::Shared;
-use crate::{find, frame, watch};
+use crate::{find, frame, tip, watch};
 
 const CLASS: PCWSTR = w!("HoradricPane");
 const SYNC_TIMER: usize = 1;
@@ -167,6 +167,27 @@ struct Resize {
     zoom: f32,
 }
 
+/// Everything a pane's frame is drawn from, besides a browser's bar.
+#[derive(PartialEq)]
+struct Shown {
+    frame: frame::Frame,
+    name: String,
+    detail: String,
+    phase: Option<Color>,
+    accent: Color,
+    active: bool,
+    lifted: bool,
+    stash: bool,
+    zoom: Option<bool>,
+    find: Option<(String, String)>,
+    veil: f32,
+    plate: (f32, f32),
+    size: (i32, i32),
+    dpi: u32,
+    font: (f32, String),
+    theme: theme::Theme,
+}
+
 pub struct Pane {
     pub hwnd: HWND,
     console: Arc<Console>,
@@ -183,6 +204,10 @@ pub struct Pane {
     /// one when a neighbour uncovers a strip of this pane, or when this
     /// pane is moved, and neither changes what it shows.
     stale: Cell<bool>,
+    /// What the last frame drawn showed. Output that changed nothing on
+    /// screen, such as a title whose spinner is left out, presents it
+    /// again instead of drawing it.
+    drawn: RefCell<Option<Shown>>,
     /// Its rain timer runs.
     raining: Cell<bool>,
     target: RefCell<Option<GridTarget>>,
@@ -293,6 +318,7 @@ impl Pane {
             held: Cell::new(false),
             floating: Cell::new(None),
             stale: Cell::new(true),
+            drawn: RefCell::new(None),
             raining: Cell::new(false),
             target: RefCell::new(None),
             dpi: Cell::new(0),
@@ -750,6 +776,7 @@ impl Pane {
                 Ok(t) => {
                     *slot = Some(t);
                     self.dpi.set(dpi);
+                    *self.drawn.borrow_mut() = None;
                 }
                 Err(e) => {
                     eprintln!("horadric: pane render target: {e}");
@@ -895,12 +922,45 @@ impl Pane {
             }
         }
         let rain = self.rain();
+        // A browser pane's header has its tabs and address besides, and its
+        // frame is empty and cheap, so it always draws, and so does a pane
+        // the rain moves behind.
+        let look = Shown {
+            frame,
+            name: name.clone(),
+            detail: detail.clone(),
+            phase,
+            accent: header.accent,
+            active: header.active,
+            lifted: header.lifted,
+            stash: header.stash,
+            zoom: header.zoom,
+            find: find
+                .as_ref()
+                .map(|f| (f.query.to_string(), f.status.to_string())),
+            veil,
+            plate,
+            size: (r.right, r.bottom),
+            dpi,
+            font: (font.size(), font.family()),
+            theme: theme::current(),
+        };
+        let same = self.console.web.is_none()
+            && rain.is_none()
+            && self.drawn.borrow().as_ref() == Some(&look);
+        if same {
+            if let Some(Err(_)) = slot.as_ref().map(GridTarget::present) {
+                *slot = None;
+                self.stale.set(true);
+            }
+            return;
+        }
         let result = slot.as_ref().map(|t| {
             t.draw(
                 &self.shared.gpu,
                 font,
                 &cell,
-                &frame,
+                &look.frame,
                 &header,
                 find.as_ref(),
                 page.as_ref(),
@@ -909,10 +969,12 @@ impl Pane {
                 rain,
             )
         });
-        if let Some(Err(_)) = result {
+        let drawn = matches!(result, Some(Ok(())));
+        if !drawn {
             *slot = None;
             self.stale.set(true);
         }
+        *self.drawn.borrow_mut() = drawn.then_some(look);
     }
 
     /// Whether the cursor is lit in this paint, and a timer for the next
@@ -1938,21 +2000,64 @@ impl Pane {
     /// none or Ctrl is up.
     fn hover(&self, lparam: Option<LPARAM>) {
         let cells = lparam.and_then(|at| self.link_at(at)).map(|l| l.0);
-        if cells.is_some() && !self.tracking.replace(true) {
-            let mut track = TRACKMOUSEEVENT {
-                cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
-                dwFlags: TME_LEAVE,
-                hwndTrack: self.hwnd,
-                dwHoverTime: 0,
-            };
-            unsafe {
-                let _ = TrackMouseEvent(&mut track);
-            }
+        if cells.is_some() {
+            self.track();
         }
         if *self.link.borrow() != cells {
             *self.link.borrow_mut() = cells;
             self.invalidate();
         }
+    }
+
+    /// Asks for WM_MOUSELEAVE, once until it comes.
+    fn track(&self) {
+        if self.tracking.replace(true) {
+            return;
+        }
+        let mut track = TRACKMOUSEEVENT {
+            cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+            dwFlags: TME_LEAVE,
+            hwndTrack: self.hwnd,
+            dwHoverTime: 0,
+        };
+        unsafe {
+            let _ = TrackMouseEvent(&mut track);
+        }
+    }
+
+    /// What the pane shows, for what its cross says.
+    fn shows(&self) -> tip::Shows {
+        if self.console.web.is_some() {
+            tip::Shows::Browser
+        } else if self.console.is_view() {
+            tip::Shows::File
+        } else if self.console.shell {
+            tip::Shows::Shell
+        } else {
+            tip::Shows::Agent
+        }
+    }
+
+    /// The line for what in the header or the tab strip is under a client
+    /// point, in the order a press there is taken.
+    fn tip_at(&self, lparam: LPARAM) -> Option<&'static str> {
+        if let Some(hit) = self.bar_at(lparam) {
+            let docked = self.console.web.as_deref().and_then(web::dock);
+            return tip::bar(hit, docked.map(|d| d.side));
+        }
+        if let Some(hit) = self.tab_at(lparam) {
+            return Some(tip::tab(hit));
+        }
+        let key = if self.on_close(lparam) {
+            tip::Key::Close
+        } else if self.on_stash(lparam) {
+            tip::Key::Stash
+        } else if self.on_zoom(lparam) {
+            tip::Key::Zoom
+        } else {
+            return None;
+        };
+        Some(tip::pane(key, self.shows(), self.zoom.get() == Some(true)))
     }
 
     /// The mouse's client point, when it is over the pane.
@@ -2174,6 +2279,12 @@ impl Pane {
     }
 
     fn handle(&self, msg: u32, wparam: WPARAM, lparam: LPARAM) -> Option<LRESULT> {
+        if matches!(
+            msg,
+            WM_LBUTTONDOWN | WM_LBUTTONDBLCLK | WM_MBUTTONDOWN | WM_RBUTTONDOWN
+        ) {
+            tip::press(self.hwnd);
+        }
         match msg {
             WM_PAINT => {
                 self.paint();
@@ -2400,6 +2511,7 @@ impl Pane {
             }
             WM_MOUSELEAVE => {
                 self.tracking.set(false);
+                tip::away(self.hwnd);
                 self.hover(None);
                 Some(LRESULT(0))
             }
@@ -2408,6 +2520,13 @@ impl Pane {
                 Some(LRESULT(0))
             }
             WM_MOUSEMOVE => {
+                let line = (!self.selecting.get())
+                    .then(|| self.tip_at(lparam))
+                    .flatten();
+                if line.is_some() {
+                    self.track();
+                }
+                tip::over(&self.shared, self.hwnd, line);
                 if !self.selecting.get() {
                     self.hover(Some(lparam));
                 }

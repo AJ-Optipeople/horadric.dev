@@ -8,7 +8,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use horadric_core::fleet::{self, Device};
-use horadric_core::runeword::{self, Offered};
+use horadric_core::runeword::{self, Stone};
 use horadric_core::tasks::{self, Mode, CONFIG_FILE, OLD_FILE, QUESTS_FILE};
 use horadric_core::{ssh, worktree};
 
@@ -81,9 +81,24 @@ pub fn ssh_config_hosts() -> Vec<String> {
     ssh::config_hosts(&read_text(&path))
 }
 
-/// The runewords the project offers, its config's own first.
-pub fn runewords(project: &Path) -> Offered {
-    runeword::offered(&read_text(&config_file(project)))
+/// Every stone the project's Runetome holds, those that do not parse too.
+pub fn stones(project: &Path) -> Vec<Stone> {
+    runeword::stones(&read_text(&config_file(project)), &global_runewords())
+}
+
+/// The file of stones every project shares, `runewords.json` beside the
+/// app's state: `%APPDATA%\Horadric`, or `Horadric-dev` for a dev instance.
+pub fn runewords_file() -> Option<PathBuf> {
+    let name = if crate::dev() {
+        "Horadric-dev"
+    } else {
+        "Horadric"
+    };
+    std::env::var_os("APPDATA").map(|a| PathBuf::from(a).join(name).join("runewords.json"))
+}
+
+fn global_runewords() -> String {
+    runewords_file().map(|f| read_text(&f)).unwrap_or_default()
 }
 
 /// What the project's config says about worktrees.

@@ -57,7 +57,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
 /// process between them, which would end the session with it. A handler
 /// rather than ignoring it outright, since ignoring is handed down to the
 /// children.
-fn ignore_ctrl_c() {
+pub(crate) fn ignore_ctrl_c() {
     use windows::core::BOOL;
     use windows::Win32::System::Console::SetConsoleCtrlHandler;
     unsafe extern "system" fn handled(_: u32) -> BOOL {
