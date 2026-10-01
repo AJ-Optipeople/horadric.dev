@@ -778,7 +778,6 @@ impl TerminalWindow {
         }
     }
 
-    /// Destroys the window and its panes. The consoles live on.
     /// Puts `icon` on the taskbar button, which is how the stage breathes
     /// with the tray while a session works.
     pub fn set_icon(&self, icon: HICON) {
@@ -792,6 +791,7 @@ impl TerminalWindow {
         }
     }
 
+    /// Destroys the window and its panes. The consoles live on.
     pub fn destroy(&self) {
         unsafe {
             let _ = DestroyWindow(self.hwnd);
