@@ -110,11 +110,23 @@ the session list, a stream from a host's ring, and a way to send input
 back. The UI passes these on, since the host pipes refuse remote
 clients.
 
-- **A PWA first, a native app maybe later.** A page Horadric serves
-  needs no app store and works on iOS and Android, with xterm.js for the
-  terminal. It means an HTTP and WebSocket server in Horadric, and maybe
-  TLS. The human waived the "no web view" and "dependencies one at a
-  time" decisions for this on 2026-10-01.
+- **A PWA first, a native app maybe later.** A web page needs no app
+  store and works on iOS and Android, with xterm.js for the terminal.
+  The human waived the "no web view" and "dependencies one at a time"
+  decisions for this on 2026-10-01.
+- **The page is hosted, not served by the PC.** The goal is any browser
+  anywhere, with nothing installed first (decided 2026-10-02). So the
+  page lives on a public site of ours, such as `app.horadric.dev`, and
+  reaches the PC through the relay. The site sends only the HTML and
+  JS; sessions never pass through it. One fixed HTTPS address also
+  makes "add to home screen" and Web Push simple. The page and the
+  relay live in a repo of their own, since both are deployed to the
+  internet and neither ships with the desktop app. This repo gets the
+  PC's side: the API, pairing and the connection out to the relay.
+- **The page must cope with older PCs.** The hosted page always runs
+  the newest version, while a PC may run an old Horadric for weeks. The
+  PC says which API version it speaks when it connects, and the page
+  supports a range of versions, or tells the human to update the PC.
 - **An API, not pages.** The PWA is written as if it were a third party
   client, against a versioned API: JSON over WebSocket for events and
   session state, binary frames for terminal output. Then a native app is
@@ -126,21 +138,21 @@ clients.
   users, and it does by having no centre: each Horadric serves its own
   few phones, so a thousand users is a thousand small servers we never
   run. Nothing we host holds sessions or state.
-- **Reaching the PC: Tailscale first, a relay later.** Tailscale needs
-  nothing from us and brings the encryption and the identity, but asking
-  every user to install it will not reach thousands. So the transport is
-  hidden behind the API from the start, and a relay of ours can drop in
-  later: stateless, it only joins a phone to its PC, and the two encrypt
-  end to end so it never reads a session. A relay like that scales
-  sideways, more instances behind a load balancer.
+- **Reaching the PC: a relay of ours.** Tailscale only works on a
+  device where it is installed, so it cannot give "any browser
+  anywhere". The PC connects out to the relay, so no port is opened on
+  the PC or the router. The relay is stateless: it only joins a browser
+  to its PC, and the two encrypt end to end so it never reads a
+  session. A relay like that scales sideways, more instances behind a
+  load balancer. Tailscale can still be a way in for development.
 - **Push needs one small service of ours.** Web Push the PC can send by
   itself, but an iOS app's APNs key is a secret no install can carry, so
   native push goes through a sender we host. It forwards a "session waits"
   with no content in it, so it holds nothing worth stealing.
 - **Off by default.** This is remote control of a machine whose agents
   may run with permissions bypassed. Each phone is paired by a device
-  token the human approves on the PC, and the server listens only on the
-  tailnet.
+  token the human approves on the PC, and the PC listens on no port: its
+  only way in is its own outgoing connection to the relay.
 - **An inbox first, not a terminal.** Typing into a terminal on a phone
   is slow. Away from the desk the need is "2 sessions wait for you":
   approve a permission, answer a question, send a short prompt, and a
