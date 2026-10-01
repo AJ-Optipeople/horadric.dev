@@ -226,8 +226,9 @@ impl Agent {
     /// the project's browser pane. Claude Code reads it from `config`, a
     /// file, in the `=` form so a prompt after it is not taken for a second
     /// file. Codex takes it as config overrides, and passes a server only
-    /// the variables it names, so the session's tag is named. Grok keeps
-    /// its servers in its own config, so it gets none here.
+    /// the variables it names, so the session's tag is named. Grok has no
+    /// flag for it and keeps its servers in its own config, where `install`
+    /// puts Horadric's, so it gets none here.
     pub fn mcp_args(self, exe: &str, config: Option<&str>) -> Vec<String> {
         match self {
             Agent::Claude => config
@@ -410,7 +411,7 @@ const CODEX_EVENTS: [&str; 8] = [
 ];
 
 /// `s` as a TOML basic string.
-fn toml_string(s: &str) -> String {
+pub fn toml_string(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
     for c in s.chars() {

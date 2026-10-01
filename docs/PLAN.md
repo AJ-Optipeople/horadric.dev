@@ -841,10 +841,10 @@ settled "no web view" for web pages only: Horadric's own UI stays Direct2D.
   chosen once and kept in the profile folder rather than per instance.
 - **Agents drive it** (`horadric mcp`, `drive.rs`). Every Claude Code
   session gets `--mcp-config=` a file naming `horadric mcp` (Codex gets
-  `-c mcp_servers.horadric...`; Grok keeps its servers in its own config,
-  so not yet). The server finds its session by the `HORADRIC_SESSION` it
-  inherits and posts each call to `/horadric/browser`, the one listener
-  path that waits for the app's answer. The session names the project, so
+  `-c mcp_servers.horadric...`; Grok gets a `[mcp_servers.horadric]`
+  table in `~/.grok/config.toml`, see below). The server finds its
+  session by the `HORADRIC_SESSION` it inherits and posts each call to
+  `/horadric/browser`, the one listener path that waits for the app's answer. The session names the project, so
   an agent only reaches its own project's page. The app does open, close,
   navigate, back, forward, reload, info, and any DevTools call on that
   page through WebView2's `CallDevToolsProtocolMethod`, no port needed.
@@ -861,6 +861,23 @@ settled "no web view" for web pages only: Horadric's own UI stays Direct2D.
   Tested: a script through every tool against a test page and
   example.com, and a Haiku session told to fill in a form, which opened,
   typed, ticked, clicked, looked and closed by itself.
+- **Grok's way in** (2026-10-01). Grok Build 1.0.44 has no per session
+  way to be given a server: the TUI has no `--mcp-config` or
+  `--plugin-dir` (only `grok agent` has the latter), its `GROK_CONFIG`
+  overlay keeps only soft settings and drops `mcp_servers` and
+  `plugins`, a plugin in `~/.grok/plugins` is put on the disabled list
+  when first seen, and `--agent` swaps the whole system prompt. So
+  `install` and `reload` write a `[mcp_servers.horadric]` table into
+  `~/.grok/config.toml`, beside the hook file, and `uninstall` takes it
+  out (`with_grok_mcp`, pure): the only part of that file Horadric
+  touches, the dev instance never. Grok passes a stdio server its own
+  environment, so the session's tag arrives. Every `grok` starts the
+  server, so without a `HORADRIC_SESSION` it offers no tools and no
+  instructions. Live check: the table pointing at a debug build, a dev
+  instance on its own port, `horadric new --agent grok` told to open
+  example.com; Grok found `horadric__browser_open` by `search_tool`, the
+  pane for its project opened there, and `browser_snapshot` read it.
+  `grok mcp doctor` from a shell outside Horadric shows 0 tools.
 - The browser still listens for the DevTools protocol on 127.0.0.1, on
   the port in `web\devtools-port`, for tools outside Horadric. While it
   is open, any program on the machine can drive that logged in browser.

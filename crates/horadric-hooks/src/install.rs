@@ -9,7 +9,12 @@
 //! Grok Build reads hooks from a folder of files, so it gets one of its own,
 //! `~/.grok/hooks/horadric.json`, a command hook for `horadric hook grok`.
 //! Grok refuses an `http` hook to loopback. The command does nothing for a
-//! `grok` not started under Horadric.
+//! `grok` not started under Horadric. Grok has no per session way to be
+//! given an MCP server either: no flag, its `GROK_CONFIG` overlay drops
+//! `mcp_servers` and `plugins`, and a plugin in `~/.grok/plugins` starts
+//! out disabled. So `horadric mcp` goes in as a `[mcp_servers.horadric]`
+//! table in its `config.toml`, the only part of that file Horadric
+//! touches. It offers no tools to a `grok` not started under Horadric.
 
 use std::fs;
 use std::io;
@@ -213,23 +218,100 @@ pub fn grok_hooks(command: &str) -> Value {
     json!({ "hooks": hooks })
 }
 
-/// Writes Horadric's hook file into Grok home `home`, when Grok is there:
-/// a machine without Grok gets no `~/.grok`. True when it wrote one.
-/// Idempotent, and the file is Horadric's alone.
-pub fn install_grok(home: &Path, command: &str) -> io::Result<bool> {
+/// Grok's own settings in Grok home `home`.
+pub fn grok_config_path(home: &Path) -> PathBuf {
+    home.join("config.toml")
+}
+
+/// The header of the table that gives Grok `horadric mcp`.
+const GROK_MCP_TABLE: &str = "[mcp_servers.horadric]";
+
+/// The table that gives Grok `horadric mcp`, run from `exe`. A page that is
+/// slow to load is given as long as Codex gives it.
+pub fn grok_mcp(exe: &str) -> String {
+    format!(
+        "{GROK_MCP_TABLE}\ncommand = {}\nargs = [\"mcp\"]\ntool_timeout_sec = 120\n",
+        horadric_core::agent::toml_string(exe)
+    )
+}
+
+/// Grok's `config` with Horadric's table taken out, and `table` put in at
+/// the end when there is one. Only that table goes: it runs from its
+/// header to the next one, and a table under it, like
+/// `[mcp_servers.horadric.env]`, goes with it.
+pub fn with_grok_mcp(config: &str, table: Option<&str>) -> String {
+    let ours = |line: &str| {
+        let line = line.trim();
+        line == GROK_MCP_TABLE || line.starts_with("[mcp_servers.horadric.")
+    };
+    let mut kept: Vec<&str> = Vec::new();
+    let mut inside = false;
+    for line in config.lines() {
+        if line.trim_start().starts_with('[') {
+            inside = ours(line);
+        }
+        if !inside {
+            kept.push(line);
+        }
+    }
+    while kept.last().is_some_and(|l| l.trim().is_empty()) {
+        kept.pop();
+    }
+    let mut out = kept.join("\n");
+    if !out.is_empty() {
+        out.push('\n');
+    }
+    if let Some(table) = table {
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(table);
+    }
+    out
+}
+
+/// Puts `table` into Grok's config in `home`, or takes Horadric's out with
+/// None. A missing config is made only to put the table in.
+fn set_grok_mcp(home: &Path, table: Option<&str>) -> io::Result<()> {
+    let path = grok_config_path(home);
+    let config = match fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == io::ErrorKind::NotFound && table.is_none() => return Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e),
+    };
+    let text = with_grok_mcp(&config, table);
+    if text == config {
+        return Ok(());
+    }
+    // Beside and rename, as for Claude Code's settings.
+    let tmp = path.with_extension("toml.horadric-tmp");
+    fs::write(&tmp, text)?;
+    fs::rename(&tmp, path)
+}
+
+/// Writes Horadric's hook file into Grok home `home`, and the table that
+/// gives Grok `horadric mcp` from `exe`, when Grok is there: a machine
+/// without Grok gets no `~/.grok`. True when it wrote them. Idempotent, and
+/// the hook file is Horadric's alone.
+pub fn install_grok(home: &Path, command: &str, exe: &str) -> io::Result<bool> {
     if !home.is_dir() {
         return Ok(false);
     }
     write(&grok_hooks_path(home), &grok_hooks(command))?;
+    set_grok_mcp(home, Some(&grok_mcp(exe)))?;
     Ok(true)
 }
 
-/// Removes Horadric's hook file from Grok home `home`. Idempotent.
+/// Removes Horadric's hook file and MCP table from Grok home `home`.
+/// Idempotent.
 pub fn uninstall_grok(home: &Path) -> io::Result<()> {
-    match fs::remove_file(grok_hooks_path(home)) {
-        Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
-        _ => Ok(()),
+    if let Err(e) = fs::remove_file(grok_hooks_path(home)) {
+        if e.kind() != io::ErrorKind::NotFound {
+            return Err(e);
+        }
     }
+    set_grok_mcp(home, None)
 }
 
 /// What Claude Code's `/model` and `/effort` save into the user's settings
@@ -349,18 +431,53 @@ mod tests {
     fn grok_hooks_go_only_where_grok_is_and_come_out_again() {
         let dir = std::env::temp_dir().join(format!("horadric-grok-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
-        assert!(!install_grok(&dir, "h").unwrap());
+        assert!(!install_grok(&dir, "h", "x").unwrap());
         assert!(!dir.exists());
         fs::create_dir_all(&dir).unwrap();
-        assert!(install_grok(&dir, "h").unwrap());
-        assert!(install_grok(&dir, "h").unwrap());
+        fs::write(grok_config_path(&dir), "[ui]\nyolo = false\n").unwrap();
+        assert!(install_grok(&dir, "h", "x").unwrap());
+        assert!(install_grok(&dir, "h", "x").unwrap());
         let written: Value =
             serde_json::from_slice(&fs::read(grok_hooks_path(&dir)).unwrap()).unwrap();
         assert_eq!(written, grok_hooks("h"));
+        let config = fs::read_to_string(grok_config_path(&dir)).unwrap();
+        assert_eq!(config, format!("[ui]\nyolo = false\n\n{}", grok_mcp("x")));
         uninstall_grok(&dir).unwrap();
         uninstall_grok(&dir).unwrap();
         assert!(!grok_hooks_path(&dir).exists());
+        let config = fs::read_to_string(grok_config_path(&dir)).unwrap();
+        assert_eq!(config, "[ui]\nyolo = false\n");
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn grok_mcp_runs_horadric_mcp() {
+        assert_eq!(
+            grok_mcp(r"C:\h\horadric.exe"),
+            "[mcp_servers.horadric]\n\
+             command = \"C:\\\\h\\\\horadric.exe\"\n\
+             args = [\"mcp\"]\n\
+             tool_timeout_sec = 120\n"
+        );
+    }
+
+    #[test]
+    fn grok_mcp_goes_in_once_and_leaves_the_rest() {
+        let table = "[mcp_servers.horadric]\ncommand = \"h\"\n";
+        assert_eq!(with_grok_mcp("", Some(table)), table);
+        assert_eq!(with_grok_mcp("", None), "");
+        let config = "[cli]\ninstaller = \"internal\"\n\n\
+                      [mcp_servers.horadric]\ncommand = \"old\"\n\n\
+                      [mcp_servers.horadric.env]\nA = \"1\"\n\n\
+                      [mcp_servers.github]\ncommand = \"gh\"\n";
+        let rest = "[cli]\ninstaller = \"internal\"\n\n[mcp_servers.github]\ncommand = \"gh\"\n";
+        assert_eq!(with_grok_mcp(config, None), rest);
+        let put = with_grok_mcp(config, Some(table));
+        assert_eq!(put, format!("{rest}\n{table}"));
+        assert_eq!(with_grok_mcp(&put, Some(table)), put);
+        // A table whose name only starts the same is someone else's.
+        let theirs = "[mcp_servers.horadric2]\ncommand = \"z\"\n";
+        assert_eq!(with_grok_mcp(theirs, None), theirs);
     }
 
     #[test]

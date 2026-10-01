@@ -39,6 +39,7 @@ pub fn run() -> Result<(), String> {
         .and_then(|p| p.parse().ok())
         .unwrap_or_else(horadric_hooks::port);
     let mut server = Server {
+        browser: session.is_some(),
         app: move |body: Value| ask_app(owner, session.as_deref(), &body),
         settle: Duration::from_millis(400),
     };
@@ -84,6 +85,10 @@ fn ask_app(port: u16, session: Option<&str>, body: &Value) -> Result<Value, Stri
 
 /// The server, with `app` the call to the Horadric that owns the session.
 struct Server<A> {
+    /// Whether Horadric started this session. Grok starts this server for
+    /// every session, since it is in Grok's own config, and one Horadric
+    /// did not start has no browser, so it is offered no tools.
+    browser: bool,
     app: A,
     /// How long after a click or a key the page is given to react.
     settle: Duration,
@@ -103,10 +108,11 @@ impl<A: FnMut(Value) -> Result<Value, String>> Server<A> {
                     .unwrap_or(PROTOCOL),
                 "capabilities": { "tools": {} },
                 "serverInfo": { "name": "horadric", "version": env!("CARGO_PKG_VERSION") },
-                "instructions": INSTRUCTIONS,
+                "instructions": if self.browser { INSTRUCTIONS } else { "" },
             })),
             "ping" => Ok(json!({})),
-            "tools/list" => Ok(json!({ "tools": tools() })),
+            "tools/list" if self.browser => Ok(json!({ "tools": tools() })),
+            "tools/list" => Ok(json!({ "tools": [] })),
             "tools/call" => {
                 let name = params.get("name").and_then(Value::as_str).unwrap_or("");
                 let args = params.get("arguments").cloned().unwrap_or(json!({}));
@@ -1058,6 +1064,7 @@ mod tests {
             a
         };
         let s = Server {
+            browser: true,
             app,
             settle: Duration::ZERO,
         };
@@ -1081,6 +1088,16 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("browser"));
+    }
+
+    #[test]
+    fn a_session_horadric_did_not_start_is_offered_no_tools() {
+        let (mut s, _) = server(|_| Ok(json!({})));
+        s.browser = false;
+        let list = json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" });
+        assert_eq!(s.handle(&list).unwrap()["result"]["tools"], json!([]));
+        let init = json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize" });
+        assert_eq!(s.handle(&init).unwrap()["result"]["instructions"], "");
     }
 
     #[test]
