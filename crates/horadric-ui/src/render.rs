@@ -69,6 +69,12 @@ use crate::layout::{
 use crate::motion::{self, ORBIT};
 use crate::theme::{self, Color};
 
+// Nothing draws a stone until the Runetome tile does.
+#[allow(dead_code)]
+mod stone;
+#[allow(unused_imports)]
+pub(crate) use stone::{StoneLook, StoneState};
+
 const FONT: PCWSTR = w!("Segoe UI Variable Text");
 /// For the project's name: the optical size cut for larger text.
 const FONT_DISPLAY: PCWSTR = w!("Segoe UI Variable Display");
