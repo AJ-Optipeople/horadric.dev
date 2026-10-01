@@ -188,23 +188,23 @@ ChatGPT and xAI subscriptions used from Horadric like a Claude one. See "Codex a
   Step 5 for Codex. `codex resume <id>` for a paused tile (it takes Codex Desktop sessions too), `-m` and `-c model_reasoning_effort=` for the defaults, History from `~/.codex/sessions`. Verify on screen with a real `codex`, and count its processes.
 - [x] Grok: install its command hook and read its events @grok-install-its-command-hook-and-read-17542
   Step 4. `~/.grok/hooks/horadric.json`, a `command` hook calling `horadric hook`, added by `install` and removed by `uninstall`, never by a dev instance. Phases from the live checks above. If Grok 1.x accepts a loopback URL after all, the listener drops a Grok payload that arrives on the Claude path by its shape. Pure and tested.
-- [/] Grok: start, resume and pick defaults for a Grok session @grok-start-resume-and-pick-defaults-for-a-17845
+- [x] Grok: start, resume and pick defaults for a Grok session @grok-start-resume-and-pick-defaults-for-a-17845
   Step 5 for Grok. The plus button and `horadric new --agent grok` start it when `grok` is found, `--resume <id>` carries a paused tile on, the model and effort defaults pass as `-m` and `--effort`, a tile shows a small mark for its agent, and History lists Grok's own conversations from `~/.grok/sessions`. Verify on screen with a real `grok`, and count its processes after any change to how sessions start.
-- [ ] Limits per provider in the usage window, Codex's from its transcripts
+- [x] Limits per provider in the usage window, Codex's from its transcripts @limits-per-provider-in-the-usage-window-18547
   Step 6. A named screen per provider in use (Claude, ChatGPT, Grok). Codex's limits from the newest `token_count` in the transcript its hooks point at, read on each `Stop`: `rate_limits.primary` and `secondary`, `used_percent` and `resets_at`. The settings follow the agent, each with its own models and efforts. Grok shows no limits until a source turns up. Verify on screen.
-- [ ] Switch ChatGPT and xAI accounts the way Claude accounts switch
+- [x] Switch ChatGPT and xAI accounts the way Claude accounts switch @switch-chatgpt-and-xai-accounts-the-way-19232
   Step 7, built on "Accounts" in docs/PLAN.md. Codex: the whole `auth.json` is the login, `account_id` the account, the email from the `id_token`; force the file store, and stop and resume its sessions, since a running Codex treats another account on disk as a permanent error. Grok: its `auth.json` entry is the login, and Grok reads it again by itself, so a switch is only the write. A switch touches one provider's sessions. Test with a fake `CODEX_HOME` and `GROK_HOME`, never the real logins.
-- [ ] Resume Claude sessions without resending the prompt they were started with
-- [ ] Keep Grok from showing an SSRF error for the Claude hook it borrows
+- [x] Resume Claude sessions without resending the prompt they were started with @resume-claude-sessions-without-resending-20088
+- [x] Keep Grok from showing an SSRF error for the Claude hook it borrows @keep-grok-from-showing-an-ssrf-error-for-20174
   Grok runs the `http` hooks in `~/.claude/settings.json` and prints "blocked by SSRF protection" in its TUI at every event. `[compat.claude] hooks = false` in Grok's config stops it, but that is the user's file; look for a flag or environment variable Horadric can pass when it starts `grok` instead.
 - [x] Mouse-over tooltips @mouse-over-tooltips-42172
   Mouse-over for all items in Horadric, describing what they do.
-- [ ] Tooltips on a pane's header: stash, zoom, close, the browser bar and its tabs, through tip.rs once the browser tabs work in pane.rs is committed
+- [x] Tooltips on a pane's header: stash, zoom, close, the browser bar and its tabs, through tip.rs once the browser tabs work in pane.rs is committed @tooltips-on-a-pane-s-header-stash-zoom-71623
 - [x] Quest Log @quest-log-43924
   Quests my ikke auto-start når du venstre-klikke på dem i listen, man skal se quest loggen først for at få en ide om hvad questen går ud på inden man accepter den.
 - [x] Quest Giver @quest-giver-43923
   Knap ved Tasks listen der selv giver bud på hvad der kunne laves af tasks for det aktuelle projekt.
-- [ ] Ship public: release everything on main to every install
+- [x] Ship public: release everything on main to every install @ship-public-release-everything-on-main-to-20289
   Always the last item. Everything finished on main goes out, not only the Codex and Grok work. Follow RELEASING.md and "Ship public" in CLAUDE.md.
 
 ## Discord Activity
@@ -227,15 +227,39 @@ Horadric on the human's Discord profile through Rich Presence. See "Discord Acti
   Needs the four above on main. Keep a client while the setting is on, hand it the presence whenever the registry or the setting changes (it drops what did not change), and clear on Off, quit and reload as the plan says. Count that the UI thread never waits on the pipe. Check with a real Discord and a dev instance, the installed one left off.
 - [x] Discord: check it on screen with a real Discord and write it into the README @discord-check-57759
   With a dev instance: each setting, a session working, waiting and done, the elapsed time holding across turns, names hidden and shown, quit and reload clearing it. Screenshot the profile. Add a short part to README.md and mark the plan section done.
-- [ ] Discord: keep the clock of a run of work through a reload
+- [x] Discord: keep the clock of a run of work through a reload @discord-keep-the-clock-of-a-run-of-work-71634
+- [x] Performance pass two: the leftovers in the plan @performance-pass-two-the-leftovers-in-the-71878
+  See Performance in docs/PLAN.md, 'Left for later'. Each pane paint makes a new layer and geometry for its glass (glyphs.rs); characters missing from the terminal font get a DrawText each; the pane caption repaints on every spinner frame of the title; each cluster paint clones its sessions twice. Measure the UI thread on a dev instance before and after, as the first pass did.
+- [x] Keep the browser page through a reload of Horadric @keep-the-browser-page-through-a-reload-of-72055
+  See Browser pane in docs/PLAN.md: the page outlives its pane but is not yet kept over a reload, so every ship drops open pages. Save each project's address (and history position if WebView2 allows) before the handover and open them again in the new build. Verify with reload under HORADRIC_DEV=1.
+- [x] Give Grok sessions the browser tools @give-grok-sessions-the-browser-tools-72801
+  Claude gets horadric mcp through --mcp-config and Codex through -c mcp_servers; Grok has none because it keeps MCP servers in its own config (see Browser pane in docs/PLAN.md). Find a per-session way in (flag, env var, a config it reads), or else an entry Horadric owns in Grok's config. Check with a real grok session that the browser_* tools reach its project's pane.
 
 ## The Runetome
 
 Runewords as rune stones in a tile of their own. See "The Runetome" under Next in docs/PLAN.md, which has the reasoning; read it and "Runewords" under Done before starting. The two quests at the top build in parallel; the tile needs both on main.
 
-- [ ] Runetome engine: say, keys and run steps, stones that need no session, and the global file
+- [x] Runetome engine: say, keys and run steps, stones that need no session, and the global file @runetome-engine-say-keys-and-run-steps-73961
   See "The Runetome" in docs/PLAN.md: Steps, Casting, Where stones live. In `horadric_core::runeword`: the object form `{"steps": [...]}` beside today's list form, `say`, `keys` (with `runeword::keys` parsing `"Esc"`, `"Ctrl+C"`, `"/clear{Enter}"`), `run` (with `"show": true`) and the three runes; `%APPDATA%\Horadric\runewords.json` read beside `.horadric/config.json`, both read again when they change; a stone that does not parse kept with its reason. Casting: `keys` written into the session's terminal and done at once, `run` by `cmd /c` in the project folder or the session's worktree, a non zero exit stopping it with a toast of its last line, and a runeword of only `run` steps cast on the project with no session, saved in `state.json` beside the sessions so it goes on through a reload. Leave the tile menu's Runeword submenu working until the tome replaces it. Pure and tested; check a `keys` and a `run` step on a dev instance with `cmd.exe` as the agent.
-- [ ] Rune stones and the Runesmith's pieces: the carved glyph, the generated name, the smith prompt and `horadric runeword list`
+- [x] Rune stones and the Runesmith's pieces: the carved glyph, the generated name, the smith prompt and `horadric runeword list` @rune-stones-and-the-runesmith-s-pieces-73971
   See "The Runetome" in docs/PLAN.md: A stone, The empty stone. `runeword::name` (two to four of the 33 rune names from a hash of the label) and `runeword::carve` (glyph strokes from the same hash), pure and tested. A function in horadric-ui that draws one stone in Direct2D at a given size: a rough rounded slab lit from the top left like the cube, the glyph cut into it, a gold glow while it runs, cracked when it does not parse, and an empty stone. `runeword::smith_prompt` (tested), saying what a stone is, the step kinds, both files and their shape, and to ask the human what it should do and for which projects, then check with `horadric runeword list`. The `horadric runeword list` command printing every stone a project has, with its name, label, steps and any parse error. No tile yet: check the drawing on screen however is quickest, in dark and light.
-- [ ] The Runetome tile: stones in a project's cluster, cast by click or drag, and the empty stone starting a Runesmith
+- [x] The Runetome tile: stones in a project's cluster, cast by click or drag, and the empty stone starting a Runesmith @the-runetome-tile-stones-in-a-project-s-73981
   Needs the two quests above on main. If either is not there yet, mark this one blocked naming which, so it can be accepted again once it is. See "The Runetome" in docs/PLAN.md. A tile in each project's cluster beside the quest log, built in stones first, then the project's, then the global ones, then the empty stone. Tooltip (tip.rs) with the runeword name and the steps. A click casts on the focused stage session when it is this project's, else asks which session; a stone of only `run` steps casts at once; dragging a stone onto a tile or pane casts on that one. While running the stone glows with its step and a click offers Stop. The empty stone starts a session named "Runesmith" on the stage with the smith prompt, as the quest giver does. The changed since last cast mark on project stones. Drop the tile menu's Runeword submenu, keep its Stop. Check on screen with a dev instance: each step kind, a sessionless stone, a drag, and a real `claude` Runesmith (Haiku) making a stone that appears on the tile. Count `claude.exe` processes after. Then add the Runetome to README.md and mark the plan section built.
+- [x] Point horadric runeword list at runeword::parse @point-horadric-runeword-list-at-runeword-77455
+  Once the Runetome engine is on main, have crates/horadric/src/runeword.rs list stones through the engine's runeword::parse (and its global file path) instead of its own reading of the two forms, so the list and the tile always agree on what cracks.
+- [x] Blocked quests resume by themselves once what blocked them is resolved @blocked-quests-resume-by-themselves-once-75845
+  Today a [!] quest waits on the human forever, and the runner stops the whole list at it (Next::Stuck in tasks.rs). Let a blocked quest say what it waits on, in a form Horadric can check, and have the runner check it on each look. Kinds worth having: another quest done (by title, the common case, see the Runetome tile quest), a commit or branch on main, a file existing, a command exiting 0, a time. Something like horadric quest blocked "why" --on-quest "title" | --on-file path | --on-cmd "..." | --until time, kept on the item line or in its notes so the file stays the state. When the condition holds: if the holding session is alive, send it a go on message the way go_on does after a usage limit reset and mark the quest [/] again; if the session is gone, start the quest again (start_again). A blocked quest whose condition is not met yet should not stop the list: the runner skips past it to the next open quest, but only for machine checkable waits; a plain why with no condition still needs the human and still stops the list. Update the system prompt so agents use the conditional form when they can, and the board row to show what it waits on. Tests for the parsing, the condition check and the runner choice (pure parts in horadric-core). Check on screen with a dev instance: block one fake quest on another, finish the other, watch the first resume. Count claude.exe after, since this starts agents by itself.
+- [x] Let a stone of only keys be cast on a session that is casting another runeword, so a permission prompt can be answered from the tome without stopping it @let-a-stone-of-only-keys-be-cast-on-a-77466
+
+## Runetome feedback
+
+From the human on 2026-10-01, after using the tome.
+
+- [/] Remove a stone by right click on it @horadric.dev-78569
+  Today there is no way to remove a runeword short of editing the JSON. A right click on a project or global stone offers "Remove <label>" (with a confirm), which deletes it from `.horadric/config.json` or `runewords.json`, keeping the rest of either file as it was. Built in stones cannot be removed, so the menu says so or leaves the item out.
+- [/] Better built in stones that show what a stone can do @horadric.dev-78569
+  "Test, merge", "Test, review, merge" and "Review, merge" are not useful. Replace them with a few that each show off a step kind and are worth a click on day one: keys, say chains, a run command.
+- [/] Ask before casting, with "Do not ask again" @horadric.dev-78569
+  A click on a stone asks whether to cast it, showing what it will do, with a "Do not ask again" check kept in state.json.
+- [/] Review the runeword and Runetome implementation for other quality of life fixes @horadric.dev-78569
+  Read the tile, casting and the engine end to end and fix what gets in the way. List what was found and done in the plan.
