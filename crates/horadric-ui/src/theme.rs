@@ -107,6 +107,9 @@ pub const WAITING: Color = Color::rgb(0xFFB224);
 pub const ERROR: Color = Color::rgb(0xFF5D66);
 pub const DONE: Color = Color::rgb(0x3DD68C);
 pub const IDLE: Color = Color::rgb(0x6E6882);
+/// The gold of the mark over a quest giver's head in the games, so a quest
+/// nobody has accepted reads as one on offer.
+pub const QUEST: Color = Color::rgb(0xFFD100);
 
 /// Git change colours, VS Code's dark theme ones, so a file looks the same
 /// in the tile as in the editor.

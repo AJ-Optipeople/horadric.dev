@@ -154,10 +154,12 @@ impl RowState {
         }
     }
 
-    /// The glyph at the row's left, in Segoe Fluent Icons.
+    /// The glyph at the row's left, in Segoe Fluent Icons. An open quest
+    /// is drawn as a quest giver's mark instead, so its glyph is only the
+    /// plain exclamation the font has.
     pub fn icon(self) -> char {
         match self {
-            RowState::Open => '\u{E739}',
+            RowState::Open => '\u{E8C9}',
             RowState::Working => '\u{E768}',
             RowState::Asks => '\u{E9CE}',
             RowState::Paused => '\u{E769}',
@@ -173,7 +175,7 @@ impl RowState {
     /// lamp burns in, so a row and its session's tile agree.
     pub fn color(self) -> Color {
         match self {
-            RowState::Open => theme::TEXT_DIM,
+            RowState::Open => theme::QUEST,
             RowState::Working | RowState::Tombs => theme::WORKING,
             RowState::Asks | RowState::Review | RowState::Pick => theme::WAITING,
             RowState::Blocked => theme::ERROR,
