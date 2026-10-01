@@ -837,8 +837,25 @@ settled "no web view" for web pages only: Horadric's own UI stays Direct2D.
   send it to a session with a screenshot, the address and the element.
   While the port is open, any program on the machine can drive that
   logged in browser. Loopback only is the whole of the protection so far.
-- Popups a page opens (an OAuth login, say) are WebView2's default: a
-  window of their own. Not yet caught.
+- **Tabs** (`web::Web::tabs`, `glyphs::tab_layout`, pure). Asked for so a
+  second page does not mean losing the first. One pane per project still,
+  with a strip of tabs along the top of its glass and the page below it;
+  each tab is a WebView of its own, only the chosen one visible, so a tab
+  keeps its page, history and scroll while another is shown. The `+` at
+  the strip's end, Ctrl+T or New tab in the menu opens one and puts the
+  keyboard in the address field. A tab's cross, a middle click on it,
+  Ctrl+W or Close tab closes it, and closing the last closes the pane.
+  Ctrl+Tab and Ctrl+Shift+Tab, Ctrl+PgDn and Ctrl+PgUp, and Ctrl+1 to 9
+  pick one, as in a browser (`web::tab_key`, pure), caught in the page by
+  `AcceleratorKeyPressed` and in the pane while the address is typed. A
+  tab is named by its page's title, else its address (`web::tab_name`).
+  An address Ctrl+clicked in a terminal opens in a new tab. The tabs are
+  not kept over a reload of Horadric, as the page was not before.
+- Popups and links to a new window (a middle click, `target=_blank`, an
+  OAuth login) open in a new tab: `NewWindowRequested` is deferred until
+  the tab's WebView is made and then handed it, so the popup keeps its
+  opener, and a page closing itself (`WindowCloseRequested`) closes its
+  tab.
 - **A size of its own** (`viewport.rs`, pure). Fitted, the page is the
   glass and changes size with the grid. Sized, from the size button after
   reload or Page size in the header's menu (Phone, Tablet, Laptop,
@@ -878,6 +895,16 @@ DevTools `Page.navigate` from a script moved it, and a value set in the
 page over DevTools was still there after the stage switched to the other
 project and back, so the page was parked and not reloaded. Two processes
 started the WebView on one profile at once and shared it.
+
+Tabs tested on screen with a dev instance on its own port and `APPDATA`
+and a `cmd.exe` session: the strip showed the page's title, `+` and Ctrl+T
+in the page opened a tab with the keyboard in its address field, Ctrl+L
+and an address loaded it and named the tab, a click on the first tab
+brought its page and address back, a middle click on a link opened it in
+a tab of its own, a middle click on a tab and Ctrl+W closed tabs, and
+Ctrl+W on the last closed the pane. Found on the way: the hidden grid's
+focused block cursor, a fill rather than a caret, showed through the
+strip, so a browser pane now draws none of its grid.
 
 ### Plain terminals
 
