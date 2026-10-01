@@ -28,9 +28,9 @@ impl Lamp {
     /// The light and how far it is turned up, as `theme::lamp` has it.
     fn light(self) -> (Color, f32) {
         match self {
-            Lamp::Waits => (theme::WAITING, 1.0),
-            Lamp::Working => (theme::WORKING, 0.85),
-            Lamp::Idle => (theme::IDLE, 0.0),
+            Lamp::Waits => (theme::waiting(), 1.0),
+            Lamp::Working => (theme::working(), 0.85),
+            Lamp::Idle => (theme::idle(), 0.0),
         }
     }
 
@@ -38,8 +38,8 @@ impl Lamp {
     /// it waits.
     fn face(self) -> Color {
         match self {
-            Lamp::Waits => theme::SURFACE.mix(theme::WAITING, 0.22),
-            Lamp::Working | Lamp::Idle => theme::SURFACE,
+            Lamp::Waits => theme::surface().mix(theme::waiting(), 0.22),
+            Lamp::Working | Lamp::Idle => theme::surface(),
         }
     }
 }
@@ -62,7 +62,7 @@ pub fn lamp(size: u32, which: Lamp) -> Vec<u32> {
         (Ring::disc(body + 1.5 * k), black.with_alpha(0.55)),
     ];
     if level <= 0.0 {
-        layers.push((Ring::disc(body), theme::LAMP_OFF));
+        layers.push((Ring::disc(body), theme::lamp_off()));
     } else {
         for i in 0..4 {
             let s = 1.5 + i as f32 * 2.0;
@@ -70,7 +70,7 @@ pub fn lamp(size: u32, which: Lamp) -> Vec<u32> {
             let spill = c.with_alpha(level * 0.16 * fall * fall);
             layers.push((Ring::band(body + s * k, 2.0 * k), spill));
         }
-        layers.push((Ring::disc(body), theme::LAMP_OFF.mix(c, level)));
+        layers.push((Ring::disc(body), theme::lamp_off().mix(c, level)));
         let hot = c.mix(white, 0.45).fade(level);
         layers.push((Ring::disc(body - k), hot));
     }
@@ -330,8 +330,8 @@ mod tests {
     #[test]
     fn a_lit_lamp_burns_hot_in_its_colour() {
         let p = lamp(64, Lamp::Working);
-        let hot = theme::WORKING.mix(Color::rgb(0xFFFFFF), 0.45).fade(0.85);
-        let body = theme::LAMP_OFF.mix(theme::WORKING, 0.85);
+        let hot = theme::working().mix(Color::rgb(0xFFFFFF), 0.45).fade(0.85);
+        let body = theme::lamp_off().mix(theme::working(), 0.85);
         let centre = at(&p, 64, 32, 32);
         assert_eq!(centre >> 24, 255, "the lamp is opaque");
         // The hot core over the body, straight alpha.
@@ -346,7 +346,7 @@ mod tests {
     #[test]
     fn an_idle_lamp_is_dark_glass() {
         let p = lamp(64, Lamp::Idle);
-        assert_eq!(at(&p, 64, 32, 36) & 0xFFFFFF, rgb(theme::LAMP_OFF));
+        assert_eq!(at(&p, 64, 32, 36) & 0xFFFFFF, rgb(theme::lamp_off()));
     }
 
     #[test]
@@ -362,7 +362,7 @@ mod tests {
     fn a_waiting_face_is_backlit() {
         let (w, i) = (lamp(64, Lamp::Waits), lamp(64, Lamp::Idle));
         assert_ne!(at(&w, 64, 32, 1), at(&i, 64, 32, 1));
-        assert_eq!(at(&i, 64, 32, 1) & 0xFFFFFF, rgb(theme::SURFACE));
+        assert_eq!(at(&i, 64, 32, 1) & 0xFFFFFF, rgb(theme::surface()));
     }
 
     #[test]

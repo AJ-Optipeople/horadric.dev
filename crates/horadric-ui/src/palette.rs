@@ -17,12 +17,33 @@ const fn rgb(hex: u32) -> Rgb {
     }
 }
 
-/// The glass of the screen a terminal is, the same black as the clusters'
-/// screens. Near black is also what every agent's own colours are made for.
-pub const BACKGROUND: Rgb = rgb(0x08090B);
-pub const FOREGROUND: Rgb = rgb(0xE8E9ED);
-pub const CURSOR: Rgb = rgb(0xF5F5F7);
-pub const SELECTION: Rgb = rgb(0x1E3A5C);
+/// The glass of the screen a terminal is, the theme's terminal tint. Near
+/// black in every theme, which is what every agent's own colours are made
+/// for.
+pub fn background() -> Rgb {
+    of(crate::theme::palette().term_bg)
+}
+
+pub fn foreground() -> Rgb {
+    of(crate::theme::palette().term_fg)
+}
+
+pub fn cursor() -> Rgb {
+    of(crate::theme::palette().term_cursor)
+}
+
+pub fn selection() -> Rgb {
+    of(crate::theme::palette().term_selection)
+}
+
+fn of(c: crate::theme::Color) -> Rgb {
+    let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+    Rgb {
+        r: byte(c.r),
+        g: byte(c.g),
+        b: byte(c.b),
+    }
+}
 
 /// Red, green, yellow and blue are the lamps' colours, so what an agent
 /// prints speaks the same language as the keys: amber is the waiting lamp,
@@ -64,14 +85,14 @@ pub fn default_rgb(index: usize) -> Rgb {
             let v = (8 + 10 * (index - 232)) as u8;
             Rgb { r: v, g: v, b: v }
         }
-        i if i == NamedColor::Background as usize => BACKGROUND,
-        i if i == NamedColor::Cursor as usize => CURSOR,
+        i if i == NamedColor::Background as usize => background(),
+        i if i == NamedColor::Cursor as usize => cursor(),
         i if (NamedColor::DimBlack as usize..=NamedColor::DimWhite as usize).contains(&i) => {
             dim(ANSI[i - NamedColor::DimBlack as usize])
         }
         i if i == NamedColor::BrightForeground as usize => rgb(0xFFFFFF),
-        i if i == NamedColor::DimForeground as usize => dim(FOREGROUND),
-        _ => FOREGROUND,
+        i if i == NamedColor::DimForeground as usize => dim(foreground()),
+        _ => foreground(),
     }
 }
 
@@ -135,11 +156,11 @@ mod tests {
         let c = Colors::default();
         assert_eq!(
             resolve(Color::Named(NamedColor::Background), &c),
-            BACKGROUND
+            background()
         );
         assert_eq!(
             resolve(Color::Named(NamedColor::Foreground), &c),
-            FOREGROUND
+            foreground()
         );
         assert_eq!(resolve(Color::Named(NamedColor::DimRed), &c), dim(ANSI[1]));
     }

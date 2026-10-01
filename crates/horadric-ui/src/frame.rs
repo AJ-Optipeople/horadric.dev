@@ -136,7 +136,7 @@ pub fn build<T: EventListener>(
 
         let (mut fg, mut bg) = palette::cell_colors(cell.fg, cell.bg, cell.flags, colors);
         if content.selection.is_some_and(|s| s.contains(point)) {
-            bg = palette::SELECTION;
+            bg = palette::selection();
         }
         if block && is_cursor(point) {
             fg = bg;
@@ -375,8 +375,8 @@ mod tests {
         assert!(f.caret.is_none());
         assert_eq!(f.fills.len(), 1);
         assert_eq!(f.fills[0].col, 0);
-        assert_eq!(f.fills[0].color, palette::CURSOR);
-        assert_eq!(f.runs[0].color, palette::BACKGROUND);
+        assert_eq!(f.fills[0].color, palette::cursor());
+        assert_eq!(f.runs[0].color, palette::background());
 
         let unfocused = build(&term, false, true, ascii);
         let caret = unfocused.caret.unwrap();

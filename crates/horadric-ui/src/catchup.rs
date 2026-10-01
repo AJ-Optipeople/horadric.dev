@@ -178,10 +178,10 @@ pub fn more(above: usize, below: usize) -> String {
 
 fn tone(section: Option<Section>) -> Option<Color> {
     match section? {
-        Section::Waiting => Some(theme::WAITING),
-        Section::Review => Some(theme::WORKING),
-        Section::Unread => Some(theme::DONE),
-        Section::Blocked => Some(theme::ERROR),
+        Section::Waiting => Some(theme::waiting()),
+        Section::Review => Some(theme::working()),
+        Section::Unread => Some(theme::done()),
+        Section::Blocked => Some(theme::error()),
         Section::Happened => None,
     }
 }

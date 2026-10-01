@@ -59,9 +59,9 @@ pub enum Tone {
 impl Tone {
     fn colour(self) -> Color {
         match self {
-            Tone::Question => theme::WORKING,
-            Tone::Warning => theme::WAITING,
-            Tone::Error => theme::ERROR,
+            Tone::Question => theme::working(),
+            Tone::Warning => theme::waiting(),
+            Tone::Error => theme::error(),
         }
     }
 }

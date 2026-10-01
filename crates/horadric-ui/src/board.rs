@@ -173,11 +173,11 @@ impl RowState {
     /// lamp burns in, so a row and its session's tile agree.
     pub fn color(self) -> Color {
         match self {
-            RowState::Open => theme::TEXT_DIM,
-            RowState::Working | RowState::Tombs => theme::WORKING,
-            RowState::Asks | RowState::Review | RowState::Pick => theme::WAITING,
-            RowState::Blocked => theme::ERROR,
-            RowState::Paused | RowState::Gone => theme::IDLE,
+            RowState::Open => theme::text_dim(),
+            RowState::Working | RowState::Tombs => theme::working(),
+            RowState::Asks | RowState::Review | RowState::Pick => theme::waiting(),
+            RowState::Blocked => theme::error(),
+            RowState::Paused | RowState::Gone => theme::idle(),
         }
     }
 

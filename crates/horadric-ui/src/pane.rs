@@ -684,6 +684,10 @@ impl Pane {
     }
 
     fn paint(&self) {
+        if self.target.borrow().as_ref().is_some_and(|t| t.outdated()) {
+            *self.target.borrow_mut() = None;
+            self.stale.set(true);
+        }
         if !self.stale.get() {
             let shown = self.target.borrow().as_ref().map(|t| t.present());
             match shown {
