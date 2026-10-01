@@ -69,6 +69,11 @@ pub struct SavedState {
     /// where it is not in it.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub page_docks: BTreeMap<String, Dock>,
+    /// Each project's browser tabs as left, so a reload or a crash opens
+    /// them again. Only the address: WebView2 has no way to give a page
+    /// back its history.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub pages: BTreeMap<String, SavedPages>,
     /// Each project's colour, by project key, as its place in the list of
     /// project colours.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -458,9 +463,70 @@ pub struct SavedRun {
     pub last_work: u64,
 }
 
+/// A project's browser tabs, left to right, and the one shown.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedPages {
+    pub tabs: Vec<SavedTab>,
+    #[serde(default)]
+    pub active: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedTab {
+    pub url: String,
+    /// Names the tab until its page loads and says its own.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub title: String,
+}
+
+impl SavedPages {
+    /// The tabs worth opening again, from each tab's address and title.
+    /// A tab still blank has nothing to open, so it is left out and the
+    /// shown one keeps its place among the rest. None when none is left.
+    pub fn of(tabs: Vec<SavedTab>, active: usize) -> Option<SavedPages> {
+        let blank = |t: &SavedTab| t.url.is_empty() || t.url == "about:blank";
+        let before = tabs.iter().take(active).filter(|t| blank(t)).count();
+        let tabs: Vec<SavedTab> = tabs.into_iter().filter(|t| !blank(t)).collect();
+        if tabs.is_empty() {
+            return None;
+        }
+        let active = active.saturating_sub(before).min(tabs.len() - 1);
+        Some(SavedPages { tabs, active })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tab(url: &str) -> SavedTab {
+        SavedTab {
+            url: url.to_string(),
+            title: String::new(),
+        }
+    }
+
+    #[test]
+    fn blank_tabs_are_not_kept_and_the_shown_one_keeps_its_place() {
+        let urls = |p: &SavedPages| p.tabs.iter().map(|t| t.url.clone()).collect::<Vec<_>>();
+        let p = SavedPages::of(
+            vec![
+                tab("about:blank"),
+                tab("https://a/"),
+                tab(""),
+                tab("https://b/"),
+            ],
+            3,
+        )
+        .unwrap();
+        assert_eq!(urls(&p), ["https://a/", "https://b/"]);
+        assert_eq!(p.active, 1);
+        // A blank tab shown: its neighbour before it is.
+        let p = SavedPages::of(vec![tab("https://a/"), tab("")], 1).unwrap();
+        assert_eq!(p.active, 0);
+        assert_eq!(SavedPages::of(vec![tab("about:blank")], 0), None);
+        assert_eq!(SavedPages::of(Vec::new(), 0), None);
+    }
 
     #[test]
     fn a_dock_reads_its_side_and_an_old_bare_width_as_the_right() {

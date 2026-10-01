@@ -60,7 +60,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use crate::app::{self, Input, WebAsk};
 use crate::terminal::WM_STAGE_LAYOUT;
 use crate::viewport;
-use horadric_core::saved::{Dock, Side};
+use horadric_core::saved::{Dock, SavedPages, SavedTab, Side};
 
 /// Posted to the pane showing a project's page when its title or address
 /// changed, so the header is drawn again.
@@ -673,6 +673,60 @@ pub fn docks() -> std::collections::BTreeMap<String, Dock> {
 /// The docks saved last time.
 pub fn set_docks(saved: &std::collections::BTreeMap<String, Dock>) {
     DOCKS.with(|d| *d.borrow_mut() = saved.iter().map(|(k, &v)| (k.clone(), v)).collect());
+}
+
+/// Every project's tabs, to save. A tab still being made has no address
+/// of its own yet, so the one it waits to open stands for it.
+pub fn pages() -> std::collections::BTreeMap<String, SavedPages> {
+    WEBS.with(|w| {
+        w.borrow()
+            .iter()
+            .filter_map(|(k, web)| {
+                let tabs = web
+                    .tabs
+                    .iter()
+                    .map(|t| SavedTab {
+                        url: if t.url.is_empty() {
+                            t.pending.clone().unwrap_or_default()
+                        } else {
+                            t.url.clone()
+                        },
+                        title: t.title.clone(),
+                    })
+                    .collect();
+                Some((k.clone(), SavedPages::of(tabs, web.active)?))
+            })
+            .collect()
+    })
+}
+
+/// Opens the project's tabs as they were saved, the shown one shown, each
+/// at its address. Off the stage until a pane attaches it.
+pub fn restore(key: &str, saved: &SavedPages) {
+    let ids: Vec<u64> = WEBS.with(|w| {
+        let mut w = w.borrow_mut();
+        let web = w.entry(key.to_string()).or_insert_with(|| Web {
+            tabs: Vec::new(),
+            active: 0,
+            pane: None,
+            bounds: RECT::default(),
+            zoom: 1.0,
+            room: None,
+        });
+        let start = web.tabs.len();
+        for t in &saved.tabs {
+            let mut tab = Tab::new(Some(t.url.clone()));
+            tab.title = t.title.clone();
+            tab.url = t.url.clone();
+            web.tabs.push(tab);
+        }
+        web.active = start + saved.active.min(saved.tabs.len().saturating_sub(1));
+        web.tabs[start..].iter().map(|t| t.id).collect()
+    });
+    show(key);
+    for id in ids {
+        make(key, id);
+    }
 }
 
 /// The pane showing the page has room for this size unscaled.

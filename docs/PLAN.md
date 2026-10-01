@@ -822,7 +822,18 @@ settled "no web view" for web pages only: Horadric's own UI stays Direct2D.
   (`attach`, the pane has `WS_CLIPCHILDREN` so its own drawing leaves the
   page alone), and on the pane's `WM_DESTROY` it goes, hidden, onto the
   app's window (`detach`). Closing the stage keeps it too. Only its cross
-  or Close ends it. Not yet kept over a reload of Horadric itself.
+  or Close ends it.
+- **Kept over a reload** (`SavedState::pages`, `web::pages`,
+  `web::restore`). Every ship dropped the open pages, so each project's
+  tabs are saved with their address, title and the one shown, and a
+  start that resumes sessions (a reload, or after a crash) opens them
+  again in their project's grid, off the stage like an agent's open. A
+  blank tab is not kept (`SavedPages::of`, pure). After Quit they are
+  not reopened, as sessions are not resumed. Only the address: WebView2
+  has no way to give a page its back and forward history again. Tested
+  with a dev instance on its own port and `APPDATA`: two saved tabs came
+  back after `app --reload`, and again after `horadric reload`, the new
+  process writing them, titles and the shown tab as they were.
 - **One profile for everything**, `%LOCALAPPDATA%\Horadric\web`, for every
   project, session and Horadric, dev instances included, so a login made
   once stays. WebView2 lets two processes share a profile when they start
@@ -869,8 +880,7 @@ settled "no web view" for web pages only: Horadric's own UI stays Direct2D.
   `AcceleratorKeyPressed` and in the pane while the address is typed. A
   tab is named by its page's title, else its address (`web::tab_name`).
   An address Ctrl+clicked in a terminal opens in a new tab. An agent's
-  tools drive the shown tab. The tabs are not kept over a reload of
-  Horadric, as the page was not before.
+  tools drive the shown tab. The tabs are kept over a reload, see above.
 - Popups and links to a new window (a middle click, `target=_blank`, an
   OAuth login) open in a new tab: `NewWindowRequested` is deferred until
   the tab's WebView is made and then handed it, so the popup keeps its
