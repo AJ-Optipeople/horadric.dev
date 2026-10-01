@@ -113,8 +113,8 @@ clients.
 - **A PWA first, a native app maybe later.** A page Horadric serves
   needs no app store and works on iOS and Android, with xterm.js for the
   terminal. It means an HTTP and WebSocket server in Horadric, and maybe
-  TLS, so it touches the "no web view" and "dependencies one at a time"
-  decisions and has to be settled with the human before it is built.
+  TLS. The human waived the "no web view" and "dependencies one at a
+  time" decisions for this on 2026-10-01.
 - **An API, not pages.** The PWA is written as if it were a third party
   client, against a versioned API: JSON over WebSocket for events and
   session state, binary frames for terminal output. Then a native app is
@@ -122,8 +122,21 @@ clients.
   pairing and the network all carry over. Only the UI is written again,
   and push gets a second sender (APNs and FCM beside Web Push), while
   the part that decides when to notify stays.
-- **Reaching the PC through Tailscale**, not a relay of our own or an
-  open port. It brings the encryption and the identity.
+- **Every PC is its own server.** It has to scale to thousands of
+  users, and it does by having no centre: each Horadric serves its own
+  few phones, so a thousand users is a thousand small servers we never
+  run. Nothing we host holds sessions or state.
+- **Reaching the PC: Tailscale first, a relay later.** Tailscale needs
+  nothing from us and brings the encryption and the identity, but asking
+  every user to install it will not reach thousands. So the transport is
+  hidden behind the API from the start, and a relay of ours can drop in
+  later: stateless, it only joins a phone to its PC, and the two encrypt
+  end to end so it never reads a session. A relay like that scales
+  sideways, more instances behind a load balancer.
+- **Push needs one small service of ours.** Web Push the PC can send by
+  itself, but an iOS app's APNs key is a secret no install can carry, so
+  native push goes through a sender we host. It forwards a "session waits"
+  with no content in it, so it holds nothing worth stealing.
 - **Off by default.** This is remote control of a machine whose agents
   may run with permissions bypassed. Each phone is paired by a device
   token the human approves on the PC, and the server listens only on the
