@@ -217,7 +217,7 @@ pub fn usage(hit: UsageHit, row: Option<Row>) -> Option<&'static str> {
             "Pick what new sessions may do without asking"
         }
         (UsageHit::Setting(_), Some(Row::Account)) => "Switch to another account",
-        (UsageHit::Setting(_), Some(Row::Version)) => "Look for an update",
+        (UsageHit::Setting(_), Some(Row::Version)) => "Read the release notes",
         (UsageHit::Setting(_), None) | (UsageHit::Nothing, _) => return None,
     })
 }

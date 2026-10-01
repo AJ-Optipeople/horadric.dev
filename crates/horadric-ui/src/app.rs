@@ -338,8 +338,8 @@ pub(crate) enum Input {
     /// The usage window's Account row clicked: the agent's accounts to
     /// switch to.
     AccountMenu(Agent),
-    /// The usage window's Version row clicked: the release it names, or a
-    /// check for one.
+    /// The usage window's Version row clicked: the release it names, or the
+    /// notes of this one.
     Version,
     /// A setting's list closed, with the value picked, if one was.
     Picked(Agent, Setting, Option<Option<String>>),
@@ -691,7 +691,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             sounds: saved.sounds,
             discord: saved.discord,
             rich: None,
-            run: presence::Run::default(),
+            run: presence::Run::from_saved(saved.run),
             cube_on: saved.cube,
             font_family: saved.font_family.clone(),
             screen: saved.screen.clone(),
@@ -987,11 +987,14 @@ unsafe extern "system" fn app_proc(
             return LRESULT(0);
         }
         WM_HORADRIC_VERSION => {
+            // A waiting update shows its own notes, so the notes are one
+            // click away either way. The tray still looks for an update.
             match with_app(|app| app.update.clone()).flatten() {
                 Some(m) => offer_update(&m),
-                None => {
-                    with_app(|app| app.check_update(true));
-                }
+                None => watch::open_link(
+                    &crate::links::Target::Web(release::notes_url(env!("CARGO_PKG_VERSION"))),
+                    None,
+                ),
             }
             return LRESULT(0);
         }
@@ -5497,6 +5500,7 @@ impl App {
             quiet: self.quiet,
             sounds: self.sounds,
             discord: self.discord,
+            run: self.run.saved(),
             cube: self.cube_on,
             font_family: self.font_family.clone(),
             screen: self.screen.clone(),

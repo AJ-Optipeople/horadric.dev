@@ -111,6 +111,10 @@ pub struct SavedState {
     /// tray. Kept per instance, so a dev one stays off on its own.
     #[serde(default, skip_serializing_if = "Discord::is_off")]
     pub discord: Discord,
+    /// The run of work the Discord presence counts from, so a reload
+    /// carries on the clock on the profile instead of starting at zero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<SavedRun>,
     /// The device name of the screen the columns stand on, when it is not
     /// the primary one.
     #[serde(default)]
@@ -446,6 +450,14 @@ pub struct SavedPanel {
     pub collapsed: bool,
 }
 
+/// A run of work as kept on disk, in unix seconds. See
+/// `presence::Run`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedRun {
+    pub start: u64,
+    pub last_work: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -624,6 +636,10 @@ mod tests {
             quiet: true,
             sounds: true,
             discord: Discord::Named,
+            run: Some(SavedRun {
+                start: 100,
+                last_work: 160,
+            }),
             screen: Some(r"\\.\DISPLAY2".into()),
             ..Default::default()
         };
@@ -644,6 +660,7 @@ mod tests {
         assert!(back.quiet);
         assert!(back.sounds);
         assert_eq!(back.discord, Discord::Named);
+        assert_eq!(back.run, state.run);
         assert_eq!(back.screen, state.screen);
         let tile = back.sessions[0].to_session(SystemTime::now());
         assert_eq!(tile.phase, Phase::Paused);

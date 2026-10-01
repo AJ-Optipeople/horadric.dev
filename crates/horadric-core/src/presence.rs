@@ -6,7 +6,7 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::discord::Activity;
-use crate::saved::Discord;
+use crate::saved::{Discord, SavedRun};
 use crate::session::{Phase, Session};
 
 /// The art. Discord takes an `https` URL where it would take the key of
@@ -178,6 +178,28 @@ impl Run {
             self.last_work = Some(now);
         }
         self.start
+    }
+
+    /// The run as kept on disk, so a reload carries on its clock. The last
+    /// work is cut to the minute, since it moves at every tick while a
+    /// session works and the state is only written when it changed; a
+    /// minute off a ten minute gap does not matter.
+    pub fn saved(&self) -> Option<SavedRun> {
+        let secs = |t: SystemTime| t.duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
+        Some(SavedRun {
+            start: secs(self.start?)?,
+            last_work: secs(self.last_work?)? / 60 * 60,
+        })
+    }
+
+    /// A run brought back from disk. One whose gap has passed by the time
+    /// it is looked at ends then, as it would have without the restart.
+    pub fn from_saved(saved: Option<SavedRun>) -> Run {
+        let at = |secs: u64| UNIX_EPOCH + Duration::from_secs(secs);
+        saved.map_or_else(Run::default, |r| Run {
+            start: Some(at(r.start)),
+            last_work: Some(at(r.last_work)),
+        })
     }
 }
 
@@ -386,5 +408,46 @@ mod tests {
         s.since = at(9000);
         let all = [(s, "a")];
         assert_eq!(run.update(&seen(&all), at(2000)), Some(at(2000)));
+    }
+
+    #[test]
+    fn a_run_comes_back_from_disk() {
+        let mut run = Run::default();
+        let working = [(session(Phase::Working), "a")];
+        run.update(&seen(&working), at(1150));
+        let saved = run.saved().unwrap();
+        assert_eq!(
+            saved,
+            SavedRun {
+                start: 1000,
+                last_work: 1140
+            }
+        );
+        let mut back = Run::from_saved(Some(saved));
+        let done = [(session(Phase::Done), "a")];
+        assert_eq!(back.update(&seen(&done), at(1200)), Some(at(1000)));
+        let mut next = session(Phase::Working);
+        next.since = at(1300);
+        assert_eq!(back.update(&seen(&[(next, "a")]), at(1300)), Some(at(1000)));
+    }
+
+    #[test]
+    fn a_run_saved_long_ago_is_over() {
+        let saved = SavedRun {
+            start: 1000,
+            last_work: 1140,
+        };
+        let mut back = Run::from_saved(Some(saved));
+        let gap = RUN_GAP.as_secs();
+        let mut s = session(Phase::Working);
+        s.since = at(1140 + gap);
+        let later = at(1140 + gap);
+        assert_eq!(back.update(&seen(&[(s, "a")]), later), Some(later));
+    }
+
+    #[test]
+    fn no_run_saves_nothing() {
+        assert_eq!(Run::default().saved(), None);
+        assert_eq!(Run::from_saved(None), Run::default());
     }
 }
