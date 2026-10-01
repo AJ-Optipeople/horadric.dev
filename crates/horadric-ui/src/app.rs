@@ -128,6 +128,9 @@ use crate::{
 #[path = "runner.rs"]
 mod runner;
 
+#[path = "drive.rs"]
+mod drive;
+
 pub use runner::ssh_prompt;
 
 /// Hook events changed the registry. What they did waits in [`EVENTS`].
@@ -605,6 +608,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
     // From the hosts' copy, since a session that outlives this app keeps
     // running the status line from wherever it pointed.
     let status_settings = store::write_status_settings(&console::host_program());
+    let mcp_config = store::write_mcp_config(&console::host_program());
     let usage_window = match UsageWindow::create(
         Rc::clone(&shared),
         saved.usage_window.as_ref().is_some_and(|p| p.collapsed),
@@ -631,6 +635,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             cube_main: false,
             start_window: None,
             status_settings,
+            mcp_config,
             setting_menu_for: None,
             dropdown: None,
             switches: HashMap::new(),
@@ -2450,6 +2455,9 @@ struct App {
     /// The settings file that gives a session `horadric status` as its status
     /// line. None when it could not be written, and then sessions go without.
     status_settings: Option<PathBuf>,
+    /// The MCP config that gives a session `horadric mcp`, the tools for its
+    /// project's browser pane. None when it could not be written.
+    mcp_config: Option<PathBuf>,
     /// The setting whose list is about to drop, and its row on screen.
     setting_menu_for: Option<(Agent, Setting, RECT)>,
     /// A setting's list, while it is dropped down.
@@ -2744,6 +2752,7 @@ impl App {
                             self.run_tasks();
                         }
                         Command::Overlap(o) => self.overlapped(&o),
+                        Command::Browser(call) => self.browser_call(call),
                     }
                 }
             }
@@ -3786,8 +3795,9 @@ impl App {
     }
 
     /// What goes before a session's own arguments this time: the defaults
-    /// from the usage window, the status line that feeds it, and what it
-    /// is told about the task list and the project's hosts. Only for Claude
+    /// from the usage window, the status line that feeds it, the tools for
+    /// the project's browser pane, and what it is told about the task list
+    /// and the project's hosts. Only for Claude
     /// Code, not for a shell put in its place with `HORADRIC_AGENT`, and not
     /// over settings the session brought itself.
     fn extra_args(&mut self, id: &str, program: &Path, args: &[String], cwd: &Path) -> Vec<String> {
@@ -3795,6 +3805,8 @@ impl App {
             let hook = store::exe_command(&console::host_program(), "hook codex");
             let mut extra = Agent::Codex.hook_args(&hook);
             extra.extend(Agent::Codex.login_args());
+            let exe = console::host_program();
+            extra.extend(Agent::Codex.mcp_args(&exe.to_string_lossy(), None));
             extra.extend(
                 self.shared
                     .defaults_of(Agent::Codex)
@@ -3820,6 +3832,8 @@ impl App {
             extra.push("--settings".into());
             extra.push(path.to_string_lossy().into_owned());
         }
+        let config = self.mcp_config.as_ref().map(|p| p.to_string_lossy());
+        extra.extend(Agent::Claude.mcp_args("", config.as_deref()));
         extra.extend(self.task_args(id, program, cwd));
         extra
     }

@@ -828,15 +828,34 @@ settled "no web view" for web pages only: Horadric's own UI stays Direct2D.
   once stays. WebView2 lets two processes share a profile when they start
   it with the same arguments, which is why the DevTools port below is
   chosen once and kept in the profile folder rather than per instance.
-- **Agents can reach it.** The browser listens for the DevTools protocol
-  on 127.0.0.1, on the port in `web\devtools-port`. Checked: a
-  `Page.navigate` and a `Runtime.evaluate` sent to that port from outside
-  moved and read the page in the pane. Next is handing the port to
-  sessions (the Chrome DevTools MCP takes `--browserUrl`, Playwright
-  `connectOverCDP`), then letting the user point at part of the page and
-  send it to a session with a screenshot, the address and the element.
-  While the port is open, any program on the machine can drive that
-  logged in browser. Loopback only is the whole of the protection so far.
+- **Agents drive it** (`horadric mcp`, `drive.rs`). Every Claude Code
+  session gets `--mcp-config=` a file naming `horadric mcp` (Codex gets
+  `-c mcp_servers.horadric...`; Grok keeps its servers in its own config,
+  so not yet). The server finds its session by the `HORADRIC_SESSION` it
+  inherits and posts each call to `/horadric/browser`, the one listener
+  path that waits for the app's answer. The session names the project, so
+  an agent only reaches its own project's page. The app does open, close,
+  navigate, back, forward, reload, info, and any DevTools call on that
+  page through WebView2's `CallDevToolsProtocolMethod`, no port needed.
+  Every tool is made of those: `browser_snapshot` is an outline of the
+  page with a ref per link, button and field, a click is a script that
+  finds the element and scrolls it to the middle, then a real mouse press
+  and release there; typing is `Input.insertText`; screenshots
+  `Page.captureScreenshot`; the console is kept from the first page on by
+  a script added at document creation. An agent's open never takes the
+  stage or the keyboard: the page joins its project's grid. A hidden page
+  draws nothing, and a screenshot waits for it to draw (90 s, then gave
+  up), so a page off the stage is made visible on the app's hidden window
+  while a call is in flight, at 1280 × 800 if it was never shown.
+  Tested: a script through every tool against a test page and
+  example.com, and a Haiku session told to fill in a form, which opened,
+  typed, ticked, clicked, looked and closed by itself.
+- The browser still listens for the DevTools protocol on 127.0.0.1, on
+  the port in `web\devtools-port`, for tools outside Horadric. While it
+  is open, any program on the machine can drive that logged in browser.
+  Loopback only is the whole of the protection so far. Next is letting
+  the user point at part of the page and send it to a session with a
+  screenshot, the address and the element.
 - Popups a page opens (an OAuth login, say) are WebView2's default: a
   window of their own. Not yet caught.
 - **A size of its own** (`viewport.rs`, pure). Fitted, the page is the

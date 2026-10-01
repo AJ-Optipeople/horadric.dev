@@ -74,6 +74,10 @@ pub const RELOAD_PATH: &str = "/horadric/reload";
 /// the app reads it at once rather than on its next look.
 pub const TASKS_PATH: &str = "/horadric/tasks";
 
+/// Path `horadric mcp` posts to: an agent driving its project's browser
+/// pane. The reply carries what the app answered.
+pub const BROWSER_PATH: &str = "/horadric/browser";
+
 /// Header a command request must carry. A browser can not send a custom
 /// header to another origin without a preflight we never answer, so this is
 /// what stops a web page from starting processes through localhost.

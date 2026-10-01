@@ -13,6 +13,7 @@ mod console;
 mod explorer;
 mod hook;
 mod install;
+mod mcp;
 mod release;
 mod reload;
 mod run;
@@ -59,6 +60,8 @@ Usage:
                                Code's JSON on stdin and passes it to the app
   horadric hook codex|grok       The command hook Codex and Grok post their events
                                through: reads one on stdin and passes it to the app
+  horadric mcp                   The MCP server Horadric gives its sessions: the tools
+                               that open, drive and close the project's browser pane
   horadric reload [--now]        Swap the running Horadric for this build once no session
                                is working (a build from before session hosts waits),
                                and carry the running sessions over to it.
@@ -108,6 +111,7 @@ fn main() -> ExitCode {
         Some("release") => release::run(&args[1..]),
         Some("status") => status::run(),
         Some("hook") => hook::run(&args[1..]),
+        Some("mcp") => mcp::run(),
         Some("swap") => reload::swap(&args[1..]),
         Some("install") => install_command(),
         Some("uninstall") => uninstall_command(),

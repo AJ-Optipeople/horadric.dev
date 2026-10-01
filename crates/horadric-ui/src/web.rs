@@ -27,6 +27,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::net::TcpListener;
 use std::path::PathBuf;
+use std::rc::Rc;
 
 use webview2_com::Microsoft::Web::WebView2::Win32::{
     CreateCoreWebView2EnvironmentWithOptions, ICoreWebView2, ICoreWebView2Controller,
@@ -34,13 +35,16 @@ use webview2_com::Microsoft::Web::WebView2::Win32::{
     COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN, COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC,
 };
 use webview2_com::{
-    AcceleratorKeyPressedEventHandler, CoreWebView2EnvironmentOptions,
+    AcceleratorKeyPressedEventHandler, AddScriptToExecuteOnDocumentCreatedCompletedHandler,
+    CallDevToolsProtocolMethodCompletedHandler, CoreWebView2EnvironmentOptions,
     CreateCoreWebView2ControllerCompletedHandler, CreateCoreWebView2EnvironmentCompletedHandler,
-    DocumentTitleChangedEventHandler, HistoryChangedEventHandler, SourceChangedEventHandler,
+    DocumentTitleChangedEventHandler, HistoryChangedEventHandler, NavigationCompletedEventHandler,
+    SourceChangedEventHandler,
 };
 use windows::core::{BOOL, HSTRING, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, RECT, WPARAM};
 use windows::Win32::System::Com::CoTaskMemFree;
+use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, VIRTUAL_KEY, VK_CONTROL, VK_MENU, VK_SHIFT,
 };
@@ -84,7 +88,19 @@ struct Web {
     url: String,
     back: bool,
     forward: bool,
+    /// Agents waiting for the page to be made, given None if it never is.
+    waiting: Vec<Box<dyn FnOnce(Option<ICoreWebView2>)>>,
+    /// Agents waiting for the page to finish loading, told whether it did.
+    loading: Vec<Box<dyn FnOnce(bool)>>,
+    /// Agents' DevTools calls still unanswered. A hidden page draws
+    /// nothing, and a screenshot or a click waits for it to draw, so a
+    /// page off the stage is shown on the app's hidden window meanwhile.
+    driven: u32,
 }
+
+/// The size a page that was never on the stage lays out at while an agent
+/// drives it, in CSS pixels: a laptop's.
+const PARKED: (i32, i32) = (1280, 800);
 
 enum Env {
     None,
@@ -183,10 +199,175 @@ fn navigate_view(view: &ICoreWebView2, url: &str) {
 
 /// Closes the project's page for good.
 pub fn close(key: &str) {
-    let gone = WEBS.with(|w| w.borrow_mut().remove(key));
-    if let Some(c) = gone.and_then(|w| w.controller) {
+    let Some(mut gone) = WEBS.with(|w| w.borrow_mut().remove(key)) else {
+        return;
+    };
+    if let Some(c) = gone.controller.take() {
         let _ = unsafe { c.Close() };
     }
+    settle(gone.waiting, gone.loading);
+}
+
+/// Tells the agents still waiting on a page that went that it is gone.
+fn settle(
+    waiting: Vec<Box<dyn FnOnce(Option<ICoreWebView2>)>>,
+    loading: Vec<Box<dyn FnOnce(bool)>>,
+) {
+    for f in waiting {
+        f(None);
+    }
+    for f in loading {
+        f(false);
+    }
+}
+
+/// Whether the project has a page, open or still being made.
+pub fn is_open(key: &str) -> bool {
+    WEBS.with(|w| w.borrow().contains_key(key))
+}
+
+/// Whether a pane on the stage shows the project's page.
+pub fn is_shown(key: &str) -> bool {
+    WEBS.with(|w| w.borrow().get(key).is_some_and(|w| w.pane.is_some()))
+}
+
+/// Runs `f` with the project's page once it is made, at once when it is.
+/// None when the project has no page, or it could not be made.
+pub fn with_view(key: &str, f: impl FnOnce(Option<ICoreWebView2>) + 'static) {
+    let f: Box<dyn FnOnce(Option<ICoreWebView2>)> = Box::new(f);
+    let now = WEBS.with(|w| {
+        let mut w = w.borrow_mut();
+        let Some(web) = w.get_mut(key) else {
+            return Some((f, None));
+        };
+        match web.webview.clone() {
+            Some(view) => Some((f, Some(view))),
+            None => {
+                web.waiting.push(f);
+                None
+            }
+        }
+    });
+    if let Some((f, view)) = now {
+        f(view);
+    }
+}
+
+/// Runs `f` once the page's next navigation ends, saying whether it
+/// loaded. False at once when the project has no page.
+pub fn after_load(key: &str, f: impl FnOnce(bool) + 'static) {
+    let f: Box<dyn FnOnce(bool)> = Box::new(f);
+    let gone = WEBS.with(|w| match w.borrow_mut().get_mut(key) {
+        Some(web) => {
+            web.loading.push(f);
+            None
+        }
+        None => Some(f),
+    });
+    if let Some(f) = gone {
+        f(false);
+    }
+}
+
+/// Sends the project's page a DevTools protocol call, `params` a JSON
+/// object, and gives `done` the JSON it answered or why it did not.
+pub fn devtools(
+    key: &str,
+    method: &str,
+    params: &str,
+    done: impl FnOnce(Result<String, String>) + 'static,
+) {
+    let (method, params, owned) = (method.to_string(), params.to_string(), key.to_string());
+    with_view(key, move |view| {
+        let Some(view) = view else {
+            return done(Err("the browser is not open".into()));
+        };
+        wake(&owned);
+        let done = move |r| {
+            rest(&owned);
+            done(r);
+        };
+        // Whichever comes first, the answer or the refusal to send it, has it.
+        let once = Rc::new(Cell::new(Some(done)));
+        let answer = Rc::clone(&once);
+        let handler =
+            CallDevToolsProtocolMethodCompletedHandler::create(Box::new(move |result, json| {
+                if let Some(done) = answer.take() {
+                    done(
+                        result
+                            .map(|()| json.clone())
+                            .map_err(|e| devtools_error(&json, &e)),
+                    );
+                }
+                Ok(())
+            }));
+        let sent = unsafe {
+            view.CallDevToolsProtocolMethod(
+                &HSTRING::from(method.as_str()),
+                &HSTRING::from(params.as_str()),
+                &handler,
+            )
+        };
+        if let Err(e) = sent {
+            if let Some(done) = once.take() {
+                done(Err(format!("cannot call {method}: {e}")));
+            }
+        }
+    });
+}
+
+/// An agent's call is about to go to the page: a page off the stage draws,
+/// at the size it had there or a laptop's, until the calls are answered.
+fn wake(key: &str) {
+    let parked = WEBS.with(|w| {
+        let mut w = w.borrow_mut();
+        let web = w.get_mut(key)?;
+        web.driven += 1;
+        if web.pane.is_some() {
+            return None;
+        }
+        let never_shown = web.bounds.right <= web.bounds.left;
+        Some((web.controller.clone()?, never_shown))
+    });
+    if let Some((c, never_shown)) = parked {
+        unsafe {
+            if never_shown {
+                let scale = GetDpiForWindow(park_hwnd()).max(96) as f64 / 96.0;
+                let (w, h) = PARKED;
+                let size = |v: i32| (v as f64 * scale).round() as i32;
+                let _ = c.SetBounds(RECT {
+                    left: 0,
+                    top: 0,
+                    right: size(w),
+                    bottom: size(h),
+                });
+            }
+            let _ = c.SetIsVisible(true);
+        }
+    }
+}
+
+/// An agent's call was answered: with none left, a page off the stage
+/// stops drawing again.
+fn rest(key: &str) {
+    let idle = WEBS.with(|w| {
+        let mut w = w.borrow_mut();
+        let web = w.get_mut(key)?;
+        web.driven = web.driven.saturating_sub(1);
+        (web.driven == 0 && web.pane.is_none()).then(|| web.controller.clone())?
+    });
+    if let Some(c) = idle {
+        let _ = unsafe { c.SetIsVisible(false) };
+    }
+}
+
+/// What a failed DevTools call says: the protocol's own message when it
+/// sent one, else the COM error.
+fn devtools_error(json: &str, e: &windows::core::Error) -> String {
+    serde_json::from_str::<serde_json::Value>(json)
+        .ok()
+        .and_then(|v| v.get("message")?.as_str().map(str::to_string))
+        .unwrap_or_else(|| e.message())
 }
 
 /// The size the project's page lays out at, in CSS pixels, or None when
@@ -361,11 +542,14 @@ pub fn detach(key: &str, hwnd: HWND) {
             return None;
         }
         web.pane = None;
-        web.controller.clone()
+        Some((web.controller.clone()?, web.driven > 0))
     });
-    if let Some(c) = controller {
+    if let Some((c, driven)) = controller {
         unsafe {
-            let _ = c.SetIsVisible(false);
+            // An agent's call in flight still needs it drawn.
+            if !driven {
+                let _ = c.SetIsVisible(false);
+            }
             let _ = c.SetParentWindow(park_hwnd());
         }
     }
@@ -531,7 +715,7 @@ fn make_controller(env: &ICoreWebView2Environment, key: &str) {
                 (Ok(()), Some(c)) => ready(&owned, c),
                 (r, _) => {
                     eprintln!("horadric: cannot open the browser pane: {r:?}");
-                    WEBS.with(|w| w.borrow_mut().remove(&owned));
+                    failed(&owned);
                 }
             }
             Ok(())
@@ -539,7 +723,15 @@ fn make_controller(env: &ICoreWebView2Environment, key: &str) {
     ));
     if let Err(e) = unsafe { env.CreateCoreWebView2Controller(parent, &handler) } {
         eprintln!("horadric: cannot open the browser pane: {e}");
-        WEBS.with(|w| w.borrow_mut().remove(key));
+        failed(key);
+    }
+}
+
+/// The project's page could not be made: it is forgotten, and whoever
+/// waits on it hears so.
+fn failed(key: &str) {
+    if let Some(web) = WEBS.with(|w| w.borrow_mut().remove(key)) {
+        settle(web.waiting, web.loading);
     }
 }
 
@@ -581,14 +773,56 @@ fn ready(key: &str, controller: ICoreWebView2Controller) {
     }
     listen(key, &view);
     keys(key, &controller);
-    navigate_view(&view, pending.as_deref().unwrap_or("about:blank"));
+    // The console is kept from the first page on, so it goes in before it.
+    let first = pending.unwrap_or_else(|| "about:blank".to_string());
+    let (go, url) = (view.clone(), first.clone());
+    let added =
+        AddScriptToExecuteOnDocumentCreatedCompletedHandler::create(Box::new(move |_, _| {
+            navigate_view(&go, &url);
+            Ok(())
+        }));
+    let script = HSTRING::from(KEEP_CONSOLE);
+    if unsafe { view.AddScriptToExecuteOnDocumentCreated(&script, &added) }.is_err() {
+        navigate_view(&view, &first);
+    }
     // Only while the stage is still in front: what opened meanwhile, the
     // prompt for an address, keeps the keyboard.
     let front = pane.is_some_and(|p| unsafe { GetAncestor(p, GA_ROOT) == GetForegroundWindow() });
     if focus && front {
         let _ = unsafe { controller.MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC) };
     }
+    let waiting = WEBS.with(|w| {
+        w.borrow_mut()
+            .get_mut(key)
+            .map(|w| std::mem::take(&mut w.waiting))
+            .unwrap_or_default()
+    });
+    for f in waiting {
+        f(Some(view.clone()));
+    }
 }
+
+/// Keeps what every page writes to its console, and its errors, where an
+/// agent can read them: `window.__horadricConsole`, the last 500.
+const KEEP_CONSOLE: &str = r#"(() => {
+  if (window.__horadricConsole) return;
+  const kept = (window.__horadricConsole = []);
+  const say = (a) => {
+    if (typeof a === "string") return a;
+    if (a instanceof Error) return a.stack || String(a);
+    try { return JSON.stringify(a); } catch { return String(a); }
+  };
+  const keep = (level, args) => {
+    kept.push({ level, text: Array.from(args, say).join(" ").slice(0, 2000), at: Date.now() });
+    if (kept.length > 500) kept.shift();
+  };
+  for (const level of ["log", "info", "warn", "error", "debug"]) {
+    const was = console[level];
+    console[level] = function (...args) { keep(level, args); return was.apply(this, args); };
+  }
+  addEventListener("error", (e) => keep("error", [e.error || e.message]));
+  addEventListener("unhandledrejection", (e) => keep("error", ["Unhandled rejection:", e.reason]));
+})();"#;
 
 fn listen(key: &str, view: &ICoreWebView2) {
     let owned = key.to_string();
@@ -600,11 +834,29 @@ fn listen(key: &str, view: &ICoreWebView2) {
         Ok(())
     }));
     let owned = key.to_string();
-    let source = SourceChangedEventHandler::create(Box::new(move |view, _| {
+    let source = SourceChangedEventHandler::create(Box::new(move |view, args| {
         if let Some(v) = view {
             let u = read(|p| unsafe { v.Source(p) });
             changed(&owned, |w| w.url = u);
         }
+        // A move within the page, a fragment or a pushed state, has no
+        // load to wait for.
+        let mut new = BOOL(1);
+        if let Some(a) = args {
+            let _ = unsafe { a.IsNewDocument(&mut new) };
+        }
+        if !new.as_bool() {
+            loaded(&owned, true);
+        }
+        Ok(())
+    }));
+    let owned = key.to_string();
+    let done = NavigationCompletedEventHandler::create(Box::new(move |_, args| {
+        let mut ok = BOOL(0);
+        if let Some(a) = args {
+            let _ = unsafe { a.IsSuccess(&mut ok) };
+        }
+        loaded(&owned, ok.as_bool());
         Ok(())
     }));
     let owned = key.to_string();
@@ -627,6 +879,20 @@ fn listen(key: &str, view: &ICoreWebView2) {
         let _ = view.add_DocumentTitleChanged(&title, &mut token);
         let _ = view.add_SourceChanged(&source, &mut token);
         let _ = view.add_HistoryChanged(&history, &mut token);
+        let _ = view.add_NavigationCompleted(&done, &mut token);
+    }
+}
+
+/// The page's navigation ended: whoever waits on it hears whether it loaded.
+fn loaded(key: &str, ok: bool) {
+    let waiting = WEBS.with(|w| {
+        w.borrow_mut()
+            .get_mut(key)
+            .map(|w| std::mem::take(&mut w.loading))
+            .unwrap_or_default()
+    });
+    for f in waiting {
+        f(ok);
     }
 }
 

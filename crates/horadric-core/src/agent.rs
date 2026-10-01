@@ -222,6 +222,32 @@ impl Agent {
         }
     }
 
+    /// The flags that give this agent Horadric's MCP server, the tools for
+    /// the project's browser pane. Claude Code reads it from `config`, a
+    /// file, in the `=` form so a prompt after it is not taken for a second
+    /// file. Codex takes it as config overrides, and passes a server only
+    /// the variables it names, so the session's tag is named. Grok keeps
+    /// its servers in its own config, so it gets none here.
+    pub fn mcp_args(self, exe: &str, config: Option<&str>) -> Vec<String> {
+        match self {
+            Agent::Claude => config
+                .map(|c| vec![format!("--mcp-config={c}")])
+                .unwrap_or_default(),
+            Agent::Codex => [
+                format!("mcp_servers.horadric.command={}", toml_string(exe)),
+                "mcp_servers.horadric.args=[\"mcp\"]".to_string(),
+                "mcp_servers.horadric.env_vars=[\"HORADRIC_SESSION\",\"HORADRIC_OWNER_PORT\"]"
+                    .to_string(),
+                // A page that is slow to load takes longer than its default.
+                "mcp_servers.horadric.tool_timeout_sec=120".to_string(),
+            ]
+            .into_iter()
+            .flat_map(|v| ["-c".to_string(), v])
+            .collect(),
+            Agent::Grok => Vec::new(),
+        }
+    }
+
     /// The environment this agent starts with beside Horadric's session
     /// tag. Grok runs the `http` hooks in `~/.claude/settings.json` too and
     /// refuses each one to loopback, with an SSRF error in its TUI at
@@ -695,6 +721,24 @@ mod tests {
         assert_eq!(a.last().unwrap(), "--dangerously-bypass-hook-trust");
         assert!(Agent::Claude.hook_args("x").is_empty());
         assert!(Agent::Grok.hook_args("x").is_empty());
+    }
+
+    #[test]
+    fn each_agent_is_given_the_browser_server_its_own_way() {
+        assert_eq!(
+            Agent::Claude.mcp_args("x", Some(r"C:\a\claude-mcp.json")),
+            [r"--mcp-config=C:\a\claude-mcp.json"]
+        );
+        assert!(Agent::Claude.mcp_args("x", None).is_empty());
+        let codex = Agent::Codex.mcp_args(r"C:\h\horadric.exe", None);
+        assert_eq!(codex[0], "-c");
+        assert_eq!(
+            codex[1],
+            r#"mcp_servers.horadric.command="C:\\h\\horadric.exe""#
+        );
+        assert!(codex.contains(&r#"mcp_servers.horadric.args=["mcp"]"#.to_string()));
+        assert!(codex.iter().any(|a| a.contains("HORADRIC_SESSION")));
+        assert!(Agent::Grok.mcp_args("x", Some("y")).is_empty());
     }
 
     #[test]

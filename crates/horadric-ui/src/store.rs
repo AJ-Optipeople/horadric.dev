@@ -78,6 +78,23 @@ pub fn write_status_settings(exe: &Path) -> Option<PathBuf> {
     Some(path)
 }
 
+/// Writes the MCP config Horadric hands each `claude` it starts with
+/// `--mcp-config`: `horadric mcp`, run from `exe`, whose tools drive the
+/// project's browser pane. It finds its session by the environment it
+/// inherits. Written on every start, as the status settings are.
+pub fn write_mcp_config(exe: &Path) -> Option<PathBuf> {
+    let dir = dir()?;
+    fs::create_dir_all(&dir).ok()?;
+    let path = dir.join("claude-mcp.json");
+    let body = serde_json::json!({
+        "mcpServers": {
+            "horadric": { "type": "stdio", "command": exe, "args": ["mcp"] }
+        }
+    });
+    fs::write(&path, body.to_string()).ok()?;
+    Some(path)
+}
+
 /// Claude Code runs the command in a shell that may be Git Bash, cmd or
 /// PowerShell. Forward slashes read as a path in all three, and quotes
 /// only where a space needs them, since PowerShell takes a quoted first

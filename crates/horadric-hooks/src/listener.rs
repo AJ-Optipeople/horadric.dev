@@ -1,7 +1,9 @@
-//! A minimal HTTP/1.1 server for five purposes: accept `POST /horadric/hook`
+//! A minimal HTTP/1.1 server for six purposes: accept `POST /horadric/hook`
 //! from Claude Code, `POST /horadric/status` from its status line,
 //! `POST /horadric/new` from `horadric new`, `POST /horadric/reload` from
-//! `horadric reload`, and `POST /horadric/tasks` from `horadric quest`.
+//! `horadric reload`, `POST /horadric/tasks` from `horadric quest`, and
+//! `POST /horadric/browser` from `horadric mcp`, the one that waits for the
+//! app's answer.
 //!
 //! Hand rolled on `std::net` because the whole protocol we need is a request
 //! line, a handful of headers, a `Content-Length` body and a fixed reply. A
@@ -19,8 +21,8 @@ use horadric_core::{Agent, HookEvent, Limits, Status};
 use serde_json::{json, Value};
 
 use crate::{
-    client, transcript, AGENT_HEADER, COMMAND_HEADER, HOOK_PATH, NEW_PATH, OWNER_HEADER,
-    RELOAD_PATH, SESSION_HEADER, STATUS_PATH, TASKS_PATH,
+    client, transcript, AGENT_HEADER, BROWSER_PATH, COMMAND_HEADER, HOOK_PATH, NEW_PATH,
+    OWNER_HEADER, RELOAD_PATH, SESSION_HEADER, STATUS_PATH, TASKS_PATH,
 };
 
 /// A hook event together with the Horadric session id from the header.
@@ -128,6 +130,39 @@ impl TasksChanged {
     }
 }
 
+/// An agent's call on its project's browser pane, from `horadric mcp`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrowserCall {
+    /// The session that asked, whose project's page it is.
+    pub session: String,
+    /// What it asked, as `horadric mcp` wrote it.
+    pub body: Value,
+    pub reply: Reply,
+}
+
+/// Where the app sends its answer, a JSON body. It is not part of what was
+/// asked, so any two are equal.
+#[derive(Debug, Clone)]
+pub struct Reply(Sender<String>);
+
+impl Reply {
+    pub fn send(&self, body: Value) {
+        let _ = self.0.send(body.to_string());
+    }
+}
+
+impl PartialEq for Reply {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for Reply {}
+
+/// The longest an agent waits on its browser: a page that is slow to load,
+/// or a script that runs long.
+const BROWSER_WAIT: Duration = Duration::from_secs(90);
+
 /// What the command line can ask the running app for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
@@ -137,6 +172,7 @@ pub enum Command {
     /// A session edited a file another session changed and has not
     /// committed, in the same working tree.
     Overlap(Overlap),
+    Browser(BrowserCall),
 }
 
 /// Starts listening on 127.0.0.1 and forwards every tagged event on `tx`,
@@ -226,7 +262,14 @@ fn handle(
         }
     }
 
-    let paths = [HOOK_PATH, STATUS_PATH, NEW_PATH, RELOAD_PATH, TASKS_PATH];
+    let paths = [
+        HOOK_PATH,
+        STATUS_PATH,
+        NEW_PATH,
+        RELOAD_PATH,
+        TASKS_PATH,
+        BROWSER_PATH,
+    ];
     if method != "POST" || !paths.contains(&path) {
         return respond(&mut stream, "404 Not Found");
     }
@@ -271,6 +314,7 @@ fn handle(
         let wanted = match path {
             NEW_PATH => "new",
             TASKS_PATH => "tasks",
+            BROWSER_PATH => "browser",
             _ => "reload",
         };
         if from_browser || command != wanted {
@@ -279,6 +323,9 @@ fn handle(
         let Some(commands) = commands else {
             return respond(&mut stream, "503 Service Unavailable");
         };
+        if path == BROWSER_PATH {
+            return browser(&mut stream, horadric_id, &body, commands);
+        }
         let request = match path {
             NEW_PATH => NewSession::from_json(&body).map(Command::New),
             TASKS_PATH => TasksChanged::from_json(&body).map(Command::Tasks),
@@ -351,6 +398,36 @@ fn handle(
         });
     }
     Ok(())
+}
+
+/// Hands an agent's browser call to the app and answers with what the app
+/// answers. Only a session's: the page is its project's.
+fn browser(
+    stream: &mut TcpStream,
+    session: String,
+    body: &[u8],
+    commands: &Sender<Command>,
+) -> io::Result<()> {
+    let Ok(body) = serde_json::from_slice::<Value>(body) else {
+        return respond(stream, "400 Bad Request");
+    };
+    if session.is_empty() {
+        return respond(stream, "400 Bad Request");
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    let call = BrowserCall {
+        session,
+        body,
+        reply: Reply(tx),
+    };
+    if commands.send(Command::Browser(call)).is_err() {
+        return respond(stream, "503 Service Unavailable");
+    }
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
+    match rx.recv_timeout(BROWSER_WAIT) {
+        Ok(answer) => respond_with(stream, "200 OK", &answer),
+        Err(_) => respond(stream, "504 Gateway Timeout"),
+    }
 }
 
 /// Who changed which file, across every session this listener hears.
@@ -615,6 +692,38 @@ X-Horadric-Port: {dev}
             rx.recv_timeout(Duration::from_secs(2)).unwrap(),
             Command::Tasks(want)
         );
+    }
+
+    #[test]
+    fn a_browser_call_is_answered_with_what_the_app_answers() {
+        let (port, rx) = start_with_new();
+        let app = thread::spawn(move || match rx.recv_timeout(Duration::from_secs(2)) {
+            Ok(Command::Browser(call)) => {
+                assert_eq!(call.session, "tile-2");
+                assert_eq!(call.body["op"], "info");
+                call.reply.send(json!({ "open": false }));
+            }
+            other => panic!("{other:?}"),
+        });
+        let headers = "X-Horadric-Command: browser\r\nX-Horadric-Session: tile-2\r\n";
+        let reply = post_to(port, BROWSER_PATH, headers, r#"{"op":"info"}"#);
+        app.join().unwrap();
+        assert!(reply.starts_with("HTTP/1.1 200"), "{reply}");
+        assert!(reply.ends_with(r#"{"open":false}"#), "{reply}");
+    }
+
+    #[test]
+    fn a_browser_call_needs_its_header_a_session_and_no_origin() {
+        let (port, rx) = start_with_new();
+        for headers in [
+            "X-Horadric-Session: tile-2\r\n",
+            "X-Horadric-Command: browser\r\n",
+            "X-Horadric-Command: browser\r\nX-Horadric-Session: t\r\nOrigin: https://a.b\r\n",
+        ] {
+            let reply = post_to(port, BROWSER_PATH, headers, r#"{"op":"info"}"#);
+            assert!(reply.starts_with("HTTP/1.1 4"), "{headers}: {reply}");
+        }
+        assert!(rx.recv_timeout(Duration::from_millis(200)).is_err());
     }
 
     #[test]
