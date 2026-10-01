@@ -1,5 +1,5 @@
-//! The browser pane: a WebView2 per project, shown on the stage beside its
-//! sessions.
+//! The browser pane: a WebView2 per tab, a project's tabs shown on the
+//! stage beside its sessions.
 //!
 //! A browser beside the tiles, in a window of its own, never snapped or
 //! followed its project, and one with a profile per project had to be
@@ -7,10 +7,14 @@
 //! project, every session and every Horadric on the machine, dev instances
 //! included, share one profile: log in once and it stays.
 //!
+//! A project has one browser pane with tabs in it, as a browser has, so a
+//! second page does not mean a second pane in the grid. Every tab is a
+//! WebView of its own, and only the chosen one is visible.
+//!
 //! The pane window is destroyed whenever the stage shows another project,
-//! and a destroyed WebView loses its page. So the WebView belongs to this
-//! module, not to the pane: the pane lends it a window while it is shown,
-//! and the rest of the time it waits, hidden, on the app's window.
+//! and a destroyed WebView loses its page. So the WebViews belong to this
+//! module, not to the pane: the pane lends them a window while it is shown,
+//! and the rest of the time they wait, hidden, on the app's window.
 //!
 //! The browser listens for the DevTools protocol on a port on 127.0.0.1,
 //! so the agent in a session can see and drive the page you see. The port
@@ -31,7 +35,8 @@ use std::rc::Rc;
 
 use webview2_com::Microsoft::Web::WebView2::Win32::{
     CreateCoreWebView2EnvironmentWithOptions, ICoreWebView2, ICoreWebView2Controller,
-    ICoreWebView2Environment, ICoreWebView2EnvironmentOptions, COREWEBVIEW2_KEY_EVENT_KIND,
+    ICoreWebView2Deferral, ICoreWebView2Environment, ICoreWebView2EnvironmentOptions,
+    ICoreWebView2NewWindowRequestedEventArgs, COREWEBVIEW2_KEY_EVENT_KIND,
     COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN, COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC,
 };
 use webview2_com::{
@@ -39,14 +44,14 @@ use webview2_com::{
     CallDevToolsProtocolMethodCompletedHandler, CoreWebView2EnvironmentOptions,
     CreateCoreWebView2ControllerCompletedHandler, CreateCoreWebView2EnvironmentCompletedHandler,
     DocumentTitleChangedEventHandler, HistoryChangedEventHandler, NavigationCompletedEventHandler,
-    SourceChangedEventHandler,
+    NewWindowRequestedEventHandler, SourceChangedEventHandler, WindowCloseRequestedEventHandler,
 };
 use windows::core::{BOOL, HSTRING, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, RECT, WPARAM};
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, VIRTUAL_KEY, VK_CONTROL, VK_MENU, VK_SHIFT,
+    GetKeyState, VIRTUAL_KEY, VK_CONTROL, VK_MENU, VK_NEXT, VK_PRIOR, VK_SHIFT, VK_TAB,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     GetAncestor, GetForegroundWindow, GetParent, PostMessageW, GA_ROOT,
@@ -65,23 +70,22 @@ pub const WM_WEB_CHANGED: u32 = windows::Win32::UI::WindowsAndMessaging::WM_USER
 /// address field, for Ctrl+L.
 pub const WM_WEB_EDIT: u32 = windows::Win32::UI::WindowsAndMessaging::WM_USER + 6;
 
-/// A project's page.
-#[derive(Default)]
-struct Web {
+/// One tab: a page with a history of its own.
+struct Tab {
+    /// Names it to WebView2's callbacks, which outlive its place in the
+    /// list.
+    id: u64,
     /// None until WebView2 has made it, a moment after it was asked for.
     controller: Option<ICoreWebView2Controller>,
     webview: Option<ICoreWebView2>,
-    /// The pane it is shown in, or None while it waits on the app window.
-    pane: Option<HWND>,
-    /// Where it goes in the pane, in the pane's pixels.
-    bounds: RECT,
-    /// The largest size its pane shows unscaled, in CSS pixels.
-    room: Option<(u32, u32)>,
     /// The zoom factor it was last given, so a zoom the user made with
     /// Ctrl and the wheel in a fitted page is not undone by every resize.
     zoom: f64,
     /// The address to open once it is made.
     pending: Option<String>,
+    /// A page that opened this tab as a new window, waiting to be handed
+    /// it, so the popup keeps its opener as an OAuth login needs.
+    opener: Option<Opener>,
     /// Wants the keyboard once it is made.
     focus: bool,
     title: String,
@@ -102,10 +106,60 @@ struct Web {
 /// drives it, in CSS pixels: a laptop's.
 const PARKED: (i32, i32) = (1280, 800);
 
+impl Tab {
+    fn new(pending: Option<String>) -> Tab {
+        let id = NEXT_TAB.with(|n| n.replace(n.get() + 1));
+        Tab {
+            id,
+            controller: None,
+            webview: None,
+            zoom: 1.0,
+            pending,
+            opener: None,
+            focus: false,
+            title: String::new(),
+            url: String::new(),
+            back: false,
+            forward: false,
+            waiting: Vec::new(),
+            loading: Vec::new(),
+            driven: 0,
+        }
+    }
+}
+
+/// A project's browser: its tabs and the one shown.
+struct Web {
+    tabs: Vec<Tab>,
+    active: usize,
+    /// The pane it is shown in, or None while it waits on the app window.
+    pane: Option<HWND>,
+    /// Where the page goes in the pane, in the pane's pixels.
+    bounds: RECT,
+    /// The zoom factor the pane wants for the page.
+    zoom: f64,
+    /// The largest size its pane shows unscaled, in CSS pixels.
+    room: Option<(u32, u32)>,
+}
+
+impl Web {
+    fn tab(&self) -> Option<&Tab> {
+        self.tabs.get(self.active)
+    }
+
+    fn tab_mut(&mut self) -> Option<&mut Tab> {
+        self.tabs.get_mut(self.active)
+    }
+
+    fn by_id(&mut self, id: u64) -> Option<&mut Tab> {
+        self.tabs.iter_mut().find(|t| t.id == id)
+    }
+}
+
 enum Env {
     None,
-    /// Asked for; these projects wait on it.
-    Starting(Vec<String>),
+    /// Asked for; these tabs wait on it.
+    Starting(Vec<(String, u64)>),
     Ready(ICoreWebView2Environment),
     Failed,
 }
@@ -113,6 +167,7 @@ enum Env {
 thread_local! {
     static ENV: RefCell<Env> = const { RefCell::new(Env::None) };
     static WEBS: RefCell<HashMap<String, Web>> = RefCell::new(HashMap::new());
+    static NEXT_TAB: Cell<u64> = const { Cell::new(1) };
     /// Each project's page size in CSS pixels, where it has one. Kept
     /// apart from the pages, since a size outlives a page closed.
     static SIZES: RefCell<HashMap<String, (u32, u32)>> = RefCell::new(HashMap::new());
@@ -157,27 +212,20 @@ pub fn devtools_port() -> Option<u16> {
     Some(port)
 }
 
-/// Opens the project's page, at `url` when given. A page it has already
-/// goes there instead.
+/// Opens the project's browser, at `url` when given. A browser it has
+/// already takes its shown tab there instead.
 pub fn open(key: &str, url: Option<&str>) {
     let known = WEBS.with(|w| {
         let mut w = w.borrow_mut();
         if let Some(web) = w.get_mut(key) {
-            if web.webview.is_none() {
+            let tab = web.tab_mut()?;
+            if tab.webview.is_none() {
                 if let Some(u) = url {
-                    web.pending = Some(u.to_string());
+                    tab.pending = Some(u.to_string());
                 }
             }
-            return Some(web.webview.clone());
+            return Some(tab.webview.clone());
         }
-        w.insert(
-            key.to_string(),
-            Web {
-                pending: url.map(str::to_string),
-                zoom: 1.0,
-                ..Web::default()
-            },
-        );
         None
     });
     match known {
@@ -187,8 +235,37 @@ pub fn open(key: &str, url: Option<&str>) {
             }
         }
         Some(None) => {}
-        None => make(key),
+        None => {
+            add_tab(key, Tab::new(url.map(str::to_string)));
+        }
     }
+}
+
+/// Opens `url` in a new tab of the project's browser, shown at once, or
+/// opens the browser at it when the project has none.
+pub fn open_tab(key: &str, url: Option<&str>) {
+    add_tab(key, Tab::new(url.map(str::to_string)));
+}
+
+/// Puts `tab` after the browser's others and shows it, making the browser
+/// when the project has none, then asks WebView2 for its page.
+fn add_tab(key: &str, tab: Tab) {
+    let id = tab.id;
+    WEBS.with(|w| {
+        let mut w = w.borrow_mut();
+        let web = w.entry(key.to_string()).or_insert_with(|| Web {
+            tabs: Vec::new(),
+            active: 0,
+            pane: None,
+            bounds: RECT::default(),
+            zoom: 1.0,
+            room: None,
+        });
+        web.tabs.push(tab);
+        web.active = web.tabs.len() - 1;
+    });
+    show(key);
+    make(key, id);
 }
 
 fn navigate_view(view: &ICoreWebView2, url: &str) {
@@ -197,15 +274,27 @@ fn navigate_view(view: &ICoreWebView2, url: &str) {
     }
 }
 
-/// Closes the project's page for good.
+/// Closes the project's browser for good, every tab of it.
 pub fn close(key: &str) {
-    let Some(mut gone) = WEBS.with(|w| w.borrow_mut().remove(key)) else {
-        return;
-    };
-    if let Some(c) = gone.controller.take() {
+    let gone = WEBS.with(|w| w.borrow_mut().remove(key));
+    for tab in gone.map(|w| w.tabs).unwrap_or_default() {
+        end(tab);
+    }
+}
+
+/// A tab closed: its WebView goes, a page still waiting to hand it a popup
+/// is told there is none, and so is every agent waiting on it.
+fn end(tab: Tab) {
+    if let Some((args, deferral)) = tab.opener {
+        unsafe {
+            let _ = args.SetHandled(true);
+            let _ = deferral.Complete();
+        }
+    }
+    if let Some(c) = tab.controller {
         let _ = unsafe { c.Close() };
     }
-    settle(gone.waiting, gone.loading);
+    settle(tab.waiting, tab.loading);
 }
 
 /// Tells the agents still waiting on a page that went that it is gone.
@@ -231,19 +320,19 @@ pub fn is_shown(key: &str) -> bool {
     WEBS.with(|w| w.borrow().get(key).is_some_and(|w| w.pane.is_some()))
 }
 
-/// Runs `f` with the project's page once it is made, at once when it is.
-/// None when the project has no page, or it could not be made.
+/// Runs `f` with the project's shown page once it is made, at once when it
+/// is. None when the project has no page, or it could not be made.
 pub fn with_view(key: &str, f: impl FnOnce(Option<ICoreWebView2>) + 'static) {
     let f: Box<dyn FnOnce(Option<ICoreWebView2>)> = Box::new(f);
     let now = WEBS.with(|w| {
         let mut w = w.borrow_mut();
-        let Some(web) = w.get_mut(key) else {
+        let Some(tab) = w.get_mut(key).and_then(Web::tab_mut) else {
             return Some((f, None));
         };
-        match web.webview.clone() {
+        match tab.webview.clone() {
             Some(view) => Some((f, Some(view))),
             None => {
-                web.waiting.push(f);
+                tab.waiting.push(f);
                 None
             }
         }
@@ -253,17 +342,19 @@ pub fn with_view(key: &str, f: impl FnOnce(Option<ICoreWebView2>) + 'static) {
     }
 }
 
-/// Runs `f` once the page's next navigation ends, saying whether it
+/// Runs `f` once the shown page's next navigation ends, saying whether it
 /// loaded. False at once when the project has no page.
 pub fn after_load(key: &str, f: impl FnOnce(bool) + 'static) {
     let f: Box<dyn FnOnce(bool)> = Box::new(f);
-    let gone = WEBS.with(|w| match w.borrow_mut().get_mut(key) {
-        Some(web) => {
-            web.loading.push(f);
-            None
-        }
-        None => Some(f),
-    });
+    let gone = WEBS.with(
+        |w| match w.borrow_mut().get_mut(key).and_then(Web::tab_mut) {
+            Some(tab) => {
+                tab.loading.push(f);
+                None
+            }
+            None => Some(f),
+        },
+    );
     if let Some(f) = gone {
         f(false);
     }
@@ -282,9 +373,11 @@ pub fn devtools(
         let Some(view) = view else {
             return done(Err("the browser is not open".into()));
         };
-        wake(&owned);
+        let id = wake(&owned, &view);
         let done = move |r| {
-            rest(&owned);
+            if let Some(id) = id {
+                rest(&owned, id);
+            }
             done(r);
         };
         // Whichever comes first, the answer or the refusal to send it, has it.
@@ -316,19 +409,25 @@ pub fn devtools(
     });
 }
 
-/// An agent's call is about to go to the page: a page off the stage draws,
-/// at the size it had there or a laptop's, until the calls are answered.
-fn wake(key: &str) {
-    let parked = WEBS.with(|w| {
+/// An agent's call is about to go to the tab showing `view`: a page off
+/// the stage draws, at the size it had there or a laptop's, until the
+/// calls are answered. Says which tab, for `rest`.
+fn wake(key: &str, view: &ICoreWebView2) -> Option<u64> {
+    let (id, parked) = WEBS.with(|w| {
         let mut w = w.borrow_mut();
         let web = w.get_mut(key)?;
-        web.driven += 1;
-        if web.pane.is_some() {
-            return None;
-        }
-        let never_shown = web.bounds.right <= web.bounds.left;
-        Some((web.controller.clone()?, never_shown))
-    });
+        let (pane, never_shown) = (web.pane, web.bounds.right <= web.bounds.left);
+        let tab = web
+            .tabs
+            .iter_mut()
+            .find(|t| t.webview.as_ref() == Some(view))?;
+        tab.driven += 1;
+        let parked = match pane {
+            Some(_) => None,
+            None => tab.controller.clone().map(|c| (c, never_shown)),
+        };
+        Some((tab.id, parked))
+    })?;
     if let Some((c, never_shown)) = parked {
         unsafe {
             if never_shown {
@@ -345,16 +444,19 @@ fn wake(key: &str) {
             let _ = c.SetIsVisible(true);
         }
     }
+    Some(id)
 }
 
 /// An agent's call was answered: with none left, a page off the stage
 /// stops drawing again.
-fn rest(key: &str) {
+fn rest(key: &str, id: u64) {
     let idle = WEBS.with(|w| {
         let mut w = w.borrow_mut();
         let web = w.get_mut(key)?;
-        web.driven = web.driven.saturating_sub(1);
-        (web.driven == 0 && web.pane.is_none()).then(|| web.controller.clone())?
+        let off_stage = web.pane.is_none();
+        let tab = web.by_id(id)?;
+        tab.driven = tab.driven.saturating_sub(1);
+        (tab.driven == 0 && off_stage).then(|| tab.controller.clone())?
     });
     if let Some(c) = idle {
         let _ = unsafe { c.SetIsVisible(false) };
@@ -368,6 +470,121 @@ fn devtools_error(json: &str, e: &windows::core::Error) -> String {
         .ok()
         .and_then(|v| v.get("message")?.as_str().map(str::to_string))
         .unwrap_or_else(|| e.message())
+}
+
+/// What can be done with a browser's tabs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TabStep {
+    /// A new tab, its address asked for.
+    New,
+    /// Close the tab at this place, or the one shown.
+    Close(Option<usize>),
+    Select(usize),
+    Next,
+    Previous,
+}
+
+/// Changes the project's tabs. Closing its last tab closes the browser.
+pub fn tab(key: &str, step: TabStep) {
+    if step == TabStep::New {
+        open_tab(key, None);
+        edit(key);
+        return;
+    }
+    let closed = WEBS.with(|w| {
+        let mut w = w.borrow_mut();
+        let web = w.get_mut(key)?;
+        let len = web.tabs.len();
+        match step {
+            TabStep::New => None,
+            TabStep::Select(i) => {
+                web.active = i.min(len.saturating_sub(1));
+                None
+            }
+            TabStep::Next => {
+                web.active = cycled(web.active, len, true);
+                None
+            }
+            TabStep::Previous => {
+                web.active = cycled(web.active, len, false);
+                None
+            }
+            TabStep::Close(at) => {
+                let at = at.unwrap_or(web.active);
+                if at >= len {
+                    return None;
+                }
+                if len == 1 {
+                    return Some(None);
+                }
+                web.active = after_close(web.active, at, len);
+                Some(Some(web.tabs.remove(at)))
+            }
+        }
+    });
+    match closed {
+        // The last one: the pane goes with it.
+        Some(None) => {
+            app::push(Input::CloseWeb(key.to_string()));
+            return;
+        }
+        Some(Some(tab)) => end(tab),
+        None => {}
+    }
+    show(key);
+    focus(key);
+}
+
+/// Which tab is shown after `closed` of `len` is closed while `active` was:
+/// the same one where it is still there, the one after a closed shown tab,
+/// or the one before when it was the last.
+pub fn after_close(active: usize, closed: usize, len: usize) -> usize {
+    if closed < active {
+        active - 1
+    } else if closed == active {
+        active.min(len.saturating_sub(2))
+    } else {
+        active
+    }
+}
+
+/// The tab after `active` of `len`, or before it, round from the end to
+/// the start as in a browser.
+pub fn cycled(active: usize, len: usize, forward: bool) -> usize {
+    match (len, forward) {
+        (0, _) => 0,
+        (_, true) => (active + 1) % len,
+        (_, false) => (active + len - 1) % len,
+    }
+}
+
+/// The titles of the project's tabs, or their addresses where a page has
+/// none yet, and which one is shown.
+pub fn tabs(key: &str) -> Option<(Vec<String>, usize)> {
+    WEBS.with(|w| {
+        let w = w.borrow();
+        let web = w.get(key)?;
+        let names = web
+            .tabs
+            .iter()
+            .map(|t| tab_name(&t.title, &t.url))
+            .collect();
+        Some((names, web.active))
+    })
+}
+
+/// What a tab is called: its page's title, else its address without the
+/// scheme, else New tab.
+pub fn tab_name(title: &str, url: &str) -> String {
+    if !title.trim().is_empty() && title != url {
+        return title.trim().to_string();
+    }
+    let bare = url.split_once("://").map_or(url, |(_, rest)| rest);
+    if bare.is_empty() || url == "about:blank" {
+        "New tab".to_string()
+    } else {
+        bare.trim_end_matches('/').to_string()
+    }
 }
 
 /// The size the project's page lays out at, in CSS pixels, or None when
@@ -387,7 +604,7 @@ pub fn set_size(key: &str, size: Option<(u32, u32)>) {
         }
     });
     if old != size {
-        changed(key, |_| {});
+        changed(key, None, |_| {});
     }
 }
 
@@ -472,24 +689,20 @@ pub fn room(key: &str) -> Option<(u32, u32)> {
     WEBS.with(|w| w.borrow().get(key).and_then(|w| w.room))
 }
 
-/// The pane `hwnd` shows the project's page now, at `bounds` and `zoom`.
+/// The pane `hwnd` shows the project's browser now, its page at `bounds`
+/// and `zoom`.
 pub fn attach(key: &str, hwnd: HWND, bounds: RECT, zoom: f64) {
-    let placed = WEBS.with(|w| {
+    let known = WEBS.with(|w| {
         let mut w = w.borrow_mut();
         let web = w.get_mut(key)?;
         web.pane = Some(hwnd);
         // Kept before the page is made too: it takes them when it is.
-        let zoom = place(web, bounds, zoom);
-        Some((web.controller.clone()?, zoom))
+        web.bounds = bounds;
+        web.zoom = zoom;
+        Some(())
     });
-    if let Some((c, zoom)) = placed {
-        unsafe {
-            let _ = c.SetParentWindow(hwnd);
-        }
-        apply(&c, bounds, zoom, size(key).is_none());
-        unsafe {
-            let _ = c.SetIsVisible(true);
-        }
+    if known.is_some() {
+        show(key);
     }
 }
 
@@ -498,21 +711,84 @@ pub fn set_bounds(key: &str, bounds: RECT, zoom: f64) {
     let placed = WEBS.with(|w| {
         let mut w = w.borrow_mut();
         let web = w.get_mut(key)?;
-        // Kept before the page is made too: it takes them when it is.
-        let zoom = place(web, bounds, zoom);
-        Some((web.controller.clone()?, zoom))
+        web.bounds = bounds;
+        web.zoom = zoom;
+        web.pane?;
+        let tab = web.tabs.get_mut(web.active)?;
+        let zoom = place(tab, zoom);
+        Some((tab.controller.clone()?, zoom))
     });
     if let Some((c, zoom)) = placed {
         apply(&c, bounds, zoom, size(key).is_none());
     }
 }
 
-/// Keeps where the page goes, and says the zoom to set when it is not the
-/// one set last.
-fn place(web: &mut Web, bounds: RECT, zoom: f64) -> Option<f64> {
-    web.bounds = bounds;
-    let changed = (web.zoom - zoom).abs() > 1e-6;
-    web.zoom = zoom;
+/// Puts every tab of the project's browser in its pane, only the chosen
+/// one visible and at the pane's bounds, or all of them hidden on the app
+/// window while no pane shows it. The header is drawn again, since the
+/// tabs or the one shown changed.
+fn show(key: &str) {
+    struct Placed {
+        controller: ICoreWebView2Controller,
+        shown: bool,
+        driven: bool,
+        zoom: Option<f64>,
+    }
+    let state = WEBS.with(|w| {
+        let mut w = w.borrow_mut();
+        let web = w.get_mut(key)?;
+        let (active, want) = (web.active, web.zoom);
+        let pane = web.pane;
+        let placed: Vec<Placed> = web
+            .tabs
+            .iter_mut()
+            .enumerate()
+            .filter_map(|(i, t)| {
+                let shown = pane.is_some() && i == active;
+                let zoom = if shown { place(t, want) } else { None };
+                Some(Placed {
+                    controller: t.controller.clone()?,
+                    shown,
+                    driven: t.driven > 0,
+                    zoom,
+                })
+            })
+            .collect();
+        Some((pane, web.bounds, placed))
+    });
+    let Some((pane, bounds, placed)) = state else {
+        return;
+    };
+    let fitted = size(key).is_none();
+    // Hidden first, so two pages are never seen over each other.
+    for p in placed.iter().filter(|p| !p.shown) {
+        unsafe {
+            // An agent's call in flight still needs a page off the stage
+            // drawn.
+            if pane.is_some() || !p.driven {
+                let _ = p.controller.SetIsVisible(false);
+            }
+            let _ = p.controller.SetParentWindow(pane.unwrap_or_else(park_hwnd));
+        }
+    }
+    for p in placed.iter().filter(|p| p.shown) {
+        unsafe {
+            let _ = p.controller.SetParentWindow(pane.unwrap_or_else(park_hwnd));
+        }
+        apply(&p.controller, bounds, p.zoom, fitted);
+        unsafe {
+            let _ = p.controller.SetIsVisible(true);
+        }
+    }
+    if let Some(p) = pane {
+        let _ = unsafe { PostMessageW(Some(p), WM_WEB_CHANGED, WPARAM(0), LPARAM(0)) };
+    }
+}
+
+/// Says the zoom to give the tab when it is not the one given last.
+fn place(tab: &mut Tab, zoom: f64) -> Option<f64> {
+    let changed = (tab.zoom - zoom).abs() > 1e-6;
+    tab.zoom = zoom;
     changed.then_some(zoom)
 }
 
@@ -531,20 +807,25 @@ fn apply(c: &ICoreWebView2Controller, bounds: RECT, zoom: Option<f64>, fitted: b
     }
 }
 
-/// The pane `hwnd` is going: the page waits on the app window, hidden,
-/// until a pane shows it again. Only when it is still that pane's, since
-/// a new pane may have taken it first.
+/// The pane `hwnd` is going: the tabs wait on the app window, hidden,
+/// until a pane shows them again. Only when they are still that pane's,
+/// since a new pane may have taken them first.
 pub fn detach(key: &str, hwnd: HWND) {
-    let controller = WEBS.with(|w| {
+    let controllers = WEBS.with(|w| {
         let mut w = w.borrow_mut();
         let web = w.get_mut(key)?;
         if web.pane != Some(hwnd) {
             return None;
         }
         web.pane = None;
-        Some((web.controller.clone()?, web.driven > 0))
+        Some(
+            web.tabs
+                .iter()
+                .filter_map(|t| Some((t.controller.clone()?, t.driven > 0)))
+                .collect::<Vec<_>>(),
+        )
     });
-    if let Some((c, driven)) = controller {
+    for (c, driven) in controllers.unwrap_or_default() {
         unsafe {
             // An agent's call in flight still needs it drawn.
             if !driven {
@@ -555,34 +836,35 @@ pub fn detach(key: &str, hwnd: HWND) {
     }
 }
 
-/// Gives the page the keyboard, now or once it is made.
+/// Gives the shown page the keyboard, now or once it is made.
 pub fn focus(key: &str) {
     let controller = WEBS.with(|w| {
         let mut w = w.borrow_mut();
-        let web = w.get_mut(key)?;
-        web.focus = web.controller.is_none();
-        web.controller.clone()
+        let tab = w.get_mut(key)?.tab_mut()?;
+        tab.focus = tab.controller.is_none();
+        tab.controller.clone()
     });
     if let Some(c) = controller {
         let _ = unsafe { c.MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC) };
     }
 }
 
-/// The page's title and address, for the pane's header.
+/// The shown page's title and address, for the pane's header.
 pub fn label(key: &str) -> Option<(String, String)> {
     WEBS.with(|w| {
         let w = w.borrow();
-        let web = w.get(key)?;
-        Some((web.title.clone(), web.url.clone()))
+        let tab = w.get(key)?.tab()?;
+        Some((tab.title.clone(), tab.url.clone()))
     })
 }
 
-/// Whether the page has somewhere to go back and forward to.
+/// Whether the shown page has somewhere to go back and forward to.
 pub fn history(key: &str) -> (bool, bool) {
     WEBS.with(|w| {
         w.borrow()
             .get(key)
-            .map_or((false, false), |w| (w.back, w.forward))
+            .and_then(Web::tab)
+            .map_or((false, false), |t| (t.back, t.forward))
     })
 }
 
@@ -594,7 +876,9 @@ pub fn edit(key: &str) -> bool {
     let pane = WEBS.with(|w| {
         let mut w = w.borrow_mut();
         let web = w.get_mut(key)?;
-        web.focus = false;
+        if let Some(tab) = web.tab_mut() {
+            tab.focus = false;
+        }
         web.pane
     });
     pane.is_some_and(|p| {
@@ -604,7 +888,12 @@ pub fn edit(key: &str) -> bool {
 
 /// Back, forward or reload, from the header's buttons or the keys.
 pub fn go(key: &str, step: Step) {
-    let Some(view) = WEBS.with(|w| w.borrow().get(key).and_then(|w| w.webview.clone())) else {
+    let Some(view) = WEBS.with(|w| {
+        w.borrow()
+            .get(key)
+            .and_then(Web::tab)
+            .and_then(|t| t.webview.clone())
+    }) else {
         return;
     };
     let _ = unsafe {
@@ -623,20 +912,20 @@ pub enum Step {
     Reload,
 }
 
-/// Makes the project's WebView, making the shared environment first when
-/// it is not there yet.
-fn make(key: &str) {
+/// Makes the tab's WebView, making the shared environment first when it
+/// is not there yet.
+fn make(key: &str, id: u64) {
     let env = ENV.with(|e| {
         let mut e = e.borrow_mut();
         match &mut *e {
             Env::Ready(env) => Some(env.clone()),
             Env::Starting(waiting) => {
-                waiting.push(key.to_string());
+                waiting.push((key.to_string(), id));
                 None
             }
             Env::Failed => None,
             Env::None => {
-                *e = Env::Starting(vec![key.to_string()]);
+                *e = Env::Starting(vec![(key.to_string(), id)]);
                 drop(e);
                 start_env();
                 None
@@ -644,7 +933,7 @@ fn make(key: &str) {
         }
     });
     if let Some(env) = env {
-        make_controller(&env, key);
+        make_controller(&env, key, id);
     }
 }
 
@@ -676,8 +965,8 @@ fn start_env() {
         });
         match (result, env) {
             (Ok(()), Some(env)) => {
-                for key in waiting {
-                    make_controller(&env, &key);
+                for (key, id) in waiting {
+                    make_controller(&env, &key, id);
                 }
             }
             (r, _) => eprintln!("horadric: cannot start the browser: {r:?}"),
@@ -703,7 +992,7 @@ fn args(port: u16) -> String {
     format!("--remote-debugging-port={port} --remote-debugging-address=127.0.0.1")
 }
 
-fn make_controller(env: &ICoreWebView2Environment, key: &str) {
+fn make_controller(env: &ICoreWebView2Environment, key: &str, id: u64) {
     // Made in the pane when one is waiting for it, so it shows at once.
     let parent = WEBS
         .with(|w| w.borrow().get(key).and_then(|w| w.pane))
@@ -712,10 +1001,10 @@ fn make_controller(env: &ICoreWebView2Environment, key: &str) {
     let handler = CreateCoreWebView2ControllerCompletedHandler::create(Box::new(
         move |result, controller| {
             match (result, controller) {
-                (Ok(()), Some(c)) => ready(&owned, c),
+                (Ok(()), Some(c)) => ready(&owned, id, c),
                 (r, _) => {
                     eprintln!("horadric: cannot open the browser pane: {r:?}");
-                    failed(&owned);
+                    lost(&owned, id);
                 }
             }
             Ok(())
@@ -723,21 +1012,25 @@ fn make_controller(env: &ICoreWebView2Environment, key: &str) {
     ));
     if let Err(e) = unsafe { env.CreateCoreWebView2Controller(parent, &handler) } {
         eprintln!("horadric: cannot open the browser pane: {e}");
-        failed(key);
+        lost(key, id);
     }
 }
 
-/// The project's page could not be made: it is forgotten, and whoever
-/// waits on it hears so.
-fn failed(key: &str) {
-    if let Some(web) = WEBS.with(|w| w.borrow_mut().remove(key)) {
-        settle(web.waiting, web.loading);
+/// A tab WebView2 could not make goes, and the browser with it when it
+/// was the only one. Whoever waits on it hears so.
+fn lost(key: &str, id: u64) {
+    let at = WEBS.with(|w| {
+        let w = w.borrow();
+        w.get(key)?.tabs.iter().position(|t| t.id == id)
+    });
+    if let Some(at) = at {
+        tab(key, TabStep::Close(Some(at)));
     }
 }
 
-/// WebView2 made the project's WebView: put it where its pane is, if one
-/// is, open what was asked for, and hear its title and address change.
-fn ready(key: &str, controller: ICoreWebView2Controller) {
+/// WebView2 made the tab's WebView: put it where its pane is, if one is,
+/// open what was asked for, and hear its title and address change.
+fn ready(key: &str, id: u64, controller: ICoreWebView2Controller) {
     let Ok(view) = (unsafe { controller.CoreWebView2() }) else {
         return;
     };
@@ -745,60 +1038,78 @@ fn ready(key: &str, controller: ICoreWebView2Controller) {
         let mut w = w.borrow_mut();
         // Closed while it was being made.
         let web = w.get_mut(key)?;
-        web.controller = Some(controller.clone());
-        web.webview = Some(view.clone());
+        let shown = web.tab().is_some_and(|t| t.id == id);
+        let pane = web.pane;
+        let tab = web.by_id(id)?;
+        tab.controller = Some(controller.clone());
+        tab.webview = Some(view.clone());
         Some((
-            web.pane,
-            web.bounds,
-            web.zoom,
-            web.pending.take(),
-            std::mem::take(&mut web.focus),
+            pane,
+            shown,
+            tab.pending.take(),
+            tab.opener.take(),
+            std::mem::take(&mut tab.focus),
         ))
     });
-    let Some((pane, bounds, zoom, pending, focus)) = state else {
+    let Some((pane, shown, pending, opener, focus)) = state else {
         let _ = unsafe { controller.Close() };
         return;
     };
     unsafe {
-        match pane {
-            Some(p) => {
-                let _ = controller.SetParentWindow(p);
-                apply(&controller, bounds, Some(zoom), size(key).is_none());
-                let _ = controller.SetIsVisible(true);
-            }
-            None => {
-                let _ = controller.SetIsVisible(false);
-            }
-        }
+        let _ = controller.SetIsVisible(false);
     }
-    listen(key, &view);
+    listen(key, id, &view);
     keys(key, &controller);
     // The console is kept from the first page on, so it goes in before it.
-    let first = pending.unwrap_or_else(|| "about:blank".to_string());
-    let (go, url) = (view.clone(), first.clone());
+    let first = Rc::new(Cell::new(Some((view.clone(), opener, pending))));
+    let start = Rc::clone(&first);
     let added =
         AddScriptToExecuteOnDocumentCreatedCompletedHandler::create(Box::new(move |_, _| {
-            navigate_view(&go, &url);
+            if let Some((view, opener, pending)) = start.take() {
+                begin(&view, opener, pending);
+            }
             Ok(())
         }));
     let script = HSTRING::from(KEEP_CONSOLE);
     if unsafe { view.AddScriptToExecuteOnDocumentCreated(&script, &added) }.is_err() {
-        navigate_view(&view, &first);
+        if let Some((view, opener, pending)) = first.take() {
+            begin(&view, opener, pending);
+        }
     }
+    show(key);
     // Only while the stage is still in front: what opened meanwhile, the
     // prompt for an address, keeps the keyboard.
     let front = pane.is_some_and(|p| unsafe { GetAncestor(p, GA_ROOT) == GetForegroundWindow() });
-    if focus && front {
+    if shown && focus && front {
         let _ = unsafe { controller.MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC) };
     }
     let waiting = WEBS.with(|w| {
         w.borrow_mut()
             .get_mut(key)
-            .map(|w| std::mem::take(&mut w.waiting))
+            .and_then(|w| w.by_id(id))
+            .map(|t| std::mem::take(&mut t.waiting))
             .unwrap_or_default()
     });
     for f in waiting {
         f(Some(view.clone()));
+    }
+}
+
+/// A popup's opener waiting to be handed its new window.
+type Opener = (
+    ICoreWebView2NewWindowRequestedEventArgs,
+    ICoreWebView2Deferral,
+);
+
+/// A new tab's first page: the page that asked for a new window gets this
+/// one, and loads its address in it itself, else the address asked for.
+fn begin(view: &ICoreWebView2, opener: Option<Opener>, pending: Option<String>) {
+    match opener {
+        Some((args, deferral)) => unsafe {
+            let _ = args.SetNewWindow(view);
+            let _ = deferral.Complete();
+        },
+        None => navigate_view(view, pending.as_deref().unwrap_or("about:blank")),
     }
 }
 
@@ -824,12 +1135,12 @@ const KEEP_CONSOLE: &str = r#"(() => {
   addEventListener("unhandledrejection", (e) => keep("error", ["Unhandled rejection:", e.reason]));
 })();"#;
 
-fn listen(key: &str, view: &ICoreWebView2) {
+fn listen(key: &str, id: u64, view: &ICoreWebView2) {
     let owned = key.to_string();
     let title = DocumentTitleChangedEventHandler::create(Box::new(move |view, _| {
         if let Some(v) = view {
             let t = read(|p| unsafe { v.DocumentTitle(p) });
-            changed(&owned, |w| w.title = t);
+            changed(&owned, Some(id), |w| w.title = t);
         }
         Ok(())
     }));
@@ -837,7 +1148,7 @@ fn listen(key: &str, view: &ICoreWebView2) {
     let source = SourceChangedEventHandler::create(Box::new(move |view, args| {
         if let Some(v) = view {
             let u = read(|p| unsafe { v.Source(p) });
-            changed(&owned, |w| w.url = u);
+            changed(&owned, Some(id), |w| w.url = u);
         }
         // A move within the page, a fragment or a pushed state, has no
         // load to wait for.
@@ -846,7 +1157,7 @@ fn listen(key: &str, view: &ICoreWebView2) {
             let _ = unsafe { a.IsNewDocument(&mut new) };
         }
         if !new.as_bool() {
-            loaded(&owned, true);
+            loaded(&owned, id, true);
         }
         Ok(())
     }));
@@ -856,7 +1167,7 @@ fn listen(key: &str, view: &ICoreWebView2) {
         if let Some(a) = args {
             let _ = unsafe { a.IsSuccess(&mut ok) };
         }
-        loaded(&owned, ok.as_bool());
+        loaded(&owned, id, ok.as_bool());
         Ok(())
     }));
     let owned = key.to_string();
@@ -867,10 +1178,33 @@ fn listen(key: &str, view: &ICoreWebView2) {
                 let _ = v.CanGoBack(&mut back);
                 let _ = v.CanGoForward(&mut forward);
             }
-            changed(&owned, |w| {
+            changed(&owned, Some(id), |w| {
                 w.back = back.as_bool();
                 w.forward = forward.as_bool();
             });
+        }
+        Ok(())
+    }));
+    // A link to a new window, or a popup, opens in a tab of its own
+    // rather than a window of WebView2's beside the stage.
+    let owned = key.to_string();
+    let popup = NewWindowRequestedEventHandler::create(Box::new(move |_, args| {
+        let Some(args) = args else { return Ok(()) };
+        let deferral = unsafe { args.GetDeferral()? };
+        let mut tab = Tab::new(None);
+        tab.opener = Some((args, deferral));
+        add_tab(&owned, tab);
+        Ok(())
+    }));
+    // A page closing itself, a login popup done, closes its tab.
+    let owned = key.to_string();
+    let closing = WindowCloseRequestedEventHandler::create(Box::new(move |_, _| {
+        let at = WEBS.with(|w| {
+            let w = w.borrow();
+            w.get(&owned)?.tabs.iter().position(|t| t.id == id)
+        });
+        if let Some(at) = at {
+            app::push(Input::WebTab(owned.clone(), TabStep::Close(Some(at))));
         }
         Ok(())
     }));
@@ -880,15 +1214,18 @@ fn listen(key: &str, view: &ICoreWebView2) {
         let _ = view.add_SourceChanged(&source, &mut token);
         let _ = view.add_HistoryChanged(&history, &mut token);
         let _ = view.add_NavigationCompleted(&done, &mut token);
+        let _ = view.add_NewWindowRequested(&popup, &mut token);
+        let _ = view.add_WindowCloseRequested(&closing, &mut token);
     }
 }
 
-/// The page's navigation ended: whoever waits on it hears whether it loaded.
-fn loaded(key: &str, ok: bool) {
+/// The tab's navigation ended: whoever waits on it hears whether it loaded.
+fn loaded(key: &str, id: u64, ok: bool) {
     let waiting = WEBS.with(|w| {
         w.borrow_mut()
             .get_mut(key)
-            .map(|w| std::mem::take(&mut w.loading))
+            .and_then(|w| w.by_id(id))
+            .map(|t| std::mem::take(&mut t.loading))
             .unwrap_or_default()
     });
     for f in waiting {
@@ -897,8 +1234,8 @@ fn loaded(key: &str, ok: bool) {
 }
 
 /// The page has the keyboard, so the stage's own keys are caught before
-/// it sees them: Ctrl+L for the address, as in a browser, and Ctrl+Shift+T
-/// for a terminal, as in any pane.
+/// it sees them: Ctrl+L for the address and the tab keys, as in a browser,
+/// and Ctrl+Shift+T for a terminal, as in any pane.
 fn keys(key: &str, controller: &ICoreWebView2Controller) {
     let owned = key.to_string();
     let handler = AcceleratorKeyPressedEventHandler::create(Box::new(move |_, args| {
@@ -917,7 +1254,10 @@ fn keys(key: &str, controller: &ICoreWebView2Controller) {
         let input = match (vk as u8, ctrl, shift, alt) {
             (b'L', true, false, false) => Input::WebAsk(owned.clone(), WebAsk::Address),
             (b'T', true, true, false) => Input::Shell(None),
-            _ => return Ok(()),
+            _ => match tab_key(VIRTUAL_KEY(vk as u16), ctrl, shift, alt) {
+                Some(step) => Input::WebTab(owned.clone(), step),
+                None => return Ok(()),
+            },
         };
         unsafe { args.SetHandled(true)? };
         app::push(input);
@@ -925,6 +1265,27 @@ fn keys(key: &str, controller: &ICoreWebView2Controller) {
     }));
     let mut token = Default::default();
     let _ = unsafe { controller.add_AcceleratorKeyPressed(&handler, &mut token) };
+}
+
+/// The keys a browser has for its tabs: Ctrl+T, Ctrl+W, Ctrl+Tab and
+/// Ctrl+Shift+Tab, Ctrl+PgDn and Ctrl+PgUp, and Ctrl+1 to Ctrl+8 for a
+/// tab by place and Ctrl+9 for the last.
+pub fn tab_key(vk: VIRTUAL_KEY, ctrl: bool, shift: bool, alt: bool) -> Option<TabStep> {
+    if !ctrl || alt {
+        return None;
+    }
+    let step = match (vk, shift) {
+        (VK_TAB, false) | (VK_NEXT, false) => TabStep::Next,
+        (VK_TAB, true) | (VK_PRIOR, false) => TabStep::Previous,
+        (VIRTUAL_KEY(k), false) if k == b'T' as u16 => TabStep::New,
+        (VIRTUAL_KEY(k), false) if k == b'W' as u16 => TabStep::Close(None),
+        (VIRTUAL_KEY(k), false) if (b'1' as u16..=b'8' as u16).contains(&k) => {
+            TabStep::Select((k - b'1' as u16) as usize)
+        }
+        (VIRTUAL_KEY(k), false) if k == b'9' as u16 => TabStep::Select(usize::MAX),
+        _ => return None,
+    };
+    Some(step)
 }
 
 /// A string WebView2 hands out, which the caller frees.
@@ -938,11 +1299,15 @@ fn read(get: impl FnOnce(*mut PWSTR) -> windows::core::Result<()>) -> String {
     s
 }
 
-fn changed(key: &str, set: impl FnOnce(&mut Web)) {
+/// Changes the tab `id`, or nothing but the browser with None, and has
+/// the pane showing it draw it again.
+fn changed(key: &str, id: Option<u64>, set: impl FnOnce(&mut Tab)) {
     let pane = WEBS.with(|w| {
         let mut w = w.borrow_mut();
         let web = w.get_mut(key)?;
-        set(web);
+        if let Some(tab) = id.and_then(|id| web.by_id(id)) {
+            set(tab);
+        }
         web.pane
     });
     if let Some(p) = pane {
@@ -1032,5 +1397,67 @@ mod tests {
             args(9333),
             "--remote-debugging-port=9333 --remote-debugging-address=127.0.0.1"
         );
+    }
+
+    #[test]
+    fn closing_a_tab_shows_its_neighbour() {
+        // Before the shown one: the same page, one place left.
+        assert_eq!(after_close(2, 0, 4), 1);
+        // The shown one: the one after it takes its place.
+        assert_eq!(after_close(1, 1, 4), 1);
+        // The shown one, last: the one before it.
+        assert_eq!(after_close(3, 3, 4), 2);
+        // After the shown one: nothing moves.
+        assert_eq!(after_close(1, 3, 4), 1);
+    }
+
+    #[test]
+    fn tabs_cycle_round() {
+        assert_eq!(cycled(0, 3, true), 1);
+        assert_eq!(cycled(2, 3, true), 0);
+        assert_eq!(cycled(0, 3, false), 2);
+        assert_eq!(cycled(0, 0, true), 0);
+    }
+
+    #[test]
+    fn a_tab_is_named_by_its_title_or_address() {
+        assert_eq!(tab_name("Example", "https://example.com/"), "Example");
+        assert_eq!(tab_name("", "https://example.com/a/"), "example.com/a");
+        assert_eq!(tab_name("", "about:blank"), "New tab");
+        assert_eq!(tab_name("", ""), "New tab");
+        // A page with no title of its own reports its address as one.
+        assert_eq!(
+            tab_name("localhost:3000", "localhost:3000"),
+            "localhost:3000"
+        );
+    }
+
+    #[test]
+    fn browser_keys_work_the_tabs() {
+        let k = |c: u8| VIRTUAL_KEY(c as u16);
+        assert_eq!(tab_key(k(b'T'), true, false, false), Some(TabStep::New));
+        assert_eq!(
+            tab_key(k(b'W'), true, false, false),
+            Some(TabStep::Close(None))
+        );
+        assert_eq!(tab_key(VK_TAB, true, false, false), Some(TabStep::Next));
+        assert_eq!(tab_key(VK_TAB, true, true, false), Some(TabStep::Previous));
+        assert_eq!(tab_key(VK_NEXT, true, false, false), Some(TabStep::Next));
+        assert_eq!(
+            tab_key(VK_PRIOR, true, false, false),
+            Some(TabStep::Previous)
+        );
+        assert_eq!(
+            tab_key(k(b'1'), true, false, false),
+            Some(TabStep::Select(0))
+        );
+        assert_eq!(
+            tab_key(k(b'9'), true, false, false),
+            Some(TabStep::Select(usize::MAX))
+        );
+        // Ctrl+Shift+T is a terminal, plain T is typing.
+        assert_eq!(tab_key(k(b'T'), true, true, false), None);
+        assert_eq!(tab_key(k(b'T'), false, false, false), None);
+        assert_eq!(tab_key(k(b'W'), true, false, true), None);
     }
 }

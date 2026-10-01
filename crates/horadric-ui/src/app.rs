@@ -310,6 +310,8 @@ pub(crate) enum Input {
     Link(String),
     /// A browser pane's cross: close the page of the project with this key.
     CloseWeb(String),
+    /// A tab key in a browser pane's page, or its page closing itself.
+    WebTab(String, web::TabStep),
     /// A browser pane's header right clicked, or Ctrl+L in its page: what
     /// can be done with the page of the project with this key.
     WebAsk(String, WebAsk),
@@ -337,8 +339,8 @@ pub(crate) enum Input {
     /// The usage window's Account row clicked: the agent's accounts to
     /// switch to.
     AccountMenu(Agent),
-    /// The usage window's Version row clicked: the release it names, or a
-    /// check for one.
+    /// The usage window's Version row clicked: the release it names, or the
+    /// notes of this one.
     Version,
     /// A setting's list closed, with the value picked, if one was.
     Picked(Agent, Setting, Option<Option<String>>),
@@ -367,6 +369,8 @@ pub(crate) enum Input {
     TasksMode(String),
     /// The plus in a tasks tile's header: ask for a new item.
     TaskAdd(String),
+    /// The gold ! beside it: start an agent that suggests quests.
+    GiveQuests(String),
     /// A stashed session's slot clicked: bring it back.
     Unstash(String),
     /// A stashed session's slot right clicked.
@@ -987,11 +991,14 @@ unsafe extern "system" fn app_proc(
             return LRESULT(0);
         }
         WM_HORADRIC_VERSION => {
+            // A waiting update shows its own notes, so the notes are one
+            // click away either way. The tray still looks for an update.
             match with_app(|app| app.update.clone()).flatten() {
                 Some(m) => offer_update(&m),
-                None => {
-                    with_app(|app| app.check_update(true));
-                }
+                None => watch::open_link(
+                    &crate::links::Target::Web(release::notes_url(env!("CARGO_PKG_VERSION"))),
+                    None,
+                ),
             }
             return LRESULT(0);
         }
@@ -1814,8 +1821,13 @@ fn web_menu(key: &str) {
     const RELOAD: usize = 4;
     const OUTSIDE: usize = 5;
     const CLOSE: usize = 6;
+    const NEW_TAB: usize = 7;
+    const CLOSE_TAB: usize = 8;
     const SIZE: usize = 100;
     let items = vec![
+        Item::action(NEW_TAB, "New tab\tCtrl+T"),
+        Item::action(CLOSE_TAB, "Close tab\tCtrl+W"),
+        Item::Separator,
         Item::action(ADDRESS, "Go to...\tCtrl+L"),
         Item::action(BACK, "Back\tAlt+Left"),
         Item::action(FORWARD, "Forward\tAlt+Right"),
@@ -1828,6 +1840,8 @@ fn web_menu(key: &str) {
     ];
     match menu::popup(&items) {
         Some(ADDRESS) => go_to(key),
+        Some(NEW_TAB) => web::tab(key, web::TabStep::New),
+        Some(CLOSE_TAB) => web::tab(key, web::TabStep::Close(None)),
         Some(BACK) => web::go(key, web::Step::Back),
         Some(FORWARD) => web::go(key, web::Step::Forward),
         Some(RELOAD) => web::go(key, web::Step::Reload),
@@ -5150,6 +5164,13 @@ impl App {
         }
     }
 
+    /// Opens `url` in a new tab of the project's browser pane, shown on
+    /// the stage with the keyboard.
+    fn open_web_tab(&mut self, key: &str, url: &str) {
+        web::open_tab(key, Some(url));
+        self.open_web(key, None);
+    }
+
     fn close_web(&mut self, key: &str) {
         self.webs.remove(key);
         self.sync_stage();
@@ -5995,10 +6016,11 @@ impl App {
                     }
                 }
                 Input::Link(url) => match self.stage.as_ref().map(|s| s.project()) {
-                    Some(key) if self.webs.contains_key(&key) => self.open_web(&key, Some(&url)),
+                    Some(key) if self.webs.contains_key(&key) => self.open_web_tab(&key, &url),
                     _ => watch::open_link(&crate::links::Target::Web(url), None),
                 },
                 Input::CloseWeb(key) => self.close_web(&key),
+                Input::WebTab(key, step) => web::tab(&key, step),
                 Input::WebAsk(key, what) => {
                     self.web_ask = Some((key, what));
                     post(self.notify.0 as isize, WM_HORADRIC_WEB, 0);
@@ -6078,6 +6100,7 @@ impl App {
                 }
                 Input::TasksMode(key) => runner::ask_for(self, runner::Menu::Mode(key)),
                 Input::TaskAdd(key) => runner::ask_for(self, runner::Menu::Add(key)),
+                Input::GiveQuests(key) => self.give_quests(&key),
             }
         }
         if relayout {

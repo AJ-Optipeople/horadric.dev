@@ -197,6 +197,13 @@ ChatGPT and xAI subscriptions used from Horadric like a Claude one. See "Codex a
 - [ ] Resume Claude sessions without resending the prompt they were started with
 - [ ] Keep Grok from showing an SSRF error for the Claude hook it borrows
   Grok runs the `http` hooks in `~/.claude/settings.json` and prints "blocked by SSRF protection" in its TUI at every event. `[compat.claude] hooks = false` in Grok's config stops it, but that is the user's file; look for a flag or environment variable Horadric can pass when it starts `grok` instead.
+- [x] Mouse-over tooltips @mouse-over-tooltips-42172
+  Mouse-over for all items in Horadric, describing what they do.
+- [ ] Tooltips on a pane's header: stash, zoom, close, the browser bar and its tabs, through tip.rs once the browser tabs work in pane.rs is committed
+- [x] Quest Log @quest-log-43924
+  Quests my ikke auto-start når du venstre-klikke på dem i listen, man skal se quest loggen først for at få en ide om hvad questen går ud på inden man accepter den.
+- [x] Quest Giver @quest-giver-43923
+  Knap ved Tasks listen der selv giver bud på hvad der kunne laves af tasks for det aktuelle projekt.
 - [ ] Ship public: release everything on main to every install
   Always the last item. Everything finished on main goes out, not only the Codex and Grok work. Follow RELEASING.md and "Ship public" in CLAUDE.md.
 

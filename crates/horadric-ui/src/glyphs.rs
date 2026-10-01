@@ -21,7 +21,7 @@ use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Direct2D::Common::{D2D1_COLOR_F, D2D1_GRADIENT_STOP, D2D_RECT_F};
 use windows::Win32::Graphics::Direct2D::{
     ID2D1Geometry, ID2D1HwndRenderTarget, ID2D1LinearGradientBrush, ID2D1SolidColorBrush,
-    D2D1_ANTIALIAS_MODE_ALIASED, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+    D2D1_ANTIALIAS_MODE_ALIASED, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_DRAW_TEXT_OPTIONS_CLIP,
     D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT, D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE,
     D2D1_EXTEND_MODE_CLAMP, D2D1_GAMMA_2_2, D2D1_LAYER_OPTIONS_NONE, D2D1_LAYER_PARAMETERS,
     D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES, D2D1_ROUNDED_RECT,
@@ -131,6 +131,86 @@ pub struct Bar<'a> {
     /// The side the pane stands on beside the grid, whose place button is
     /// lit. None in the grid.
     pub dock: Option<Side>,
+    /// What each tab is called, in the strip along the glass's top.
+    pub tabs: &'a [String],
+    /// The tab shown.
+    pub tab: usize,
+}
+
+/// Height of a browser pane's tab strip, a row of keys on the plate
+/// between its address bar and its glass.
+pub const TABS_H: f32 = HEADER_H + 4.0;
+/// A tab's widest. Past that many tabs share the strip.
+const TAB_MAX: f32 = 220.0;
+/// The new tab button's width, after the last tab.
+const TAB_NEW: f32 = HEADER_H;
+/// A tab's cross, at its right end.
+const TAB_CROSS: f32 = 20.0;
+/// Between two tabs: plate showing between keys.
+const TAB_GAP: f32 = 5.0;
+/// Between the strip's ends and the glass's edges.
+const TAB_INSET: f32 = 0.0;
+/// A tab key's top and bottom in the strip, room left under it for its
+/// side and its shadow.
+const TAB_KEY_TOP: f32 = 3.0;
+const TAB_KEY_H: f32 = 21.0;
+const TAB_RADIUS: f32 = 5.0;
+
+/// Where a browser pane's tabs go, in DIPs from its left.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TabLayout {
+    /// Each tab's left and right edges.
+    pub tabs: Vec<(f32, f32)>,
+    /// Where each tab's cross starts, where it is wide enough for one.
+    pub crosses: Vec<Option<f32>>,
+    /// Where the new tab button starts.
+    pub new: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TabHit {
+    Tab(usize),
+    Close(usize),
+    New,
+}
+
+/// `count` tabs in a pane `width` DIPs wide: as wide as [`TAB_MAX`] while
+/// they fit, sharing the strip when they do not, then the new tab button.
+pub fn tab_layout(width: f32, count: usize) -> TabLayout {
+    let left = BEZEL + TAB_INSET;
+    let room = (width - BEZEL - TAB_INSET - left - TAB_NEW).max(0.0);
+    let each = if count == 0 {
+        0.0
+    } else {
+        (room / count as f32).min(TAB_MAX)
+    };
+    let tabs: Vec<(f32, f32)> = (0..count)
+        .map(|i| {
+            let l = left + i as f32 * each;
+            (l, (l + each - TAB_GAP).max(l))
+        })
+        .collect();
+    let crosses = tabs
+        .iter()
+        .map(|&(l, r)| (r - l >= 3.0 * TAB_CROSS).then_some(r - TAB_CROSS))
+        .collect();
+    TabLayout {
+        tabs,
+        crosses,
+        new: left + count as f32 * each,
+    }
+}
+
+/// What in the tab strip is under `x`, a point in it.
+pub fn tab_hit(l: &TabLayout, x: f32) -> Option<TabHit> {
+    if x >= l.new && x < l.new + TAB_NEW {
+        return Some(TabHit::New);
+    }
+    let i = l.tabs.iter().position(|&(a, b)| x >= a && x < b)?;
+    match l.crosses[i] {
+        Some(c) if x >= c => Some(TabHit::Close(i)),
+        _ => Some(TabHit::Tab(i)),
+    }
 }
 
 /// A browser pane's page laid out at a size of its own: a rim round it,
@@ -579,6 +659,8 @@ pub struct GridTarget {
     plate: ID2D1LinearGradientBrush,
     /// The shade the bezel casts down onto the top of the glass.
     shade: ID2D1LinearGradientBrush,
+    /// A key's face, lit from above.
+    face: ID2D1LinearGradientBrush,
 }
 
 impl GridTarget {
@@ -594,11 +676,20 @@ impl GridTarget {
             let black = Color::rgb(0);
             let plate = gradient(&rt, &[theme::PLATE_TOP, theme::PLATE_BOTTOM])?;
             let shade = gradient(&rt, &[black.with_alpha(0.55), black.with_alpha(0.0)])?;
+            let white = Color::rgb(0xFFFFFF);
+            let face = gradient(
+                &rt,
+                &[
+                    theme::SURFACE.mix(white, 0.07),
+                    theme::SURFACE.mix(black, 0.1),
+                ],
+            )?;
             Ok(GridTarget {
                 rt,
                 brush,
                 plate,
                 shade,
+                face,
             })
         }
     }
@@ -650,9 +741,12 @@ impl GridTarget {
         };
         unsafe {
             let size = self.rt.GetSize();
+            // A browser pane's tabs stand on the plate, so its glass starts
+            // under them, where its page does.
+            let tabs = if header.bar.is_some() { TABS_H } else { 0.0 };
             let screen = D2D_RECT_F {
                 left: BEZEL,
-                top: SCREEN_TOP,
+                top: SCREEN_TOP + tabs,
                 right: size.width - BEZEL,
                 bottom: size.height - BEZEL,
             };
@@ -784,6 +878,9 @@ impl GridTarget {
             self.rt.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
 
             self.glass(gpu, &screen, header);
+            if let Some(bar) = &header.bar {
+                self.tab_strip(gpu, bar, size.width, header.accent);
+            }
             if let Some(p) = page {
                 self.page_frame(gpu, p);
             }
@@ -804,6 +901,223 @@ impl GridTarget {
                     .FillRoundedRectangle(&rounded(&screen, SCREEN_RADIUS), &self.brush);
             }
             self.rt.EndDraw(None, None)
+        }
+    }
+
+    /// A browser pane's tabs, a row of keys on the plate above its glass
+    /// as on a tape deck: the one shown latched down with its lamp lit in
+    /// the project's colour, the rest standing up, then the new tab key.
+    unsafe fn tab_strip(&self, gpu: &Gpu, bar: &Bar, width: f32, accent: Color) {
+        let l = tab_layout(width, bar.tabs.len());
+        let top = SCREEN_TOP + TAB_KEY_TOP;
+        let bottom = top + TAB_KEY_H;
+        let glyph = |g: &str, left: f32, right: f32, ink: Color| {
+            let g: Vec<u16> = g.encode_utf16().collect();
+            self.brush.SetColor(&render::color(ink));
+            self.rt.DrawText(
+                &g,
+                &gpu.icon_small,
+                &D2D_RECT_F {
+                    left,
+                    top,
+                    right,
+                    bottom,
+                },
+                &self.brush,
+                D2D1_DRAW_TEXT_OPTIONS_NONE,
+                DWRITE_MEASURING_MODE_NATURAL,
+            );
+        };
+        for (i, (name, &(left, right))) in bar.tabs.iter().zip(&l.tabs).enumerate() {
+            let shown = i == bar.tab;
+            let key = D2D_RECT_F {
+                left,
+                top,
+                right,
+                bottom,
+            };
+            if shown {
+                self.latched_key(gpu, &key, TAB_RADIUS);
+            } else {
+                self.raised_key(&key, TAB_RADIUS);
+            }
+            let wide = right - left >= 2.0 * TAB_CROSS;
+            if wide {
+                let lit = shown.then_some(accent);
+                self.tab_lamp(left + 10.0, (top + bottom) / 2.0, lit);
+            }
+            let cross = l.crosses[i];
+            let text_left = left + if wide { 19.0 } else { 6.0 };
+            let text_right = cross.unwrap_or(right - 4.0);
+            let name: Vec<u16> = name.encode_utf16().collect();
+            self.brush.SetColor(&render::color(if shown {
+                theme::TEXT
+            } else {
+                theme::TEXT_DIM
+            }));
+            self.rt.DrawText(
+                &name,
+                &gpu.small,
+                &D2D_RECT_F {
+                    left: text_left,
+                    top,
+                    right: text_right.max(text_left),
+                    bottom,
+                },
+                &self.brush,
+                D2D1_DRAW_TEXT_OPTIONS_CLIP,
+                DWRITE_MEASURING_MODE_NATURAL,
+            );
+            if let Some(c) = cross {
+                let ink = if shown {
+                    theme::TEXT_DIM
+                } else {
+                    theme::TEXT_DIM.with_alpha(0.6)
+                };
+                glyph("\u{E711}", c, c + TAB_CROSS, ink);
+            }
+        }
+        // A round key, as the new session key on a cluster.
+        let d = TAB_KEY_H - 1.0;
+        let cx = l.new + TAB_NEW / 2.0;
+        let new = D2D_RECT_F {
+            left: cx - d / 2.0,
+            top,
+            right: cx + d / 2.0,
+            bottom: top + d,
+        };
+        self.raised_key(&new, d / 2.0);
+        glyph("\u{E710}", new.left, new.right, theme::TEXT_DIM);
+    }
+
+    /// A key standing off the plate: its shadow on the plate, its side
+    /// showing under its face, the face lit from above and the light
+    /// catching its top edge.
+    unsafe fn raised_key(&self, r: &D2D_RECT_F, radius: f32) {
+        let side = 2.5;
+        for (grow, alpha) in [(3.0, 0.06), (2.0, 0.1), (1.0, 0.16), (0.0, 0.22)] {
+            self.brush
+                .SetColor(&render::color(Color::rgb(0).with_alpha(alpha)));
+            let s = D2D_RECT_F {
+                left: r.left - grow,
+                top: r.top + side + 1.0 - grow,
+                right: r.right + grow,
+                bottom: r.bottom + side + 1.0 + grow,
+            };
+            self.rt
+                .FillRoundedRectangle(&rounded(&s, radius + grow), &self.brush);
+        }
+        self.brush
+            .SetColor(&render::color(theme::SURFACE.mix(Color::rgb(0), 0.6)));
+        let below = D2D_RECT_F {
+            top: r.top + side,
+            bottom: r.bottom + side,
+            ..*r
+        };
+        self.rt
+            .FillRoundedRectangle(&rounded(&below, radius), &self.brush);
+        // The face drawn a pixel down over a lighter copy leaves the lit
+        // top edge.
+        self.brush.SetColor(&render::color(
+            theme::SURFACE.mix(Color::rgb(0xFFFFFF), 0.12),
+        ));
+        self.rt
+            .FillRoundedRectangle(&rounded(r, radius), &self.brush);
+        self.face.SetStartPoint(Vector2 { X: 0.0, Y: r.top });
+        self.face.SetEndPoint(Vector2 {
+            X: 0.0,
+            Y: r.bottom,
+        });
+        let face = D2D_RECT_F {
+            top: r.top + 1.0,
+            ..*r
+        };
+        self.rt
+            .FillRoundedRectangle(&rounded(&face, radius - 0.5), &self.face);
+    }
+
+    /// A key latched in, level with the plate: the plate's shade falling
+    /// in over its top edge and the plate's lit lip along its bottom, as
+    /// round a bay.
+    unsafe fn latched_key(&self, gpu: &Gpu, r: &D2D_RECT_F, radius: f32) {
+        let lip = D2D_RECT_F {
+            left: r.left - 0.5,
+            top: r.top + 0.5,
+            right: r.right + 0.5,
+            bottom: r.bottom + 1.5,
+        };
+        self.brush
+            .SetColor(&render::color(theme::ENGRAVE_LIGHT.fade(1.6)));
+        self.rt
+            .FillRoundedRectangle(&rounded(&lip, radius + 0.5), &self.brush);
+        self.brush
+            .SetColor(&render::color(theme::WELL.mix(theme::SURFACE, 0.15)));
+        self.rt
+            .FillRoundedRectangle(&rounded(r, radius), &self.brush);
+        if let Ok(mask) = gpu.d2d.CreateRoundedRectangleGeometry(&rounded(r, radius)) {
+            if let Ok(layer) = self.rt.CreateLayer(None) {
+                let params = D2D1_LAYER_PARAMETERS {
+                    contentBounds: *r,
+                    geometricMask: ManuallyDrop::new(mask.cast::<ID2D1Geometry>().ok()),
+                    maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                    maskTransform: Matrix3x2::identity(),
+                    opacity: 1.0,
+                    opacityBrush: ManuallyDrop::new(None),
+                    layerOptions: D2D1_LAYER_OPTIONS_NONE,
+                };
+                self.rt.PushLayer(&params, &layer);
+                let depth = 6.0;
+                self.shade.SetStartPoint(Vector2 { X: 0.0, Y: r.top });
+                self.shade.SetEndPoint(Vector2 {
+                    X: 0.0,
+                    Y: r.top + depth,
+                });
+                self.rt.FillRectangle(
+                    &D2D_RECT_F {
+                        bottom: r.top + depth,
+                        ..*r
+                    },
+                    &self.shade,
+                );
+                self.rt.PopLayer();
+                drop(ManuallyDrop::into_inner(params.geometricMask));
+            }
+        }
+        let edge = D2D_RECT_F {
+            left: r.left + 0.5,
+            top: r.top + 0.5,
+            right: r.right - 0.5,
+            bottom: r.bottom - 0.5,
+        };
+        self.brush.SetColor(&render::color(theme::ENGRAVE_DARK));
+        self.rt
+            .DrawRoundedRectangle(&rounded(&edge, radius - 0.5), &self.brush, 1.0, None);
+    }
+
+    /// A tab's lamp at `(x, y)`: burning in `lit`, or dark glass in its
+    /// housing.
+    unsafe fn tab_lamp(&self, x: f32, y: f32, lit: Option<Color>) {
+        let dot = |r: f32, c: Color| {
+            self.brush.SetColor(&render::color(c));
+            self.rt.FillEllipse(
+                &D2D1_ELLIPSE {
+                    point: Vector2 { X: x, Y: y },
+                    radiusX: r,
+                    radiusY: r,
+                },
+                &self.brush,
+            );
+        };
+        match lit {
+            Some(c) => {
+                dot(6.0, c.with_alpha(0.12));
+                dot(4.0, c.with_alpha(0.25));
+                dot(2.5, c.mix(Color::rgb(0xFFFFFF), 0.3));
+            }
+            None => {
+                dot(3.5, Color::rgb(0).with_alpha(0.55));
+                dot(2.5, theme::LAMP_OFF);
+            }
         }
     }
 
@@ -1559,5 +1873,36 @@ mod tests {
         assert_eq!(r[1], ((oy + 32.0) * 1.5).round() as i32);
         assert_eq!(r[2] - r[0], 12);
         assert_eq!(r[3] - r[1], 24);
+    }
+
+    #[test]
+    fn tabs_share_the_strip_once_they_no_longer_fit() {
+        let wide = tab_layout(1000.0, 2);
+        assert_eq!(wide.tabs[0].0, BEZEL + TAB_INSET);
+        assert_eq!(wide.tabs[0].1 - wide.tabs[0].0, TAB_MAX - TAB_GAP);
+        assert_eq!(wide.new, BEZEL + TAB_INSET + 2.0 * TAB_MAX);
+        assert!(wide.crosses.iter().all(Option::is_some));
+
+        let many = tab_layout(400.0, 10);
+        let each = many.tabs[1].0 - many.tabs[0].0;
+        assert!(each < TAB_MAX);
+        assert!(many.new + TAB_NEW <= 400.0 - BEZEL - TAB_INSET + 0.01);
+        // Too narrow for a cross: a middle click or Ctrl+W closes it.
+        assert!(many.crosses.iter().all(Option::is_none));
+
+        let none = tab_layout(400.0, 0);
+        assert!(none.tabs.is_empty());
+        assert_eq!(none.new, BEZEL + TAB_INSET);
+    }
+
+    #[test]
+    fn a_click_in_the_strip_finds_its_tab() {
+        let l = tab_layout(1000.0, 3);
+        assert_eq!(tab_hit(&l, l.tabs[1].0 + 1.0), Some(TabHit::Tab(1)));
+        let cross = l.crosses[2].unwrap();
+        assert_eq!(tab_hit(&l, cross + 1.0), Some(TabHit::Close(2)));
+        assert_eq!(tab_hit(&l, l.new + 1.0), Some(TabHit::New));
+        assert_eq!(tab_hit(&l, l.new + TAB_NEW + 1.0), None);
+        assert_eq!(tab_hit(&l, 0.0), None);
     }
 }

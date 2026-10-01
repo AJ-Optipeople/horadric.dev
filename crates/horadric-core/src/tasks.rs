@@ -668,6 +668,23 @@ pub fn system_prompt(horadric: &str, file: &str, list: Option<&str>) -> String {
     out
 }
 
+/// The first prompt of the quest giver, a session the gold ! on the
+/// tile starts to suggest quests. It only suggests: the human picks, since
+/// a project in auto mode would start whatever lands in the log at once.
+pub fn giver_prompt(horadric: &str, file: &str) -> String {
+    format!(
+        "You are the quest giver for this project. Look around before you suggest \
+         anything: the README, the docs and any plan in them, the quest log at {file} \
+         (what is done, what is open), the recent git log, and the code itself. Then \
+         suggest three to five quests worth doing next that are not on the log yet, \
+         each a short title and a few lines of notes saying what to do and why, \
+         numbered. Change nothing while you look.\n\n\
+         Ask me which to add. Add only the ones I pick, each with \
+         `{horadric} quest add \"<title>\" --notes \"<notes>\"`, in the order they \
+         should be done, then stop."
+    )
+}
+
 /// What an agent is told, once, when its turn ended without a report.
 pub fn nudge(horadric: &str) -> String {
     format!(
@@ -706,6 +723,15 @@ mod tests {
         - [-] Something Horadric does not know\n\
         Some prose.\n\
         \x20 Not a note, the item before is over.\n";
+
+    #[test]
+    fn the_quest_giver_suggests_and_adds_only_what_the_human_picks() {
+        let p = giver_prompt("horadric", ".horadric/quests.md");
+        assert!(p.contains("the quest log at .horadric/quests.md"));
+        assert!(p.contains("Add only the ones I pick"));
+        assert!(p.contains("`horadric quest add \"<title>\" --notes \"<notes>\"`"));
+        assert!(p.contains("Change nothing while you look."));
+    }
 
     #[test]
     fn a_list_is_unfinished_while_any_item_is_not_done() {

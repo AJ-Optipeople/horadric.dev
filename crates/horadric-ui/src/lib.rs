@@ -127,6 +127,8 @@ mod store;
 #[cfg(windows)]
 mod terminal;
 #[cfg(windows)]
+mod tip;
+#[cfg(windows)]
 mod toast;
 #[cfg(windows)]
 mod tray;
