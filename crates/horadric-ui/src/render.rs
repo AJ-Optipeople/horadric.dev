@@ -318,6 +318,8 @@ pub struct TaskRow {
 pub struct UsageScene<'a> {
     pub layout: &'a UsageLayout,
     pub collapsed: bool,
+    /// Locked against folding and dragging.
+    pub locked: bool,
     /// Whose limits and settings these are, when there is a header to say.
     pub provider: &'a str,
     /// What the screen says while no limit is known.
@@ -943,9 +945,18 @@ impl Painter<'_> {
                 }
             }
         }
+        // Open, it is only a hint, so it stays faint until pointed at;
+        // closed, it says why a click on the limits does nothing.
+        let ink = match (scene.button(UsageHit::Lock), scene.locked) {
+            (Button::Idle, false) => theme::TEXT_DIM.fade(0.45),
+            (Button::Idle, true) => theme::TEXT_DIM,
+            _ => theme::TEXT,
+        };
+        let glyph = if scene.locked { '\u{E72E}' } else { '\u{E785}' };
+        self.icon(&gpu.icon_small, ink, glyph, l.lock);
         // The screen folds the window, so it says so as a cluster's name
         // does: a chevron beside the first word, always there when folded.
-        let folding = scene.button(UsageHit::Limits) != Button::Idle;
+        let folding = !scene.locked && scene.button(UsageHit::Limits) != Button::Idle;
         if let (Some(r), true) = (first, scene.collapsed || folding) {
             let name = limits.first().map_or("", |(n, _)| *n);
             let x = r.x + INNER_PAD + self.measure(gpu, &gpu.body, name);
