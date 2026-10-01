@@ -555,6 +555,10 @@ pub struct UsageLayout {
     pub limits_box: Rect,
     /// One row per limit, or one for the line that says none is known yet.
     pub limits: Vec<Rect>,
+    /// The padlock, which keeps the window from folding or being dragged.
+    /// It is a piece of the plate bitten out of the screen's top right
+    /// corner, reaching out into the margin.
+    pub lock: Rect,
     /// The section round the settings. None when folded.
     pub settings_box: Option<Rect>,
     pub settings: Vec<SettingRow>,
@@ -601,6 +605,7 @@ pub fn usage(
         header,
         limits_box: Rect::default(),
         limits: Vec::new(),
+        lock: Rect::default(),
         settings_box: None,
         settings: Vec::new(),
     };
@@ -610,6 +615,12 @@ pub fn usage(
     }
     y += inner;
     l.limits_box = Rect::new(m.pad, top, full, y - top);
+    // Deep enough into the screen to swallow its rounded corner, and up to
+    // the header without covering it.
+    let (bite, reach) = (m.tile_radius + 4.0, 12.0);
+    let lock_top = header.map_or(top - reach, |h| h.bottom().max(top - reach));
+    let x = l.limits_box.right() - bite;
+    l.lock = Rect::new(x, lock_top, bite + reach, top + bite - lock_top);
     if !collapsed {
         y += m.gap;
         let top = y;
@@ -787,6 +798,8 @@ pub enum UsageHit {
     Header,
     /// The limits' screen, which folds and unfolds the window.
     Limits,
+    /// The padlock, which locks and unlocks the fold and the drag.
+    Lock,
     Setting(usize),
     Nothing,
 }
@@ -794,6 +807,9 @@ pub enum UsageHit {
 pub fn usage_hit(l: &UsageLayout, x: f32, y: f32) -> UsageHit {
     if l.header.is_some_and(|h| h.contains(x, y)) {
         return UsageHit::Header;
+    }
+    if l.lock.contains(x, y) {
+        return UsageHit::Lock;
     }
     if l.limits_box.contains(x, y) {
         return UsageHit::Limits;
@@ -2146,6 +2162,23 @@ mod tests {
         let r = l.limits[1];
         assert_eq!(usage_hit(&l, r.x + 5.0, r.y + 5.0), UsageHit::Limits);
         assert_eq!(usage_hit(&l, 1.0, 1.0), UsageHit::Nothing);
+    }
+
+    #[test]
+    fn the_padlock_sits_in_the_top_right_corner_clear_of_the_rest() {
+        let m = Metrics::default();
+        for (header, collapsed) in [(false, false), (true, false), (false, true)] {
+            let l = usage(&m, header, 2, &SCALES, collapsed);
+            let (k, b) = (l.lock, l.limits_box);
+            // Inside the plate's seam, over the screen's corner.
+            assert!(k.y >= 6.0 && k.right() <= l.size.0 - 6.0);
+            assert!(k.x < b.right() && k.right() > b.right());
+            assert!(k.y < b.y && k.bottom() > b.y + m.tile_radius);
+            assert!(b.right() - k.x > m.tile_radius);
+            assert!(l.header.is_none_or(|h| k.y >= h.bottom()));
+            let (x, y) = (k.x + k.w / 2.0, k.y + k.h / 2.0);
+            assert_eq!(usage_hit(&l, x, y), UsageHit::Lock);
+        }
     }
 
     #[test]

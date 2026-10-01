@@ -7,7 +7,8 @@
 //! in a cluster, and it sits at the top of the first column of tiles. It
 //! behaves like a cluster: it never takes the focus, and it drags to
 //! another place in the columns the same way. A click on the limits folds
-//! it down to the session's budget alone. A list setting drops its list,
+//! it down to the session's budget alone, unless the padlock beside them is
+//! closed, which keeps the window as it is and where it is. A list setting drops its list,
 //! which the app opens, since it owns the defaults. Effort is a slider in
 //! the window itself. Under the settings, the provider's account in use,
 //! whose row opens its accounts to switch to.
@@ -55,6 +56,9 @@ const WM_MOUSELEAVE: u32 = 0x02A3;
 pub struct UsageWindow {
     pub hwnd: HWND,
     pub collapsed: Cell<bool>,
+    /// Locked, a click on the limits does not fold it and a drag does not
+    /// move it, so a stray click leaves the column as it was.
+    pub locked: Cell<bool>,
     shared: Rc<Shared>,
     target: RefCell<Option<Target>>,
     layout: RefCell<UsageLayout>,
@@ -174,11 +178,18 @@ pub fn register_class() -> Result<()> {
 impl UsageWindow {
     /// Creates the window at `(x, y)` in physical pixels and shows it
     /// without activating it.
-    pub fn create(shared: Rc<Shared>, collapsed: bool, x: i32, y: i32) -> Result<Box<Self>> {
+    pub fn create(
+        shared: Rc<Shared>,
+        collapsed: bool,
+        locked: bool,
+        x: i32,
+        y: i32,
+    ) -> Result<Box<Self>> {
         let initial = layout::usage(&shared.metrics, false, 0, &scales(Agent::Claude), collapsed);
         let mut win = Box::new(UsageWindow {
             hwnd: HWND::default(),
             collapsed: Cell::new(collapsed),
+            locked: Cell::new(locked),
             shared,
             target: RefCell::new(None),
             layout: RefCell::new(initial),
@@ -366,6 +377,7 @@ impl UsageWindow {
         let scene = UsageScene {
             layout: &layout,
             collapsed: self.collapsed.get(),
+            locked: self.locked.get(),
             provider: agent.provider(),
             empty: empty(agent),
             usage: usage.as_ref(),
@@ -441,7 +453,7 @@ impl UsageWindow {
             }),
             _ => None,
         };
-        tip::usage(hot, row)
+        tip::usage(hot, row, self.locked.get())
     }
 
     fn hover(&self, hot: UsageHit) {
@@ -474,6 +486,12 @@ impl UsageWindow {
 
     fn click(&self, hit: UsageHit) {
         match hit {
+            UsageHit::Lock => {
+                self.locked.set(!self.locked.get());
+                tip::over(&self.shared, self.hwnd, self.tip(UsageHit::Lock));
+                self.invalidate();
+            }
+            UsageHit::Limits if self.locked.get() => {}
             UsageHit::Limits => {
                 self.collapsed.set(!self.collapsed.get());
                 self.fit();
@@ -645,6 +663,7 @@ impl UsageWindow {
                     return Some(LRESULT(0));
                 }
                 let (x, y) = self.position();
+                // Locked, it still clicks: the drag is only never moved.
                 *self.drag.borrow_mut() = Some(Drag {
                     start_cursor: cursor,
                     start_window: POINT { x, y },
@@ -667,7 +686,8 @@ impl UsageWindow {
                     }
                     let dx = cursor.x - d.start_cursor.x;
                     let dy = cursor.y - d.start_cursor.y;
-                    if d.moved || dx.abs() > DRAG_THRESHOLD || dy.abs() > DRAG_THRESHOLD {
+                    let far = dx.abs() > DRAG_THRESHOLD || dy.abs() > DRAG_THRESHOLD;
+                    if !self.locked.get() && (d.moved || far) {
                         d.moved = true;
                         self.press(None);
                         self.move_to(d.start_window.x + dx, d.start_window.y + dy);
