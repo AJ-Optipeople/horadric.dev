@@ -68,6 +68,7 @@ use crate::glide::Glides;
 use crate::layout::CaptionHit;
 use crate::menu::{self, Item};
 use crate::pane::{self, Pane, DIRS, WM_PANE_FOCUS, WM_PANE_GRAB, WM_PANE_MOVE, WM_PANE_ZOOM};
+use crate::tip;
 use crate::window::Shared;
 use crate::{layout, snapping, theme, web};
 
@@ -1315,6 +1316,9 @@ impl TerminalWindow {
                     }
                 }
                 let key = Self::key_of(wparam.0 as u32);
+                let zoomed = unsafe { IsZoomed(self.hwnd) }.as_bool();
+                let line = key.and_then(|k| tip::caption(k, zoomed));
+                tip::over(&self.shared, self.hwnd, line);
                 self.with_caption(|c| {
                     c.set_hot(key);
                     if c.pressed().is_some() && c.pressed() != key {
@@ -1325,6 +1329,7 @@ impl TerminalWindow {
             }
             WM_NCMOUSELEAVE => {
                 self.tracking.set(false);
+                tip::away(self.hwnd);
                 self.with_caption(|c| {
                     c.set_hot(None);
                     c.set_pressed(None);
@@ -1334,6 +1339,7 @@ impl TerminalWindow {
             // Windows would draw its own keys over the caption on a press,
             // so the caption's keys are pressed and let go here.
             WM_NCLBUTTONDOWN | WM_NCLBUTTONDBLCLK => {
+                tip::press(self.hwnd);
                 let key = Self::key_of(wparam.0 as u32)?;
                 self.with_caption(|c| c.set_pressed(Some(key)));
                 Some(LRESULT(0))

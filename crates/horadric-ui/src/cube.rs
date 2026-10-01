@@ -37,6 +37,7 @@ use crate::layout::{self, CubeHit, CubeLayout};
 use crate::motion::{self};
 use crate::render::{CubeScene, Flying, StashLook, Target, TransmuteLook};
 use crate::theme;
+use crate::tip;
 use crate::window::Shared;
 use crate::{appear, backdrop, columns};
 
@@ -425,6 +426,7 @@ impl CubeWindow {
     }
 
     fn hover(&self, hot: CubeHit) {
+        tip::over(&self.shared, self.hwnd, tip::cube(hot));
         if self.hot.replace(hot) != hot {
             self.invalidate();
         }
@@ -525,6 +527,7 @@ impl CubeWindow {
                 Some(LRESULT(0))
             }
             WM_LBUTTONDOWN => {
+                tip::press(self.hwnd);
                 self.raise();
                 let mut cursor = POINT::default();
                 unsafe {
@@ -591,6 +594,7 @@ impl CubeWindow {
             WM_MOUSELEAVE => {
                 self.tracking.set(false);
                 self.hover(CubeHit::Nothing);
+                tip::away(self.hwnd);
                 Some(LRESULT(0))
             }
             WM_CAPTURECHANGED => {

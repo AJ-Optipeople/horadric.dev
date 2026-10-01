@@ -42,6 +42,7 @@ use crate::clipboard;
 use crate::layout::{self, StartHit, StartLayout};
 use crate::recent;
 use crate::render::{StartScene, Target};
+use crate::tip;
 use crate::window::Shared;
 
 pub(crate) const CLASS: PCWSTR = w!("HoradricStart");
@@ -260,6 +261,7 @@ impl StartWindow {
     }
 
     fn hover(&self, hot: StartHit) {
+        tip::over(&self.shared, self.hwnd, tip::start(hot));
         if self.hot.replace(hot) != hot {
             self.invalidate();
         }
@@ -355,6 +357,7 @@ impl StartWindow {
                 Some(LRESULT(0))
             }
             WM_LBUTTONDOWN => {
+                tip::press(self.hwnd);
                 self.raise();
                 unsafe {
                     SetCapture(self.hwnd);
@@ -383,6 +386,7 @@ impl StartWindow {
                 Some(LRESULT(0))
             }
             WM_RBUTTONUP => {
+                tip::press(self.hwnd);
                 if let StartHit::Recent(i) = self.hit(lparam) {
                     if let Some(p) = self.recent.borrow().get(i) {
                         app::push(Input::RecentMenu(PathBuf::from(p)));
@@ -393,6 +397,7 @@ impl StartWindow {
             WM_MOUSELEAVE => {
                 self.tracking.set(false);
                 self.hover(StartHit::Nothing);
+                tip::away(self.hwnd);
                 Some(LRESULT(0))
             }
             WM_CAPTURECHANGED => {
