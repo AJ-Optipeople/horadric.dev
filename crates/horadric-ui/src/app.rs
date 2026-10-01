@@ -6802,6 +6802,7 @@ fn clip_window(clipped: &mut Clipped, hwnd: HWND, bounds: Option<(i32, i32)>) {
         return;
     }
     clipped.insert(id, (w, cut));
+    crate::render::set_cut(hwnd, cut);
     unsafe {
         // The window owns the region once it is set.
         let region = cut.map(|(from, to)| CreateRectRgn(0, from, w, to));
