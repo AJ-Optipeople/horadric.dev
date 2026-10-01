@@ -53,6 +53,7 @@ use horadric_core::diff::{self as changes, Diff, FileDiff, Recount};
 use horadric_core::fleet::{self, Device};
 use horadric_core::journal::{self, Entry, What};
 use horadric_core::overlap::Overlap;
+use horadric_core::presence;
 use horadric_core::release::{self, Manifest};
 use horadric_core::saved::{Discord, Side};
 use horadric_core::ssh;
@@ -685,6 +686,8 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             quiet: saved.quiet,
             sounds: saved.sounds,
             discord: saved.discord,
+            rich: None,
+            run: presence::Run::default(),
             cube_on: saved.cube,
             font_family: saved.font_family.clone(),
             screen: saved.screen.clone(),
@@ -2603,6 +2606,10 @@ struct App {
     /// What the Discord profile may show, from the tray menu. Changed only
     /// through [`App::set_discord`].
     discord: Discord,
+    /// The Rich Presence client, kept while [`App::discord`] is on.
+    rich: Option<crate::discord::Discord>,
+    /// When the current run of work began, which the profile counts from.
+    run: presence::Run,
     /// The cube is shown, from the usage window's menu.
     cube_on: bool,
     /// The terminal font picked from the tray menu. Kept as picked, so a
@@ -5365,6 +5372,8 @@ impl App {
         if let Some(since) = self.away.idle(idle_secs(), unix_now()) {
             self.welcome_back(since);
         }
+        // A run of work ends after a quiet spell no event marks.
+        self.sync_discord();
         self.save();
     }
 
@@ -5516,6 +5525,12 @@ impl App {
             }
         }
         self.frozen = true;
+        // Quit and reload clear the profile before the pipe closes, since
+        // Discord shows a stale activity for a while after we are gone. The
+        // wait is bounded by the client.
+        if let Some(rich) = self.rich.take() {
+            rich.stop();
+        }
     }
 
     /// Makes the windows match the projects in the registry.
@@ -5625,6 +5640,7 @@ impl App {
             (t, w) => format!("{app}: {t} sessions, {w} waiting"),
         };
         self.tray.set_tip(&tip);
+        self.sync_discord();
         self.identify();
         self.announce();
         self.journal_phases();
@@ -5712,6 +5728,45 @@ impl App {
         }
         self.discord = discord;
         self.save();
+        self.sync_discord();
+    }
+
+    /// Hands the Discord client what the profile should say now. Called
+    /// whenever the registry or the setting changes, and from the tick so a
+    /// run of work ends on time; the client drops what did not change. It
+    /// only ever sends on a channel, so the UI thread never waits on the
+    /// pipe.
+    fn sync_discord(&mut self) {
+        if self.discord.is_off() || self.frozen {
+            // Dropped, not stopped: the client clears and closes on its own
+            // thread, and the UI does not wait for a Discord that may hang.
+            self.rich = None;
+            self.run = presence::Run::default();
+            return;
+        }
+        let began = Instant::now();
+        let stage = self.stage.as_ref().map(|s| project_name(&s.project()));
+        let activity = {
+            let Ok(r) = self.shared.registry.lock() else {
+                return;
+            };
+            let named: Vec<(&Session, String)> = r
+                .all()
+                .map(|s| (s, project_name(&project_key(s))))
+                .collect();
+            let seen: Vec<presence::Seen> = named
+                .iter()
+                .map(|(session, project)| presence::Seen { session, project })
+                .collect();
+            let start = self.run.update(&seen, SystemTime::now());
+            presence::presence(&seen, stage.as_deref(), self.discord, start)
+        };
+        self.rich
+            .get_or_insert_with(crate::discord::Discord::start)
+            .set(activity);
+        if std::env::var_os("HORADRIC_DEBUG").is_some() {
+            eprintln!("discord sync took {:?}", began.elapsed());
+        }
     }
 
     /// Plays `loot` when the tray says loot is heard.

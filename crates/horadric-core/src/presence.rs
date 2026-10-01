@@ -9,13 +9,18 @@ use crate::discord::Activity;
 use crate::saved::Discord;
 use crate::session::{Phase, Session};
 
-/// The art keys. Rich Presence names an image by the key it was uploaded
-/// under, or takes an `https` URL in the same field, so the art decides
-/// what these finally say.
-pub const LARGE_IMAGE: &str = "horadric";
-pub const WAITS_IMAGE: &str = "waits";
-pub const WORKING_IMAGE: &str = "working";
-pub const IDLE_IMAGE: &str = "idle";
+/// The art. Discord takes an `https` URL where it would take the key of
+/// an uploaded asset, so the images live in `docs/discord` and are named
+/// by their URL on `main`, which nothing has to be uploaded for. See
+/// `docs/discord/README.md` for going back to keys.
+pub const LARGE_IMAGE: &str =
+    "https://raw.githubusercontent.com/Mopra/horadric.dev/main/docs/discord/horadric.png";
+pub const WAITS_IMAGE: &str =
+    "https://raw.githubusercontent.com/Mopra/horadric.dev/main/docs/discord/waits.png";
+pub const WORKING_IMAGE: &str =
+    "https://raw.githubusercontent.com/Mopra/horadric.dev/main/docs/discord/working.png";
+pub const IDLE_IMAGE: &str =
+    "https://raw.githubusercontent.com/Mopra/horadric.dev/main/docs/discord/idle.png";
 
 /// Discord refuses a `state` or `details` longer than this.
 const MAX_TEXT: usize = 128;
