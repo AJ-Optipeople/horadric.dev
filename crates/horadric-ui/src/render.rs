@@ -620,6 +620,46 @@ impl StartScene<'_> {
     }
 }
 
+thread_local! {
+    /// The rows that show of each window cut at a column's top or bottom,
+    /// by its handle, in its own pixels.
+    static CUTS: RefCell<HashMap<isize, (i32, i32)>> = RefCell::default();
+}
+
+/// Tells a window's frames that only its rows `from..to` show, None when
+/// all of it does, so they fade into the plate at a cut edge rather than
+/// stop dead at it.
+pub fn set_cut(hwnd: HWND, cut: Option<(i32, i32)>) {
+    CUTS.with(|c| {
+        let mut c = c.borrow_mut();
+        match cut {
+            Some(cut) => c.insert(hwnd.0 as isize, cut),
+            None => c.remove(&(hwnd.0 as isize)),
+        };
+    });
+}
+
+/// How far in from a cut edge the window fades into its plate, in DIPs.
+const CUT_FADE: f32 = 28.0;
+
+/// The bands that fade into the plate in a window `h` tall of which only
+/// `from..to` shows, each as the row at the cut where the plate is solid
+/// and the row `band` inside it where the window shows through clear. None
+/// at an edge that is the window's own.
+pub fn fade_bands((from, to): (f32, f32), h: f32, band: f32) -> Vec<(f32, f32)> {
+    let mut out = Vec::new();
+    if from >= to {
+        return out;
+    }
+    if from > 0.0 {
+        out.push((from, (from + band).min(to)));
+    }
+    if to < h {
+        out.push((to, (to - band).max(from)));
+    }
+    out
+}
+
 /// A window's render target. Recreated when Direct2D asks for it.
 pub struct Target {
     rt: ID2D1HwndRenderTarget,
@@ -775,6 +815,7 @@ impl Target {
             if scene.ambient {
                 self.painter(&self.rt).light(m, scene);
             }
+            self.fade_cut();
             self.rt.EndDraw(None, None)
         }
     }
@@ -784,6 +825,7 @@ impl Target {
         unsafe {
             self.rt.BeginDraw();
             self.painter(&self.rt).usage(gpu, m, scene);
+            self.fade_cut();
             self.rt.EndDraw(None, None)
         }
     }
@@ -793,6 +835,7 @@ impl Target {
         unsafe {
             self.rt.BeginDraw();
             self.painter(&self.rt).stash(gpu, m, scene);
+            self.fade_cut();
             self.rt.EndDraw(None, None)
         }
     }
@@ -802,6 +845,7 @@ impl Target {
         unsafe {
             self.rt.BeginDraw();
             self.painter(&self.rt).cube(gpu, m, scene);
+            self.fade_cut();
             self.rt.EndDraw(None, None)
         }
     }
@@ -874,6 +918,7 @@ impl Target {
         unsafe {
             self.rt.BeginDraw();
             self.painter(&self.rt).start(gpu, m, scene);
+            self.fade_cut();
             self.rt.EndDraw(None, None)
         }
     }
@@ -893,6 +938,29 @@ impl Target {
             p.plate(m, size);
             p.draw_layout(text, theme::text(), Rect::new(pad.0, pad.1, size.0, size.1));
             self.rt.EndDraw(None, None)
+        }
+    }
+
+    /// Fades the window into its plate at the edges the column cuts it
+    /// at, so a tile scrolling past one dissolves rather than is sliced.
+    unsafe fn fade_cut(&self) {
+        let id = self.rt.GetHwnd().0 as isize;
+        let Some((from, to)) = CUTS.with(|c| c.borrow().get(&id).copied()) else {
+            return;
+        };
+        let (mut dpi_x, mut dpi_y) = (96.0, 96.0);
+        self.rt.GetDpi(&mut dpi_x, &mut dpi_y);
+        let k = 96.0 / dpi_y.max(1.0);
+        let size = self.rt.GetSize();
+        let h = size.height.max(1.0);
+        let p = self.painter(&self.rt);
+        for (solid, clear) in fade_bands((from as f32 * k, to as f32 * k), h, CUT_FADE) {
+            // Where the plate's own light is, in steps, so a scroll does
+            // not make a new gradient every frame.
+            let t = ((solid / h).clamp(0.0, 1.0) * 32.0).round() / 32.0;
+            let c = theme::plate_top().mix(theme::plate_bottom(), t);
+            let r = Rect::new(0.0, solid.min(clear), size.width, (clear - solid).abs());
+            p.fill_gradient(&r, (solid, clear), &[(0.0, c), (1.0, c.fade(0.0))]);
         }
     }
 
@@ -3765,6 +3833,19 @@ fn rect(r: &Rect) -> D2D_RECT_F {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_cut_edge_fades_inward_and_a_window_edge_does_not() {
+        assert_eq!(fade_bands((40.0, 300.0), 300.0, 28.0), vec![(40.0, 68.0)]);
+        assert_eq!(fade_bands((0.0, 200.0), 300.0, 28.0), vec![(200.0, 172.0)]);
+        assert_eq!(fade_bands((0.0, 300.0), 300.0, 28.0), vec![]);
+        // A sliver narrower than the fade fades across all of it.
+        assert_eq!(
+            fade_bands((290.0, 300.0), 400.0, 28.0),
+            vec![(290.0, 300.0), (300.0, 290.0)]
+        );
+        assert_eq!(fade_bands((50.0, 50.0), 300.0, 28.0), vec![]);
+    }
 
     #[test]
     fn a_soft_edge_spreads_evenly_about_the_sharp_one() {

@@ -276,6 +276,39 @@ pub fn fill(
     (out, room)
 }
 
+/// Lays out a column as [`fill`] does, but with its first `pinned` windows
+/// held at `top`, unscrolled, and the rest filling and scrolling in what is
+/// left below them. Also returns where that scrolling part starts, which is
+/// the top the windows in it are cut at.
+pub fn fill_pinned(
+    items: &[Stacked],
+    top: i32,
+    height: i32,
+    gap: i32,
+    min_files: i32,
+    scroll: i32,
+    pinned: usize,
+) -> (Vec<Filled>, i32, i32) {
+    let pinned = pinned.min(items.len());
+    let mut out = Vec::with_capacity(items.len());
+    let mut y = top;
+    for s in &items[..pinned] {
+        out.push(Filled { y, files: None });
+        y += s.fixed + gap;
+    }
+    let below = y.min(top + height);
+    let (rest, room) = fill(
+        &items[pinned..],
+        below,
+        top + height - below,
+        gap,
+        min_files,
+        scroll,
+    );
+    out.extend(rest);
+    (out, room, below)
+}
+
 /// The rows of a window in a column, `y` its top on screen and `h` its
 /// height, that show between the column's `top` and `bottom`, so a column
 /// taller than the screen scrolls inside the work area rather than hang
@@ -581,6 +614,25 @@ mod tests {
         assert_eq!(out[0].y, -110);
         let (out, _) = fill(&items, 0, 500, 10, 60, -5);
         assert_eq!(out[0].y, 0);
+    }
+
+    #[test]
+    fn pinned_windows_stay_put_while_the_rest_scroll_below_them() {
+        let s = |fixed| Stacked { fixed, files: None };
+        let items = [s(100), s(300), s(300)];
+        let (out, room, below) = fill_pinned(&items, 0, 500, 10, 60, 50, 1);
+        assert_eq!(below, 110);
+        assert_eq!(out[0].y, 0);
+        // 610 tall under the pin, in 390.
+        assert_eq!(room, 220);
+        assert_eq!(out[1].y, 60);
+        assert_eq!(out[2].y, 370);
+        let (out, room, below) = fill_pinned(&items, 0, 500, 10, 60, 50, 0);
+        assert_eq!((out, room), fill(&items, 0, 500, 10, 60, 50));
+        assert_eq!(below, 0);
+        let (out, _, below) = fill_pinned(&items, 0, 500, 10, 60, 50, 9);
+        assert_eq!(out.len(), 3);
+        assert_eq!(below, 500);
     }
 
     #[test]

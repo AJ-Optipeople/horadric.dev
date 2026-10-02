@@ -476,7 +476,7 @@ pub struct SavedCluster {
 }
 
 /// A window that is not a project's: whether it was folded, and whether
-/// it was locked against folding and dragging.
+/// it was locked, pinned to the top of its column.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct SavedPanel {
     #[serde(default)]
