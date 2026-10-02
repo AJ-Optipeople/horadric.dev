@@ -6449,12 +6449,12 @@ impl App {
             let x = g.x(i);
             let tiles = self.column_windows(keys, i == 0);
             let items: Vec<columns::Stacked> = tiles.iter().map(Tile::stacked).collect();
-            // A locked usage window stays at the top, with whatever is
-            // above it, and the rest of its column scrolls below it.
-            let pinned = tiles
-                .iter()
-                .position(|t| matches!(t, Tile::Usage(u) if u.locked.get()))
-                .map_or(0, |at| at + 1);
+            // A locked usage window at the top of its column stays there
+            // while the rest scrolls below it. Lower down it does not pin,
+            // or the tiles above it could fill the column and leave the
+            // ones below no room to scroll into.
+            let pinned =
+                usize::from(matches!(tiles.first(), Some(Tile::Usage(u)) if u.locked.get()));
             let scroll = self.columns.cols[*model].scroll;
             let (filled, room, below) =
                 columns::fill_pinned(&items, g.top, g.height, g.gap, g.min_files, scroll, pinned);
@@ -6496,6 +6496,7 @@ impl App {
         self.column_bounds = bounds;
         // A handle Windows gives a new window must not inherit a cut.
         self.clipped.borrow_mut().retain(|id, _| seen.contains(id));
+        crate::render::retain_cuts(|id| seen.contains(&id));
         // Mid drag the columns are not settled yet, so the stage waits for
         // the drop.
         if self.carried.is_none() {

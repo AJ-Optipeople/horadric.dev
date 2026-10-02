@@ -639,6 +639,12 @@ pub fn set_cut(hwnd: HWND, cut: Option<(i32, i32)>) {
     });
 }
 
+/// Forgets the cuts of windows no longer in the columns, so a handle
+/// Windows gives a new window does not inherit a fade.
+pub fn retain_cuts(keep: impl Fn(isize) -> bool) {
+    CUTS.with(|c| c.borrow_mut().retain(|id, _| keep(*id)));
+}
+
 /// How far in from a cut edge the window fades into its plate, in DIPs.
 const CUT_FADE: f32 = 28.0;
 
