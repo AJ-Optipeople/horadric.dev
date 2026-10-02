@@ -388,7 +388,9 @@ fn split_holder(body: &str) -> (String, Option<String>, Option<String>) {
 }
 
 fn is_id_char(c: char) -> bool {
-    c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')
+    // Any letter, not only ASCII, so a holder written before ids were
+    // ASCII, like `@kør-tests`, still reads as one.
+    c.is_alphanumeric() || matches!(c, '-' | '_' | '.')
 }
 
 /// An item's line as Horadric writes it back.
@@ -859,12 +861,19 @@ pub fn next(
     }
 }
 
-/// A session name from an item's title: lower case words joined by
-/// hyphens, short enough for a tile.
+/// A session name from an item's title: lower case ASCII words joined by
+/// hyphens, short enough for a tile. ASCII because the name becomes the
+/// session's id, which goes into headers, branch names and the list's
+/// `@holder`, and `kør` must not lose its quest there.
 pub fn slug(title: &str) -> String {
     let mut out = String::new();
-    for word in title
-        .split(|c: char| !c.is_alphanumeric())
+    let ascii: String = title
+        .chars()
+        .flat_map(char::to_lowercase)
+        .map(ascii)
+        .collect();
+    for word in ascii
+        .split(|c: char| !c.is_ascii_alphanumeric())
         .filter(|w| !w.is_empty())
     {
         if out.len() + word.len() > 40 {
@@ -873,12 +882,38 @@ pub fn slug(title: &str) -> String {
         if !out.is_empty() {
             out.push('-');
         }
-        out.extend(word.chars().flat_map(char::to_lowercase));
+        out.push_str(word);
     }
     if out.is_empty() {
         out.push_str("task");
     }
     out
+}
+
+/// The ASCII spelling of a lower case letter: the Danish and German ones
+/// as they are written without them, accents dropped, anything else a
+/// space so it splits words.
+fn ascii(c: char) -> &'static str {
+    const PLAIN: &str = "abcdefghijklmnopqrstuvwxyz0123456789";
+    let plain = |i: usize| &PLAIN[i..i + 1];
+    match c {
+        'æ' => "ae",
+        'ø' => "oe",
+        'å' => "aa",
+        'ß' => "ss",
+        'ä' | 'à' | 'á' | 'â' | 'ã' => "a",
+        'ö' | 'ò' | 'ó' | 'ô' | 'õ' => "o",
+        'ü' | 'ù' | 'ú' | 'û' => "u",
+        'é' | 'è' | 'ê' | 'ë' => "e",
+        'í' | 'ì' | 'î' | 'ï' => "i",
+        'ç' => "c",
+        'ñ' => "n",
+        'ý' | 'ÿ' => "y",
+        c => match PLAIN.find(c) {
+            Some(i) if c.is_ascii() => plain(i),
+            _ => " ",
+        },
+    }
 }
 
 /// The first prompt of a session that takes `task`: the item, its notes,
@@ -1533,6 +1568,26 @@ mod tests {
         assert_eq!(slug("Fix the login redirect!"), "fix-the-login-redirect");
         assert_eq!(slug("  ...  "), "task");
         assert!(slug(&"word ".repeat(30)).len() <= 40);
+    }
+
+    #[test]
+    fn a_slug_spells_danish_letters_in_ascii() {
+        assert_eq!(
+            slug("Danske tegn: Kør på Æblerne"),
+            "danske-tegn-koer-paa-aeblerne"
+        );
+        assert_eq!(slug("Crème brûlée für 日本"), "creme-brulee-fur");
+        assert_eq!(slug("日本"), "task");
+    }
+
+    #[test]
+    fn a_holder_with_danish_letters_still_parses() {
+        let t = &parse(
+            "- [/] Kør tests @kør-tests
+",
+        )[0];
+        assert_eq!(t.title, "Kør tests");
+        assert_eq!(t.holder.as_deref(), Some("kør-tests"));
     }
 
     #[test]
