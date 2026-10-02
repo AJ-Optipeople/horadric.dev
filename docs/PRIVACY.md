@@ -72,6 +72,28 @@ read from code.
 11. **Low, unverified: CDP `Browser.grantPermissions`** may let an agent
     grant camera or microphone without the WebView2 prompt.
 
+## The agents themselves
+
+Everything above is about Horadric's own code. The agents it starts are
+separate programs, and they run as you, with your full Windows rights. So
+"Horadric cannot screenshot" is true of Horadric and not of what runs in
+it:
+
+- **An agent can capture the whole screen.** A few lines of PowerShell
+  (`CopyFromScreen`, or `PrintWindow` for a covered window) picture the
+  desktop and every other app's window. This is how the agent developing
+  Horadric checks its dev builds, following `CLAUDE.md`.
+- **Nothing asks first** when the agent runs with permissions bypassed.
+  Shell commands, capture included, run without a prompt.
+- **What the agent reads leaves the machine.** A screenshot or file the
+  agent looks at goes to its model provider as part of the conversation.
+
+This holds for an agent in any terminal, not only in Horadric. Horadric
+does not add a capture path; it starts agents with your user rights, as a
+terminal would. To rein it in: run agents without bypass mode so shell
+commands need approval, or add deny rules for capture commands in the
+agent's settings (easy to word around, so a speed bump, not a wall).
+
 ## Verified fine
 
 Loopback only binding everywhere; MCP is stdio; host pipes are user only
