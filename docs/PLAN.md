@@ -2371,6 +2371,16 @@ through the rename too.
   between them where it is, so a quest crosses into the next section.
   Delete asks first and is not offered while a session holds the quest:
   put it back first. Checked on screen with a dev instance.
+- **A draft survives a click away.** Clicking elsewhere to look something
+  up used to throw away the title and notes typed for a new or edited
+  quest. Asked for on 2026-10-03. The input now hands what was typed back
+  when it is left rather than answered (`ask::Reply::Left`), and the
+  runner keeps it, for a new quest by project and for an edit by the
+  quest's line and title too (`runner::draft_for`, tested). The next +
+  or Edit quest fills it in with the caret at its end. Esc still throws it
+  away, and adding or saving clears it. Kept in memory only, so a reload
+  forgets it. Checked on screen with a dev instance: type, click away, +
+  again, the text is there.
 - **The quest giver.** A gold ! left of the plus, the mark over a quest
   giver's head in the games, starts a session named "Quest Giver" in the
   project, on the stage. Asked for on 2026-10-01. Its

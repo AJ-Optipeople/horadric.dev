@@ -89,6 +89,9 @@ pub(super) struct State {
     refused: HashMap<String, Refused>,
     /// Menus and dialogs waiting for the app's window to show them.
     pub(super) menu: Option<Menu>,
+    /// What was typed for a new or edited quest before the input was
+    /// clicked away from, by [`draft_for`], filled back in next time.
+    drafts: HashMap<String, ask::Draft>,
     /// Worktrees whose branch stayed when their session ended, with the
     /// session's project, back from the thread that removed them.
     pub(super) kept: Arc<Mutex<Vec<(String, Worktree)>>>,
@@ -1399,7 +1402,7 @@ pub(super) fn show_menu(menu: Menu) {
                 notes: true,
                 pick: None,
             };
-            if let Some(a) = super::ask_beside(Some(&key), &question) {
+            if let Some(a) = ask_quest(&key, &draft_for(&key, None), &question, "") {
                 with_app(|app| app.add_task(&key, &a.text, &a.notes));
             }
         }
@@ -1625,21 +1628,12 @@ fn rewrite(key: &str, t: &Task) {
         notes: true,
         pick: None,
     };
-    let Some((shared, beside)) = with_app(|app| {
-        let beside = app.clusters.iter().find(|c| c.key == key).map(|c| c.hwnd);
-        (Rc::clone(&app.shared), beside)
-    }) else {
-        return;
-    };
-    let Some(a) = ask::ask_with_notes(
-        shared,
-        beside,
-        &question,
-        &t.notes.join(
-            "
+    let notes = t.notes.join(
+        "
 ",
-        ),
-    ) else {
+    );
+    let draft = draft_for(key, Some((t.line, &t.title)));
+    let Some(a) = ask_quest(key, &draft, &question, &notes) else {
         return;
     };
     with_app(|app| {
@@ -1647,6 +1641,54 @@ fn rewrite(key: &str, t: &Task) {
             tasks::edit(text, t.line, &t.title, &a.text, &a.notes)
         })
     });
+}
+
+/// Where a quest's draft is kept: by project for a new one, and for an
+/// edit by its line and title too, so a draft for a quest that has since
+/// changed is not filled into another.
+fn draft_for(key: &str, edit: Option<(usize, &str)>) -> String {
+    match edit {
+        None => format!(
+            "{key}
+new"
+        ),
+        Some((line, title)) => format!(
+            "{key}
+edit
+{line}
+{title}"
+        ),
+    }
+}
+
+/// Whether a draft says more than the input started with, and so is worth
+/// filling back in.
+fn worth_keeping(d: &ask::Draft, initial: &str, notes: &str) -> bool {
+    d.text != initial || d.notes != notes
+}
+
+/// Asks for a quest's title and notes beside the project's cluster, filling
+/// in the draft kept under `draft`, and keeps what was typed when the
+/// input is clicked away from. Answering or Esc drops the draft.
+fn ask_quest(key: &str, draft: &str, question: &ask::Ask, notes: &str) -> Option<ask::Answer> {
+    let (shared, beside, kept) = with_app(|app| {
+        let beside = app.clusters.iter().find(|c| c.key == key).map(|c| c.hwnd);
+        let kept = app.tasks.drafts.get(draft).cloned();
+        (Rc::clone(&app.shared), beside, kept)
+    })?;
+    let reply = ask::ask_or_leave(shared, beside, question, notes, kept.as_ref());
+    with_app(|app| match &reply {
+        ask::Reply::Left(d) if worth_keeping(d, question.initial, notes) => {
+            app.tasks.drafts.insert(draft.to_string(), d.clone());
+        }
+        _ => {
+            app.tasks.drafts.remove(draft);
+        }
+    });
+    match reply {
+        ask::Reply::Answered(a) => Some(a),
+        ask::Reply::Cancelled | ask::Reply::Left(_) => None,
+    }
 }
 
 /// Whether the human really means to delete a quest. Its notes go with
@@ -1747,6 +1789,33 @@ pub(super) fn merges(dir: &Path) -> Vec<Merge> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_draft_is_kept_by_project_and_by_the_quest_edited() {
+        assert_ne!(draft_for("a", None), draft_for("b", None));
+        assert_ne!(draft_for("a", None), draft_for("a", Some((3, "Fix"))));
+        assert_ne!(
+            draft_for("a", Some((3, "Fix"))),
+            draft_for("a", Some((3, "Fix it")))
+        );
+        assert_ne!(
+            draft_for("a", Some((3, "Fix"))),
+            draft_for("a", Some((4, "Fix")))
+        );
+    }
+
+    #[test]
+    fn only_a_draft_that_changed_something_is_kept() {
+        let d = |text: &str, notes: &str| ask::Draft {
+            text: text.into(),
+            notes: notes.into(),
+        };
+        assert!(!worth_keeping(&d("", ""), "", ""));
+        assert!(worth_keeping(&d("Fix", ""), "", ""));
+        assert!(worth_keeping(&d("", "why"), "", ""));
+        assert!(!worth_keeping(&d("Fix", "why"), "Fix", "why"));
+        assert!(worth_keeping(&d("Fix", "why not"), "Fix", "why"));
+    }
 
     #[test]
     fn the_agent_runs_this_build_by_its_full_path() {
