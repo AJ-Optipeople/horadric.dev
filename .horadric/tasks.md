@@ -232,7 +232,7 @@ Horadric on the human's Discord profile through Rich Presence. See "Discord Acti
   Lav en lille padlock ikon på session Tilen, som forhindrer den i at scrolle når man klikker paa den.
 - [x] Theme Switcher @theme-switcher-72599
   Branch out and create 5 disctint themes for the app, changable via the tray icon menu.
-- [?] Padlock not working @padlock-not-working-75760
+- [x] Padlock not working @padlock-not-working-75760
   Padlock on session usage tile doesnt work. Its supposed to lock the tile at the very top and allow the tiles under it to continue scrolling from its bottom. Currently it does nothing.
 
 ## The Runetome
@@ -245,3 +245,15 @@ Runewords as rune stones in a tile of their own. See "The Runetome" under Next i
   See "The Runetome" in docs/PLAN.md: A stone, The empty stone. `runeword::name` (two to four of the 33 rune names from a hash of the label) and `runeword::carve` (glyph strokes from the same hash), pure and tested. A function in horadric-ui that draws one stone in Direct2D at a given size: a rough rounded slab lit from the top left like the cube, the glyph cut into it, a gold glow while it runs, cracked when it does not parse, and an empty stone. `runeword::smith_prompt` (tested), saying what a stone is, the step kinds, both files and their shape, and to ask the human what it should do and for which projects, then check with `horadric runeword list`. The `horadric runeword list` command printing every stone a project has, with its name, label, steps and any parse error. No tile yet: check the drawing on screen however is quickest, in dark and light.
 - [ ] The Runetome tile: stones in a project's cluster, cast by click or drag, and the empty stone starting a Runesmith
   Needs the two quests above on main. If either is not there yet, mark this one blocked naming which, so it can be accepted again once it is. See "The Runetome" in docs/PLAN.md. A tile in each project's cluster beside the quest log, built in stones first, then the project's, then the global ones, then the empty stone. Tooltip (tip.rs) with the runeword name and the steps. A click casts on the focused stage session when it is this project's, else asks which session; a stone of only `run` steps casts at once; dragging a stone onto a tile or pane casts on that one. While running the stone glows with its step and a click offers Stop. The empty stone starts a session named "Runesmith" on the stage with the smith prompt, as the quest giver does. The changed since last cast mark on project stones. Drop the tile menu's Runeword submenu, keep its Stop. Check on screen with a dev instance: each step kind, a sessionless stone, a drag, and a real `claude` Runesmith (Haiku) making a stone that appears on the tile. Count `claude.exe` processes after. Then add the Runetome to README.md and mark the plan section built.
+- [x] Privacy run @privacy-run-73133
+  Branch out and spawn agents to check for privacy concerns in Horadric. Does anything transmit back to a server somewhere, can the app screenshot silently without the users conscent and send the screen back to a someone else etc.
+- [ ] Gate the browser pane's DevTools passthrough: allowlist CDP methods, ask before cookie and storage reads (docs/PRIVACY.md item 1)
+- [ ] Show on the tile when an agent is driving the browser pane, even when its project is off stage (docs/PRIVACY.md item 2)
+- [ ] Require a per user secret on the listener's command paths, reload, new, tasks, browser (docs/PRIVACY.md item 3)
+- [ ] Drop the WebView2 remote debugging port and the devtools-port file (docs/PRIVACY.md item 4)
+- [ ] Make session ids random instead of name plus seconds since midnight (docs/PRIVACY.md item 5)
+- [ ] Bind the hook listener with SO_EXCLUSIVEADDRUSE and check whether port squatting works (docs/PRIVACY.md item 6)
+- [ ] Add an off switch for the daily update check and say it in the README (docs/PRIVACY.md item 7)
+- [ ] Refuse Origin headers on /horadric/hook too, and check host pipe owners before attaching (docs/PRIVACY.md items 8 and 9)
+- [?] Quest log - Horadric @quest-log-horadric-33953
+  Branch the release out to any amount of agents you need and  Build a quest log. My isssue: When i run a quest and it auto-disappears from the QUESTS window, i have no way of going back and checking what the session did or how it ended up, without aasking the main session again. The quest log could de designed as a new window which shows a tree of every quest this tile has ever undertaken, which quests lead to which other quests and where quests converged into main sessions again with a branching diagram. Clicking each quest opens its old quest log, and a ultra-short summary of what the quest achieved and the result of the session. Ship local afterwards, so i can test the app.
