@@ -49,6 +49,7 @@ use std::time::{Duration, Instant, SystemTime};
 use horadric_core::accounts::{Account, Accounts};
 use horadric_core::agent::Agent;
 use horadric_core::background::Asked;
+use horadric_core::chronicle;
 use horadric_core::diff::{self as changes, Diff, FileDiff, Recount};
 use horadric_core::fleet::{self, Device};
 use horadric_core::journal::{self, Entry, What};
@@ -5777,6 +5778,7 @@ impl App {
     fn journal_phases(&mut self) {
         let now = unix_now();
         let mut lines = Vec::new();
+        let mut turns = Vec::new();
         let mut seen = HashSet::new();
         let mut dropped = false;
         if let Ok(r) = self.shared.registry.lock() {
@@ -5808,6 +5810,9 @@ impl App {
                     Phase::Ended => What::Ended,
                     _ => continue,
                 };
+                if matches!(s.phase, Phase::Done | Phase::Ended) {
+                    turns.extend(self.quest_turn(s, &project, now));
+                }
                 lines.push(Entry {
                     at: now,
                     session: s.id.clone(),
@@ -5840,10 +5845,34 @@ impl App {
         for e in &lines {
             store::journal(e);
         }
+        for r in &turns {
+            store::chronicle(r);
+        }
         // With the beam, which rises the moment the tile turns done.
         if dropped {
             self.sound(Loot::Drop);
         }
+    }
+
+    /// The chronicle's record of a turn that ended, when the session works
+    /// a quest of its project's list: what it said last, and its
+    /// conversation, which the quest log reads or carries on later. Kept
+    /// under the session's own id, so each tomb's word stays its own.
+    fn quest_turn(&self, s: &Session, project: &str, now: u64) -> Option<chronicle::Record> {
+        let boards = self.shared.boards.borrow();
+        let task = chronicle::worked_by(&boards.get(project)?.tasks, &s.id)?;
+        Some(chronicle::Record {
+            at: now,
+            project: project.to_string(),
+            quest: s.id.clone(),
+            title: task.title.clone(),
+            what: chronicle::Happened::Turn {
+                line: s.last_line.clone(),
+                conversation: s.claude_session_id.clone().unwrap_or_default(),
+                cwd: s.cwd.clone(),
+                name: s.label().to_string(),
+            },
+        })
     }
 
     /// The one place the "Show on Discord" setting changes, so the presence

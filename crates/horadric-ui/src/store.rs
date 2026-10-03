@@ -4,6 +4,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use horadric_core::chronicle;
 use horadric_core::journal::{self, Entry};
 use horadric_core::SavedState;
 
@@ -134,15 +135,26 @@ pub fn save(state: &SavedState) {
 
 /// Adds a line to the journal the catch-up reads.
 pub fn journal(e: &Entry) {
+    append(journal::FILE, &e.line());
+}
+
+/// Adds a line to the chronicle the quest log reads. It is never trimmed,
+/// and `horadric quest` writes it too, from a session's shell, where a
+/// failure must not fail the report, so it says nothing either way.
+pub fn chronicle(r: &chronicle::Record) {
+    append(chronicle::FILE, &r.line());
+}
+
+fn append(file: &str, line: &str) {
     use std::io::Write;
     let Some(dir) = dir() else { return };
     let _ = fs::create_dir_all(&dir);
     let file = fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(dir.join(journal::FILE));
+        .open(dir.join(file));
     if let Ok(mut f) = file {
-        let _ = f.write_all(e.line().as_bytes());
+        let _ = f.write_all(line.as_bytes());
     }
 }
 

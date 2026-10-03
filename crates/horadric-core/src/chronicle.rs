@@ -145,6 +145,14 @@ pub fn quest_of(session: &str) -> &str {
     tombs::of(session).map_or(session, |(batch, _)| batch)
 }
 
+/// The item of `list` the session works, if it works one. A tomb's item
+/// is held by its batch until the human picks, and by the winner after.
+pub fn worked_by<'a>(list: &'a [Task], session: &str) -> Option<&'a Task> {
+    let quest = quest_of(session);
+    list.iter()
+        .find(|t| t.holder.as_deref().is_some_and(|h| quest_of(h) == quest))
+}
+
 /// The records for what changed between two reads of a project's list:
 /// a quest accepted, marked, or put back. Like [`journal::marks`], items
 /// are matched by title, since lines move as the list is edited.
@@ -651,6 +659,26 @@ mod tests {
         );
         let text = format!("{}{{\"at\":", r.line());
         assert_eq!(parse(&text), vec![r]);
+    }
+
+    #[test]
+    fn a_session_works_the_item_its_quest_holds() {
+        let list = [
+            task(0, Mark::Open, "A", None),
+            task(1, Mark::Working, "B", Some("b-1")),
+            task(2, Mark::Working, "C", Some("c-1.x3")),
+            task(3, Mark::Done, "D", Some("d-1.x2.2")),
+        ];
+        let title = |s: &str| worked_by(&list, s).map(|t| t.title.as_str());
+        assert_eq!(title("b-1"), Some("B"));
+        assert_eq!(title("c-1.x3.3"), Some("C"));
+        assert_eq!(
+            title("d-1.x2.1"),
+            Some("D"),
+            "a losing tomb is still its batch's"
+        );
+        assert_eq!(title("b-11"), None);
+        assert_eq!(title("quest-giver-5"), None);
     }
 
     #[test]

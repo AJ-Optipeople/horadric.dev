@@ -97,6 +97,10 @@ pub mod discord;
 #[cfg(windows)]
 pub use dialog::error_alone;
 pub use store::exe_command;
+/// For `horadric quest`, which writes the chronicle from a session's shell
+/// under the same project key the app uses.
+#[cfg(windows)]
+pub use {project::folder_key, store::chronicle};
 #[cfg(windows)]
 mod dropdown;
 #[cfg(windows)]

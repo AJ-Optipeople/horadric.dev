@@ -27,6 +27,7 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
+use horadric_core::chronicle::{self, Happened};
 use horadric_core::journal::{self, Commit, Entry, What};
 use horadric_core::tasks::{self, Holder, Mark, Mode, Next, Task};
 use horadric_core::usage::format_until;
@@ -248,13 +249,30 @@ impl App {
             let fresh = read_board(dir);
             let mut boards = self.shared.boards.borrow_mut();
             if boards.get(key) != Some(&fresh) {
+                let at = unix_now();
+                if let Some(old) = boards.get(key) {
+                    for r in chronicle::marks(key, &old.tasks, &fresh.tasks, at) {
+                        store::chronicle(&r);
+                    }
+                }
                 let mut lines = boards
                     .get(key)
-                    .map(|old| journal::marks(key, &old.tasks, &fresh.tasks, unix_now()))
+                    .map(|old| journal::marks(key, &old.tasks, &fresh.tasks, at))
                     .unwrap_or_default();
                 for e in &mut lines {
                     if let What::Finished { title, commits } = &mut e.what {
                         *commits = self.commits_under(key, dir, &e.session, title);
+                        if !commits.is_empty() {
+                            store::chronicle(&chronicle::Record {
+                                at,
+                                project: key.clone(),
+                                quest: e.session.clone(),
+                                title: title.clone(),
+                                what: Happened::Commits {
+                                    commits: commits.clone(),
+                                },
+                            });
+                        }
                     }
                     store::journal(e);
                 }
@@ -1062,14 +1080,34 @@ impl App {
         match crate::worktree::merge(&m.main, &m.branch) {
             Ok(()) => {
                 self.landed(&m.main, &m.branch);
+                let project = folder_key(&m.main.to_string_lossy());
                 store::journal(&Entry {
                     at: unix_now(),
                     session: String::new(),
                     name: String::new(),
-                    project: folder_key(&m.main.to_string_lossy()),
+                    project: project.clone(),
                     what: What::Merged {
                         branch: m.branch.clone(),
                         title: m.title.clone(),
+                    },
+                });
+                // The list still holds the finished item, and its holder is
+                // the quest the chronicle knows it by.
+                let quest = self
+                    .shared
+                    .boards
+                    .borrow()
+                    .get(&project)
+                    .and_then(|b| b.tasks.iter().find(|t| t.title == m.title))
+                    .and_then(|t| t.holder.clone())
+                    .unwrap_or_default();
+                store::chronicle(&chronicle::Record {
+                    at: unix_now(),
+                    project,
+                    quest,
+                    title: m.title.clone(),
+                    what: Happened::Merged {
+                        branch: m.branch.clone(),
                     },
                 });
                 self.toasts.show(

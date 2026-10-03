@@ -2340,10 +2340,15 @@ through the rename too.
   rename, still reading `tasks.md`, sees the same list as the new one. A
   new list is a quest log. `tasks::list_file` picks, pure and tested;
   `horadric_hooks::tasks::file` and `rel` are where it is on disk.
-- **The command** is `horadric quest done|blocked WHY|add TITLE|list`.
-  `horadric task` does the same, so every session started with the old
-  prompt still reports back. New prompts say `quest` and name the file the
-  project really has.
+- **The command** is `horadric quest done [SUMMARY]|blocked WHY|add
+  TITLE|list`. `horadric task` does the same, so every session started
+  with the old prompt still reports back. New prompts say `quest` and name
+  the file the project really has, and ask for `quest done "<one short
+  line on what you achieved>"`: the words after `done` go into the
+  chronicle as the quest's summary (a bare `done` still works). A `quest
+  add` from inside a session goes into the chronicle too, as added by
+  that session, so the quest log draws the new quest branching from the
+  one that session works.
 - **The tile** says quests: "New quest", "Accept", "Mark completed",
   "Edit the quest log", and the toasts "Quest log completed" and "N quests
   need you".
