@@ -129,8 +129,8 @@ use crate::tray::{self, Choice, Tray};
 use crate::usage::{self, UsageWindow};
 use crate::window::{self, folder_key, project_key, project_name, Cluster, Shared};
 use crate::{
-    ask, autostart, browsers, history, inbox, paths, picker, recent, shell, snapping, store, theme,
-    update, viewport, watch, web, worktree,
+    ask, autostart, browsers, inbox, paths, picker, recent, shell, snapping, store, theme, update,
+    viewport, watch, web, worktree,
 };
 
 #[path = "runner.rs"]
@@ -1164,15 +1164,6 @@ fn tray_menu(hwnd: HWND) {
         .filter(|p| Path::new(p).is_dir())
         .collect();
     let autostart = (!horadric_hooks::dev()).then(autostart::is_enabled);
-    let past: Vec<Vec<Past>> = projects
-        .iter()
-        .map(|p| with_app(|app| app.history(Path::new(p))).unwrap_or_default())
-        .collect();
-    let lines = past
-        .iter()
-        .enumerate()
-        .map(|(i, p)| history_items(p, tray::HISTORY + i * history::SPAN))
-        .collect();
     let (screens, chosen) = (monitors(), with_app(|app| app.screen.clone()).flatten());
     let shown = screens::pick(&screens, chosen.as_deref()).map(|s| s.name.clone());
     let (fonts, font) = with_app(|app| {
@@ -1184,7 +1175,6 @@ fn tray_menu(hwnd: HWND) {
     .unwrap_or_default();
     let menu = tray::menu(
         &projects,
-        lines,
         autostart,
         hotkeys,
         notify,
@@ -1219,12 +1209,8 @@ fn tray_menu(hwnd: HWND) {
         }
         Some(Choice::New) => pick_and_start(hwnd, projects.first().map(PathBuf::from)),
         Some(Choice::Recent(path)) => start_logged(PathBuf::from(path)),
-        Some(Choice::History(id)) => {
-            if let Some((i, pick)) = history::pick_nested(id, tray::HISTORY) {
-                if let (Some(dir), Some(past)) = (projects.get(i), past.get(i)) {
-                    with_app(|app| app.reopen(Path::new(dir), past, pick));
-                }
-            }
+        Some(Choice::QuestLog(path)) => {
+            push(Input::QuestLog(questlog::Ask::Open(folder_key(&path))))
         }
         Some(Choice::Tidy) => {
             with_app(App::tidy);
@@ -1716,10 +1702,6 @@ const SAVED_WITHIN: Duration = Duration::from_secs(5);
 /// once, few enough to keep an eye on.
 const BATCH: usize = 4;
 
-/// How many past conversations the History menu lists. The last line
-/// opens Claude Code's own picker for the rest.
-const HISTORY: usize = 10;
-
 /// How many hosts the project menu lists one by one. Past that they are
 /// found by name instead.
 const MENU_HOSTS: usize = 8;
@@ -1944,7 +1926,6 @@ fn project_menu(key: &str) {
     const CLOSE: usize = 12;
     const BRANCHES: usize = 13;
     const SSH: usize = 20;
-    const PAST: usize = 100;
     const SUGGEST: usize = 200;
     const SUGGEST_END: usize = 300;
     const MERGE: usize = 300;
@@ -1952,26 +1933,18 @@ fn project_menu(key: &str) {
     const COLOUR: usize = 400;
     const ADD_AGENT: usize = 500;
     let dir = with_app(|app| app.project_dir(key)).flatten();
-    // Reading transcripts and asking git are the slow part of opening the
-    // menu, so they are done side by side.
-    let held = with_app(|app| app.held_conversations())
-        .flatten()
-        .unwrap_or_default();
-    let (past, mut merges, own_trees) = match &dir {
+    // Asking git is the slow part of opening the menu, so it is done
+    // side by side.
+    let (mut merges, own_trees) = match &dir {
         Some(d) => std::thread::scope(|scope| {
-            let past = scope.spawn(|| past_in(d, &held));
             let merges = scope.spawn(|| runner::merges(d));
             // Only a repository's main tree can add worktrees.
             let own_trees = worktree::main_tree(d)
                 .is_some()
                 .then(|| horadric_hooks::tasks::worktrees(d).enabled);
-            (
-                past.join().unwrap_or_default(),
-                merges.join().unwrap_or_default(),
-                own_trees,
-            )
+            (merges.join().unwrap_or_default(), own_trees)
         }),
-        None => (Vec::new(), Vec::new(), None),
+        None => (Vec::new(), None),
     };
     let hosts = dir
         .as_deref()
@@ -2004,7 +1977,6 @@ fn project_menu(key: &str) {
         ));
     }
     items.extend([
-        Item::Submenu("History".into(), history_items(&past, PAST)),
         Item::action(QUESTS, "Quest log..."),
         Item::action(START_BATCH, format!("Start {BATCH} sessions")),
         Item::action(START_OVER, format!("Start over with {BATCH} sessions")),
@@ -2136,7 +2108,7 @@ fn project_menu(key: &str) {
         Some(CLOSE) => app.close_project(key),
         Some(SHELL) => app.open_shell(key),
         Some(BROWSE) => app.open_web(key, None),
-        Some(i) if (SSH..PAST).contains(&i) => app.open_ssh(key, &listed[i - SSH], None),
+        Some(i) if (SSH..SUGGEST).contains(&i) => app.open_ssh(key, &listed[i - SSH], None),
         Some(i) if (MERGE..MERGE_END).contains(&i) => {
             app.merge(&merges[i - MERGE]);
         }
@@ -2151,11 +2123,6 @@ fn project_menu(key: &str) {
         Some(EXPLORE) => {
             if let Some(dir) = app.project_dir(key) {
                 watch::explore(&dir);
-            }
-        }
-        Some(i) => {
-            if let (Some(pick), Some(dir)) = (history::pick(i, PAST), &dir) {
-                app.reopen(dir, &past, pick);
             }
         }
         _ => {}
@@ -2263,40 +2230,18 @@ fn add_host(dir: &Path, host: &str) {
     }
 }
 
-/// The lines of a History menu: each past conversation, `first` on, then
-/// Claude Code's own picker for the rest.
-/// The past conversations held in `dir`, leaving out the ones in `held`.
-/// Every agent's past conversations in `dir` together, newest first.
-fn past_in(dir: &Path, held: &[String]) -> Vec<Past> {
+/// Every agent's past conversations in `dir` together, the newest
+/// `limit`, newest first, leaving out the ones in `held`.
+fn past_in(dir: &Path, held: &[String], limit: usize) -> Vec<Past> {
     let dir = dir.to_string_lossy();
-    let mut past = transcript::history(&dir, held, HISTORY);
-    past.extend(horadric_hooks::codex::history(&dir, held, HISTORY));
-    past.extend(horadric_hooks::grok::history(&dir, held, HISTORY));
+    let mut past = transcript::history(&dir, held, limit);
+    past.extend(horadric_hooks::codex::history(&dir, held, limit));
+    past.extend(horadric_hooks::grok::history(&dir, held, limit));
     past.sort_by_key(|p| std::cmp::Reverse(p.modified));
-    past.truncate(HISTORY);
+    past.truncate(limit);
     past
 }
 
-fn history_items(past: &[Past], first: usize) -> Vec<Item> {
-    let now = SystemTime::now();
-    let mut items: Vec<Item> = past
-        .iter()
-        .enumerate()
-        .map(|(i, p)| {
-            let ago = now.duration_since(p.modified).unwrap_or_default();
-            Item::action(first + i, history::label(&p.title.text, ago))
-        })
-        .collect();
-    if items.is_empty() {
-        items.push(Item::Disabled("No earlier conversations".into()));
-    }
-    items.push(Item::Separator);
-    items.push(Item::action(history::all(first), "All conversations..."));
-    items
-}
-
-/// A recent project right clicked in the start window, which has no
-/// cluster and so no project menu: a new session, or an old one back.
 /// The usage window's menu, for what the settings rows do not hold.
 fn usage_menu() {
     const CUBE: usize = 1;
@@ -2384,20 +2329,22 @@ fn account_menu(agent: Agent) {
     });
 }
 
+/// A recent project right clicked in the start window, which has no
+/// cluster and so no project menu: a new session, or its quest log, the
+/// way back to its old conversations.
 fn recent_menu(dir: PathBuf) {
     const ADD: usize = 1;
-    const PAST: usize = 100;
-    let past = with_app(|app| app.history(&dir)).unwrap_or_default();
-    let mut items = vec![Item::action(ADD, "New session"), Item::Separator];
-    items.extend(history_items(&past, PAST));
+    const QUESTS: usize = 2;
+    let items = [
+        Item::action(ADD, "New session"),
+        Item::action(QUESTS, "Quest log..."),
+    ];
     match menu::popup(&items) {
         Some(ADD) => start_logged(dir),
-        Some(i) => {
-            if let Some(pick) = history::pick(i, PAST) {
-                with_app(|app| app.reopen(&dir, &past, pick));
-            }
-        }
-        None => {}
+        Some(QUESTS) => push(Input::QuestLog(questlog::Ask::Open(folder_key(
+            &dir.to_string_lossy(),
+        )))),
+        _ => {}
     }
 }
 
@@ -3635,60 +3582,18 @@ impl App {
             .unwrap_or_default()
     }
 
-    /// The past conversations held in `dir` that no tile holds, newest
-    /// first. Claude Code keeps every one, ended or not, so this is the way
-    /// back to a session closed for good.
-    fn history(&self, dir: &Path) -> Vec<Past> {
-        match self.held_conversations() {
-            Some(open) => past_in(dir, &open),
-            None => Vec::new(),
-        }
-    }
-
-    /// The conversations tiles hold, running, paused or stashed.
-    fn held_conversations(&self) -> Option<Vec<String>> {
-        let r = self.shared.registry.lock().ok()?;
-        Some(
-            r.all()
-                .filter_map(|s| s.claude_session_id.clone())
-                .chain(
-                    r.stashed()
-                        .iter()
-                        .filter_map(|s| s.claude_session_id.clone()),
-                )
-                .collect(),
-        )
-    }
-
-    /// Carries on a past conversation from `past`, the History menu's list
-    /// for `dir`, in a new tile. Or the tile opens Claude Code's own picker
-    /// of every conversation in the folder.
-    fn reopen(&mut self, dir: &Path, past: &[Past], pick: history::Pick) {
-        let past = match pick {
-            history::Pick::Past(i) => match past.get(i) {
-                Some(p) => Some(p),
-                None => return,
-            },
-            history::Pick::All => None,
-        };
-        let agent = past.map_or(Agent::Claude, |p| p.agent);
-        let args = agent.resume_args(past.map(|p| p.id.as_str()));
-        let id = match self.start_in(None, dir.to_path_buf(), args, agent, false) {
-            Ok(id) => id,
-            Err(e) => {
-                eprintln!("horadric: cannot resume a conversation: {e}");
-                return;
-            }
-        };
-        // Known before any hook says so. A pause before the next prompt
-        // would otherwise resume nothing and start afresh.
-        if let (Some(p), Ok(mut r)) = (past, self.shared.registry.lock()) {
-            if let Some(s) = r.get_mut(&id) {
-                s.claude_session_id = Some(p.id.clone());
-                s.prompted = true;
-                s.title = Some(p.title.clone());
-            }
-        }
+    /// The conversations the stash holds, which come back from there.
+    fn stashed_conversations(&self) -> Vec<String> {
+        self.shared
+            .registry
+            .lock()
+            .map(|r| {
+                r.stashed()
+                    .iter()
+                    .filter_map(|s| s.claude_session_id.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// Resumes a paused session in the same tile, with its conversation.

@@ -1,19 +1,21 @@
 //! The app's side of the quest log: a project's quests built from the
 //! chronicle, the journal and its quest list, the window kept up to date
 //! as they change, and what its keys ask done with a quest's conversation.
+//! The project's other conversations, the agents' own record of them, sit
+//! on the main line among the quests.
 
 use std::cell::{Cell, RefCell};
 use std::fs;
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::time::SystemTime;
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use horadric_core::chronicle::{self, Quest};
+use horadric_core::chronicle::{self, Quest, Talk};
 use horadric_core::journal;
 use horadric_core::tasks::Task;
 use horadric_core::Agent;
 
-use super::App;
+use super::{past_in, App};
 use crate::questlog::{self, Ask, QuestLog};
 use crate::store;
 use crate::window::project_name;
@@ -21,8 +23,13 @@ use crate::window::project_name;
 /// A file's size and when it was written, which says whether it changed.
 type Stamp = Option<(u64, SystemTime)>;
 
-/// How many ticks between repaints that only move the ages on.
+/// How many ticks between repaints that only move the ages on, which also
+/// look again for conversations, since nothing says when one starts.
 const AGES_EVERY: u32 = 30;
+
+/// How many of the newest conversations the main line shows. Each costs a
+/// read of its tail the first time it is seen.
+const TALKS: usize = 40;
 
 thread_local! {
     /// What the quest log was last built from: the chronicle, the journal
@@ -49,18 +56,49 @@ impl App {
             }
             Ask::Read(key, id) => self.read_quest(&key, &id),
             Ask::Carry(key, id) => self.carry_on_quest(&key, &id),
+            Ask::All(key) => self.pick_conversation(&key),
         }
     }
 
-    /// The project's quests, oldest first.
+    /// The project's quests, oldest first, with its conversations no quest
+    /// holds among them.
     fn quests_of(&self, key: &str) -> Vec<Quest> {
         let list = self.list_of(key);
-        chronicle::quests(
+        let quests = chronicle::quests(
             &store::chronicle_all(),
             &store::journal_since(0),
             key,
             &list,
-        )
+        );
+        let talks = self.talks_of(key, &quests);
+        chronicle::with_talks(quests, &talks)
+    }
+
+    /// The newest conversations held in the project's folder, leaving out
+    /// the quests' own and the stash's, which have their own way back.
+    fn talks_of(&self, key: &str, quests: &[Quest]) -> Vec<Talk> {
+        let Some(dir) = self.project_dir(key) else {
+            return Vec::new();
+        };
+        let mut skip = self.stashed_conversations();
+        skip.extend(
+            quests
+                .iter()
+                .filter_map(|q| q.conversation.as_ref().map(|(c, _)| c.clone())),
+        );
+        let secs = |t: SystemTime| t.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
+        let cwd = dir.to_string_lossy().into_owned();
+        past_in(&dir, &skip, TALKS)
+            .into_iter()
+            .map(|p| Talk {
+                id: p.id,
+                title: p.title.text,
+                started: secs(p.started),
+                touched: secs(p.modified),
+                cwd: cwd.clone(),
+                agent: p.agent,
+            })
+            .collect()
     }
 
     fn list_of(&self, key: &str) -> Vec<Task> {
@@ -110,6 +148,7 @@ impl App {
             t.set(t.get().wrapping_add(1));
             t.get() % AGES_EVERY == 0
         }) {
+            w.set(key.clone(), project_name(&key), self.quests_of(&key));
             w.invalidate();
         }
     }
@@ -173,21 +212,39 @@ impl App {
             return;
         };
         let name = Some(q.name.clone()).filter(|n| !n.trim().is_empty());
-        let args = Agent::Claude.resume_args(Some(&conversation));
-        let started = match self.start_in(name, dir, args, Agent::Claude, false) {
+        let args = q.agent.resume_args(Some(&conversation));
+        let started = match self.start_in(name, dir, args, q.agent, false) {
             Ok(id) => id,
             Err(e) => {
                 eprintln!("horadric: cannot carry on the quest: {e}");
                 return;
             }
         };
-        // Known before any hook says so, as for the History menu: a pause
-        // before the next prompt would otherwise resume nothing.
+        // Known before any hook says so: a pause before the next prompt
+        // would otherwise resume nothing and start afresh.
         if let Ok(mut r) = self.shared.registry.lock() {
             if let Some(s) = r.get_mut(&started) {
                 s.claude_session_id = Some(conversation);
                 s.prompted = true;
+                if q.main {
+                    s.title = Some(horadric_core::Title {
+                        text: q.title.clone(),
+                        custom: false,
+                    });
+                }
             }
+        }
+    }
+
+    /// Starts a session in the project on Claude Code's own picker of
+    /// every conversation in its folder, for the ones past the main line's.
+    fn pick_conversation(&mut self, key: &str) {
+        let Some(dir) = self.project_dir(key) else {
+            return;
+        };
+        let args = Agent::Claude.resume_args(None);
+        if let Err(e) = self.start_in(None, dir, args, Agent::Claude, false) {
+            eprintln!("horadric: cannot open the conversation picker: {e}");
         }
     }
 }

@@ -29,6 +29,8 @@ pub struct QuestRowLook {
     pub result: String,
     pub outcome: Outcome,
     pub color: Color,
+    /// A conversation on the main line, not a quest.
+    pub main: bool,
 }
 
 /// What the section beside the diagram says about the quest picked.
@@ -42,8 +44,13 @@ pub struct QuestDetail {
     pub notes: String,
     /// Each commit's short hash and subject.
     pub commits: Vec<(String, String)>,
-    /// It has a conversation, so its keys do something.
-    pub can_act: bool,
+    /// A conversation on the main line, and the quests it added.
+    pub main: bool,
+    pub added: Vec<String>,
+    /// Whether its keys do something: a conversation to write out and
+    /// one to carry on.
+    pub can_read: bool,
+    pub can_carry: bool,
 }
 
 /// Everything one frame of the quest log needs.
@@ -106,15 +113,24 @@ impl Painter<'_> {
                 let says = if scene.rows.is_empty() {
                     ""
                 } else {
-                    "Pick a quest to read what came of it."
+                    "Pick a quest or a conversation to read it."
                 };
                 self.text(&gpu.small, theme::legend(), says, l.body);
                 0.0
             }
         };
-        let can = scene.detail.is_some_and(|d| d.can_act);
-        self.quest_key(gpu, scene, QuestHit::Read, l.read, "Read the session", can);
-        self.quest_key(gpu, scene, QuestHit::Carry, l.carry, "Carry it on", can);
+        let read = scene.detail.is_some_and(|d| d.can_read);
+        let carry = scene.detail.is_some_and(|d| d.can_carry);
+        self.quest_key(gpu, scene, QuestHit::Read, l.read, "Read the session", read);
+        self.quest_key(gpu, scene, QuestHit::Carry, l.carry, "Carry it on", carry);
+        self.quest_key(
+            gpu,
+            scene,
+            QuestHit::All,
+            l.all,
+            "All conversations\u{2026}",
+            true,
+        );
         h
     }
 
@@ -128,7 +144,8 @@ impl Painter<'_> {
         self.icon(&gpu.icon_small, gold, BOOK, book);
         let label = Rect::new(book.right() + 4.0, l.label.y, l.label.w - 20.0, l.label.h);
         self.text_spaced(gpu, &gpu.chip, gold, "QUEST LOG", 1.6, label);
-        let count = match scene.rows.len() {
+        let quests = scene.looks.iter().filter(|r| !r.main).count();
+        let count = match quests {
             0 => String::new(),
             1 => "1 quest".to_string(),
             n => format!("{n} quests"),
@@ -221,6 +238,10 @@ impl Painter<'_> {
                 self.stroke_rounded(&back, 7.0, look.color.with_alpha(0.35), 1.0);
             } else if hot {
                 self.fill_rounded(&back, 7.0, theme::hover_fill());
+            } else if look.main {
+                // Faint, so a conversation reads apart from the quests at
+                // a glance and the quests stay what the eye goes to.
+                self.fill_rounded(&back, 7.0, look.color.with_alpha(0.06));
             }
 
             for &lane in &row.through {
@@ -233,10 +254,32 @@ impl Painter<'_> {
                 self.line(x, y1, x, ym, c, caps);
                 self.lane_end(gpu, (x, ym), y0, trunk_x, end, c, caps);
             }
+            // A conversation's quests leave its dot for their lanes.
+            for &(lane, quest) in &row.forks {
+                let x = l.lane_x(lane);
+                let c = scene
+                    .colors
+                    .get(quest)
+                    .copied()
+                    .unwrap_or(theme::text_dim())
+                    .fade(0.6);
+                let bend = (ym + y0) / 2.0;
+                self.curve(
+                    gpu,
+                    (trunk_x, ym),
+                    (trunk_x, bend),
+                    (x, bend),
+                    (x, y0),
+                    c,
+                    caps,
+                );
+            }
             let x = l.lane_x(row.lane);
             let own = look.color.fade(0.7);
             let from = l.lane_x(row.from);
-            if (from - x).abs() < 0.5 {
+            if look.main {
+                // On the trunk, which is drawn already.
+            } else if (from - x).abs() < 0.5 {
                 self.line(x, y1, x, ym, own, caps);
             } else {
                 let bend = (y1 + ym) / 2.0;
@@ -488,10 +531,15 @@ impl Painter<'_> {
         );
         y += 26.0;
 
+        let label_w = if d.main {
+            FACT_LABEL_W + 18.0
+        } else {
+            FACT_LABEL_W
+        };
         for (label, value) in &d.facts {
-            let r = Rect::new(x, y, FACT_LABEL_W, FACT_H);
+            let r = Rect::new(x, y, label_w, FACT_H);
             self.text(&gpu.small, theme::legend(), label, r);
-            let v = Rect::new(x + FACT_LABEL_W, y, w - FACT_LABEL_W, FACT_H);
+            let v = Rect::new(x + label_w, y, w - label_w, FACT_H);
             self.text(
                 &gpu.small,
                 theme::text_dim().mix(theme::text(), 0.4),
@@ -502,15 +550,27 @@ impl Painter<'_> {
         }
         y += 8.0;
 
-        y = self.section(gpu, "WHAT CAME OF IT", x, y, w);
-        if d.result.is_empty() {
-            let r = Rect::new(x, y, w, 20.0);
-            self.text(&gpu.small, theme::legend(), "Nothing said yet.", r);
-            y += 22.0;
-        } else {
-            y += self.wrapped_text(gpu, &gpu.body, theme::text(), &d.result, x, y, w);
+        if !d.added.is_empty() {
+            y = self.section(gpu, "QUESTS IT ADDED", x, y, w);
+            for title in &d.added {
+                y += self.wrapped_text(gpu, &gpu.small, theme::text_dim(), title, x, y, w);
+                y += 3.0;
+            }
+            y += 7.0;
         }
-        y += 10.0;
+
+        // A conversation is not a quest, so nothing came of it as such.
+        if !d.main {
+            y = self.section(gpu, "WHAT CAME OF IT", x, y, w);
+            if d.result.is_empty() {
+                let r = Rect::new(x, y, w, 20.0);
+                self.text(&gpu.small, theme::legend(), "Nothing said yet.", r);
+                y += 22.0;
+            } else {
+                y += self.wrapped_text(gpu, &gpu.body, theme::text(), &d.result, x, y, w);
+            }
+            y += 10.0;
+        }
 
         if !d.notes.trim().is_empty() {
             y = self.section(gpu, "NOTES", x, y, w);

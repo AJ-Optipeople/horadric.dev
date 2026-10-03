@@ -78,6 +78,8 @@ pub struct Past {
     pub id: String,
     pub title: Title,
     pub modified: SystemTime,
+    /// When it started, as near as the file system says.
+    pub started: SystemTime,
     /// Whose conversation it is, which says how to carry it on.
     pub agent: Agent,
 }
@@ -100,7 +102,7 @@ pub fn history(cwd: &str, skip: &[String], limit: usize) -> Vec<Past> {
 }
 
 fn list_in(root: &Path, cwd: &str, skip: &[String], limit: usize) -> Vec<Past> {
-    let mut files: Vec<(PathBuf, SystemTime, u64)> = folders(root, cwd)
+    let mut files: Vec<(PathBuf, SystemTime, u64, SystemTime)> = folders(root, cwd)
         .iter()
         .filter_map(|dir| std::fs::read_dir(dir).ok())
         .flatten()
@@ -108,24 +110,27 @@ fn list_in(root: &Path, cwd: &str, skip: &[String], limit: usize) -> Vec<Past> {
         .filter(|e| e.path().extension().is_some_and(|x| x == "jsonl"))
         .filter_map(|e| {
             let meta = e.metadata().ok()?;
-            Some((e.path(), meta.modified().ok()?, meta.len()))
+            let modified = meta.modified().ok()?;
+            let created = meta.created().unwrap_or(modified).min(modified);
+            Some((e.path(), modified, meta.len(), created))
         })
         .collect();
     files.sort_by_key(|f| std::cmp::Reverse(f.1));
     files
         .into_iter()
-        .filter_map(|(path, modified, len)| {
+        .filter_map(|(path, modified, len, started)| {
             let id = path.file_stem()?.to_str()?.to_string();
-            Some((path, id, modified, len))
+            Some((path, id, modified, len, started))
         })
         .filter(|(_, id, ..)| !skip.contains(id))
         .take(LOOKED_AT)
-        .filter_map(|(path, id, modified, len)| {
+        .filter_map(|(path, id, modified, len, started)| {
             let title = kept_title(&path, modified, len)?;
             Some(Past {
                 id,
                 title,
                 modified,
+                started,
                 agent: Agent::Claude,
             })
         })

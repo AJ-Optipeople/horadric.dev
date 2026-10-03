@@ -46,7 +46,6 @@ pub mod find;
 pub mod frame;
 pub mod glide;
 pub mod highlight;
-pub mod history;
 pub mod icon;
 pub mod inbox;
 pub mod keys;

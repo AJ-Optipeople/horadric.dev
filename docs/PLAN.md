@@ -367,6 +367,13 @@ the project's submenu without the conversation just resumed, and a pick
 there started the right one. A dev instance lists the installed one's live
 sessions too, since its registry does not hold them.
 
+**Folded into the quest log window (2026-10-03).** The History submenus
+are gone from the project menu, the tray and the start window. The
+conversations they listed are rows on the quest log's main line (see The
+quest log window), and the three menus offer "Quest log..." for the
+project instead: the tray a "Quest log" submenu of the recent projects,
+the start window's right click New session and Quest log.
+
 ### Install
 
 `horadric install` makes Horadric a normal per user app, no admin rights:
@@ -2418,6 +2425,41 @@ Checked on screen with a dev instance and a dozen fake quests in dark,
 light and narrow, and the recording with `cmd.exe` as the agent and a
 fake `Stop`. Not clicked on screen: the three menu entries (the window was
 opened by messages), and the `Commits` and `Merged` records.
+
+**Conversations on the main line** (asked for on 2026-10-03, folding the
+History menu in):
+
+- **What shows.** The project folder's newest 40 conversations of every
+  agent (`past_in`, the History menu's reader with its rules: untitled
+  ones left out), less those a quest holds and those in the stash. A
+  conversation a live tile holds stays: it is usually the main session
+  the quests came from, and Carry it on shows its tile. They are read
+  again every 30 ticks, since nothing says when one starts.
+- **Where.** `chronicle::with_talks` (pure and tested) puts each among
+  the quests as a `Quest` with `main` set, at when its transcript file
+  was created, and `graph` gives it a row on the trunk and no lane. A
+  dot of its own colour (the magic blue), a faint band behind its row.
+- **A quest added in one** branches from its dot: `quest add` now records
+  the conversation of the session that ran it (`CLAUDE_CODE_SESSION_ID`,
+  which Claude Code gives its commands), and when that session worked no
+  quest, the quest's lane starts on the conversation's row (`Row::forks`)
+  and runs up to the quest. Quests added before this grow from the trunk
+  as before.
+- **Its detail**: the title, Started, Last touched, the quests it added,
+  and Read the session and Carry it on as for a quest. Read is Claude
+  Code's only; a Codex or Grok conversation can be carried on.
+- **All conversations...** sits in the main line's band: a session on
+  Claude Code's own picker of the folder's conversations.
+
+Checked on screen with a dev instance and `cmd.exe` as the agent: the
+tray's Quest log submenu opened the window for a project with no cluster
+and for this one, whose real conversations lined the main line between
+the quests; a conversation's detail, Read the session (the transcript on
+the stage), Carry it on (`--resume <id>`) and All conversations
+(`--resume`) all clicked; the project menu's Quest log... switched the
+window; a fake `Added` with a conversation drew the fork from its dot and
+listed it under the conversation. Not clicked: the start window's right
+click, which was not up with clusters open.
 
 ### Waits a blocked quest can name
 

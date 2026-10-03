@@ -3,7 +3,9 @@
 //! it and back into it, and what came of the one picked on the right. A
 //! quest leaves the quests tile once it is done and its session goes, so
 //! this is where its story is read afterwards, and where its conversation
-//! is opened again to read or to carry on.
+//! is opened again to read or to carry on. The project's other
+//! conversations, the main sessions quests grow out of, sit on the main
+//! line among them, so this is the way back to any of them too.
 //!
 //! One window, showing one project at a time: opening it for another
 //! project switches it. It draws its own chrome like the stage, its header
@@ -15,6 +17,7 @@ use std::ffi::c_void;
 use std::rc::Rc;
 
 use horadric_core::chronicle::{self, Outcome, Quest, Row};
+use horadric_core::Agent;
 use windows::core::{w, Result, BOOL, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{
@@ -90,6 +93,9 @@ pub struct QuestLogLayout {
     /// top, and the rows under it, which scroll.
     pub list: Rect,
     pub head: Rect,
+    /// The key in the head's band for the agent's own picker of every
+    /// conversation.
+    pub all: Rect,
     pub rows: Rect,
     /// Where lane 0 starts and how wide each lane is.
     pub graph_x: f32,
@@ -113,6 +119,8 @@ pub enum QuestHit {
     Close,
     /// A quest's row, by its place in the diagram's rows.
     Row(usize),
+    /// All conversations...
+    All,
     Read,
     Carry,
 }
@@ -151,6 +159,13 @@ pub fn layout(size: (f32, f32), lanes: usize) -> QuestLogLayout {
         )
     };
     let head = Rect::new(list.x, list.y + 4.0, list.w, HEAD_H);
+    let all_w = 136.0;
+    let all = Rect::new(
+        head.right() - 10.0 - all_w,
+        head.y + 3.0,
+        all_w,
+        HEAD_H - 4.0,
+    );
     let rows = Rect::new(
         list.x,
         head.bottom(),
@@ -181,6 +196,7 @@ pub fn layout(size: (f32, f32), lanes: usize) -> QuestLogLayout {
         project,
         list,
         head,
+        all,
         rows,
         graph_x,
         lane_w,
@@ -247,6 +263,9 @@ impl QuestLogLayout {
         if self.carry.contains(x, y) {
             return QuestHit::Carry;
         }
+        if self.all.contains(x, y) {
+            return QuestHit::All;
+        }
         if self.rows.contains(x, y) {
             let i = ((y - self.rows.y + scroll) / ROW_H).floor();
             if i >= 0.0 && (i as usize) < n {
@@ -298,8 +317,16 @@ pub fn occupants(rows: &[Row], width: usize) -> Vec<Vec<Option<usize>>> {
     let mut out = vec![Vec::new(); rows.len()];
     for (r, row) in rows.iter().enumerate().rev() {
         out[r] = on.clone();
-        if let Some(slot) = on.get_mut(row.lane) {
-            *slot = Some(row.quest);
+        // A conversation is on the trunk, which is nobody's to colour.
+        if row.lane != 0 {
+            if let Some(slot) = on.get_mut(row.lane) {
+                *slot = Some(row.quest);
+            }
+        }
+        for &(lane, quest) in &row.forks {
+            if let Some(slot) = on.get_mut(lane) {
+                *slot = Some(quest);
+            }
         }
         for (lane, _) in &row.ends {
             if let Some(slot) = on.get_mut(*lane) {
@@ -416,6 +443,31 @@ fn one_line(s: &str) -> String {
     horadric_core::tasks::one_line(s).to_string()
 }
 
+/// The colour a quest burns in, or a conversation on the main line.
+pub fn color_of(q: &Quest) -> Color {
+    if q.main {
+        conversation_color()
+    } else {
+        outcome_color(q.outcome)
+    }
+}
+
+/// A conversation's own colour, apart from every lamp a quest can be lit
+/// by.
+pub fn conversation_color() -> Color {
+    theme::palette().magic
+}
+
+/// The word a row and the detail show for how a quest stands, or that it
+/// is a conversation.
+pub fn word_of(q: &Quest) -> &'static str {
+    if q.main {
+        "conversation"
+    } else {
+        q.outcome.word()
+    }
+}
+
 /// The colour a quest burns in, the lamp colours the quests tile uses, so
 /// a quest reads the same in both.
 pub fn outcome_color(o: Outcome) -> Color {
@@ -448,6 +500,10 @@ pub fn session_file(id: &str) -> String {
 /// then the conversation.
 pub fn session_doc(q: &Quest, transcript: &str) -> String {
     let mut out = format!("# {}\n\n", one_line(&q.title));
+    if q.main {
+        out.push_str(&transcript_part(transcript));
+        return out;
+    }
     let result = q.result().trim();
     out.push_str(&format!("**{}**", q.outcome.word()));
     if !result.is_empty() {
@@ -464,7 +520,12 @@ pub fn session_doc(q: &Quest, transcript: &str) -> String {
     if !q.commits.is_empty() {
         out.push('\n');
     }
-    out.push_str("# The conversation\n\n");
+    out.push_str(&transcript_part(transcript));
+    out
+}
+
+fn transcript_part(transcript: &str) -> String {
+    let mut out = "# The conversation\n\n".to_string();
     if transcript.trim().is_empty() {
         out.push_str("The conversation has nothing to read.\n");
     } else {
@@ -484,6 +545,9 @@ pub enum Ask {
     Read(String, String),
     /// Carry on that conversation in a new session.
     Carry(String, String),
+    /// Start a session in the project with this key on the agent's own
+    /// picker of every conversation.
+    All(String),
 }
 
 pub fn register_class() -> Result<()> {
@@ -788,19 +852,19 @@ impl QuestLog {
                 let q = &data.quests[r.quest];
                 QuestRowLook {
                     title: one_line(&q.title),
-                    word: q.outcome.word(),
+                    word: word_of(q),
                     age: row_age(q, now),
-                    result: one_line(q.result()),
+                    result: match q.accepted {
+                        Some(at) if q.main => format!("Started {}", when(at, now, offset)),
+                        _ => one_line(q.result()),
+                    },
                     outcome: q.outcome,
-                    color: outcome_color(q.outcome),
+                    color: color_of(q),
+                    main: q.main,
                 }
             })
             .collect();
-        let colors: Vec<Color> = data
-            .quests
-            .iter()
-            .map(|q| outcome_color(q.outcome))
-            .collect();
+        let colors: Vec<Color> = data.quests.iter().map(color_of).collect();
         let picked = self.picked_row();
         let detail = picked
             .and_then(|i| data.quests.get(data.rows[i].quest))
@@ -842,15 +906,14 @@ impl QuestLog {
         let hit = self.layout().hit(n, self.scroll.get(), x, y);
         // A key with nothing to do lights for nothing.
         match hit {
-            QuestHit::Read | QuestHit::Carry if !self.can_act() => QuestHit::Nothing,
+            QuestHit::Read if !self.picked_quest().as_ref().is_some_and(can_read) => {
+                QuestHit::Nothing
+            }
+            QuestHit::Carry if !self.picked_quest().as_ref().is_some_and(can_carry) => {
+                QuestHit::Nothing
+            }
             h => h,
         }
-    }
-
-    /// The quest picked has a conversation to read or carry on.
-    fn can_act(&self) -> bool {
-        self.picked_quest()
-            .is_some_and(|q| q.conversation.is_some())
     }
 
     fn hover(&self, hot: QuestHit) {
@@ -889,6 +952,7 @@ impl QuestLog {
                     app::push(Input::QuestLog(Ask::Carry(key, q.id)));
                 }
             }
+            QuestHit::All => app::push(Input::QuestLog(Ask::All(key))),
             QuestHit::Caption | QuestHit::Nothing => {}
         }
     }
@@ -926,7 +990,7 @@ impl QuestLog {
             return;
         }
         if vk == VK_RETURN.0 {
-            if self.can_act() {
+            if self.picked_quest().as_ref().is_some_and(can_read) {
                 self.click(QuestHit::Read);
             }
             return;
@@ -1133,8 +1197,55 @@ fn ht(e: Edge) -> u32 {
     }
 }
 
+/// The quest's conversation can be written out to read: only Claude
+/// Code's transcripts are read.
+pub fn can_read(q: &Quest) -> bool {
+    q.conversation.is_some() && q.agent == Agent::Claude
+}
+
+pub fn can_carry(q: &Quest) -> bool {
+    q.conversation.is_some()
+}
+
+/// What the section beside the list says about a conversation on the main
+/// line: when, and the quests it added.
+fn talk_detail(q: &Quest, quests: &[Quest], now: u64, offset: i64) -> QuestDetail {
+    let mut facts: Vec<(&'static str, String)> = Vec::new();
+    if let Some(at) = q.accepted {
+        facts.push(("Started", when(at, now, offset)));
+    }
+    if let Some(at) = q.ended {
+        facts.push(("Last touched", when(at, now, offset)));
+    }
+    if q.agent != Agent::Claude {
+        facts.push(("Agent", q.agent.label().to_string()));
+    }
+    let me = quests.iter().position(|o| o.main && o.id == q.id);
+    let added = quests
+        .iter()
+        .filter(|c| me.is_some() && c.parent == me)
+        .map(|c| one_line(&c.title))
+        .collect();
+    QuestDetail {
+        title: one_line(&q.title),
+        word: word_of(q),
+        color: color_of(q),
+        facts,
+        result: String::new(),
+        notes: String::new(),
+        commits: Vec::new(),
+        main: true,
+        added,
+        can_read: can_read(q),
+        can_carry: can_carry(q),
+    }
+}
+
 /// What the section beside the list says about `q`.
 fn detail_of(q: &Quest, quests: &[Quest], now: u64, offset: i64) -> QuestDetail {
+    if q.main {
+        return talk_detail(q, quests, now, offset);
+    }
     let mut facts: Vec<(&'static str, String)> = Vec::new();
     if let Some(at) = q.accepted {
         facts.push(("Accepted", when(at, now, offset)));
@@ -1173,7 +1284,10 @@ fn detail_of(q: &Quest, quests: &[Quest], now: u64, offset: i64) -> QuestDetail 
             .iter()
             .map(|c| (c.hash.clone(), one_line(&c.subject)))
             .collect(),
-        can_act: q.conversation.is_some(),
+        main: false,
+        added: Vec::new(),
+        can_read: can_read(q),
+        can_carry: can_carry(q),
     }
 }
 
@@ -1271,6 +1385,20 @@ mod tests {
             merged: None,
             parent: None,
             added_by: None,
+            added_in: None,
+            main: false,
+            agent: Agent::Claude,
+        }
+    }
+
+    fn talk(id: &str, started: u64, touched: u64) -> chronicle::Talk {
+        chronicle::Talk {
+            id: id.into(),
+            title: id.to_uppercase(),
+            started,
+            touched,
+            cwd: "C:/p".into(),
+            agent: Agent::Claude,
         }
     }
 
@@ -1323,6 +1451,9 @@ mod tests {
             l.hit(5, 0.0, l.carry.x + 2.0, l.carry.y + 2.0),
             QuestHit::Carry
         );
+        assert_eq!(l.hit(5, 0.0, l.all.x + 2.0, l.all.y + 2.0), QuestHit::All);
+        assert!(l.all.y >= l.head.y && l.all.bottom() <= l.head.bottom());
+        assert!(l.all.right() <= l.list.right());
     }
 
     #[test]
@@ -1371,6 +1502,45 @@ mod tests {
         assert_eq!(on[1], vec![None, Some(0), None]);
         assert_eq!(on[0], vec![None, Some(0), None]);
         assert_eq!(rows[0].ends, vec![(1, End::Converge)]);
+    }
+
+    #[test]
+    fn a_conversation_leaves_the_trunk_uncoloured_and_colours_its_fork() {
+        let mut child = quest("b", 5, Some(6), Outcome::Done);
+        child.parent = Some(1);
+        let q = chronicle::with_talks(vec![child], &[talk("t", 1, 9)]);
+        let (rows, width) = chronicle::graph(&q);
+        let on = occupants(&rows, width);
+        // Newest first: b, then t. Under t nothing ran; under b, b's own
+        // lane rising from t's dot.
+        assert_eq!(on[1], vec![None, None]);
+        assert_eq!(on[0], vec![None, Some(0)]);
+    }
+
+    #[test]
+    fn a_conversation_reads_and_burns_apart_from_any_quest() {
+        let q = chronicle::with_talks(Vec::new(), &[talk("t", 1, 9)]);
+        let t = &q[0];
+        assert_eq!(word_of(t), "conversation");
+        assert_eq!(color_of(t), conversation_color());
+        for o in [
+            Outcome::Working,
+            Outcome::Review,
+            Outcome::Blocked,
+            Outcome::Done,
+            Outcome::Returned,
+        ] {
+            assert_ne!(conversation_color(), outcome_color(o));
+        }
+        assert!(can_read(t) && can_carry(t));
+        let mut codex = t.clone();
+        codex.agent = Agent::Codex;
+        assert!(!can_read(&codex) && can_carry(&codex));
+        assert!(!can_carry(&quest("a", 1, None, Outcome::Done)));
+        assert_eq!(
+            session_doc(t, "## You\n\nHi\n"),
+            "# T\n\n# The conversation\n\n## You\n\nHi\n"
+        );
     }
 
     #[test]

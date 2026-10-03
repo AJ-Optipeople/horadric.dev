@@ -173,9 +173,16 @@ fn add(cwd: &Path, title: &str, notes: &str) -> Result<(), String> {
     })
     .map_err(|e| format!("{}: {e}", file::file(&project).display()))?;
     // Inside a session the new quest grows out of whatever that session
-    // works, which the quest log draws as a branch.
+    // works, which the quest log draws as a branch: its quest, or else its
+    // conversation, which Claude Code names to the commands it runs.
     if let Some(by) = session() {
-        record(&project, String::new(), title, Happened::Added { by });
+        let conversation = std::env::var("CLAUDE_CODE_SESSION_ID").unwrap_or_default();
+        record(
+            &project,
+            String::new(),
+            title,
+            Happened::Added { by, conversation },
+        );
     }
     tell_app(&project);
     println!("Added to {}", file::file(&project).display());

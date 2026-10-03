@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::journal::{self, Commit};
 use crate::tasks::{Mark, Task};
-use crate::tombs;
+use crate::{tombs, Agent};
 
 /// The file, beside `state.json`.
 pub const FILE: &str = "chronicle.jsonl";
@@ -45,8 +45,13 @@ pub struct Record {
 #[serde(tag = "what", rename_all = "snake_case")]
 pub enum Happened {
     /// `horadric quest add` ran in the session `by`, which makes the quest
-    /// `title` a child of the quest `by` works, if it works one.
-    Added { by: String },
+    /// `title` a child of the quest `by` works, if it works one, or else
+    /// of the conversation `by` held, which sits on the main line.
+    Added {
+        by: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        conversation: String,
+    },
     /// A session took the quest.
     Accepted {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -215,6 +220,15 @@ pub struct Quest {
     pub parent: Option<usize>,
     /// The session, not a quest's, that added it, for "added by".
     pub added_by: Option<String>,
+    /// The conversation that session held, which the quest branches from
+    /// when it is on the main line.
+    pub added_in: Option<String>,
+    /// Not a quest but a conversation no quest holds: a main session, drawn
+    /// on the main line itself. Its `accepted` is when it started, `ended`
+    /// when it was last touched.
+    pub main: bool,
+    /// Whose conversation it is, which says how to carry it on.
+    pub agent: Agent,
 }
 
 impl Quest {
@@ -235,6 +249,9 @@ impl Quest {
             merged: None,
             parent: None,
             added_by: None,
+            added_in: None,
+            main: false,
+            agent: Agent::Claude,
         }
     }
 
@@ -261,10 +278,10 @@ pub fn quests(
     let mut out: Vec<Quest> = Vec::new();
     let mut index: HashMap<String, usize> = HashMap::new();
     // Who added which title, waiting for the quest to be accepted.
-    let mut added: HashMap<&str, &str> = HashMap::new();
+    let mut added: HashMap<&str, (&str, &str)> = HashMap::new();
     for r in records.iter().filter(|r| r.project == project) {
-        if let Happened::Added { by } = &r.what {
-            added.insert(r.title.as_str(), by.as_str());
+        if let Happened::Added { by, conversation } = &r.what {
+            added.insert(r.title.as_str(), (by.as_str(), conversation.as_str()));
             continue;
         }
         if r.quest.is_empty() {
@@ -283,8 +300,9 @@ pub fn quests(
                 q.notes = notes.clone();
                 q.outcome = Outcome::Working;
                 q.ended = None;
-                if let Some(by) = added.get(r.title.as_str()) {
+                if let Some((by, conversation)) = added.get(r.title.as_str()) {
                     q.added_by = Some(by.to_string());
+                    q.added_in = Some(conversation.to_string()).filter(|c| !c.is_empty());
                 }
             }
             Happened::Marked { mark, reason } => {
@@ -391,6 +409,54 @@ fn link(quests: &mut [Quest]) {
     }
 }
 
+/// A conversation the agent kept for the project's folder, as the app
+/// found it on disk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Talk {
+    pub id: String,
+    pub title: String,
+    /// When it started and when it was last touched, in Unix seconds.
+    pub started: u64,
+    pub touched: u64,
+    pub cwd: String,
+    pub agent: Agent,
+}
+
+/// `quests` with each of `talks` that no quest holds put among them as a
+/// conversation on the main line, and each quest added in one of those
+/// made its child, so it branches from the conversation's dot.
+pub fn with_talks(mut quests: Vec<Quest>, talks: &[Talk]) -> Vec<Quest> {
+    let held = |id: &str| {
+        quests
+            .iter()
+            .any(|q| q.conversation.as_ref().is_some_and(|(c, _)| c == id))
+    };
+    let free: Vec<&Talk> = talks.iter().filter(|t| !held(&t.id)).collect();
+    for t in free {
+        let mut q = Quest::new(&t.id, &t.title);
+        q.accepted = Some(t.started);
+        q.ended = Some(t.touched);
+        q.outcome = Outcome::Done;
+        q.conversation = Some((t.id.clone(), t.cwd.clone()));
+        q.main = true;
+        q.agent = t.agent;
+        quests.push(q);
+    }
+    for i in 0..quests.len() {
+        if quests[i].main || quests[i].parent.is_some() {
+            continue;
+        }
+        let Some(c) = quests[i].added_in.clone() else {
+            continue;
+        };
+        if let Some(p) = quests.iter().position(|q| q.main && q.id == c) {
+            quests[i].parent = Some(p);
+            quests[i].added_by = None;
+        }
+    }
+    quests
+}
+
 /// One row of the branching diagram, a quest, newest at the top. Lane 0
 /// is the trunk, the project's main line, drawn the whole way down; every
 /// quest has a lane of its own from where it branched until it converged.
@@ -404,6 +470,9 @@ fn link(quests: &mut [Quest]) {
 ///   rise from the bottom edge to the middle, then converge into the
 ///   trunk at the top edge when merged, or stop with a cap.
 /// - `end`: how the dot's own lane ends here, when it does.
+/// - `forks`: on a conversation's row, which sits on the trunk, the lanes
+///   of the quests it added, leaving its dot for the top edge and running
+///   on up to the quest.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Row {
     /// Index into the quests.
@@ -415,6 +484,8 @@ pub struct Row {
     pub end: Option<End>,
     pub through: Vec<usize>,
     pub ends: Vec<(usize, End)>,
+    /// Each lane forking here, and the quest it leads to.
+    pub forks: Vec<(usize, usize)>,
 }
 
 /// How a lane ends.
@@ -428,8 +499,10 @@ pub enum End {
     Cap,
 }
 
-/// The diagram for `quests` as [`quests`] gave them, oldest first, and how
-/// many lanes it takes, the trunk included. Rows come newest first.
+/// The diagram for `quests` as [`quests`] and [`with_talks`] gave them,
+/// and how many lanes it takes, the trunk included. Rows come newest
+/// first. A conversation on the main line takes a row on the trunk and no
+/// lane; a quest it added has its lane from the conversation's row.
 pub fn graph(quests: &[Quest]) -> (Vec<Row>, usize) {
     let n = quests.len();
     // Oldest first, by acceptance; the unknown keep their order, first.
@@ -439,15 +512,25 @@ pub fn graph(quests: &[Quest]) -> (Vec<Row>, usize) {
     for (r, &q) in order.iter().enumerate() {
         row_of[q] = r;
     }
+    let main = |q: usize| quests[q].main;
+    // The row each quest's lane starts on: its own, or the row of the
+    // conversation that added it, when that came first.
+    let mut start = row_of.clone();
+    for q in 0..n {
+        if let Some(p) = quests[q].parent.filter(|&p| main(p)) {
+            start[q] = row_of[p].min(row_of[q]);
+        }
+    }
     // The last row each quest's lane reaches: the last quest accepted
     // before it ended, and never short of its children's rows. A quest
     // that has not ended runs to the newest row.
     let mut last = vec![0; n];
     for (r, &q) in order.iter().enumerate() {
         let quest = &quests[q];
-        last[q] = match (quest.outcome, quest.ended) {
-            (Outcome::Working, _) => n.saturating_sub(1),
-            (_, Some(end)) => order
+        last[q] = match (quest.main, quest.outcome, quest.ended) {
+            (true, ..) => r,
+            (_, Outcome::Working, _) => n.saturating_sub(1),
+            (_, _, Some(end)) => order
                 .iter()
                 .enumerate()
                 .skip(r)
@@ -455,29 +538,36 @@ pub fn graph(quests: &[Quest]) -> (Vec<Row>, usize) {
                 .map(|(r, _)| r)
                 .last()
                 .unwrap_or(r),
-            (_, None) => r,
+            (_, _, None) => r,
         };
     }
     for &q in order.iter().rev() {
-        if let Some(p) = quests[q].parent {
+        if let Some(p) = quests[q].parent.filter(|&p| !main(p)) {
             last[p] = last[p].max(row_of[q]);
         }
     }
-    // Lanes, lowest free first, held from a quest's row to its last.
+    // The quests whose lanes start on each row, in row order.
+    let mut starting: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for &q in order.iter().filter(|&&q| !main(q)) {
+        starting[start[q]].push(q);
+    }
+    // Lanes, lowest free first, held from a quest's start to its last.
     let mut lane = vec![0; n];
     let mut busy: Vec<Option<usize>> = Vec::new();
-    for (r, &q) in order.iter().enumerate() {
+    for (r, here) in starting.iter().enumerate() {
         for slot in busy.iter_mut() {
             if slot.is_some_and(|h| last[h] < r) {
                 *slot = None;
             }
         }
-        let free = busy.iter().position(Option::is_none).unwrap_or_else(|| {
-            busy.push(None);
-            busy.len() - 1
-        });
-        busy[free] = Some(q);
-        lane[q] = free + 1;
+        for &q in here {
+            let free = busy.iter().position(Option::is_none).unwrap_or_else(|| {
+                busy.push(None);
+                busy.len() - 1
+            });
+            busy[free] = Some(q);
+            lane[q] = free + 1;
+        }
     }
     let width = busy.len() + 1;
     let end_of = |q: usize| -> Option<End> {
@@ -492,11 +582,12 @@ pub fn graph(quests: &[Quest]) -> (Vec<Row>, usize) {
     for (r, &q) in order.iter().enumerate() {
         let mut through = Vec::new();
         let mut ends = Vec::new();
-        for &o in &order[..r] {
-            if last[o] < r {
+        for &o in &order {
+            if o == q || main(o) || start[o] >= r || last[o] < r {
                 continue;
             }
-            if last[o] == r && !(last[o] == top && end_of(o).is_none()) {
+            let ending = row_of[o] < r && last[o] == r;
+            if ending && !(last[o] == top && end_of(o).is_none()) {
                 ends.push((lane[o], end_of(o).unwrap_or(End::Cap)));
             } else {
                 through.push(lane[o]);
@@ -504,15 +595,36 @@ pub fn graph(quests: &[Quest]) -> (Vec<Row>, usize) {
         }
         through.sort_unstable();
         ends.sort_unstable_by_key(|(l, _)| *l);
+        if main(q) {
+            let forks = starting[r].iter().map(|&c| (lane[c], c)).collect();
+            rows.push(Row {
+                quest: q,
+                lane: 0,
+                from: 0,
+                up: false,
+                end: None,
+                through,
+                ends,
+                forks,
+            });
+            continue;
+        }
         let open = last[q] > r || (r == top && end_of(q).is_none());
+        let from = match quests[q].parent {
+            // Its lane rose here from the conversation's dot.
+            _ if start[q] < r => lane[q],
+            Some(p) => lane[p],
+            None => 0,
+        };
         rows.push(Row {
             quest: q,
             lane: lane[q],
-            from: quests[q].parent.map_or(0, |p| lane[p]),
+            from,
             up: open,
             end: (!open).then(|| end_of(q).unwrap_or(End::Cap)),
             through,
             ends,
+            forks: Vec::new(),
         });
     }
     rows.reverse();
@@ -727,7 +839,15 @@ mod tests {
     fn a_quest_gathers_its_records_and_its_child() {
         let records = [
             accepted(10, "a-1", "A"),
-            rec(11, "", "B", Happened::Added { by: "a-1".into() }),
+            rec(
+                11,
+                "",
+                "B",
+                Happened::Added {
+                    by: "a-1".into(),
+                    conversation: String::new(),
+                },
+            ),
             rec(
                 12,
                 "a-1",
@@ -772,6 +892,7 @@ mod tests {
                 "A",
                 Happened::Added {
                     by: "quest-giver-5".into(),
+                    conversation: String::new(),
                 },
             ),
             accepted(2, "a-1", "A"),
@@ -860,6 +981,77 @@ mod tests {
         assert_eq!((a.lane, a.up, a.end), (1, true, None));
         assert_eq!((b.lane, b.from), (2, 1));
         assert_eq!(b.ends, vec![(1, End::Converge)]);
+    }
+
+    fn talk(id: &str, started: u64, touched: u64) -> Talk {
+        Talk {
+            id: id.into(),
+            title: id.to_uppercase(),
+            started,
+            touched,
+            cwd: "C:/p".into(),
+            agent: Agent::Claude,
+        }
+    }
+
+    #[test]
+    fn conversations_no_quest_holds_join_the_main_line_and_adopt_their_quests() {
+        let records = [
+            rec(
+                3,
+                "",
+                "A",
+                Happened::Added {
+                    by: "main-7".into(),
+                    conversation: "t1".into(),
+                },
+            ),
+            accepted(4, "a-1", "A"),
+            rec(
+                5,
+                "a-1",
+                "",
+                Happened::Turn {
+                    line: String::new(),
+                    conversation: "held".into(),
+                    cwd: "C:/p".into(),
+                    name: String::new(),
+                },
+            ),
+        ];
+        let q = quests(&records, &[], "p", &[]);
+        assert_eq!(q[0].added_in.as_deref(), Some("t1"));
+        let q = with_talks(q, &[talk("t1", 1, 9), talk("held", 4, 6)]);
+        assert_eq!(q.len(), 2, "the conversation a quest holds is the quest's");
+        assert!(q[1].main && q[1].id == "t1");
+        assert_eq!((q[1].accepted, q[1].ended), (Some(1), Some(9)));
+        assert_eq!(q[0].parent, Some(1));
+        assert_eq!(q[0].added_by, None);
+        // Added in a conversation not on the main line: from the trunk.
+        let q = with_talks(quests(&records, &[], "p", &[]), &[talk("t2", 1, 2)]);
+        assert_eq!(q[0].parent, None);
+        assert_eq!(q[0].added_by.as_deref(), Some("main-7"));
+    }
+
+    #[test]
+    fn a_conversation_sits_on_the_trunk_and_its_quest_forks_from_its_dot() {
+        let mut child = quest("b", 5, Some(6), Outcome::Done);
+        child.parent = Some(2);
+        let q = with_talks(
+            vec![quest("a", 3, Some(4), Outcome::Done), child],
+            &[talk("t", 1, 9)],
+        );
+        let (rows, width) = graph(&q);
+        // Oldest first: t, a, b; drawn newest first.
+        let (b, a, t) = (&rows[0], &rows[1], &rows[2]);
+        assert_eq!(width, 3);
+        assert_eq!((t.quest, t.lane, t.up, t.end), (2, 0, false, None));
+        assert_eq!(t.forks, vec![(1, 1)]);
+        // b's lane passes a on its way up, a takes the next lane.
+        assert_eq!(a.lane, 2);
+        assert_eq!(a.through, vec![1]);
+        assert_eq!((b.lane, b.from), (1, 1));
+        assert!(b.ends.is_empty() && b.through.is_empty());
     }
 
     #[test]
