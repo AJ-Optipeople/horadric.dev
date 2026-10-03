@@ -2380,6 +2380,43 @@ through the rename too.
 
 Not checked on screen: the tile's words are the only change there.
 
+### The quest log window
+
+Asked for on 2026-10-03: a quest done leaves the tile and its session
+closes, and there was no way back to what it did or how it ended short of
+asking another session.
+
+- **The chronicle** (`horadric_core::chronicle`, pure and tested) is
+  `chronicle.jsonl` beside `state.json`, never trimmed, unlike the
+  journal's week. A line for each quest accepted, marked (review, blocked,
+  done, put back), summed up, added, each turn of its session ended (last
+  message, conversation id, folder, tile name), its commits and its merge.
+  The app writes most of them (`runner.rs`, `journal_phases`);
+  `horadric quest done "summary"` writes the agent's own one line and
+  `quest add` inside a session writes who added the quest, which is how a
+  quest becomes another's child. Every prompt now asks for that summary.
+- **Quests from before the chronicle** come from the list itself, every
+  held item, with what the journal's week still knows of them.
+- **The diagram** (`chronicle::graph`, pure and tested) is drawn like
+  `git log --graph`, newest at the top: the main line is the trunk, each
+  quest a lane from where it branched (the trunk, or the quest that added
+  it, whose lane runs on until its children branch) until it converged
+  back into the trunk when done, or stopped with a cap when blocked or put
+  back. Dots take the tile's lamp colours.
+- **The window** (`questlog.rs`, `render/questlog.rs`, `chronicler.rs`),
+  one at a time, from "Quest log..." in the quests tile's mode menu, a
+  quest's right click menu and the project menu. A row a quest: title,
+  outcome, age and its one line result. Click one for the detail: times,
+  where it came from, what came of it, notes, commits, merged branch.
+  "Read the session" turns its transcript into text in
+  `chronicle\<id>.md` and opens it read only on the stage; "Carry it on"
+  resumes the conversation in a new tile, or shows the one that holds it.
+
+Checked on screen with a dev instance and a dozen fake quests in dark,
+light and narrow, and the recording with `cmd.exe` as the agent and a
+fake `Stop`. Not clicked on screen: the three menu entries (the window was
+opened by messages), and the `Commits` and `Merged` records.
+
 ### Performance
 
 On 2026-09-26 everything felt less smooth: typing in the stage, right
