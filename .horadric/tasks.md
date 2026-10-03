@@ -259,7 +259,7 @@ Runewords as rune stones in a tile of their own. See "The Runetome" under Next i
 
 - [x] Privacy run @privacy-run-73133
   Branch out and spawn agents to check for privacy concerns in Horadric. Does anything transmit back to a server somewhere, can the app screenshot silently without the users conscent and send the screen back to a someone else etc.
-- [ ] Gate the browser pane's DevTools passthrough: allowlist CDP methods, ask before cookie and storage reads (docs/PRIVACY.md item 1)
+- [/] Gate the browser pane's DevTools passthrough: allowlist CDP methods, ask before cookie and storage reads (docs/PRIVACY.md item 1) @gate-the-browser-pane-s-devtools-36954
 - [ ] Show on the tile when an agent is driving the browser pane, even when its project is off stage (docs/PRIVACY.md item 2)
 - [ ] Require a per user secret on the listener's command paths, reload, new, tasks, browser (docs/PRIVACY.md item 3)
 - [ ] Drop the WebView2 remote debugging port and the devtools-port file (docs/PRIVACY.md item 4)
@@ -282,3 +282,7 @@ From the human on 2026-10-01, after using the tome.
   A click on a stone asks whether to cast it, showing what it will do, with a "Do not ask again" check kept in state.json.
 - [x] Review the runeword and Runetome implementation for other quality of life fixes @horadric.dev-78569
   Read the tile, casting and the engine end to end and fix what gets in the way. List what was found and done in the plan.
+- [?] Fold the History menu into the Quest Log window @fold-the-history-menu-into-the-quest-log-36361
+  History (project menu, tray, start window right click; see History in docs/PLAN.md) lists a project's newest Claude Code conversations and resumes one, quests or not. The Quest Log now does the same for quests. Put the conversations no quest holds (transcript::history, same skip rules) on the Quest Log's own timeline, in time order between the quests, as rows on the main line itself (they are the main sessions quests grow from and converge into), drawn with a dot of their own colour and a faint row background so they read apart from quests at a glance. A quest added by one of them branches from its dot. Their detail shows the conversation's title, when it was last touched, and Read the session and Carry it on. Keep the All conversations picker in the window. Asked for by the human on 2026-10-03. Then the project menu, tray and start window offer Quest log... for that project instead of their History submenus, and the History submenu code goes. Check on screen with a dev instance, including a project with no open cluster from the tray.
+- [?] Keep a new quest's text when the input loses focus @keep-a-new-quest-s-text-when-the-input-37605
+  The themed input from the quests tile's + (ask.rs, see The task list and Replace the Win32 text dialog in docs/PLAN.md) cancels on a click outside, so clicking away to look something up loses the title and notes typed so far. Asked for by the human on 2026-10-03. A click outside should no longer throw the text away: either keep the input open (only Esc and its own cancel close it), or keep the draft per project and fill it back in the next time + is clicked, cleared once the quest is added. Same for Edit quest. Check on screen with a dev instance: type, click another window, come back, the text is there.
