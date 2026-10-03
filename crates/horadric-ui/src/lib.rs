@@ -116,6 +116,8 @@ mod picker;
 #[cfg(windows)]
 mod project;
 #[cfg(windows)]
+mod questlog;
+#[cfg(windows)]
 mod recent;
 #[cfg(windows)]
 mod render;

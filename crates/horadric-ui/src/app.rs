@@ -116,6 +116,7 @@ use crate::keys::{self, FontStep};
 use crate::layout::{self, Metrics};
 use crate::loot::Loot;
 use crate::menu::{self, Item};
+use crate::questlog::{self, QuestLog};
 use crate::render::{Gpu, StashLook};
 use crate::screens::{self, Screen};
 use crate::sound;
@@ -137,6 +138,9 @@ mod runner;
 
 #[path = "drive.rs"]
 mod drive;
+
+#[path = "chronicler.rs"]
+mod chronicler;
 
 pub use runner::ssh_prompt;
 
@@ -376,6 +380,8 @@ pub(crate) enum Input {
     TaskAdd(String),
     /// The gold ! beside it: start an agent that suggests quests.
     GiveQuests(String),
+    /// The quest log asks, or is asked for.
+    QuestLog(questlog::Ask),
     /// A stashed session's slot clicked: bring it back.
     Unstash(String),
     /// A stashed session's slot right clicked.
@@ -461,6 +467,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
     dialog::register_class()?;
     toast::register_class()?;
     catchup::register_class()?;
+    questlog::register_class()?;
     start::register_class()?;
     terminal::register_class()?;
     let notify = create_app_window()?;
@@ -674,6 +681,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             listen_key,
             away: Away::default(),
             catchup: None,
+            quest_log: None,
             journaled: HashMap::new(),
             next_serial: 1,
             requests,
@@ -1931,6 +1939,7 @@ fn project_menu(key: &str) {
     const END_ALL: usize = 4;
     const SHELL: usize = 5;
     const BROWSE: usize = 14;
+    const QUESTS: usize = 15;
     const CODE: usize = 7;
     const EXPLORE: usize = 8;
     const OTHER_HOST: usize = 9;
@@ -2001,6 +2010,7 @@ fn project_menu(key: &str) {
     }
     items.extend([
         Item::Submenu("History".into(), history_items(&past, PAST)),
+        Item::action(QUESTS, "Quest log..."),
         Item::action(START_BATCH, format!("Start {BATCH} sessions")),
         Item::action(START_OVER, format!("Start over with {BATCH} sessions")),
         Item::Separator,
@@ -2096,6 +2106,7 @@ fn project_menu(key: &str) {
             return ask_host(key, dir, if offering { &[] } else { &suggested });
         }
         (Some(SSH_FIND), Some(_)) => return ssh_to(key, &hosts, &devices),
+        (Some(QUESTS), _) => return push(Input::QuestLog(questlog::Ask::Open(key.into()))),
         (Some(i @ (TRUNK | BRANCHES)), Some(dir)) => {
             if let Err(e) = horadric_hooks::tasks::set_worktrees(dir, i == BRANCHES) {
                 eprintln!("horadric: cannot write the project's config: {e}");
@@ -2605,6 +2616,8 @@ struct App {
     away: Away,
     /// The catch-up, while it is open.
     catchup: Option<Box<Catchup>>,
+    /// The quest log, while it is open.
+    quest_log: Option<Box<QuestLog>>,
     /// Each session's phase as last journaled, with its project and name,
     /// by session id, so only a change is written, and a session that
     /// vanishes can still be named.
@@ -5496,6 +5509,7 @@ impl App {
         }
         // A run of work ends after a quiet spell no event marks.
         self.sync_discord();
+        self.refresh_quest_log(false);
         self.save();
     }
 
@@ -6215,6 +6229,7 @@ impl App {
                 Input::TasksMode(key) => runner::ask_for(self, runner::Menu::Mode(key)),
                 Input::TaskAdd(key) => runner::ask_for(self, runner::Menu::Add(key)),
                 Input::GiveQuests(key) => self.give_quests(&key),
+                Input::QuestLog(ask) => self.quest_log_asks(ask),
             }
         }
         if relayout {

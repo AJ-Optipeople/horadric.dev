@@ -169,6 +169,14 @@ pub fn journal_since(since: u64) -> Vec<Entry> {
     entries
 }
 
+/// Every line of the chronicle, for the quest log.
+pub fn chronicle_all() -> Vec<chronicle::Record> {
+    let Some(dir) = dir() else {
+        return Vec::new();
+    };
+    chronicle::parse(&fs::read_to_string(dir.join(chronicle::FILE)).unwrap_or_default())
+}
+
 /// Drops the journal's lines older than a week, the way [`save`] writes.
 pub fn trim_journal(now: u64) {
     let Some(dir) = dir() else { return };

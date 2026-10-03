@@ -35,10 +35,11 @@ use horadric_core::worktree::{self, Worktree};
 use horadric_core::{fleet, ssh, tombs, Phase, WaitReason};
 use horadric_hooks::tasks as file;
 
-use super::{post, unix_now, with_app, App, WM_HORADRIC_KEPT, WM_HORADRIC_TASK_MENU};
+use super::{post, push, unix_now, with_app, App, Input, WM_HORADRIC_KEPT, WM_HORADRIC_TASK_MENU};
 use crate::app::Run;
 use crate::board::{self, Board, RowState};
 use crate::menu::{self, Item};
+use crate::questlog::Ask;
 use crate::toast::Kind;
 use crate::window::{folder_key, project_key, project_name};
 use crate::{ask, store, watch};
@@ -1253,6 +1254,7 @@ fn item_menu(key: &str, line: usize, title: &str) {
     const UP: usize = 8;
     const DOWN: usize = 9;
     const DELETE: usize = 10;
+    const LOG: usize = 11;
     // Beyond the ids of `tombs::MOST` tombs.
     const TOMBS: usize = 100;
     const PICK: usize = 200;
@@ -1318,6 +1320,7 @@ fn item_menu(key: &str, line: usize, title: &str) {
         items.push(Item::action(DELETE, "Delete quest"));
     }
     items.push(Item::action(EDIT, "Edit the quest log"));
+    items.push(Item::action(LOG, "Quest log..."));
     // Outside the app's borrow: the menu's loop dispatches its messages.
     let picked = menu::popup(&items);
     if let Some(i) = picked.filter(|i| *i >= PICK) {
@@ -1328,6 +1331,7 @@ fn item_menu(key: &str, line: usize, title: &str) {
     }
     match picked {
         Some(REWRITE) => return rewrite(key, &t),
+        Some(LOG) => return push(Input::QuestLog(Ask::Open(key.to_string()))),
         Some(DELETE) if !confirm_delete(title) => return,
         _ => {}
     }
@@ -1463,6 +1467,7 @@ const AT_ONCE: [usize; 4] = [1, 2, 3, 4];
 
 fn mode_menu(key: &str) {
     const EDIT: usize = 10;
+    const LOG: usize = 11;
     // Plus how many, so each choice of `AT_ONCE` has an id of its own.
     const PARALLEL: usize = 20;
     let Some(board) = with_app(|app| app.shared.boards.borrow().get(key).cloned()) else {
@@ -1492,7 +1497,11 @@ fn mode_menu(key: &str) {
     }
     items.push(Item::Separator);
     items.push(Item::action(EDIT, "Edit the quest log"));
+    items.push(Item::action(LOG, "Quest log..."));
     let picked = menu::popup(&items);
+    if picked == Some(LOG) {
+        return push(Input::QuestLog(Ask::Open(key.to_string())));
+    }
     with_app(|app| match picked {
         Some(EDIT) => app.edit_list(key),
         Some(i) if i > PARALLEL => app.set_parallel(key, i - PARALLEL),
