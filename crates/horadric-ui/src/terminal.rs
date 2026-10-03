@@ -39,19 +39,19 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetCursorPos,
     GetForegroundWindow, GetSystemMetrics, GetWindowLongPtrW, GetWindowRect, IsIconic, IsZoomed,
-    LoadCursorW, LoadIconW, RegisterClassW, SetCursor, SetForegroundWindow, SetWindowLongPtrW,
-    SetWindowPos, SetWindowTextW, ShowWindow, CREATESTRUCTW, CW_USEDEFAULT, GWLP_USERDATA,
-    HTCAPTION, HTCLIENT, HTCLOSE, HTMAXBUTTON, HTMINBUTTON, HTTOP, HTTOPLEFT, HTTOPRIGHT,
-    IDC_ARROW, IDC_SIZEALL, IDC_SIZENS, IDC_SIZEWE, NCCALCSIZE_PARAMS, SC_KEYMENU, SM_CXMINTRACK,
-    SM_CXPADDEDBORDER, SM_CYFRAME, SM_CYMINTRACK, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
-    SWP_NOSIZE, SWP_NOZORDER, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOWNOACTIVATE,
-    SW_SHOWNORMAL, WINDOW_EX_STYLE, WMSZ_BOTTOM, WMSZ_BOTTOMLEFT, WMSZ_BOTTOMRIGHT, WMSZ_LEFT,
-    WMSZ_RIGHT, WMSZ_TOP, WMSZ_TOPLEFT, WMSZ_TOPRIGHT, WM_CAPTURECHANGED, WM_CLOSE, WM_DPICHANGED,
-    WM_ENTERSIZEMOVE, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOVING,
-    WM_NCACTIVATE, WM_NCCALCSIZE, WM_NCCREATE, WM_NCDESTROY, WM_NCHITTEST, WM_NCLBUTTONDBLCLK,
-    WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMOUSEMOVE, WM_NCRBUTTONUP, WM_PAINT, WM_SETCURSOR,
-    WM_SETFOCUS, WM_SIZE, WM_SIZING, WM_SYSCOMMAND, WM_TIMER, WNDCLASSW, WS_CLIPCHILDREN,
-    WS_OVERLAPPEDWINDOW,
+    LoadCursorW, LoadIconW, RegisterClassW, SendMessageW, SetCursor, SetForegroundWindow,
+    SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow, CREATESTRUCTW, CW_USEDEFAULT,
+    GWLP_USERDATA, HICON, HTCAPTION, HTCLIENT, HTCLOSE, HTMAXBUTTON, HTMINBUTTON, HTTOP, HTTOPLEFT,
+    HTTOPRIGHT, ICON_BIG, IDC_ARROW, IDC_SIZEALL, IDC_SIZENS, IDC_SIZEWE, NCCALCSIZE_PARAMS,
+    SC_KEYMENU, SIZE_MINIMIZED, SM_CXMINTRACK, SM_CXPADDEDBORDER, SM_CYFRAME, SM_CYMINTRACK,
+    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_MAXIMIZE,
+    SW_MINIMIZE, SW_RESTORE, SW_SHOWNOACTIVATE, SW_SHOWNORMAL, WINDOW_EX_STYLE, WMSZ_BOTTOM,
+    WMSZ_BOTTOMLEFT, WMSZ_BOTTOMRIGHT, WMSZ_LEFT, WMSZ_RIGHT, WMSZ_TOP, WMSZ_TOPLEFT,
+    WMSZ_TOPRIGHT, WM_CAPTURECHANGED, WM_CLOSE, WM_DPICHANGED, WM_ENTERSIZEMOVE, WM_ERASEBKGND,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOVING, WM_NCACTIVATE, WM_NCCALCSIZE,
+    WM_NCCREATE, WM_NCDESTROY, WM_NCHITTEST, WM_NCLBUTTONDBLCLK, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP,
+    WM_NCMOUSEMOVE, WM_NCRBUTTONUP, WM_PAINT, WM_SETCURSOR, WM_SETFOCUS, WM_SETICON, WM_SIZE,
+    WM_SIZING, WM_SYSCOMMAND, WM_TIMER, WNDCLASSW, WS_CLIPCHILDREN, WS_OVERLAPPEDWINDOW,
 };
 
 /// Not in the `windows` crate's WindowsAndMessaging.
@@ -641,6 +641,16 @@ impl TerminalWindow {
             .collect()
     }
 
+    /// The session whose pane is at this point on the screen, when the
+    /// stage is what shows there.
+    pub fn session_at(&self, at: POINT) -> Option<String> {
+        self.panes
+            .borrow()
+            .iter()
+            .find(|p| crate::app::window_under(at, p.hwnd))
+            .map(|p| p.session().to_string())
+    }
+
     /// The session that has the keyboard, or last had it.
     pub fn active(&self) -> Option<String> {
         self.active.borrow().clone()
@@ -765,6 +775,19 @@ impl TerminalWindow {
             let mut r = RECT::default();
             GetWindowRect(self.hwnd, &mut r).ok()?;
             Some([r.left, r.top, r.right, r.bottom])
+        }
+    }
+
+    /// Puts `icon` on the taskbar button, which is how the stage breathes
+    /// with the tray while a session works.
+    pub fn set_icon(&self, icon: HICON) {
+        unsafe {
+            SendMessageW(
+                self.hwnd,
+                WM_SETICON,
+                Some(WPARAM(ICON_BIG as usize)),
+                Some(LPARAM(icon.0 as isize)),
+            );
         }
     }
 
@@ -1386,6 +1409,9 @@ impl TerminalWindow {
                 }
                 Some(unsafe { DefWindowProcW(self.hwnd, msg, wparam, LPARAM(-1)) })
             }
+            // Minimized, the client area is empty and there is nothing to
+            // lay out; the restore brings its own WM_SIZE.
+            WM_SIZE if wparam.0 == SIZE_MINIMIZED as usize => None,
             WM_SIZE => {
                 // A new session wobbles the stage's size as it shows, which
                 // would stop its panes mid glide. An edge dragged by hand

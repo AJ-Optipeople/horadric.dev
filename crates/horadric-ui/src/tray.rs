@@ -3,6 +3,7 @@
 //! and quits the app.
 
 use std::ffi::c_void;
+use std::time::Duration;
 
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Gdi::{
@@ -14,7 +15,7 @@ use windows::Win32::UI::Shell::{
     NOTIFYICONDATAW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateIconIndirect, DestroyIcon, GetSystemMetrics, HICON, ICONINFO, SM_CXSMICON,
+    CreateIconIndirect, DestroyIcon, GetSystemMetrics, HICON, ICONINFO, SM_CXICON, SM_CXSMICON,
 };
 
 use horadric_core::experience;
@@ -23,7 +24,7 @@ use horadric_core::saved::Discord;
 use crate::menu::{self, Item};
 use crate::screens::{self, Screen};
 use crate::theme::Theme;
-use crate::{icon, recent};
+use crate::{icon, motion, recent};
 
 const ID: u32 = 1;
 
@@ -31,7 +32,26 @@ pub struct Tray {
     hwnd: HWND,
     callback: u32,
     icon: HICON,
+    /// The breathing light, one icon per step, made once and kept.
+    frames: Vec<HICON>,
+    /// The same breath at the taskbar's size, for the stage's button.
+    big: Vec<HICON>,
+    /// The frame showing while it breathes, `None` while it rests.
+    frame: Option<usize>,
     tip: String,
+}
+
+/// How many steps one breath takes. At [`BREATH_STEP_MS`] each, a breath
+/// lasts about two seconds, slow enough to read as calm work.
+pub const BREATH_FRAMES: usize = 24;
+pub const BREATH_STEP_MS: u32 = 80;
+
+/// How bright the light is at this step of a breath: full at the start and
+/// end, dimmest halfway. The same curve as a waiting tile's breath.
+pub fn breath(step: usize) -> f32 {
+    let at = Duration::from_millis((step as u64) * BREATH_STEP_MS as u64);
+    let period = Duration::from_millis((BREATH_FRAMES as u64) * BREATH_STEP_MS as u64);
+    1.0 - 0.6 * motion::breathe(at, period)
 }
 
 /// What the user picked from the menu.
@@ -81,10 +101,19 @@ pub enum Choice {
 impl Tray {
     /// Adds the icon. Clicks arrive at `hwnd` as `callback` messages.
     pub fn add(hwnd: HWND, callback: u32) -> Tray {
+        let small = unsafe { GetSystemMetrics(SM_CXSMICON) }.max(16);
+        let big = unsafe { GetSystemMetrics(SM_CXICON) }.max(32);
         let tray = Tray {
             hwnd,
             callback,
-            icon: make_icon(),
+            icon: make_icon(small, 1.0),
+            frames: (0..BREATH_FRAMES)
+                .map(|i| make_icon(small, breath(i)))
+                .collect(),
+            big: (0..BREATH_FRAMES)
+                .map(|i| make_icon(big, breath(i)))
+                .collect(),
+            frame: None,
             tip: "Horadric".into(),
         };
         tray.show();
@@ -109,6 +138,40 @@ impl Tray {
         }
     }
 
+    /// Starts or stops the light breathing. Returns the new state when it
+    /// changed, so the caller starts or stops the timer that steps it.
+    pub fn breathe(&mut self, on: bool) -> Option<bool> {
+        if on == self.frame.is_some() {
+            return None;
+        }
+        self.frame = on.then_some(0);
+        self.refresh();
+        Some(on)
+    }
+
+    /// Moves the breath on one frame.
+    pub fn step(&mut self) {
+        if let Some(f) = self.frame {
+            self.frame = Some((f + 1) % self.frames.len().max(1));
+            self.refresh();
+        }
+    }
+
+    /// The icon for the stage's taskbar button, breathing with the tray's.
+    /// At rest it is the first frame, which is the light at full.
+    pub fn taskbar_icon(&self) -> HICON {
+        self.big
+            .get(self.frame.unwrap_or(0))
+            .copied()
+            .unwrap_or_default()
+    }
+
+    fn refresh(&self) {
+        unsafe {
+            let _ = Shell_NotifyIconW(NIM_MODIFY, &self.data());
+        }
+    }
+
     fn data(&self) -> NOTIFYICONDATAW {
         let mut d = NOTIFYICONDATAW {
             cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
@@ -116,7 +179,10 @@ impl Tray {
             uID: ID,
             uFlags: NIF_ICON | NIF_MESSAGE | NIF_TIP,
             uCallbackMessage: self.callback,
-            hIcon: self.icon,
+            hIcon: self
+                .frame
+                .and_then(|f| self.frames.get(f).copied())
+                .unwrap_or(self.icon),
             ..Default::default()
         };
         for (slot, unit) in d.szTip.iter_mut().zip(self.tip.encode_utf16().take(127)) {
@@ -131,6 +197,9 @@ impl Drop for Tray {
         unsafe {
             let _ = Shell_NotifyIconW(NIM_DELETE, &self.data());
             let _ = DestroyIcon(self.icon);
+            for f in self.frames.iter().chain(&self.big) {
+                let _ = DestroyIcon(*f);
+            }
         }
     }
 }
@@ -340,14 +409,15 @@ pub fn menu(
     }
 }
 
-/// Turns the drawn pixels into an icon at the small icon size for this DPI.
-fn make_icon() -> HICON {
-    let size = unsafe { GetSystemMetrics(SM_CXSMICON) }.max(16);
-    let pixels = if horadric_hooks::dev() {
-        icon::dev_pixels(size as u32)
+/// Turns the drawn pixels into a `size` pixel icon, its light dimmed to
+/// `bright`.
+fn make_icon(size: i32, bright: f32) -> HICON {
+    let light = if horadric_hooks::dev() {
+        icon::ERROR
     } else {
-        icon::pixels(size as u32)
+        icon::GOLD
     };
+    let pixels = icon::lit(size as u32, dim(light, bright));
     unsafe {
         let info = BITMAPINFO {
             bmiHeader: BITMAPINFOHEADER {
@@ -381,5 +451,33 @@ fn make_icon() -> HICON {
         let _ = DeleteObject(color.into());
         let _ = DeleteObject(mask.into());
         icon
+    }
+}
+
+/// A `0xRRGGBB` colour with each channel scaled by `k`.
+fn dim(rgb: u32, k: f32) -> u32 {
+    [16, 8, 0].iter().fold(0, |acc, shift| {
+        let c = ((rgb >> shift) & 0xff) as f32 * k.clamp(0.0, 1.0);
+        acc | (c.round() as u32) << shift
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_breath_starts_bright_dips_halfway_and_comes_back() {
+        assert_eq!(breath(0), 1.0);
+        assert!((breath(BREATH_FRAMES / 2) - 0.4).abs() < 1e-5);
+        assert_eq!(breath(BREATH_FRAMES), breath(0));
+        assert!(breath(3) > breath(6), "dims smoothly on the way down");
+    }
+
+    #[test]
+    fn dimming_scales_each_channel() {
+        assert_eq!(dim(0xE8B04A, 1.0), 0xE8B04A);
+        assert_eq!(dim(0xFF8040, 0.5), 0x804020);
+        assert_eq!(dim(0xFFFFFF, 0.0), 0);
     }
 }

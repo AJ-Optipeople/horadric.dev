@@ -640,6 +640,7 @@ mod tests {
             title: title.into(),
             holder: holder.map(Into::into),
             reason: None,
+            wait: None,
             notes: vec![],
         }
     }

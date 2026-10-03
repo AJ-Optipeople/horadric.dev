@@ -4,8 +4,8 @@
 //! types to the session, writes its keystrokes, runs commands, starts its
 //! reviewer and merges its branch, the cube's own actions.
 
-use std::cell::RefCell;
-use std::collections::HashMap;
+use std::cell::{Cell, RefCell};
+use std::collections::{BTreeMap, HashMap};
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -13,14 +13,19 @@ use std::rc::Rc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use horadric_core::runeword::{
-    self, Act, Offered, OnProject, Ran, Rune, Runeword, Seen, Step, Stone,
+    self, Act, OnProject, Ran, Rune, Runeword, Seen, Source, Step, Stone,
 };
+use horadric_core::saved::SavedState;
 use horadric_core::tasks::one_line;
 use horadric_core::Session;
+use windows::Win32::Foundation::POINT;
 
 use super::transmute::subject;
-use crate::app::{App, Run};
+use crate::app::{self, App, Input, Run};
 use crate::console;
+use crate::dialog::{Dialog, Tone};
+use crate::menu::{self, Item};
+use crate::render::TomeStone;
 use crate::store;
 use crate::toast::Kind;
 use crate::window::{project_key, project_name};
@@ -37,6 +42,16 @@ const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
 pub(in crate::app) struct Tome {
     /// Runewords cast on a project rather than on a session.
     pub(in crate::app) projects: Vec<OnProject>,
+    /// The steps each project stone had when last cast, by project key
+    /// and label, as `runeword::fingerprint`.
+    pub(in crate::app) cast: BTreeMap<String, u64>,
+    /// Whether a click asks before it casts. A stone whose steps changed
+    /// since it was last cast asks anyway.
+    pub(in crate::app) ask: bool,
+    /// The built in stones put away, by label.
+    pub(in crate::app) hidden: Vec<String>,
+    /// The order each project's stones were dragged to, by project key.
+    pub(in crate::app) order: BTreeMap<String, Vec<String>>,
     /// Keystrokes still to be written, by session, each when it is due.
     typing: Vec<(String, Vec<u8>, Instant)>,
     /// The hidden commands this run of the app started, by file, to tell
@@ -55,9 +70,13 @@ struct Read {
 }
 
 impl Tome {
-    pub(in crate::app) fn new(projects: Vec<OnProject>) -> Tome {
+    pub(in crate::app) fn new(saved: &SavedState) -> Tome {
         Tome {
-            projects,
+            projects: saved.runewords.clone(),
+            cast: saved.stones_cast.clone(),
+            ask: !saved.cast_without_asking,
+            hidden: saved.stones_hidden.clone(),
+            order: saved.stones_order.clone(),
             ..Tome::default()
         }
     }
@@ -95,6 +114,9 @@ impl Tome {
             .map(|f| self.text(&f))
             .unwrap_or_default();
         runeword::stones(&project, &global)
+            .into_iter()
+            .filter(|s| s.source != Source::BuiltIn || !self.hidden.contains(&s.label))
+            .collect()
     }
 
     fn typing(&self, id: &str) -> bool {
@@ -135,15 +157,10 @@ impl App {
             .collect()
     }
 
-    /// The runewords a session can be given, and the one it has. None for
-    /// what cannot take one: a plain terminal or a background session.
-    pub(in crate::app) fn runewords_of(&self, id: &str) -> Option<(Offered, Option<Runeword>)> {
-        let (key, word) = {
-            let r = self.shared.registry.lock().ok()?;
-            let s = r.get(id).filter(|s| !s.shell && s.background.is_none())?;
-            (project_key(s), s.runeword.clone())
-        };
-        Some((runeword::offered(self.stones_of(&key)), word))
+    /// The runeword a session has.
+    pub(in crate::app) fn runeword_of(&self, id: &str) -> Option<Runeword> {
+        let r = self.shared.registry.lock().ok()?;
+        r.get(id)?.runeword.clone()
     }
 
     /// Gives a session a runeword. Its first rune is cast at once if the
@@ -580,9 +597,18 @@ impl App {
 
     /// What a toast calls what a runeword was cast on.
     fn on_label(&self, on: &On, s: Option<&Session>) -> String {
-        match (on, s) {
-            (_, Some(s)) => s.label().to_string(),
-            (On::Project(key), None) | (On::Session(key), None) => project_name(key),
+        if let Some(s) = s {
+            return s.label().to_string();
+        }
+        match on {
+            On::Session(id) => self
+                .shared
+                .registry
+                .lock()
+                .ok()
+                .and_then(|r| r.get(id).map(|s| s.label().to_string()))
+                .unwrap_or_else(|| id.clone()),
+            On::Project(key) => project_name(key),
         }
     }
 
@@ -596,10 +622,630 @@ impl App {
     }
 
     fn redraw_tiles(&self) {
+        self.refresh_tomes();
         for c in &self.clusters {
             c.invalidate();
         }
     }
+
+    /// Reads every project's stones again and hands the tome what changed:
+    /// a stone an agent wrote, one being cast, one cast at last.
+    pub(in crate::app) fn refresh_tomes(&self) {
+        let mut resized = false;
+        for c in &self.clusters {
+            let Some(dir) = self.project_dir(&c.key) else {
+                continue;
+            };
+            let stones = self.tome_of(&c.key, &dir);
+            let same = self.shared.tomes.borrow().get(&c.key) == Some(&stones);
+            if !same {
+                self.shared.tomes.borrow_mut().insert(c.key.clone(), stones);
+                resized |= c.update();
+            }
+        }
+        if resized {
+            app::push(Input::Arrange);
+        }
+    }
+
+    /// The stones of the project with this key as its tome draws them,
+    /// with where each is while it is cast, and the empty stone last.
+    fn tome_of(&self, key: &str, dir: &Path) -> Vec<TomeStone> {
+        let casting: Vec<Runeword> = {
+            let mut words = self.project_runewords(key);
+            if let Ok(r) = self.shared.registry.lock() {
+                words.extend(
+                    r.all()
+                        .filter(|s| project_key(s) == key)
+                        .filter_map(|s| s.runeword.clone()),
+                );
+            }
+            words
+        };
+        let order = self.tome.order.get(key).map_or(&[][..], Vec::as_slice);
+        let mut out: Vec<TomeStone> = runeword::arrange(self.tome.stones(Some(dir)), order)
+            .into_iter()
+            .map(|stone| {
+                let marked = self.changed(key, &stone);
+                let progress = casting
+                    .iter()
+                    .find(|w| w.name == stone.label)
+                    .map(|w| format!("{}/{}", (w.at + 1).min(w.runes.len()), w.runes.len()));
+                TomeStone {
+                    carving: runeword::carve(&stone.label),
+                    tip: runeword::tip(&stone, marked),
+                    cracked: stone.steps.is_err(),
+                    label: Some(stone.label),
+                    progress,
+                    marked,
+                }
+            })
+            .collect();
+        out.push(TomeStone {
+            label: None,
+            carving: runeword::carve(""),
+            tip: runeword::EMPTY_TIP.to_string(),
+            cracked: false,
+            progress: None,
+            marked: false,
+        });
+        out
+    }
+
+    /// Whether a stone came with the project and its steps are not the
+    /// ones last cast, so a pull that changed a command is seen before it
+    /// runs. Built in and global stones are the app's and the human's own.
+    fn changed(&self, key: &str, stone: &Stone) -> bool {
+        let Some(runes) = stone.runes().filter(|_| stone.source == Source::Project) else {
+            return false;
+        };
+        self.tome.cast.get(&cast_key(key, &stone.label)) != Some(&runeword::fingerprint(runes))
+    }
+
+    /// The stone of this label the project with this key has, when it
+    /// parses.
+    fn stone(&self, key: &str, label: &str) -> Option<Stone> {
+        self.any_stone(key, label).filter(|s| s.steps.is_ok())
+    }
+
+    /// The stone of this label, cracked or not.
+    fn any_stone(&self, key: &str, label: &str) -> Option<Stone> {
+        self.stones_of(key).into_iter().find(|s| s.label == label)
+    }
+
+    /// The file a stone is written in. None for a built in one.
+    fn stone_file(&self, key: &str, stone: &Stone) -> Option<PathBuf> {
+        match stone.source {
+            Source::BuiltIn => None,
+            Source::Project => self
+                .project_dir(key)
+                .map(|d| horadric_hooks::tasks::config_file(&d)),
+            Source::Global => horadric_hooks::tasks::runewords_file(),
+        }
+    }
+
+    /// Takes the stone of this label out of the file it is written in,
+    /// leaving the rest of the file as it was.
+    fn remove_stone(&mut self, key: &str, label: &str) -> Result<(), String> {
+        let stone = self.any_stone(key, label).ok_or("it is gone already")?;
+        let file = self
+            .stone_file(key, &stone)
+            .ok_or("a built in stone is in no file")?;
+        let text = std::fs::read_to_string(&file)
+            .map_err(|e| format!("cannot read {}: {e}", file.display()))?;
+        let bom = if text.starts_with('\u{feff}') {
+            "\u{feff}"
+        } else {
+            ""
+        };
+        let out = runeword::unwrite(text.trim_start_matches('\u{feff}'), label)?;
+        std::fs::write(&file, format!("{bom}{out}"))
+            .map_err(|e| format!("cannot write {}: {e}", file.display()))?;
+        if self.tome.cast.remove(&cast_key(key, label)).is_some() {
+            self.save();
+        }
+        self.redraw_tiles();
+        Ok(())
+    }
+
+    /// Moves the stone at place `from` in the project's tome to place
+    /// `to`, as the tome now shows them, and keeps the order. The empty
+    /// stone stays last.
+    pub(in crate::app) fn move_stone(&mut self, key: &str, from: usize, to: usize) {
+        let labels: Vec<String> = self
+            .shared
+            .tomes
+            .borrow()
+            .get(key)
+            .map(|t| t.iter().filter_map(|s| s.label.clone()).collect())
+            .unwrap_or_default();
+        if from >= labels.len() || from == to {
+            return;
+        }
+        self.tome
+            .order
+            .insert(key.to_string(), runeword::moved(&labels, from, to));
+        self.save();
+        self.redraw_tiles();
+    }
+
+    /// Puts a built in stone away, or with None brings every one back.
+    fn hide_stone(&mut self, label: Option<&str>) {
+        match label {
+            Some(l) if !self.tome.hidden.iter().any(|h| h == l) => {
+                self.tome.hidden.push(l.to_string())
+            }
+            Some(_) => {}
+            None => self.tome.hidden.clear(),
+        }
+        self.save();
+        self.redraw_tiles();
+    }
+
+    /// What a click asks before it casts the stone of this label on `on`,
+    /// a session, or the project with None. None when it casts without
+    /// asking: the human said not to, and its steps are the ones they cast
+    /// before.
+    fn cast_question(&self, key: &str, label: &str, on: Option<&str>) -> Option<Question> {
+        let stone = self.stone(key, label)?;
+        let changed = self.changed(key, &stone);
+        if !self.tome.ask && !changed {
+            return None;
+        }
+        let who = match on {
+            Some(id) => self.on_label(&On::Session(id.to_string()), None),
+            None => format!("the project {}", project_name(key)),
+        };
+        let commands = stone
+            .runes()
+            .is_some_and(|r| r.iter().any(|r| matches!(r, Rune::Run { .. })));
+        Some(Question {
+            title: format!("Cast {label}?"),
+            text: runeword::ask_text(&stone, &who, changed),
+            commands,
+        })
+    }
+
+    /// Who is casting the stone of this label in the project with this
+    /// key: each session by id with where it is, and None for the project
+    /// itself.
+    fn casting(&self, key: &str, label: &str) -> Vec<(Option<String>, String)> {
+        let mut out: Vec<(Option<String>, String)> = self
+            .project_runewords(key)
+            .into_iter()
+            .filter(|w| w.name == label)
+            .map(|w| (None, w.progress()))
+            .collect();
+        if let Ok(r) = self.shared.registry.lock() {
+            for s in r.all().filter(|s| project_key(s) == key) {
+                if let Some(w) = s.runeword.as_ref().filter(|w| w.name == label) {
+                    out.push((
+                        Some(s.id.clone()),
+                        format!("{}, {}", s.label(), w.progress()),
+                    ));
+                }
+            }
+        }
+        out
+    }
+
+    /// Whether a stone can be cast on this session: one Horadric runs, not
+    /// a plain terminal, a background session or a paused one.
+    fn castable(&self, id: &str) -> bool {
+        let fit = self.shared.registry.lock().is_ok_and(|r| {
+            r.get(id)
+                .is_some_and(|s| !s.shell && s.background.is_none())
+        });
+        fit && !self.paused.contains_key(id)
+            && self
+                .consoles
+                .get(id)
+                .is_some_and(|c| c.exit_code().is_none())
+    }
+
+    /// The project's sessions a stone can be cast on, with their labels,
+    /// in the order the tiles show them.
+    fn castable_in(&self, key: &str) -> Vec<(String, String)> {
+        let mut sessions: Vec<(String, String)> = self
+            .shared
+            .registry
+            .lock()
+            .map(|r| {
+                r.all()
+                    .filter(|s| project_key(s) == key)
+                    .map(|s| (s.id.clone(), s.label().to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        sessions.retain(|(id, _)| self.castable(id));
+        if let Some(order) = self.shared.orders.borrow().get(key) {
+            sessions.sort_by_key(|(id, _)| crate::layout::rank(order, id));
+        }
+        sessions
+    }
+
+    /// Where a click on a stone casts it without asking: on the project
+    /// for a stone of only commands, or on the session with the keyboard
+    /// on the stage when that is one of this project's.
+    fn cast_at_once(&self, key: &str, stone: &Stone) -> Option<Option<String>> {
+        if stone.sessionless() {
+            return Some(None);
+        }
+        let stage = self.stage.as_ref().filter(|s| s.project() == key)?;
+        let id = stage.active().filter(|id| self.castable(id))?;
+        (self.project_of(&id).as_deref() == Some(key)).then_some(Some(id))
+    }
+
+    /// Casts the stone of this label on a session, or with none on the
+    /// project, and notes the steps it was cast with.
+    pub(in crate::app) fn cast_stone(&mut self, key: &str, label: &str, on: Option<&str>) {
+        let Some(stone) = self.stone(key, label) else {
+            return;
+        };
+        let runes = stone.runes().map(<[Rune]>::to_vec).unwrap_or_default();
+        match on {
+            Some(id) if self.runeword_of(id).is_some() && runeword::only_keys(&runes) => {
+                if !self.slip_keys(id, label, &runes) {
+                    return;
+                }
+            }
+            Some(id) => {
+                if let Some(w) = self.runeword_of(id) {
+                    let who = self.on_label(&On::Session(id.to_string()), None);
+                    self.toasts.show(
+                        Kind::Failed,
+                        &format!("Cannot cast {label}"),
+                        &format!("{who} is casting {} already. Stop it first.", w.name),
+                    );
+                    return;
+                }
+                self.give_runeword(id, label, runes.clone());
+            }
+            None => self.cast_on_project(key, label, runes.clone()),
+        }
+        if stone.source == Source::Project {
+            self.tome
+                .cast
+                .insert(cast_key(key, label), runeword::fingerprint(&runes));
+            self.save();
+        }
+        self.redraw_tiles();
+    }
+
+    /// Types a stone of only keys into a session casting another
+    /// runeword, leaving that one where it is: keys wait for no turn, so
+    /// they answer a prompt the other runeword is held up on.
+    /// False, with a toast, when they could not be typed.
+    fn slip_keys(&mut self, id: &str, label: &str, runes: &[Rune]) -> bool {
+        let pieces: Result<Vec<Vec<u8>>, String> = runes
+            .iter()
+            .filter_map(|r| match r {
+                Rune::Keys(spec) => Some(runeword::keys(spec)),
+                _ => None,
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(|p| p.into_iter().flatten().collect());
+        let why = match pieces {
+            Ok(pieces) => {
+                if self.type_keys(id, pieces) {
+                    return true;
+                }
+                "its terminal is not running".to_string()
+            }
+            Err(e) => e,
+        };
+        let who = self.on_label(&On::Session(id.to_string()), None);
+        self.toasts.show(
+            Kind::Failed,
+            &format!("Cannot cast {label}"),
+            &format!("{who}: {why}"),
+        );
+        false
+    }
+
+    /// A stone let go of over the screen: cast on the tile or pane there.
+    /// A stone of only commands needs no session, so it casts on its
+    /// project wherever it lands.
+    pub(in crate::app) fn stone_dropped(&mut self, key: &str, label: &str, at: POINT) {
+        let Some(stone) = self.stone(key, label) else {
+            return;
+        };
+        if stone.sessionless() {
+            return self.cast_stone(key, label, None);
+        }
+        let on = self
+            .clusters
+            .iter()
+            .find_map(|c| c.session_at(at))
+            .or_else(|| self.stage.as_ref().and_then(|s| s.session_at(at)));
+        match on {
+            Some(id) if self.castable(&id) => self.cast_stone(key, label, Some(&id)),
+            Some(id) => {
+                let who = self.on_label(&On::Session(id), None);
+                self.toasts.show(
+                    Kind::Failed,
+                    &format!("Cannot cast {label}"),
+                    &format!("{who} is not a session Horadric runs."),
+                );
+            }
+            None => {}
+        }
+    }
+
+    /// The empty stone: starts a session in the project that asks what a
+    /// new stone should do and writes it, and puts it on the stage, since
+    /// it asks.
+    /// With `change`, the label of a stone written in a file, it changes
+    /// that one instead.
+    pub(in crate::app) fn start_runesmith(&mut self, key: &str, change: Option<&str>) {
+        let Some(dir) = self.project_dir(key) else {
+            return;
+        };
+        // Forward slashes read as a path in every shell the agent may use.
+        let slashed = |p: &Path| p.to_string_lossy().replace('\\', "/");
+        let global = horadric_hooks::tasks::runewords_file()
+            .map(|f| slashed(&f))
+            .unwrap_or_else(|| "runewords.json beside Horadric's state".into());
+        let (horadric, config) = (super::horadric_command(), horadric_core::tasks::CONFIG_FILE);
+        let file = change.and_then(|label| {
+            let stone = self.any_stone(key, label)?;
+            Some((label, slashed(&self.stone_file(key, &stone)?)))
+        });
+        let prompt = match &file {
+            Some((label, file)) => {
+                runeword::reforge_prompt(&horadric, config, &global, label, file)
+            }
+            None => runeword::smith_prompt(&horadric, config, &global),
+        };
+        let id = self.unique_id("runesmith");
+        self.tasks.prompts.insert(id.clone(), prompt);
+        if let Err(e) = self.launch(
+            &id,
+            "Runesmith",
+            dir,
+            Vec::new(),
+            Run::Agent(horadric_core::Agent::Claude),
+            false,
+        ) {
+            self.tasks.prompts.remove(&id);
+            eprintln!("horadric: cannot start the Runesmith: {e}");
+            self.toasts
+                .show(Kind::Failed, "Cannot start the Runesmith", &e);
+            return;
+        }
+        if self.fill_stage(key) {
+            if let Some(stage) = &self.stage {
+                stage.focus_session(&id);
+            }
+        }
+    }
+}
+
+/// How a project stone's last cast steps are filed.
+fn cast_key(key: &str, label: &str) -> String {
+    format!("{key}\n{label}")
+}
+
+/// What a click on a stone does: offers Stop while it is cast, otherwise
+/// casts it where it can without asking, or asks which session. Outside
+/// the app's borrow, since a menu runs a loop of its own.
+pub(in crate::app) fn stone_clicked(key: &str, label: &str) {
+    const STOP: usize = 1;
+    const SESSION: usize = 100;
+    let casting = app::with_app(|a| a.casting(key, label)).unwrap_or_default();
+    if !casting.is_empty() {
+        let items: Vec<Item> = casting
+            .iter()
+            .enumerate()
+            .map(|(i, (_, at))| Item::action(STOP + i, format!("Stop {label} ({at})")))
+            .collect();
+        let picked = menu::popup(&items).and_then(|p| p.checked_sub(STOP));
+        if let Some((on, _)) = picked.and_then(|i| casting.get(i)) {
+            app::with_app(|a| match on {
+                Some(id) => a.stop_runeword(id),
+                None => a.stop_project_runeword(key, label),
+            });
+        }
+        return;
+    }
+    let plan = app::with_app(|a| {
+        a.stone(key, label)
+            .map(|s| (a.cast_at_once(key, &s), a.castable_in(key)))
+    })
+    .flatten();
+    let Some((at_once, sessions)) = plan else {
+        return;
+    };
+    if let Some(on) = at_once {
+        if confirmed(key, label, on.as_deref()) {
+            app::with_app(|a| a.cast_stone(key, label, on.as_deref()));
+        }
+        return;
+    }
+    let mut items = vec![Item::Disabled("Cast on which session?".into())];
+    if sessions.is_empty() {
+        items.push(Item::Disabled(
+            "No session of this project is running".into(),
+        ));
+    }
+    items.extend(
+        sessions
+            .iter()
+            .enumerate()
+            .map(|(i, (_, name))| Item::action(SESSION + i, name.clone())),
+    );
+    let picked = menu::popup(&items).and_then(|p| p.checked_sub(SESSION));
+    if let Some((id, _)) = picked.and_then(|i| sessions.get(i)) {
+        app::with_app(|a| a.cast_stone(key, label, Some(id)));
+    }
+}
+
+/// What a click asks before it casts a stone.
+struct Question {
+    title: String,
+    text: String,
+    /// It runs a command, which may be anything.
+    commands: bool,
+}
+
+/// Asks before a click casts a stone, unless the human said not to. A
+/// pick from "Cast on which session?" or a drag is asked already, by what
+/// the human did. True to cast.
+fn confirmed(key: &str, label: &str, on: Option<&str>) -> bool {
+    let Some(q) = app::with_app(|a| a.cast_question(key, label, on)).flatten() else {
+        return true;
+    };
+    let quiet = Cell::new(app::with_app(|a| !a.tome.ask).unwrap_or(false));
+    let pressed = app::ask(&Dialog {
+        tone: if q.commands {
+            Tone::Warning
+        } else {
+            Tone::Question
+        },
+        title: &q.title,
+        text: &q.text,
+        buttons: &["Not now", "Cast"],
+        default: 1,
+        check: Some(("Do not ask again", &quiet)),
+    });
+    if pressed != Some(1) {
+        return false;
+    }
+    app::with_app(|a| {
+        if a.tome.ask == quiet.get() {
+            a.tome.ask = !quiet.get();
+            a.save();
+        }
+    });
+    true
+}
+
+/// What a right click on a stone offers: casting or stopping it, changing
+/// or removing a stone written in a file, putting a built in one away,
+/// and whether a click asks first. `label` is None for the empty stone and
+/// the tome's header, which offer only what is about the whole tome.
+pub(in crate::app) fn stone_menu(key: &str, label: Option<&str>) {
+    const CAST: usize = 1;
+    const NEW: usize = 2;
+    const REFORGE: usize = 3;
+    const REMOVE: usize = 4;
+    const HIDE: usize = 5;
+    const ASK: usize = 6;
+    const UNHIDE: usize = 7;
+    const STOP: usize = 100;
+    let Some((stone, casting, ask, hidden)) = app::with_app(|a| {
+        let stone = label.and_then(|l| a.any_stone(key, l));
+        let casting = label.map(|l| a.casting(key, l)).unwrap_or_default();
+        (stone, casting, a.tome.ask, a.tome.hidden.len())
+    }) else {
+        return;
+    };
+    let mut items = Vec::new();
+    match &stone {
+        Some(s) => {
+            items.push(Item::Disabled(format!(
+                "{}\t{}",
+                s.label,
+                runeword::name(&s.label)
+            )));
+            if !casting.is_empty() {
+                items.extend(casting.iter().enumerate().map(|(i, (_, at))| {
+                    Item::action(STOP + i, format!("Stop {} ({at})", s.label))
+                }));
+            } else if s.steps.is_ok() {
+                items.push(Item::action(CAST, "Cast"));
+            }
+            if s.source == Source::BuiltIn {
+                items.push(Item::action(HIDE, "Put away"));
+            } else {
+                items.push(Item::action(REFORGE, "Change with the Runesmith"));
+                items.push(Item::action(REMOVE, "Remove"));
+            }
+            items.push(Item::Separator);
+        }
+        None => {
+            items.push(Item::action(NEW, "Make a new stone"));
+            items.push(Item::Separator);
+        }
+    }
+    items.push(Item::Action {
+        id: ASK,
+        label: "Ask before a click casts".into(),
+        checked: ask,
+    });
+    if hidden > 0 {
+        let s = if hidden == 1 { "" } else { "s" };
+        items.push(Item::action(
+            UNHIDE,
+            format!("Bring back {hidden} built in stone{s}"),
+        ));
+    }
+    let Some(picked) = menu::popup(&items) else {
+        return;
+    };
+    let label = stone.as_ref().map(|s| s.label.as_str());
+    match (picked, label) {
+        (CAST, Some(l)) => stone_clicked(key, l),
+        (NEW, _) => {
+            app::with_app(|a| a.start_runesmith(key, None));
+        }
+        (REFORGE, Some(l)) => {
+            app::with_app(|a| a.start_runesmith(key, Some(l)));
+        }
+        (REMOVE, Some(l)) => {
+            if let Some(s) = &stone {
+                remove(key, l, s.source)
+            }
+        }
+        (HIDE, Some(l)) => {
+            app::with_app(|a| a.hide_stone(Some(l)));
+        }
+        (ASK, _) => {
+            app::with_app(|a| {
+                a.tome.ask = !a.tome.ask;
+                a.save();
+            });
+        }
+        (UNHIDE, _) => {
+            app::with_app(|a| a.hide_stone(None));
+        }
+        (p, Some(l)) if p >= STOP => {
+            if let Some((on, _)) = casting.get(p - STOP) {
+                app::with_app(|a| match on {
+                    Some(id) => a.stop_runeword(id),
+                    None => a.stop_project_runeword(key, l),
+                });
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Asks, then takes the stone of this label out of the file it is written
+/// in, which `source` names.
+fn remove(key: &str, label: &str, source: Source) {
+    let file = match source {
+        Source::Global => "runewords.json, which every project shares",
+        _ => "this project's .horadric/config.json",
+    };
+    let text = format!("It is taken out of {file}. The rest of the file stays as it is.");
+    let pressed = app::ask(&Dialog {
+        tone: Tone::Warning,
+        title: &format!("Remove {label}?"),
+        text: &text,
+        buttons: &["Keep it", "Remove"],
+        default: 0,
+        check: None,
+    });
+    if pressed != Some(1) {
+        return;
+    }
+    app::with_app(|a| {
+        if let Err(e) = a.remove_stone(key, label) {
+            a.toasts
+                .show(Kind::Failed, &format!("Cannot remove {label}"), &e);
+        }
+    });
 }
 
 /// A finished command's files, which nothing reads again.

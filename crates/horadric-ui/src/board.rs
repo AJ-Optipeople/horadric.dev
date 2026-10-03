@@ -33,16 +33,13 @@ impl Board {
     }
 
     /// What the header says about the whole list: how many are left, the
-    /// same count as the rows under it, and short enough to fit beside the
-    /// mode key on a narrow tile.
+    /// same count as the rows under it. A bare number, since the header
+    /// also holds the mode key and two buttons, and nothing when none are
+    /// left, which the empty tile already says.
     pub fn summary(&self) -> String {
-        let named = self.tasks.iter().filter(|t| !t.title.trim().is_empty());
-        let total = named.clone().count();
-        let left = named.filter(|t| t.mark != Mark::Done).count();
-        match (left, total) {
-            (_, 0) => "empty".into(),
-            (0, _) => "all done".into(),
-            (l, _) => format!("{l} to do"),
+        match self.shown().len() {
+            0 => String::new(),
+            n => n.to_string(),
         }
     }
 
@@ -55,6 +52,15 @@ impl Board {
             self.mode.label().into()
         }
     }
+}
+
+/// What the right end of `task`'s row says when its state's word is not
+/// enough: what a blocked item waits on.
+pub fn note(task: &Task, now: u64) -> Option<String> {
+    task.wait
+        .as_ref()
+        .filter(|_| task.mark == Mark::Blocked)
+        .map(|w| w.label(now))
 }
 
 /// How an item reads on its row.
@@ -71,7 +77,11 @@ pub enum RowState {
     /// Its session no longer exists. A click starts the item again.
     Gone,
     Review,
+    /// Its agent can not go on without the human.
     Blocked,
+    /// Blocked on something the runner checks, and goes on by itself once
+    /// that holds.
+    Waits,
     /// Its tombs are at it.
     Tombs,
     /// Every tomb still there says it is done: the human picks one.
@@ -129,6 +139,7 @@ pub fn row_state(task: &Task, holder: Option<&Phase>) -> RowState {
     match task.mark {
         Mark::Open | Mark::Done => RowState::Open,
         Mark::Review => RowState::Review,
+        Mark::Blocked if task.wait.is_some() => RowState::Waits,
         Mark::Blocked => RowState::Blocked,
         Mark::Working => match holder {
             None | Some(Phase::Ended) => RowState::Gone,
@@ -150,6 +161,7 @@ impl RowState {
             RowState::Gone => "session gone",
             RowState::Review => "review",
             RowState::Blocked => "blocked",
+            RowState::Waits => "waits",
             RowState::Tombs => "tombs",
             RowState::Pick => "pick one",
         }
@@ -165,6 +177,7 @@ impl RowState {
             RowState::Gone => '\u{E711}',
             RowState::Review => '\u{E73E}',
             RowState::Blocked => '\u{E7BA}',
+            RowState::Waits => '\u{E823}',
             RowState::Tombs => '\u{E716}',
             RowState::Pick => '\u{E734}',
         }
@@ -178,7 +191,7 @@ impl RowState {
             RowState::Working | RowState::Tombs => theme::working(),
             RowState::Asks | RowState::Review | RowState::Pick => theme::waiting(),
             RowState::Blocked => theme::error(),
-            RowState::Paused | RowState::Gone => theme::idle(),
+            RowState::Paused | RowState::Gone | RowState::Waits => theme::idle(),
         }
     }
 
@@ -210,10 +223,10 @@ mod tests {
     fn done_and_unnamed_items_get_no_row() {
         let b = board("- [x] A\n- [ ]\n- [/] B @b-1\n- [ ] C\n");
         assert_eq!(b.shown(), [2, 3]);
-        assert_eq!(b.summary(), "2 to do");
-        assert_eq!(board("- [x] A\n").summary(), "all done");
-        assert_eq!(board("- [ ] A\n- [ ] B\n").summary(), "2 to do");
-        assert_eq!(board("").summary(), "empty");
+        assert_eq!(b.summary(), "2");
+        assert_eq!(board("- [x] A\n").summary(), "");
+        assert_eq!(board("- [ ] A\n- [ ] B\n").summary(), "2");
+        assert_eq!(board("").summary(), "");
     }
 
     #[test]
@@ -238,6 +251,17 @@ mod tests {
         assert_eq!(row_state(t, Some(&Phase::Paused)), RowState::Paused);
         assert_eq!(row_state(t, Some(&Phase::Ended)), RowState::Gone);
         assert_eq!(row_state(t, None), RowState::Gone);
+    }
+
+    #[test]
+    fn a_blocked_item_that_waits_on_a_check_says_on_what_and_does_not_call_you() {
+        let t = &parse("- [!] A @a-1: later {on quest: Build it}\n")[0];
+        assert_eq!(row_state(t, Some(&Phase::Done)), RowState::Waits);
+        assert!(!RowState::Waits.needs_you());
+        assert_eq!(note(t, 0).as_deref(), Some("after Build it"));
+        let t = &parse("- [!] A @a-1: why\n")[0];
+        assert_eq!(row_state(t, None), RowState::Blocked);
+        assert_eq!(note(t, 0), None);
     }
 
     #[test]

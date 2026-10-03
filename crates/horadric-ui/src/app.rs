@@ -92,12 +92,12 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::Shell::{SHQueryUserNotificationState, NIN_BALLOONUSERCLICK};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, EnumWindows, GetMessageW, GetWindowRect,
-    GetWindowThreadProcessId, KillTimer, PostMessageW, PostQuitMessage, RegisterClassW,
+    GetWindowThreadProcessId, IsChild, KillTimer, PostMessageW, PostQuitMessage, RegisterClassW,
     RegisterWindowMessageW, SetTimer, SetWindowPos, SystemParametersInfoW, TranslateMessage,
-    MONITORINFOF_PRIMARY, MSG, SPI_GETWORKAREA, SPI_SETWORKAREA, SWP_NOACTIVATE, SWP_NOSIZE,
-    SWP_NOZORDER, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WM_APP, WM_DISPLAYCHANGE, WM_HOTKEY,
-    WM_LBUTTONUP, WM_QUERYENDSESSION, WM_QUIT, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_TIMER, WNDCLASSW,
-    WS_EX_TOOLWINDOW, WS_POPUP,
+    WindowFromPoint, MONITORINFOF_PRIMARY, MSG, SPI_GETWORKAREA, SPI_SETWORKAREA, SWP_NOACTIVATE,
+    SWP_NOSIZE, SWP_NOZORDER, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WM_APP, WM_DISPLAYCHANGE,
+    WM_HOTKEY, WM_LBUTTONUP, WM_QUERYENDSESSION, WM_QUIT, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_TIMER,
+    WNDCLASSW, WS_EX_TOOLWINDOW, WS_POPUP,
 };
 
 use crate::accounts;
@@ -202,6 +202,12 @@ const WM_HORADRIC_PANE: u32 = WM_APP + 26;
 const WM_HORADRIC_VERSION: u32 = WM_APP + 27;
 /// A session did not start, and the app's `start_failed` says why.
 const WM_HORADRIC_START_FAILED: u32 = WM_APP + 28;
+/// Cast the stone the app's `stone_for` names, or offer to stop it,
+/// outside the app's borrow since it may ask which session.
+const WM_HORADRIC_STONE: u32 = WM_APP + 29;
+/// Offer what can be done with the stone the app's `stone_menu_for`
+/// names, outside the app's borrow since a menu runs a loop of its own.
+const WM_HORADRIC_STONE_MENU: u32 = WM_APP + 30;
 
 /// A button in a session pane's header, handled outside the app's borrow
 /// since it may ask first.
@@ -244,6 +250,8 @@ const TICK_TIMER: usize = 1;
 const SCREEN_TIMER: usize = 2;
 /// Runs while a window glides to its place in the columns.
 const GLIDE_TIMER: usize = 3;
+/// Runs while a session works, to breathe the tray icon's light.
+const BREATH_TIMER: usize = 4;
 const ENDED_LINGER: Duration = Duration::from_secs(20);
 /// A crash this long after resuming sessions after a crash is a crash of
 /// its own, not the same one again, so the next start resumes once more.
@@ -382,6 +390,20 @@ pub(crate) enum Input {
     GiveQuests(String),
     /// The quest log asks, or is asked for.
     QuestLog(questlog::Ask),
+    /// A stone of the Runetome of the project with this key clicked, by
+    /// its label: cast it, or stop it while it is cast. None is the empty
+    /// stone, which starts the Runesmith.
+    Stone(String, Option<String>),
+    /// A stone of that project's tome let go of here, on the screen: cast
+    /// on the tile or pane under it.
+    StoneDrop(String, String, POINT),
+    /// A stone of that project's tome, at this place, dragged to another
+    /// place in the same tome.
+    StoneMove(String, usize, usize),
+    /// A stone of that project's tome right clicked, by its label, None
+    /// for the empty stone or the tome's header: offer what can be done
+    /// with it.
+    StoneMenu(String, Option<String>),
     /// A stashed session's slot clicked: bring it back.
     Unstash(String),
     /// A stashed session's slot right clicked.
@@ -626,6 +648,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
         }),
         boards: RefCell::new(HashMap::new()),
         cube: Cell::new(None),
+        tomes: RefCell::new(HashMap::new()),
     });
     menu::init(Rc::clone(&shared));
     let toasts = Toasts::new(Rc::clone(&shared), notify, WM_HORADRIC_TRAY);
@@ -715,7 +738,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             discord: saved.discord,
             rich: None,
             run: presence::Run::from_saved(saved.run),
-            tome: runner::runeword::Tome::new(saved.runewords.clone()),
+            tome: runner::runeword::Tome::new(&saved),
             cube_on: saved.cube,
             font_family: saved.font_family.clone(),
             screen: saved.screen.clone(),
@@ -725,6 +748,8 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             pick_from: None,
             start_failed: None,
             menu_for: None,
+            stone_for: None,
+            stone_menu_for: None,
             stash_menu_for: None,
             project_menu_for: None,
             recent_menu_for: None,
@@ -977,6 +1002,7 @@ unsafe extern "system" fn app_proc(
                     text: &why,
                     buttons: &["OK"],
                     default: 0,
+                    check: None,
                 });
             }
             return LRESULT(0);
@@ -984,6 +1010,18 @@ unsafe extern "system" fn app_proc(
         WM_HORADRIC_TILE_MENU => {
             if let Some(id) = with_app(|app| app.menu_for.take()).flatten() {
                 tile_menu(&id);
+            }
+            return LRESULT(0);
+        }
+        WM_HORADRIC_STONE => {
+            if let Some((key, label)) = with_app(|app| app.stone_for.take()).flatten() {
+                runner::runeword::stone_clicked(&key, &label);
+            }
+            return LRESULT(0);
+        }
+        WM_HORADRIC_STONE_MENU => {
+            if let Some((key, label)) = with_app(|app| app.stone_menu_for.take()).flatten() {
+                runner::runeword::stone_menu(&key, label.as_deref());
             }
             return LRESULT(0);
         }
@@ -1252,6 +1290,7 @@ fn tray_menu(hwnd: HWND) {
                     text: &q,
                     buttons: &["Keep running", "Stop them", "Cancel"],
                     default: if working > 0 { 0 } else { 1 },
+                    check: None,
                 })
                 .and_then(|b| (b < 2).then_some(b == 0)),
                 None => Some(false),
@@ -1372,7 +1411,6 @@ fn tile_menu(id: &str) {
         Some(false) => Item::action(STASH, "Stash"),
         _ => Item::Disabled("Stash is full".into()),
     };
-    let restful = matches!(kind, TileKind::Live | TileKind::Paused);
     let items = match (kind, shell) {
         (TileKind::Live, false) => vec![
             Item::action(OPEN, "Show terminal"),
@@ -1409,47 +1447,15 @@ fn tile_menu(id: &str) {
         ],
     };
     let mut items = items;
-    let runewords = with_app(|app| app.runewords_of(id)).flatten();
-    let offered = match &runewords {
-        Some((offered, _)) if restful => offered.clone(),
-        _ => Vec::new(),
-    };
-    if let Some((_, word)) = &runewords {
-        let entry = match word {
-            Some(w) => Some(Item::action(
-                STOP_RUNEWORD,
-                format!("Stop {} ({})", w.name, w.progress()),
-            )),
-            None if !offered.is_empty() => Some(Item::Submenu(
-                "Runeword".into(),
-                offered
-                    .iter()
-                    .enumerate()
-                    .map(|(i, (name, _))| Item::action(RUNEWORD + i, name.clone()))
-                    .collect(),
-            )),
-            None => None,
-        };
-        // With the other things done to the session, above ending it.
-        if let (Some(entry), Some(at)) = (
-            entry,
-            items.iter().rposition(|i| matches!(i, Item::Separator)),
-        ) {
-            items.insert(at, entry);
-        }
-    }
-    // Runewords of commands cast on the session's project, which have no
-    // tile of their own to be stopped from until the Runetome.
-    let key = with_app(|app| app.project_of(id)).flatten();
-    let on_project = key
-        .as_ref()
-        .and_then(|k| with_app(|app| app.project_runewords(k)))
-        .unwrap_or_default();
-    if let Some(at) = items.iter().rposition(|i| matches!(i, Item::Separator)) {
-        for (i, w) in on_project.iter().enumerate().rev() {
-            let label = format!("Stop {} ({})", w.name, w.progress());
-            items.insert(at, Item::action(STOP_PROJECT + i, label));
-        }
+    // Runewords are given from the Runetome; the tile stops the one its
+    // session has, with the other things done to it, above ending it.
+    let word = with_app(|app| app.runeword_of(id)).flatten();
+    if let (Some(w), Some(at)) = (
+        word,
+        items.iter().rposition(|i| matches!(i, Item::Separator)),
+    ) {
+        let stop = format!("Stop {} ({})", w.name, w.progress());
+        items.insert(at, Item::action(STOP_RUNEWORD, stop));
     }
     let tree = with_app(|app| app.diff_of(id)).flatten();
     if let Some((w, diff)) = &tree {
@@ -1493,16 +1499,6 @@ fn tile_menu(id: &str) {
         Some(STOP_RUNEWORD) => {
             with_app(|app| app.stop_runeword(id));
         }
-        Some(i) if (STOP_PROJECT..STOP_PROJECT + on_project.len()).contains(&i) => {
-            if let Some(key) = &key {
-                let name = &on_project[i - STOP_PROJECT].name;
-                with_app(|app| app.stop_project_runeword(key, name));
-            }
-        }
-        Some(i) if (RUNEWORD..RUNEWORD + offered.len()).contains(&i) => {
-            let (name, runes) = offered[i - RUNEWORD].clone();
-            with_app(|app| app.give_runeword(id, &name, runes));
-        }
         Some(STASH) if confirm_stash(id) => {
             with_app(|app| app.stash(id));
         }
@@ -1533,6 +1529,7 @@ fn confirm_stash(id: &str) -> bool {
                on it in the stash resumes the conversation.",
         buttons: &["Stash", "Cancel"],
         default: 1,
+        check: None,
     });
     pressed == Some(0)
 }
@@ -1563,6 +1560,7 @@ fn stash_has_room() -> bool {
         text: "End a stashed session or bring one back to make room.",
         buttons: &["OK"],
         default: 0,
+        check: None,
     });
     false
 }
@@ -1598,10 +1596,6 @@ fn stash_menu(id: &str) {
 const UNCOMMITTED: usize = 100;
 const COMMITTED: usize = 400;
 const COMMITTED_END: usize = 700;
-/// Where the runewords a session can be given start in its tile menu.
-const RUNEWORD: usize = 800;
-/// Where the runewords cast on the session's project start in its menu.
-const STOP_PROJECT: usize = 900;
 const CODE: usize = 700;
 /// The most files a half of the changes lists. A menu taller than the
 /// screen scrolls by the pixel, which is no way to look at a change.
@@ -1688,6 +1682,7 @@ fn offer_update(m: &Manifest) {
         text,
         buttons: &["Update now", "Not now"],
         default: 0,
+        check: None,
     });
     if pressed == Some(0) {
         with_app(|app| app.install_update());
@@ -2423,6 +2418,7 @@ fn confirm_end(key: Option<&str>) -> bool {
                 text: &q,
                 buttons: &["End", "Cancel"],
                 default: 0,
+                check: None,
             });
             pressed == Some(0)
         }
@@ -2675,6 +2671,11 @@ struct App {
     start_failed: Option<String>,
     /// The tile whose menu is about to show.
     menu_for: Option<String>,
+    /// The stone about to be cast, by project key and label.
+    stone_for: Option<(String, String)>,
+    /// The stone whose menu is about to show, by project key and label,
+    /// None for the empty stone.
+    stone_menu_for: Option<(String, Option<String>)>,
     /// The stashed session whose menu is about to show.
     stash_menu_for: Option<String>,
     /// The project whose menu is about to show.
@@ -2881,6 +2882,10 @@ impl App {
             WM_TIMER if wparam == GLIDE_TIMER => {
                 crate::vsync::took(self.notify, GLIDE_TIMER);
                 self.glide();
+            }
+            WM_TIMER if wparam == BREATH_TIMER => {
+                self.tray.step();
+                self.breathe_stage();
             }
             WM_TIMER if wparam == SCREEN_TIMER => {
                 unsafe {
@@ -5537,6 +5542,7 @@ impl App {
                 collapsed: c.collapsed,
                 files_collapsed: c.files_collapsed(),
                 tasks_collapsed: c.tasks_collapsed(),
+                tome_collapsed: c.tome_collapsed(),
             })
             .collect();
         // A project closed for good does not keep a place forever: only
@@ -5628,6 +5634,10 @@ impl App {
             page_docks: web::docks(),
             pages: web::pages(),
             runewords: self.tome.projects.clone(),
+            stones_cast: self.tome.cast.clone(),
+            cast_without_asking: !self.tome.ask,
+            stones_hidden: self.tome.hidden.clone(),
+            stones_order: self.tome.order.clone(),
             update_told: self.update_told.clone(),
             ..Default::default()
         }
@@ -5722,6 +5732,7 @@ impl App {
                         c.collapsed = place.collapsed;
                         c.set_files_collapsed(place.files_collapsed);
                         c.set_tasks_collapsed(place.tasks_collapsed);
+                        c.set_tome_collapsed(place.tome_collapsed);
                     }
                     self.clusters.push(c);
                 }
@@ -5763,12 +5774,25 @@ impl App {
         }
         self.sync_stage();
 
-        let (total, waiting) = self
+        let (total, waiting, working) = self
             .shared
             .registry
             .lock()
-            .map(|r| (r.len(), r.waiting().len()))
-            .unwrap_or((0, 0));
+            .map(|r| {
+                let working = r.all().any(|s| s.phase == Phase::Working);
+                (r.len(), r.waiting().len(), working)
+            })
+            .unwrap_or((0, 0, false));
+        match self.tray.breathe(working) {
+            Some(true) => unsafe {
+                SetTimer(Some(self.notify), BREATH_TIMER, tray::BREATH_STEP_MS, None);
+            },
+            Some(false) => unsafe {
+                let _ = KillTimer(Some(self.notify), BREATH_TIMER);
+                self.breathe_stage();
+            },
+            None => {}
+        }
         let app = if horadric_hooks::dev() {
             "Horadric dev"
         } else {
@@ -5785,6 +5809,13 @@ impl App {
         self.identify();
         self.announce();
         self.journal_phases();
+    }
+
+    /// Gives the stage's taskbar button the tray's current breath.
+    fn breathe_stage(&self) {
+        if let Some(stage) = &self.stage {
+            stage.set_icon(self.tray.taskbar_icon());
+        }
     }
 
     /// Writes a line for each session whose phase became one worth telling:
@@ -6230,6 +6261,17 @@ impl App {
                 Input::TaskAdd(key) => runner::ask_for(self, runner::Menu::Add(key)),
                 Input::GiveQuests(key) => self.give_quests(&key),
                 Input::QuestLog(ask) => self.quest_log_asks(ask),
+                Input::Stone(key, None) => self.start_runesmith(&key, None),
+                Input::Stone(key, Some(label)) => {
+                    self.stone_for = Some((key, label));
+                    post(self.notify.0 as isize, WM_HORADRIC_STONE, 0);
+                }
+                Input::StoneDrop(key, label, at) => self.stone_dropped(&key, &label, at),
+                Input::StoneMove(key, from, to) => self.move_stone(&key, from, to),
+                Input::StoneMenu(key, label) => {
+                    self.stone_menu_for = Some((key, label));
+                    post(self.notify.0 as isize, WM_HORADRIC_STONE_MENU, 0);
+                }
             }
         }
         if relayout {
@@ -6451,12 +6493,12 @@ impl App {
             let x = g.x(i);
             let tiles = self.column_windows(keys, i == 0);
             let items: Vec<columns::Stacked> = tiles.iter().map(Tile::stacked).collect();
-            // A locked usage window stays at the top, with whatever is
-            // above it, and the rest of its column scrolls below it.
-            let pinned = tiles
-                .iter()
-                .position(|t| matches!(t, Tile::Usage(u) if u.locked.get()))
-                .map_or(0, |at| at + 1);
+            // A locked usage window at the top of its column stays there
+            // while the rest scrolls below it. Lower down it does not pin,
+            // or the tiles above it could fill the column and leave the
+            // ones below no room to scroll into.
+            let pinned =
+                usize::from(matches!(tiles.first(), Some(Tile::Usage(u)) if u.locked.get()));
             let scroll = self.columns.cols[*model].scroll;
             let (filled, room, below) =
                 columns::fill_pinned(&items, g.top, g.height, g.gap, g.min_files, scroll, pinned);
@@ -6498,6 +6540,7 @@ impl App {
         self.column_bounds = bounds;
         // A handle Windows gives a new window must not inherit a cut.
         self.clipped.borrow_mut().retain(|id, _| seen.contains(id));
+        crate::render::retain_cuts(|id| seen.contains(&id));
         // Mid drag the columns are not settled yet, so the stage waits for
         // the drop.
         if self.carried.is_none() {
@@ -6855,6 +6898,16 @@ fn clip_window(clipped: &mut Clipped, hwnd: HWND, bounds: Option<(i32, i32)>) {
 }
 
 /// A window's top left corner on screen.
+/// Whether the window at this point on the screen is `hwnd` or one in
+/// it, so a drop lands on what is on top there and not on a window under
+/// it.
+pub(crate) fn window_under(at: POINT, hwnd: HWND) -> bool {
+    unsafe {
+        let w = WindowFromPoint(at);
+        !w.is_invalid() && (w == hwnd || IsChild(hwnd, w).as_bool())
+    }
+}
+
 fn window_at(hwnd: HWND) -> (i32, i32) {
     let mut r = RECT::default();
     unsafe {
@@ -6863,7 +6916,7 @@ fn window_at(hwnd: HWND) -> (i32, i32) {
     (r.left, r.top)
 }
 
-fn unix_now() -> u64 {
+pub(crate) fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs())

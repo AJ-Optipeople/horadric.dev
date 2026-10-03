@@ -389,12 +389,7 @@ mod tests {
                 0.0,
                 Color::rgb(0xF3F3F3),
             );
-            let labels = [
-                "Fresh start",
-                "Open the site",
-                "Ship",
-                "Test, review, merge",
-            ];
+            let labels = ["Fresh start", "Open the site", "Ship", "Second opinion"];
             let states = [
                 StoneState::Rest,
                 StoneState::Running(0.0),

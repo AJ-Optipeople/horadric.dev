@@ -69,6 +69,11 @@ pub struct Metrics {
     pub task_foot: f32,
     /// The button in the tasks tile's header that shows the mode.
     pub mode_w: f32,
+    /// A rune stone in the Runetome, its label under it, and how many
+    /// stand in a row.
+    pub stone: f32,
+    pub stone_label_h: f32,
+    pub stones_per_row: usize,
     /// The button on a tile whose session has a browser open.
     pub mark_w: f32,
     pub mark_h: f32,
@@ -110,6 +115,9 @@ impl Default for Metrics {
             task_rows: 8,
             task_foot: 6.0,
             mode_w: 72.0,
+            stone: 44.0,
+            stone_label_h: 18.0,
+            stones_per_row: 4,
             mark_w: 24.0,
             mark_h: 20.0,
             limit_row_h: 44.0,
@@ -149,6 +157,8 @@ pub struct ClusterLayout {
     /// The tasks tile, between the plus and the files. None when the
     /// cluster is collapsed or its project has no folder.
     pub tasks: Option<TasksLayout>,
+    /// The Runetome, below the tasks tile. None where the tasks tile is.
+    pub tome: Option<TomeLayout>,
     /// The files tile, below everything else. None when the project is not
     /// in git or the cluster is collapsed.
     pub files: Option<FilesLayout>,
@@ -185,6 +195,18 @@ impl TasksLayout {
     }
 }
 
+/// Where the Runetome's header and its stones go.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TomeLayout {
+    pub rect: Rect,
+    /// Its title row, which folds it.
+    pub header: Rect,
+    /// Each stone's slab, in the tome's order, the empty stone last.
+    pub stones: Vec<Rect>,
+    /// The label under each.
+    pub labels: Vec<Rect>,
+}
+
 /// Where the files tile and its rows go.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FilesLayout {
@@ -210,7 +232,8 @@ impl FilesLayout {
 
 /// Lays out a cluster with `n` tiles. `tasks` is one entry per task row
 /// shown, true where the row has an approve button, none for no tasks
-/// tile; empty is its header alone. `files` is how tall the files tile is
+/// tile; empty is its header alone. `tome` is how many stones the
+/// Runetome shows, none for no tome and zero for its header alone. `files` is how tall the files tile is
 /// below its header, in DIPs, none for no files tile. Zero is the tile
 /// folded to its header. It holds as many whole rows as fit and the rest is
 /// room under the last one. Sizing it is the column's job, see
@@ -220,6 +243,7 @@ pub fn cluster(
     n: usize,
     collapsed: bool,
     tasks: Option<&[bool]>,
+    tome: Option<usize>,
     files: Option<f32>,
 ) -> ClusterLayout {
     let header = Rect::new(m.pad, m.pad, m.width - 2.0 * m.pad, m.header_h);
@@ -234,6 +258,7 @@ pub fn cluster(
     let mut add = None;
     let mut shell = None;
     let mut tasks_layout = None;
+    let mut tome_layout = None;
     let mut files_layout = None;
     let mut y = header.bottom() + m.gap;
     if !collapsed {
@@ -249,6 +274,11 @@ pub fn cluster(
             let l = tasks_tile(m, y, approve);
             y = l.rect.bottom() + m.gap;
             tasks_layout = Some(l);
+        }
+        if let Some(stones) = tome {
+            let l = tome_tile(m, y, stones);
+            y = l.rect.bottom() + m.gap;
+            tome_layout = Some(l);
         }
         if let Some(body) = files {
             let body = body.max(0.0);
@@ -291,7 +321,48 @@ pub fn cluster(
         add,
         shell,
         tasks: tasks_layout,
+        tome: tome_layout,
         files: files_layout,
+    }
+}
+
+/// The Runetome with its top at `y` and `n` stones in rows under its
+/// header, each centred in its share of the row.
+fn tome_tile(m: &Metrics, y: f32, n: usize) -> TomeLayout {
+    let full = m.width - 2.0 * m.pad;
+    let header = Rect::new(m.pad, y, full, m.files_header_h);
+    let cell_w = full / m.stones_per_row as f32;
+    let row_h = m.stone + m.stone_label_h + 4.0;
+    let mut stones = Vec::with_capacity(n);
+    let mut labels = Vec::with_capacity(n);
+    for i in 0..n {
+        let (row, col) = (i / m.stones_per_row, i % m.stones_per_row);
+        let cell_x = m.pad + col as f32 * cell_w;
+        let top = header.bottom() + 2.0 + row as f32 * row_h;
+        stones.push(Rect::new(
+            cell_x + (cell_w - m.stone) / 2.0,
+            top,
+            m.stone,
+            m.stone,
+        ));
+        labels.push(Rect::new(
+            cell_x + 2.0,
+            top + m.stone,
+            cell_w - 4.0,
+            m.stone_label_h,
+        ));
+    }
+    let rows = n.div_ceil(m.stones_per_row);
+    let bottom = if n == 0 {
+        header.bottom()
+    } else {
+        header.bottom() + 2.0 + rows as f32 * row_h + m.task_foot
+    };
+    TomeLayout {
+        rect: Rect::new(m.pad, y, full, bottom - y),
+        header,
+        stones,
+        labels,
     }
 }
 
@@ -432,6 +503,9 @@ pub enum Hit {
     Task(usize),
     /// The approve button on that row.
     TaskApprove(usize),
+    TomeHeader,
+    /// A stone of the Runetome, or its label, in the tome's order.
+    Stone(usize),
     Nothing,
 }
 
@@ -453,6 +527,7 @@ impl Hit {
                 | Hit::TasksGive
                 | Hit::Task(_)
                 | Hit::TaskApprove(_)
+                | Hit::Stone(_)
         )
     }
 }
@@ -526,6 +601,15 @@ pub fn hit(layout: &ClusterLayout, x: f32, y: f32) -> Hit {
         }
         if let Some(i) = t.rows.iter().position(|r| r.contains(x, y)) {
             return Hit::Task(i);
+        }
+    }
+    if let Some(t) = &layout.tome {
+        if t.header.contains(x, y) {
+            return Hit::TomeHeader;
+        }
+        let on = |r: &Rect| r.contains(x, y);
+        if let Some(i) = (t.stones.iter().zip(&t.labels)).position(|(s, l)| on(s) || on(l)) {
+            return Hit::Stone(i);
         }
     }
     if let Some(f) = &layout.files {
@@ -1124,7 +1208,21 @@ pub struct DialogLayout {
     pub title: Rect,
     pub text: Rect,
     pub buttons: Vec<Rect>,
+    /// A check left of the buttons, such as "Do not ask again": its box
+    /// and its label, which a click on either turns.
+    pub check: Option<(Rect, Rect)>,
 }
+
+/// What a click on a dialog lands on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DialogHit {
+    Button(usize),
+    Check,
+}
+
+/// How big a dialog's check box is, and the room between it and its label.
+pub const DIALOG_CHECK: f32 = 16.0;
+const DIALOG_CHECK_GAP: f32 = 8.0;
 
 pub const DIALOG_W: f32 = 440.0;
 const DIALOG_PAD: f32 = 24.0;
@@ -1140,8 +1238,9 @@ pub fn dialog_text_w() -> f32 {
 }
 
 /// Lays out a dialog whose text wraps to `text_h` DIPs at
-/// [`dialog_text_w`], with a button for each of `labels`, their widths.
-pub fn dialog(text_h: f32, labels: &[f32]) -> DialogLayout {
+/// [`dialog_text_w`], with a button for each of `labels`, their widths,
+/// and a check whose label is `check` wide when it has one.
+pub fn dialog(text_h: f32, labels: &[f32], check: Option<f32>) -> DialogLayout {
     let w = dialog_text_w();
     let lamp = (DIALOG_PAD + 4.0, 20.0 + 12.0);
     let title = Rect::new(DIALOG_PAD + 16.0, 20.0, w - 16.0, 24.0);
@@ -1163,17 +1262,35 @@ pub fn dialog(text_h: f32, labels: &[f32]) -> DialogLayout {
         })
         .collect();
     buttons.reverse();
+    let check = check.map(|w| {
+        let boxed = Rect::new(
+            DIALOG_PAD,
+            y + (DIALOG_BUTTON_H - DIALOG_CHECK) / 2.0,
+            DIALOG_CHECK,
+            DIALOG_CHECK,
+        );
+        let x = boxed.right() + DIALOG_CHECK_GAP;
+        // It gives way to the buttons rather than running under them.
+        let room = buttons.first().map_or(DIALOG_W, |b| b.x) - DIALOG_BUTTON_GAP - x;
+        (boxed, Rect::new(x, y, w.ceil().min(room), DIALOG_BUTTON_H))
+    });
     DialogLayout {
         size: (DIALOG_W, y + DIALOG_BUTTON_H + DIALOG_PAD - 4.0),
         lamp,
         title,
         text,
         buttons,
+        check,
     }
 }
 
-pub fn dialog_hit(l: &DialogLayout, x: f32, y: f32) -> Option<usize> {
-    l.buttons.iter().position(|r| r.contains(x, y))
+pub fn dialog_hit(l: &DialogLayout, x: f32, y: f32) -> Option<DialogHit> {
+    if let Some(i) = l.buttons.iter().position(|r| r.contains(x, y)) {
+        return Some(DialogHit::Button(i));
+    }
+    let (boxed, label) = l.check?;
+    let both = Rect::new(boxed.x, label.y, label.right() - boxed.x, label.h);
+    both.contains(x, y).then_some(DialogHit::Check)
 }
 
 /// Where a dialog `size` goes on the work area `work`, both in screen
@@ -1794,6 +1911,26 @@ pub fn rank(order: &[String], id: &str) -> usize {
     order.iter().position(|s| s == id).unwrap_or(usize::MAX)
 }
 
+/// The place in the tome a stone carried to `(x, y)` takes: that of the
+/// stone nearest, or the last over the empty stone, which stays last.
+/// None when the point is outside the tome, where the stone is cast
+/// instead.
+pub fn stone_slot(tome: &TomeLayout, x: f32, y: f32) -> Option<usize> {
+    if !tome.rect.contains(x, y) {
+        return None;
+    }
+    let made = tome.stones.len().checked_sub(1)?;
+    let on = |r: Option<&Rect>| r.is_some_and(|r| r.contains(x, y));
+    if made > 0 && (on(tome.stones.get(made)) || on(tome.labels.get(made))) {
+        return Some(made - 1);
+    }
+    let far = |r: &Rect| {
+        let (dx, dy) = (r.x + r.w / 2.0 - x, r.y + r.h / 2.0 - y);
+        dx * dx + dy * dy
+    };
+    (0..made).min_by(|&a, &b| far(&tome.stones[a]).total_cmp(&far(&tome.stones[b])))
+}
+
 /// The order after a tile was dragged: `shown`, the tiles as they now
 /// stand, then whatever `order` remembers that has no tile right now.
 pub fn reordered(order: &[String], shown: &[String]) -> Vec<String> {
@@ -2069,8 +2206,9 @@ mod tests {
 
     #[test]
     fn a_dialog_puts_its_buttons_right_aligned_under_the_text() {
-        let l = dialog(60.0, &[40.0, 120.0]);
+        let l = dialog(60.0, &[40.0, 120.0], None);
         assert_eq!(l.text.h, 60.0);
+        assert!(l.check.is_none());
         let [a, b] = [l.buttons[0], l.buttons[1]];
         assert_eq!(a.w, DIALOG_BUTTON_MIN);
         assert_eq!(b.w, 120.0 + 2.0 * DIALOG_BUTTON_PAD);
@@ -2078,8 +2216,33 @@ mod tests {
         assert_eq!(a.right() + DIALOG_BUTTON_GAP, b.x);
         assert!(a.y > l.text.bottom());
         assert!(l.size.1 > b.bottom());
-        assert_eq!(dialog_hit(&l, b.x + 1.0, b.y + 1.0), Some(1));
+        assert_eq!(
+            dialog_hit(&l, b.x + 1.0, b.y + 1.0),
+            Some(DialogHit::Button(1))
+        );
         assert_eq!(dialog_hit(&l, l.text.x + 1.0, l.text.y + 1.0), None);
+    }
+
+    #[test]
+    fn a_dialog_check_sits_left_of_the_buttons_and_never_under_them() {
+        let l = dialog(40.0, &[40.0, 40.0], Some(110.0));
+        let (boxed, label) = l.check.unwrap();
+        let first = l.buttons[0];
+        assert_eq!(boxed.x, DIALOG_PAD);
+        assert_eq!(boxed.y + boxed.h / 2.0, first.y + first.h / 2.0);
+        assert_eq!(label.w, 110.0);
+        assert!(label.right() < first.x);
+        assert_eq!(
+            dialog_hit(&l, boxed.x + 2.0, boxed.y + 2.0),
+            Some(DialogHit::Check)
+        );
+        assert_eq!(
+            dialog_hit(&l, label.right() - 2.0, label.y + 2.0),
+            Some(DialogHit::Check)
+        );
+        let long = dialog(40.0, &[40.0, 40.0], Some(900.0));
+        let (_, label) = long.check.unwrap();
+        assert!(label.right() < long.buttons[0].x);
     }
 
     #[test]
@@ -2352,7 +2515,7 @@ mod tests {
     #[test]
     fn collapsed_is_header_only() {
         let m = Metrics::default();
-        let l = cluster(&m, 5, true, None, Some(100.0));
+        let l = cluster(&m, 5, true, None, None, Some(100.0));
         assert!(l.tiles.is_empty());
         assert!(l.add.is_none());
         assert!(l.shell.is_none());
@@ -2363,7 +2526,14 @@ mod tests {
     #[test]
     fn files_tile_sits_below_the_plus() {
         let m = Metrics::default();
-        let l = cluster(&m, 1, false, None, Some(14.0 * m.file_row_h + m.file_foot));
+        let l = cluster(
+            &m,
+            1,
+            false,
+            None,
+            None,
+            Some(14.0 * m.file_row_h + m.file_foot),
+        );
         let add = l.add.unwrap();
         let f = l.files.as_ref().unwrap();
         assert_eq!(f.rect.y - add.bottom(), m.gap);
@@ -2383,6 +2553,7 @@ mod tests {
             1,
             false,
             None,
+            None,
             Some(10.0 * m.file_row_h + m.file_foot + 13.0),
         );
         let f = l.files.unwrap();
@@ -2397,6 +2568,7 @@ mod tests {
             1,
             false,
             None,
+            None,
             Some(7.0 * m.file_row_h + m.file_foot - 0.1),
         );
         assert_eq!(l.files.unwrap().rows.len(), 7);
@@ -2405,7 +2577,7 @@ mod tests {
     #[test]
     fn collapsed_files_tile_is_its_header() {
         let m = Metrics::default();
-        let l = cluster(&m, 1, false, None, Some(0.0));
+        let l = cluster(&m, 1, false, None, None, Some(0.0));
         let f = l.files.unwrap();
         assert!(f.rows.is_empty());
         assert_eq!(f.rect, f.header);
@@ -2420,6 +2592,7 @@ mod tests {
             1,
             false,
             Some(&approve),
+            None,
             Some(5.0 * m.file_row_h + m.file_foot),
         );
         let add = l.add.unwrap();
@@ -2447,20 +2620,60 @@ mod tests {
     }
 
     #[test]
+    fn the_tome_sits_under_the_tasks_tile_its_stones_in_rows() {
+        let m = Metrics::default();
+        let l = cluster(&m, 1, false, Some(&[]), Some(6), Some(0.0));
+        let tasks = l.tasks.as_ref().unwrap();
+        let t = l.tome.as_ref().unwrap();
+        let f = l.files.as_ref().unwrap();
+        assert_eq!(t.rect.y - tasks.rect.bottom(), m.gap);
+        assert_eq!(f.rect.y - t.rect.bottom(), m.gap);
+        assert_eq!(t.stones.len(), 6);
+        // Four to a row, the fifth under the first.
+        assert_eq!(t.stones[1].y, t.stones[0].y);
+        assert!(t.stones[1].x > t.stones[0].right());
+        assert_eq!(t.stones[4].x, t.stones[0].x);
+        assert!(t.stones[4].y > t.labels[0].bottom());
+        assert!(t.stones[0].y >= t.header.bottom());
+        assert!(t.rect.bottom() >= t.labels[5].bottom());
+        let s = t.stones[5];
+        assert_eq!(hit(&l, s.x + 1.0, s.y + 1.0), Hit::Stone(5));
+        let lb = t.labels[2];
+        assert_eq!(hit(&l, lb.x + 1.0, lb.y + 1.0), Hit::Stone(2));
+        assert_eq!(hit(&l, 20.0, t.header.y + 1.0), Hit::TomeHeader);
+        // A carried stone takes the place of the one nearest, never the
+        // empty stone's, and outside the tome no place at all.
+        let at = |r: Rect| stone_slot(t, r.x + r.w / 2.0, r.y + r.h / 2.0);
+        assert_eq!(at(t.stones[2]), Some(2));
+        assert_eq!(at(t.labels[4]), Some(4));
+        assert_eq!(at(t.stones[5]), Some(4));
+        assert_eq!(stone_slot(t, 20.0, t.rect.bottom() + 5.0), None);
+        // Folded, the header alone.
+        let folded = cluster(&m, 1, false, Some(&[]), Some(0), None);
+        let t = folded.tome.unwrap();
+        assert_eq!(t.rect, t.header);
+        assert!(cluster(&m, 1, true, Some(&[]), Some(6), None)
+            .tome
+            .is_none());
+    }
+
+    #[test]
     fn an_empty_or_folded_tasks_tile_is_its_header() {
         let m = Metrics::default();
-        let l = cluster(&m, 1, false, Some(&[]), None);
+        let l = cluster(&m, 1, false, Some(&[]), None, None);
         let t = l.tasks.unwrap();
         assert!(t.rows.is_empty());
         assert_eq!(t.rect, t.header);
         assert_eq!(l.size.1, t.rect.bottom() + m.pad);
-        assert!(cluster(&m, 1, true, Some(&[true]), None).tasks.is_none());
+        assert!(cluster(&m, 1, true, Some(&[true]), None, None)
+            .tasks
+            .is_none());
     }
 
     #[test]
     fn tiles_stack_with_gaps() {
         let m = Metrics::default();
-        let l = cluster(&m, 3, false, None, None);
+        let l = cluster(&m, 3, false, None, None, None);
         assert_eq!(l.tiles.len(), 3);
         assert_eq!(l.tiles[1].y - l.tiles[0].bottom(), m.gap);
         let add = l.add.unwrap();
@@ -2508,7 +2721,7 @@ mod tests {
     #[test]
     fn a_browser_button_sits_on_the_second_line_of_marked_tiles_only() {
         let m = Metrics::default();
-        let mut l = cluster(&m, 3, false, None, None);
+        let mut l = cluster(&m, 3, false, None, None, None);
         assert_eq!(l.marks, vec![None; 3]);
         mark(&mut l, &m, &[false, true], &[]);
         assert_eq!(l.marks.len(), 3);
@@ -2528,7 +2741,7 @@ mod tests {
     #[test]
     fn a_worktree_button_stands_left_of_the_browser_or_in_its_place() {
         let m = Metrics::default();
-        let mut l = cluster(&m, 3, false, None, None);
+        let mut l = cluster(&m, 3, false, None, None, None);
         mark(&mut l, &m, &[true, false, false], &[true, true, false]);
         let (browser, both) = (l.marks[0].unwrap(), l.codes[0].unwrap());
         assert_eq!(both.right() + 2.0, browser.x);
@@ -2544,7 +2757,7 @@ mod tests {
     #[test]
     fn collapsing_drops_the_browser_buttons() {
         let m = Metrics::default();
-        let mut l = cluster(&m, 2, true, None, None);
+        let mut l = cluster(&m, 2, true, None, None, None);
         mark(&mut l, &m, &[true, true], &[true, true]);
         assert!(l.marks.is_empty() && l.codes.is_empty());
     }
@@ -2628,7 +2841,7 @@ mod tests {
     #[test]
     fn empty_cluster_still_offers_another_session() {
         let m = Metrics::default();
-        let l = cluster(&m, 0, false, None, None);
+        let l = cluster(&m, 0, false, None, None, None);
         let add = l.add.unwrap();
         assert_eq!(add.y, l.header.bottom() + m.gap);
         assert_eq!(l.size.1, add.bottom() + m.pad);

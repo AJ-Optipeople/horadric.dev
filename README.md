@@ -83,7 +83,29 @@ work. Worktrees are next.
   shows where it is. The mode button picks how the list is worked: Manual,
   one click per item; Review, the next item starts once you approve the
   last; Auto, down the list until it is done. The `+` adds an item, and so
-  does `horadric quest add` from any shell.
+  does `horadric quest add` from any shell. A quest blocked with
+  `--on-quest "title"`, `--on-main ref`, `--on-file path`, `--on-cmd
+  "command"` or `--until +30m` goes on by itself once that holds, and the
+  list works on past it meanwhile.
+- A Runetome per project: rune stones under the quest log, each a button
+  that casts a runeword, a list of steps done in order. A step says
+  something to the session and waits for its turn to end, types keys into
+  its terminal (`"/clear{Enter}"`, `"Esc"`), runs a command in the
+  project's folder (hidden, or in a pane to watch), or tests, reviews or
+  merges. Click a stone to cast it on the session with the keyboard on the
+  stage, or pick a session; drag it onto any tile or pane to cast it
+  there. A stone of only commands needs no session. Hover one to read its
+  steps first. A click asks before it casts, showing every step, until you
+  tick "Do not ask again". While it runs it glows with its step, and a
+  click stops it. Built in stones answer a prompt (Approve), stop a turn
+  (Interrupt), ask for a recap, commit, start fresh, get a second opinion
+  from a reviewer and open the folder. The empty stone starts the
+  Runesmith, an agent that asks what the new stone should do and writes it
+  into `.horadric/config.json`, or into `runewords.json` beside Horadric's
+  state for every project. Right click a stone to remove it, have the
+  Runesmith change it, or put a built in one away. A stone that came with
+  the project and changed since you last cast it carries a dot, and asks
+  before it casts even when you said not to.
 - Right click a tile to rename its session, or a project's header to open
   its folder in VS Code or Explorer.
 - Ctrl+Alt+Space, from anywhere, shows the session that has waited on you

@@ -5,6 +5,7 @@
 //! of its label, never its steps, so a stone keeps its look while its steps
 //! are edited, and the same label looks the same on every machine.
 
+use super::{Rune, Stone};
 use crate::tasks::one_line;
 
 /// The 33 runes, in the order the game ranks them.
@@ -169,6 +170,17 @@ impl Dice {
 /// agent's shell, `config` the project's config file and `global` the
 /// file of stones every project has.
 pub fn smith_prompt(horadric: &str, config: &str, global: &str) -> String {
+    smith(
+        horadric,
+        config,
+        global,
+        "First ask me what the stone should do, and whether it is for this project or \
+         for every project.",
+    )
+}
+
+/// What every Runesmith is told, with `ask` saying what it asks first.
+fn smith(horadric: &str, config: &str, global: &str, ask: &str) -> String {
     format!(
         "You are the Runesmith for this project. You make rune stones: buttons in \
          Horadric's Runetome that do something when clicked. A stone has a label and a \
@@ -185,17 +197,111 @@ pub fn smith_prompt(horadric: &str, config: &str, global: &str) -> String {
          and fixes them, a reviewer reads its work and it answers the review, its branch \
          is merged.\n\n\
          Stones for this project go in {config}, stones for every project in {global}. \
-         Both have the same shape, with the label as the key:\n\n\
+         Both have the same shape, with the label as the key and an \"about\" saying \
+         in one sentence what the stone is for:\n\n\
          {{ \"runewords\": {{\n    \
-         \"Fresh start\": {{ \"steps\": [ {{ \"keys\": \"/clear{{Enter}}\" }}, \
+         \"Fresh start\": {{ \"about\": \"Clears the conversation, then takes the next \
+         quest\", \"steps\": [ {{ \"keys\": \"/clear{{Enter}}\" }}, \
          {{ \"say\": \"Read the plan and take the next quest\" }} ] }},\n    \
          \"Open the site\": {{ \"steps\": [ {{ \"run\": \"start http://localhost:3000\" }} ] }}\n\
          }} }}\n\n\
-         Keep everything else in the file as it is. First ask me what the stone should \
-         do, and whether it is for this project or for every project. Then write it, run \
+         Keep everything else in the file as it is. {ask} Then write it, run \
          `{horadric} runeword list` to check it parses, and tell me the stone's runeword \
          name from that list."
     )
+}
+
+/// The first prompt of the Runesmith started to change a stone that is
+/// there already, the one labelled `label` in `file`, rather than make a
+/// new one. The rest is as [`smith_prompt`] says.
+pub fn reforge_prompt(
+    horadric: &str,
+    config: &str,
+    global: &str,
+    label: &str,
+    file: &str,
+) -> String {
+    smith(
+        horadric,
+        config,
+        global,
+        &format!(
+            "This time I want to change the stone \"{label}\" in {file}, not make a new \
+             one. Read it, tell me in a line what it does now, and ask me what should change."
+        ),
+    )
+}
+
+/// What hovering a stone says: its runeword name, what it is for when it
+/// says, then its steps in order, so what a click does is never a guess. A cracked stone says why
+/// it does not parse instead, and one marked `changed` that its steps are
+/// not the ones last cast.
+pub fn tip(stone: &Stone, changed: bool) -> String {
+    let mut lines = vec![name(&stone.label)];
+    if !stone.about.is_empty() {
+        lines.push(stone.about.clone());
+    }
+    match &stone.steps {
+        Ok(runes) => lines.extend(
+            runes
+                .iter()
+                .enumerate()
+                .map(|(i, r)| format!("{}. {}", i + 1, cut(&r.describe(), TIP_STEP_CHARS))),
+        ),
+        Err(why) => lines.push(format!("Cracked: {why}")),
+    }
+    if changed {
+        lines.push("Not cast since these steps came in".into());
+    }
+    lines.join("\n")
+}
+
+/// What the human reads before a click casts a stone: what it is for,
+/// what it is cast on, and every step, so nothing runs unseen. `changed`
+/// says its steps are not the ones it was last cast with.
+pub fn ask_text(stone: &Stone, on: &str, changed: bool) -> String {
+    let mut out = String::new();
+    if !stone.about.is_empty() {
+        out.push_str(&stone.about);
+        out.push_str("\n\n");
+    }
+    out.push_str(&format!("On {on}:"));
+    for (i, r) in stone.runes().unwrap_or_default().iter().enumerate() {
+        out.push_str(&format!(
+            "\n{}. {}",
+            i + 1,
+            cut(&r.describe(), TIP_STEP_CHARS)
+        ));
+    }
+    if changed {
+        out.push_str("\n\nNot cast since these steps came in.");
+    }
+    out
+}
+
+/// What hovering the empty stone says.
+pub const EMPTY_TIP: &str = "Make a new stone: the Runesmith asks what it should do";
+
+/// The longest a step reads in a stone's tip.
+const TIP_STEP_CHARS: usize = 120;
+
+fn cut(text: &str, most: usize) -> String {
+    if text.chars().count() <= most {
+        return text.to_string();
+    }
+    let cut: String = text.chars().take(most).collect();
+    format!("{}...", cut.trim_end())
+}
+
+/// A stone's steps as one number, kept when it is cast, so a project's
+/// stone whose steps changed after (a pull, an agent's edit) is marked
+/// until it is cast again. FNV-1a over the steps as JSON, the same on
+/// every build, as it is saved.
+pub fn fingerprint(runes: &[Rune]) -> u64 {
+    let text = serde_json::to_string(runes).unwrap_or_default();
+    text.bytes().fold(0xcbf2_9ce4_8422_2325, |h, b| {
+        (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
 }
 
 #[cfg(test)]
@@ -320,5 +426,95 @@ mod tests {
         assert!(p.contains("for this project or for every project"));
         assert!(p.contains("`horadric runeword list`"));
         assert!(p.contains("runeword name"));
+    }
+
+    #[test]
+    fn a_reforging_smith_is_told_which_stone_and_to_ask_what_changes() {
+        let p = reforge_prompt(
+            "horadric",
+            ".horadric/config.json",
+            "C:/g/runewords.json",
+            "Deploy",
+            "C:/app/.horadric/config.json",
+        );
+        assert!(p.contains("change the stone \"Deploy\" in C:/app/.horadric/config.json"));
+        assert!(p.contains("ask me what should change"));
+        assert!(!p.contains("First ask me what the stone should do"));
+        assert!(p.contains("\"keys\""));
+        assert!(p.contains("`horadric runeword list`"));
+    }
+
+    fn stone(label: &str, steps: Result<Vec<Rune>, String>) -> Stone {
+        Stone {
+            label: label.into(),
+            steps,
+            source: super::super::Source::Project,
+            about: String::new(),
+        }
+    }
+
+    #[test]
+    fn a_tip_names_the_stone_then_its_steps() {
+        let s = stone(
+            "Fresh start",
+            Ok(vec![
+                Rune::Keys("/clear{Enter}".into()),
+                Rune::Say("Take the next quest".into()),
+            ]),
+        );
+        assert_eq!(
+            tip(&s, false),
+            "Um Pul Zod Io\n1. keys /clear{Enter}\n2. say \"Take the next quest\""
+        );
+        assert!(tip(&s, true).ends_with("\nNot cast since these steps came in"));
+        let about = Stone {
+            about: "Clears it, then gives it the next quest".into(),
+            ..s
+        };
+        assert!(tip(&about, false)
+            .starts_with("Um Pul Zod Io\nClears it, then gives it the next quest\n1. keys"));
+    }
+
+    #[test]
+    fn asking_before_a_cast_says_what_for_on_what_and_each_step() {
+        let mut s = stone(
+            "Ship",
+            Ok(vec![Rune::Test, Rune::Say("Update the changelog".into())]),
+        );
+        assert_eq!(
+            ask_text(&s, "fix-login", false),
+            "On fix-login:\n1. test\n2. say \"Update the changelog\""
+        );
+        s.about = "Tests it and writes the changelog".into();
+        assert_eq!(
+            ask_text(&s, "fix-login", true),
+            "Tests it and writes the changelog\n\nOn fix-login:\n1. test\n\
+             2. say \"Update the changelog\"\n\nNot cast since these steps came in."
+        );
+    }
+
+    #[test]
+    fn a_cracked_stone_says_why_and_a_long_step_is_cut() {
+        let s = stone("Fresh start", Err("step 2: \"say\" wants some text".into()));
+        assert_eq!(
+            tip(&s, false),
+            "Um Pul Zod Io\nCracked: step 2: \"say\" wants some text"
+        );
+        let long = stone("Fresh start", Ok(vec![Rune::Say("x".repeat(400))]));
+        let line = tip(&long, false).lines().nth(1).unwrap().to_string();
+        assert!(
+            line.ends_with("...") && line.chars().count() < 140,
+            "{line}"
+        );
+    }
+
+    #[test]
+    fn a_fingerprint_changes_with_the_steps_and_only_with_them() {
+        let a = vec![Rune::Test, Rune::Say("Tidy".into())];
+        let b = vec![Rune::Test, Rune::Say("Tidy up".into())];
+        assert_eq!(fingerprint(&a), fingerprint(&a.clone()));
+        assert_ne!(fingerprint(&a), fingerprint(&b));
+        // Pinned, as it is saved: a change to it would mark every stone.
+        assert_eq!(fingerprint(&[]), 675_868_731_199_239_589);
     }
 }

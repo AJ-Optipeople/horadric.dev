@@ -1684,7 +1684,9 @@ tracker.
   would fill its context with the items before. The commit the agent made
   is what the next one builds on. A session whose item is `[x]` closes
   once it is not mid turn, since the agent reports from inside its turn.
-- **When the runner stops.** At a blocked item, since the order is the
+- **When the runner stops.** At a blocked item that waits on the human
+  (one that names a wait it can check is passed, see "Waits a blocked
+  quest can name" below), since the order is the
   order and the next may need this one; an item added meanwhile waits
   behind it. At an item whose session is gone. At a paused session, after
   a restart: the runner never resumes one by itself, a click on its row
@@ -2417,6 +2419,63 @@ light and narrow, and the recording with `cmd.exe` as the agent and a
 fake `Stop`. Not clicked on screen: the three menu entries (the window was
 opened by messages), and the `Commits` and `Merged` records.
 
+### Waits a blocked quest can name
+
+Asked for on 2026-10-01: a `[!]` quest stopped the whole list until the
+human came, even when what it waited on was another quest that the list
+would get to anyway.
+
+- **The form.** `horadric quest blocked "why" --on-quest "title"`, or
+  `--on-main <commit or branch>`, `--on-file <path>`, `--on-cmd
+  "<command>"`, `--until <+30m, Unix seconds or 2026-10-01T14:05Z>`. With
+  a wait the why may be left out. The wait goes at the end of the item's
+  line in braces, `- [!] Wire it @wire-1: needs it {on quest: Build it}`,
+  so the file stays the state and a human can write one too
+  (`tasks::Wait`, pure and tested). A time is kept in UTC, so the file
+  means one moment wherever it is read.
+- **What holds.** A quest of that title, any case, marked `[x]` in the
+  same log. A ref that `git merge-base --is-ancestor <ref> HEAD` passes in
+  the main tree, so a branch with nothing new on it counts as merged. A
+  file from the project folder. A command `cmd.exe /d /c` runs in the
+  project folder exiting 0 within 30 seconds. The list and the clock are
+  asked on every look; git and a command run on a thread at most every 15
+  seconds, and until one has answered the wait is not over.
+- **The runner** (`tasks::next`, tested) passes a blocked quest with a
+  wait that does not hold yet and starts the next open one. A quest
+  blocked with only a why still stops the list there, since that needs the
+  human. A list with nothing left but waits is not finished. Once a wait
+  holds the quest takes a place like a start (`Next::Resume`), in list
+  order, within `parallel`, at most one start per project every 10
+  seconds. Its session, if there and between turns, gets `[/]` back with
+  its holder and is told what happened and to go on (`tasks::waited`),
+  typed in like the usage limit's go on. A session that is gone, ended, or
+  whose terminal exited, starts the quest again as a click on a gone row
+  does. A paused session, after a restart or a crash, waits for a click,
+  as every paused session does. Only in review and auto mode: manual
+  starts nothing. A toast says the quest goes on; a waiting quest raises
+  no "Blocked" toast, since it needs nobody.
+- **The row** reads in the idle colour with a clock and says what it
+  waits on, "after Build it", "for done.txt", "in 25 min"
+  (`Wait::label`, `board::note`).
+- **The system prompt** spells out the flags and asks the agent to use one
+  whenever it fits.
+
+Checked on screen with a dev instance on its own port and app data and
+`cmd.exe` as the agent, in auto mode: of two quests, the runner started
+the first, which was blocked on the second with `--on-quest`; the row read
+"after Build the engine" and the runner started the second. `quest done`
+on it marked it `[x]`, closed its session, put the first back to `[/]`
+with its own session and showed "Quest goes on". A quest held by a session
+that no longer exists, waiting on a file that was there, started again in
+a new session. One `cmd.exe` at any time. A killed terminal read as
+paused, so its quest waited for a click. Not checked on screen: `--on-cmd`,
+`--on-main` and `--until`.
+
+Built as the quest asked, with every kind of wait, before Orchestration
+below was written. If its `After:` lines are built, `--on-quest` should
+write one of those instead of `{on quest: ...}`, and `tasks::next`
+already passes a quest that waits and wakes it in the same place.
+
 ### Performance
 
 On 2026-09-26 everything felt less smooth: typing in the stage, right
@@ -2493,6 +2552,223 @@ went from 8% to 5%.
 - **A cluster paint copies its sessions once.** It reads them from the
   registry once, as `Rc`, and the tiles leaving and the `Still` it keeps
   share them.
+
+### The Runetome
+
+Asked for on 2026-10-01. Runewords become shortcuts: programmable
+buttons that do anything, from one prompt to a chain of prompts, keys
+and commands. Each is a rune stone with a generated runeword carved on
+it, kept in a tile of its own, the Runetome. Builds on "Runewords"
+above, whose engine (one step a turn, the human taking over stops it,
+saved in `state.json`) stays.
+
+- **The tile.** One Runetome a project, in its cluster beside the
+  quest log, shown whenever the project has a cluster. Its stones sit
+  in rows, the built in ones first, then the project's, then the global
+  ones, and last an empty stone. (The built in ones were "Test, merge",
+  "Test, review, merge" and "Review, merge" until the feedback below.)
+- **A stone** is drawn in Direct2D: a rough rounded slab, lit from the
+  top left like the cube, with a glyph cut into it and its label under
+  it. The glyph and a runeword name ("Tal Eth Ko", two to four of the
+  33 rune names) both come from a hash of the stone's label, so a
+  stone keeps its look when its steps are edited and two stones rarely
+  match. `runeword::carve` (strokes from the hash) and `runeword::name`
+  are pure and tested. Hovering a stone shows its name and its steps
+  in a tooltip (tip.rs), so what a click does is never a guess.
+- **Steps.** A stone is a list of steps, cast in order:
+  - `say`: typed to the session, done when its turn ends (the said
+    rune of today).
+  - `keys`: keystrokes into the session's terminal at once, such as
+    `"Esc"`, `"Ctrl+C"` or `"/clear{Enter}"`. Parsed by a pure, tested
+    `runeword::keys`. Done once written; it waits for no turn.
+  - `run`: a command run with `cmd /c` in the project's folder (or the
+    session's worktree when it has one), hidden. Done when it exits; a
+    non zero exit stops the runeword with a toast carrying the
+    command's last line of output. `"show": true` runs it in a plain
+    terminal pane on the stage instead, for a command worth watching.
+  - `test`, `review`, `merge`: the runes as they are.
+- **Keys stay inside Horadric.** A `keys` step only reaches Horadric's
+  own terminals. Input sent to other programs' windows is fragile and
+  fights the window manager; anything outside Horadric is a `run` step
+  (a script, AutoHotkey, `start ms-settings:`), which needs no new
+  dependency.
+- **Casting.** A stone with any step that needs a session (`say`,
+  `keys`, `review`, `merge`, `test`) casts on the session focused on
+  the stage when that session is this project's, and asks "Cast on
+  which session?" with the project's sessions otherwise. Dragging a
+  stone onto a tile or a pane casts on that one, the way a tile goes
+  into the cube. A stone of only `run` steps needs no session and
+  casts at once, with the project's folder as its directory. A
+  sessionless runeword lives on the project rather than a session, so
+  it is saved beside the sessions in `state.json` and goes on through a
+  reload too.
+  A session casts one runeword at a time, and any other stone cast on
+  it says to stop that first, except a stone of only `keys` steps:
+  keys wait for no turn, so they are typed in beside the runeword
+  already running, which is how a permission prompt that holds it up
+  is answered from the tome without stopping it.
+- **While one runs** the stone glows in the cube's gold and shows its
+  step ("2/4"); a click on it then offers Stop. The tile it casts on
+  shows "rune 2/4" as today. The tile menu keeps "Stop <name>" and
+  loses the "Runeword" submenu, since the tome is where they are given.
+- **Where stones live.** A project's in `.horadric/config.json`, every
+  project's in `%APPDATA%\Horadric\runewords.json`, same shape:
+
+  ```json
+  { "runewords": {
+      "Fresh start": { "steps": [ { "keys": "/clear{Enter}" },
+                                  { "say": "Read docs/PLAN.md and take the next quest" } ] },
+      "Open the site": { "steps": [ { "run": "start http://localhost:3000" } ] },
+      "Ship": ["test", "Update the changelog", "merge"] } }
+  ```
+
+  The list form of today is still read: a bare word is a rune or a
+  `say`. The tome reads both files again when they change, so a stone
+  an agent adds appears without a restart. `runeword::parse` is pure
+  and tested, and a stone that does not parse shows cracked, with the
+  reason in its tooltip, rather than vanishing.
+- **The empty stone** makes new ones, the way the quest giver makes
+  quests. A click starts a session named "Runesmith" in the project, on
+  the stage. Its prompt (`runeword::smith_prompt`, tested) says what a
+  stone is, the step kinds, both files and their shape, and asks the
+  human what the stone should do and whether it is for this project or
+  every one. It writes the stone, then runs `horadric runeword list` to
+  check it parses, and reports the stone's runeword name. Agents make
+  stones; a human never has to write the JSON, though they can.
+- **Trust.** A `run` step is any command, and a project's config comes
+  with its repository, so a cloned project can carry stones. Nothing
+  runs without a click, and the tooltip shows the command before it.
+  A stone from a project's config whose steps changed since it was
+  last cast shows a small mark until it is cast once, so a pull that
+  changes a command is seen.
+- **Left alone**: the cube and its recipes, and how runes are cast
+  turn by turn.
+
+The engine is built (2026-10-01). `runeword::parse` reads both forms
+and every step kind, `runeword::stones` lays out built in, project and
+global stones with a cracked one's reason, and `runeword::keys` turns
+a spec into pieces written 400 ms apart, a run of text one piece and
+each key in braces one of its own, so `/clear{Enter}` lands as typed.
+A `run` step goes through `horadric runestep <file> [--show]
+<command>`, started out of the app's job, which writes the exit code
+to `<file>.exit` (and, hidden, the output to `<file>.log`) under
+`runes` in the app's folder. That file is how a build after a reload
+learns how a command it did not start ended. A shown one runs in a
+plain pane that waits for Enter after a failure. Stones of only `run`
+steps cast on the project (`OnProject`, saved as `runewords` in
+`state.json`). The global file is `runewords.json` beside the state,
+in `Horadric-dev` for a dev instance, and both files are read again
+when their time or size changes. Until the tome existed, the tile
+menu's Runeword submenu offered every stone that parsed. Checked on a dev instance with `cmd.exe` as the agent: `keys` typed
+`echo ...{Enter}` and cmd ran it, keys then a hidden `run` wrote its
+file in the project, a failing command toasted "it exited with 3:
+boom went the command", a shown one opened a pane and closed it on
+exit 0, the global stone ran, and a 30 second command cast before a
+`reload` finished after it, the new build completing the runeword.
+
+The tile is built (2026-10-01). It sits under the quest log in every
+cluster of a project with a folder, folded by its header like the
+others, the fold kept with the cluster. The app reads each project's
+stones once a second (both files only when they changed) and hands the
+tiles what moved: a stone written, one cast, one done. A stone's tooltip
+is `runeword::tip`, its runeword name then its numbered steps, or why it
+is cracked; the tooltip plate now takes a line made at run time as well
+as a fixed one. The mark is a small amber dot. It is on a project's stone
+whose steps are not the ones last cast, a stone never cast included, so
+a stone a clone or a pull brings shows it before anything runs; built in
+and global stones never carry it. The steps last cast are kept as
+`runeword::fingerprint` (FNV-1a over the steps as JSON) in `state.json`
+as `stones_cast`. A click casts at once a stone of only commands, or on
+the session with the keyboard on the stage when it is this project's,
+and otherwise asks "Cast on which session?" with the project's live
+sessions; a paused, background or plain terminal one cannot take a
+stone. A session that is casting already is not given a second
+runeword: a toast says to stop the first. A drag that lets go over a
+tile in any cluster or a pane on the stage casts there, the window on
+top at that point deciding, so a stone dropped on a tile under another
+window casts nothing. While a stone is cast it glows and its label reads
+"1/3" in gold, and a click offers "Stop <label>" for each session or the
+project casting it. The empty stone starts "Runesmith" as the quest
+giver starts its session. The tile menu lost its Runeword submenu and
+its stops for project casts, and keeps "Stop <name>" for the session's
+own.
+
+Checked on a dev instance with `cmd.exe` as the agent and a scratch
+project with a stone of each kind: a hidden `run` of only commands wrote
+its file at a click and its dot went; `keys` typed into the focused
+session; `say` glowed "1/1" and the tile read the rune, and the click's
+menu stopped it; a shown `run` opened a pane that closed on exit; keys
+then a `run` did both; a global stone ran. With the stage on another
+project, a click asked which session and cast on the one picked. A stone
+dragged onto a pane on the stage and onto a tile in the other project's
+cluster cast on each. Then with a real `claude` (Haiku) the empty stone
+started the Runesmith: it read its prompt, was answered by a `say` stone
+cast on it, wrote "Hello file" into the project's config, and the stone
+showed on the tile with its dot within the second; a stone dragged onto
+its pane approved its permission prompt, and a click on the new stone
+wrote `hello.txt`. No `claude.exe` of the dev instance was left after.
+What it showed:
+
+- A tile added above the tome, a shown command's pane or a new session,
+  moves every stone down. A stone pressed as the layout changes is the
+  one now under the cursor.
+- Claude Code asks whether to trust a folder it has not seen, and a
+  stone of keys is how to answer it from the tome: `{Down}{Enter}` there,
+  `{Enter}` for a permission prompt.
+
+#### The human's feedback (2026-10-02)
+
+After using the tome: no way to remove a stone, built in stones nobody
+would click, and a click that casts without asking. What changed:
+
+- **Built in stones that show what a stone can do**, one or two of each
+  step kind, each worth a click on day one: Approve (`{Enter}`, which
+  slips in beside a runeword held up on a permission prompt), Interrupt
+  (`Esc`), Recap and Commit (`say`), Fresh start (`/clear{Enter}` then a
+  `say`, a chain), Second opinion (the review rune) and Open folder
+  (`run start "" .`, sessionless). A file's stone with a built in one's
+  label takes its place, as one with the same steps did already.
+- **`"about"`**: a stone in its object form may say in a sentence what
+  it is for. The tooltip, `horadric runeword list` and the question
+  before a cast show it, and the Runesmith is told to write one.
+- **A click asks first.** "Cast <label>?" with what it is for, what it
+  casts on and every step, Cast or Not now, and a "Do not ask again"
+  check (`cast_without_asking` in `state.json`). The dialog took a check
+  for it, beside its buttons. A stone with a command is asked in the
+  warning tone. A project stone whose steps are not the ones last cast
+  asks even when told not to, since that is the trust mark. A pick from
+  "Cast on which session?" and a drag are not asked again: the pick and
+  the drop were the human saying so.
+- **Right click a stone** for its menu: its label and runeword name,
+  Cast (or Stop while cast), and for a stone in a file "Change with the
+  Runesmith" (`runeword::reforge_prompt`, the smith told which stone and
+  file) and "Remove", which asks, then takes it out of the file with
+  `runeword::unwrite`. That edits the text in place rather than through
+  serde, whose maps are sorted (no `preserve_order`), so every other key
+  and all the spacing stay as written, a BOM too. A built
+  in stone offers "Put away" (`stones_hidden` in `state.json`). Every
+  menu, and the one on the empty stone or the tome's header, has "Ask
+  before a click casts" and, once one is put away, "Bring back".
+- **Drag a stone within the tome to move it** (asked for 2026-10-02).
+  While carried over the tome it shows in the place it would take
+  (`layout::stone_slot`, the nearest stone's, the last over the empty
+  stone), the others closed up around it; let go there and it stays.
+  Let go outside the tome and it casts as before. The order is kept per
+  project as labels (`stones_order` in `state.json`), laid out by
+  `runeword::arrange`, so built in, project and global stones mix
+  freely and a stone the order does not name, a new one, shows last.
+  Checked on a dev instance: a move, a drop on the empty stone and a
+  drop on a tile, which cast.
+- **Found on the way**: a toast about a session casting already named the
+  project rather than the session (`on_label` without a session in hand
+  looked the id up as a project key).
+
+Checked on a dev instance with a scratch project whose config was written
+with a BOM: the click asked with the steps and the dot's note, the check
+ticked and was kept, the command ran; the right click menu removed a
+project stone, leaving the file byte for byte but for the stone and its
+comma, BOM included; Approve was put away and brought back from the
+header's menu.
 
 ## Next
 
@@ -2823,115 +3099,252 @@ saved state (its last work cut to the minute, so a working session does
 not write the file every tick), and a start finds it there and carries
 on, unless the ten minute gap passed meanwhile.
 
-### The Runetome
+### Orchestration
 
-Asked for on 2026-10-01. Runewords become shortcuts: programmable
-buttons that do anything, from one prompt to a chain of prompts, keys
-and commands. Each is a rune stone with a generated runeword carved on
-it, kept in a tile of its own, the Runetome. Builds on "Runewords"
-above, whose engine (one step a turn, the human taking over stops it,
-saved in `state.json`) stays.
+Asked for on 2026-10-01. Proposed, not built. The goal is development
+that runs itself across many sessions, with the human hearing only
+about what needs a human. Today the human is the orchestrator: with
+several sessions in a project, a quest that cannot go on because it
+waits on another sits `[!]` until the human notices, works out what it
+waits on and starts it again. "Blocked quests resume by themselves" in
+the quest log fixes part of that. It is not the whole answer, and this
+section says what is.
 
-- **The tile.** One Runetome a project, in its cluster beside the
-  quest log, shown whenever the project has a cluster. Its stones sit
-  in rows, the built in ones first ("Test, merge", "Test, review,
-  merge", "Review, merge"), then the project's, then the global ones,
-  and last an empty stone.
-- **A stone** is drawn in Direct2D: a rough rounded slab, lit from the
-  top left like the cube, with a glyph cut into it and its label under
-  it. The glyph and a runeword name ("Tal Eth Ko", two to four of the
-  33 rune names) both come from a hash of the stone's label, so a
-  stone keeps its look when its steps are edited and two stones rarely
-  match. `runeword::carve` (strokes from the hash) and `runeword::name`
-  are pure and tested. Hovering a stone shows its name and its steps
-  in a tooltip (tip.rs), so what a click does is never a guess.
-- **Steps.** A stone is a list of steps, cast in order:
-  - `say`: typed to the session, done when its turn ends (the said
-    rune of today).
-  - `keys`: keystrokes into the session's terminal at once, such as
-    `"Esc"`, `"Ctrl+C"` or `"/clear{Enter}"`. Parsed by a pure, tested
-    `runeword::keys`. Done once written; it waits for no turn.
-  - `run`: a command run with `cmd /c` in the project's folder (or the
-    session's worktree when it has one), hidden. Done when it exits; a
-    non zero exit stops the runeword with a toast carrying the
-    command's last line of output. `"show": true` runs it in a plain
-    terminal pane on the stage instead, for a command worth watching.
-  - `test`, `review`, `merge`: the runes as they are.
-- **Keys stay inside Horadric.** A `keys` step only reaches Horadric's
-  own terminals. Input sent to other programs' windows is fragile and
-  fights the window manager; anything outside Horadric is a `run` step
-  (a script, AutoHotkey, `start ms-settings:`), which needs no new
-  dependency.
-- **Casting.** A stone with any step that needs a session (`say`,
-  `keys`, `review`, `merge`, `test`) casts on the session focused on
-  the stage when that session is this project's, and asks "Cast on
-  which session?" with the project's sessions otherwise. Dragging a
-  stone onto a tile or a pane casts on that one, the way a tile goes
-  into the cube. A stone of only `run` steps needs no session and
-  casts at once, with the project's folder as its directory. A
-  sessionless runeword lives on the project rather than a session, so
-  it is saved beside the sessions in `state.json` and goes on through a
-  reload too.
-- **While one runs** the stone glows in the cube's gold and shows its
-  step ("2/4"); a click on it then offers Stop. The tile it casts on
-  shows "rune 2/4" as today. The tile menu keeps "Stop <name>" and
-  loses the "Runeword" submenu, since the tome is where they are given.
-- **Where stones live.** A project's in `.horadric/config.json`, every
-  project's in `%APPDATA%\Horadric\runewords.json`, same shape:
+**Why a blocked quest is the wrong place to start.** When quest B waits
+on quest A, the dependency was there before either started. B finds out
+halfway in, after a session and some of its context are spent. The
+Runetome tile is the example on our own log: it was taken, worked until
+it saw that two quests above it had not landed, and blocked. Resuming
+it once they land is a good safety net. Not starting it until they land
+is the fix. So the work splits in three layers, each useful alone, built
+in this order.
 
-  ```json
-  { "runewords": {
-      "Fresh start": { "steps": [ { "keys": "/clear{Enter}" },
-                                  { "say": "Read docs/PLAN.md and take the next quest" } ] },
-      "Open the site": { "steps": [ { "run": "start http://localhost:3000" } ] },
-      "Ship": ["test", "Update the changelog", "merge"] } }
-  ```
+**1. Dependencies in the quest log, declared before work starts.**
 
-  The list form of today is still read: a bare word is a rune or a
-  `say`. The tome reads both files again when they change, so a stone
-  an agent adds appears without a restart. `runeword::parse` is pure
-  and tested, and a stone that does not parse shows cracked, with the
-  reason in its tooltip, rather than vanishing.
-- **The empty stone** makes new ones, the way the quest giver makes
-  quests. A click starts a session named "Runesmith" in the project, on
-  the stage. Its prompt (`runeword::smith_prompt`, tested) says what a
-  stone is, the step kinds, both files and their shape, and asks the
-  human what the stone should do and whether it is for this project or
-  every one. It writes the stone, then runs `horadric runeword list` to
-  check it parses, and reports the stone's runeword name. Agents make
-  stones; a human never has to write the JSON, though they can.
-- **Trust.** A `run` step is any command, and a project's config comes
-  with its repository, so a cloned project can carry stones. Nothing
-  runs without a click, and the tooltip shows the command before it.
-  A stone from a project's config whose steps changed since it was
-  last cast shows a small mark until it is cast once, so a pull that
-  changes a command is seen.
-- **Left alone**: the cube and its recipes, and how runes are cast
-  turn by turn.
+This reopens "No dependencies" in The task list, so it waits for the
+human's yes before it is built.
 
-The engine is built (2026-10-01). `runeword::parse` reads both forms
-and every step kind, `runeword::stones` lays out built in, project and
-global stones with a cracked one's reason, and `runeword::keys` turns
-a spec into pieces written 400 ms apart, a run of text one piece and
-each key in braces one of its own, so `/clear{Enter}` lands as typed.
-A `run` step goes through `horadric runestep <file> [--show]
-<command>`, started out of the app's job, which writes the exit code
-to `<file>.exit` (and, hidden, the output to `<file>.log`) under
-`runes` in the app's folder. That file is how a build after a reload
-learns how a command it did not start ended. A shown one runs in a
-plain pane that waits for Enter after a failure. Stones of only `run`
-steps cast on the project (`OnProject`, saved as `runewords` in
-`state.json`). The global file is `runewords.json` beside the state,
-in `Horadric-dev` for a dev instance, and both files are read again
-when their time or size changes. Until the tome exists, the tile menu's
-Runeword submenu offers every stone that parses, picking one of only
-commands casts it on the project, and "Stop <name>" items stop those.
-Checked on a dev instance with `cmd.exe` as the agent: `keys` typed
-`echo ...{Enter}` and cmd ran it, keys then a hidden `run` wrote its
-file in the project, a failing command toasted "it exited with 3:
-boom went the command", a shown one opened a pane and closed it on
-exit 0, the global stone ran, and a 30 second command cast before a
-`reload` finished after it, the new build completing the runeword.
+- **The form.** A notes line `After: <title>` names a quest this one
+  waits for, one line each. The title is matched exactly or by a unique
+  start, since titles are long and carry colons. A name that matches
+  nothing or several quests makes the quest not ready, and its row says
+  which name, so a typo never starts work early. The file stays the
+  state; nothing is kept beside it.
+- **Ready.** A quest is ready when every quest it names is `[x]`. Not
+  `[?]`: in review the work may not be on `main` yet, and with worktrees
+  it is not.
+- **The runner picks the first ready open quest**, not the first open
+  one. A quest waiting on another does not stop the list, it is passed
+  over, which is what `parallel` needs: with three slots and a chain of
+  three, one runs and the other slots take quests that do not wait. A
+  cycle is not ready either; its rows say so and the list stops there,
+  since only a human can break it.
+- **Who writes them.** The quest giver's prompt says to add `After:`
+  lines when a suggested quest needs another, and a planning quest that
+  writes its own quests below itself does the same. `quest add "title"
+  --after "other"` writes the line.
+- **"Blocked quests resume", cut down.** `quest blocked "why" --on
+  "title"` marks the quest `[!]` and writes the same `After:` line. When
+  that quest is `[x]`: a live holding session is told to go on, typed
+  in as `go_on` does after a usage limit, and the quest goes `[/]`; a
+  session that is gone starts again (`start_again`). One rule with two
+  ways in. Waits on a file, a command or a time are left out until a
+  quest needs one. A plain `blocked "why"` still stops the list for the
+  human.
+- **The board row** of a quest that waits reads "after <title>", dim,
+  with no lamp, since nothing runs.
+- **Pure and tested** in `horadric_core::tasks`: reading `After:` lines,
+  matching titles, ready, cycles, the runner's choice, the `--on` form.
+  On screen with a dev instance and `cmd.exe`: two quests, the second
+  after the first, auto mode, `quest done` on the first starts the
+  second. Count `claude.exe` after, since this starts agents.
+
+**2. An orchestrator session, woken by events.**
+
+Some blocks no rule can clear: an agent asks a question another agent
+could answer, two quests turn out to overlap, a merge conflicts, a
+quest is too big and should be split. Today each of those goes to the
+human. Most need judgment, not a human in particular. That judgment
+lives in an agent; Horadric stays the plumbing that wakes it, which
+keeps the runner small and testable and keeps state coming from hooks
+and the file.
+
+- **One per project, named Warriv** (the caravan master in the games,
+  who moves the camp on when the way is clear), a session on the stage
+  like the quest giver. It holds no quest and the runner never gives it
+  one.
+- **Woken by events, not left running.** A quest goes `[!]` without
+  `--on`; a session on a quest reads "asks you" after the nudge; a quest
+  names a dependency that matches nothing, or a cycle; a merge into
+  `main` fails; the log runs out of ready quests in auto mode while some
+  wait. Not every `Stop`: that would make it a second runner.
+- **A fresh session per wake**, for the reason the runner gives each
+  quest one: carrying a session from event to event fills its context.
+  Its first prompt is the event, the quest, the reason and the holding
+  session's last turn. Its memory is the quest log: it writes what it
+  decided as a notes line on the quest (`Warriv: split into the two
+  below`), so the next wake reads it. Events that arrive while it works
+  wait and go to it at its next `Stop` in one prompt. When it has no
+  event left and is not mid turn, it closes.
+- **What it may do.** Change the log (`quest add`, `--after`, notes,
+  move, put back), answer a holding session with `quest tell "title"
+  "message"` (typed in once the session is not mid turn, the same way
+  `go_on` types), and hand the event to the human with `quest blocked
+  "question"` on the quest, worded so the human can answer in one line.
+  It changes no code and starts no session; the runner starts what the
+  log says, with its fuses.
+- **Fuses.** At most one Warriv a project. At most six wakes a project
+  an hour, then events go to the human as today, with a notification
+  saying why. It is never woken by its own changes. A `quest tell` to a
+  session goes once per event. Its permission mode is the project's, and
+  a prompt it stops at is an "asks you" like any session's.
+- **Off by default.** `"orchestrator": true` in `.horadric/config.json`
+  turns it on. Without it, every event goes to the human as today.
+- **Pure and tested:** which events wake it, the wake budget, the first
+  prompt, the queue of events. On screen with a dev instance: a fake
+  quest blocked with a question its notes answer, Warriv wakes, tells the
+  session, the quest goes on. Count `claude.exe` after.
+
+**3. The human hears only what Warriv could not settle.**
+
+Not an inbox: that was dropped on 2026-09-26, and the tiles, the hotkey
+that walks waiting sessions and the notification still give the
+overview. What changes is what reaches them. With Warriv on, a quest is
+red only when it handed the question on, and its reason is that
+question. "N quests need you" counts only those. The notes say what
+Warriv tried, so the human answers without reading the session first.
+
+**Open questions.**
+
+- Whether Warriv may review `[?]` quests in review mode, as a first
+  reader before the human. It would make review mode run alone for
+  longer, and it is the first place a wrong judgment costs real work.
+- Whether a merge conflict between worktrees is Warriv's to resolve, or
+  a quest it files for a worker. The second keeps "changes no code".
+- Which model Warriv runs on. Its turns are short and many, which says a
+  small one, but a wrong call costs more than the turn saves.
+
+### The agent's cursor
+
+Asked for on 2026-10-01. Proposed, not built. When an agent tests a dev
+instance it clicks with the human's own mouse: a PowerShell script calls
+`SetCursorPos` and `SendInput`, the pointer jumps across the screen, and
+the human has to keep their hands off until it is done. A human who
+moves mid script sends the click somewhere else, which is why every
+scripted click today first checks the window under the point is the dev
+build's. The ask: the agent gets a cursor of its own that it uses as it
+does today, the human keeps theirs, and the agent's is drawn on screen
+whenever it is in use. It does not have to be a real pointer, only as
+usable as one.
+
+**Why it is faked.** Windows has one pointer per desktop. A second mouse,
+real or a virtual driver, moves the same one. So the agent's cursor is a
+position Horadric keeps, a picture of an arrow drawn there, and mouse
+messages sent to the window under it. No `SendInput`, no `SetCursorPos`:
+the human's pointer never moves and their clicks keep going where they
+point.
+
+**Why that works fully for Horadric's own windows.** A posted
+`WM_LBUTTONDOWN` carries its point in `lParam`, and most handlers read it
+from there. Not all: a drag reads the screen point with `GetCursorPos`
+(a cluster moved, a tile lifted into the cube, the stash, the usage
+window's slider, a terminal selection), hover asks `GetCursorPos` after
+the fact, `SetCapture` only follows the real mouse, and the browser pane
+asks `GetAsyncKeyState` whether a button is down. About forty such reads
+in thirteen files of `horadric-ui`. Faked messages alone would click but
+not drag. Since the code is ours, those reads go through one place that
+knows about the agent's cursor, and then the fake is as good as the real
+thing. Someone else's app reads the real pointer and cannot be taught,
+so other apps get less (step 5).
+
+**The shape.**
+
+- **`pointer.rs` in `horadric-ui`.** The one place that answers where the
+  mouse is and what is held: `pointer::at()` for `GetCursorPos`,
+  `pointer::held(vk)` for `GetAsyncKeyState` and `GetKeyState`. With no
+  agent gesture under way they pass straight through to Windows. During
+  one they answer the agent's point and the agent's buttons and keys.
+  Every read in the UI moves to them, and clippy's
+  `disallowed_methods` keeps a new `GetCursorPos` from creeping back.
+- **A gesture is one call.** Move, press, drag, release, scroll, a key or
+  some text. It runs on the UI thread, between messages, so it never
+  interleaves with a real one. It finds the Horadric window at the point
+  from Horadric's own windows in z order (not `WindowFromPoint`, which
+  would find whatever the human has on top), sends it `WM_MOUSEMOVE`,
+  the button messages and `WM_MOUSEWHEEL` with the point in `lParam`,
+  and keeps an emulated capture: after a press, the moves and the
+  release go to the window pressed, as `SetCapture` would make them.
+  Leaving a window sends it `WM_MOUSELEAVE`, so hover clears. Text is
+  `WM_KEYDOWN`, `WM_CHAR` and `WM_KEYUP` to the window that has the
+  keyboard in Horadric, without `SetForegroundWindow`, so the human's
+  focus stays in their own app.
+- **The human wins a tie.** While a gesture runs, real mouse messages to
+  the window it acts on are held back and replayed after it, so a
+  human's twitch does not break the agent's drag. A gesture is
+  milliseconds long, so nobody feels the wait. After it the agent's
+  hover stays until the human's pointer comes back to that window.
+- **The arrow, `ghost.rs`.** A layered window, topmost, click through
+  (`WS_EX_TRANSPARENT`), never activated and not on the taskbar, drawn
+  with Direct2D like the rest: an arrow in a colour no Horadric state
+  uses, with the session's name on a small tag beside it. It glides to
+  each new point over about 150 ms, so the human can follow it, rings
+  out on a press, draws a line while dragging, and fades three seconds
+  after the last gesture. Several sessions acting at once each get
+  their own arrow and tag. `SetWindowDisplayAffinity` with
+  `WDA_EXCLUDEFROMCAPTURE` keeps it out of screenshots, so the arrow
+  never covers what the agent is trying to read, while the human still
+  sees it.
+- **How an agent drives it.** Tools on the MCP server every session
+  already gets (`mcp.rs`), beside the browser ones: `desktop_click`,
+  `desktop_drag`, `desktop_scroll`, `desktop_type`, `desktop_press` and
+  `desktop_screenshot`. Points are screen pixels, the same as a
+  screenshot's. Key names reuse the browser tools' `key_events`
+  parsing. The screenshot is `PrintWindow` of Horadric's windows
+  composed in place, so it shows them even when the human's windows are
+  on top, and replaces the `CopyFromScreen` scripts. For a script or a
+  shell, `horadric pointer click 1820 64` and friends do the same.
+  Both go to the listener at a new `/horadric/pointer`, with the
+  session's header, so the tag knows whose arrow it is.
+- **Dev instances only, at first.** The installed Horadric refuses
+  pointer calls; the MCP tools go to the dev instance's port. An agent
+  testing a build cannot click the human's real tiles by a wrong
+  coordinate, and a point that lands outside the dev build's windows is
+  refused with what is there instead. That refusal replaces the check
+  each script does today.
+
+**Steps**, each landing on its own:
+
+1. `pointer.rs` with every cursor and button read moved to it, passing
+   through. No behaviour change; the clippy rule turned on.
+2. Gestures and `/horadric/pointer`, with `horadric pointer` on the
+   command line. Verified on a dev instance with the human's pointer
+   parked in another corner: a tile click switches the stage, a cluster
+   dragged and dropped, a tile lifted into the cube, the usage slider
+   dragged, a terminal selection, a list picked, text typed into a
+   pane. After each, the real `GetCursorPos` is where it was.
+3. The arrow: glide, press ring, drag line, fade, tag, kept out of
+   captures. Checked by eye, and by a `CopyFromScreen` that must not
+   show it.
+4. The MCP tools and `desktop_screenshot`, and this file's "Verifying
+   Windows code" and `CLAUDE.md` rewritten to use them instead of
+   scripts.
+5. Other apps, best effort: messages posted to the child window under
+   the point and UI Automation's invoke for a named button, the arrow
+   drawn the same. Clicks and typing work in most plain Win32 apps.
+   Drags, and apps that read the real pointer (games, some Electron and
+   DirectX apps), do not, and the tool says so instead of falling back
+   to the real mouse.
+
+Pure parts get tests: finding the window at a point from a z ordered
+list, the emulated capture's routing, the glide's path, the held back
+messages replayed in order.
+
+**Open questions.**
+
+- Whether the installed Horadric should ever take pointer calls, for an
+  agent helping the human in their real tiles. Off until asked for.
+- Whether step 5 is worth it, or Horadric's windows and the browser pane
+  cover what agents actually click.
 
 ### Step 4: worktrees and the git glance
 

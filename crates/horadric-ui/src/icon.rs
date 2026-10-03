@@ -34,8 +34,8 @@ impl Color {
     }
 }
 
-const GOLD: u32 = 0xE8B04A;
-const ERROR: u32 = 0xFF5D66;
+pub const GOLD: u32 = 0xE8B04A;
+pub const ERROR: u32 = 0xFF5D66;
 const LID: Color = Color::rgb(0x2C2F3A);
 const LEFT: Color = Color::rgb(0x1B1D24);
 const RIGHT: Color = Color::rgb(0x121317);

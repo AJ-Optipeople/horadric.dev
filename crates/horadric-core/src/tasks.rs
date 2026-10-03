@@ -14,12 +14,19 @@
 //!   Happens only after a session expires.
 //! - [?] Add dark mode to the settings page @add-dark-mode-51300
 //! - [!] Migrate to the new API @migrate-api-51400: needs a key I do not have
+//! - [!] Wire the new API in @wire-api-51500: needs it {on quest: Migrate to the new API}
 //! - [ ] Show the build time in the footer
 //! ```
+//!
+//! A blocked item that says in braces what it waits on is the runner's to
+//! wake, see [`Wait`]: it skips past it, and once the wait is over it tells
+//! the session to go on or starts the item again. One that says only why
+//! waits on the human.
 
 use serde_json::{Map, Value};
 
 use crate::tombs;
+use crate::usage::format_until;
 
 /// Where the list lives, from the project folder.
 pub const QUESTS_FILE: &str = ".horadric/quests.md";
@@ -95,6 +102,8 @@ pub struct Task {
     pub holder: Option<String>,
     /// Why it is blocked, as its agent said.
     pub reason: Option<String>,
+    /// What a blocked item waits on, in a form the runner can check.
+    pub wait: Option<Wait>,
     /// The indented lines under it, indent taken off.
     pub notes: Vec<String>,
 }
@@ -137,15 +146,216 @@ fn parse_item(raw: &str, line: usize) -> Option<Task> {
         None if rest.trim().is_empty() => "",
         None => return None,
     };
-    let (title, holder, reason) = split_holder(body.trim_end());
+    let (body, wait) = split_wait(body.trim_end());
+    let (title, holder, reason) = split_holder(body);
     Some(Task {
         line,
         mark,
         title,
         holder,
         reason,
+        wait,
         notes: Vec::new(),
     })
+}
+
+/// What a blocked item waits on before it can go on by itself. Written at
+/// the end of its line in braces, `{on quest: Title}`, so the file stays
+/// the state and a human can write one too.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Wait {
+    /// Another quest in the same log, by title, is done.
+    Quest(String),
+    /// A commit or branch is in the main tree's checked out branch.
+    Main(String),
+    /// A file exists, from the project folder.
+    File(String),
+    /// A command `cmd.exe` runs in the project folder exits 0.
+    Cmd(String),
+    /// A time has come, in Unix seconds.
+    Until(u64),
+}
+
+impl Wait {
+    /// How it is written on the item's line.
+    pub fn spell(&self) -> String {
+        match self {
+            Wait::Quest(t) => format!("{{on quest: {}}}", one_line(t)),
+            Wait::Main(r) => format!("{{on main: {}}}", one_line(r)),
+            Wait::File(f) => format!("{{on file: {}}}", one_line(f)),
+            Wait::Cmd(c) => format!("{{on cmd: {}}}", one_line(c)),
+            Wait::Until(t) => format!("{{until: {}}}", utc(*t)),
+        }
+    }
+
+    /// Reads what `spell` wrote, braces included.
+    pub fn read(s: &str) -> Option<Wait> {
+        let inner = s.strip_prefix('{')?.strip_suffix('}')?;
+        let (kind, value) = inner.split_once(':')?;
+        let value = value.trim();
+        if value.is_empty() {
+            return None;
+        }
+        let v = value.to_string();
+        match kind.trim() {
+            "on quest" => Some(Wait::Quest(v)),
+            "on main" => Some(Wait::Main(v)),
+            "on file" => Some(Wait::File(v)),
+            "on cmd" => Some(Wait::Cmd(v)),
+            "until" => parse_utc(value).map(Wait::Until),
+            _ => None,
+        }
+    }
+
+    /// Whether it is over, for the kinds the list and the clock answer.
+    /// None for those that need a look at the disk or a command run.
+    pub fn met(&self, tasks: &[Task], now: u64) -> Option<bool> {
+        match self {
+            Wait::Quest(title) => {
+                let want = one_line(title).to_lowercase();
+                Some(
+                    tasks
+                        .iter()
+                        .any(|t| t.mark == Mark::Done && one_line(&t.title).to_lowercase() == want),
+                )
+            }
+            Wait::Until(at) => Some(now >= *at),
+            Wait::Main(_) | Wait::File(_) | Wait::Cmd(_) => None,
+        }
+    }
+
+    /// What the row says it waits on: a few words, since the title needs
+    /// the room.
+    pub fn label(&self, now: u64) -> String {
+        let short = |s: &str| {
+            let s = one_line(s);
+            if s.chars().count() > 18 {
+                format!("{}\u{2026}", s.chars().take(17).collect::<String>())
+            } else {
+                s
+            }
+        };
+        match self {
+            Wait::Quest(t) => format!("after {}", short(t)),
+            Wait::Main(r) => format!("on main {}", short(r)),
+            Wait::File(f) => format!("for {}", short(f)),
+            Wait::Cmd(_) => "on a command".into(),
+            Wait::Until(t) if *t > now => format!("in {}", format_until(t - now)),
+            Wait::Until(_) => "due".into(),
+        }
+    }
+
+    /// What it waited on, for the session told to go on.
+    pub fn over(&self) -> String {
+        match self {
+            Wait::Quest(t) => format!("The quest \"{t}\" is done"),
+            Wait::Main(r) => format!("{r} is on the main branch"),
+            Wait::File(f) => format!("{f} exists"),
+            Wait::Cmd(c) => format!("`{c}` exits 0"),
+            Wait::Until(t) => format!("It is past {}", utc(*t)),
+        }
+    }
+}
+
+/// Splits a wait in braces off the end of an item's body. The last ` {`
+/// that reads as one is it, so braces earlier in the title stay there.
+fn split_wait(body: &str) -> (&str, Option<Wait>) {
+    let mut search = body.len();
+    while let Some(at) = body[..search].rfind(" {") {
+        search = at;
+        if let Some(w) = Wait::read(&body[at + 1..]) {
+            return (body[..at].trim_end(), Some(w));
+        }
+    }
+    (body, None)
+}
+
+/// A time as `2026-10-01T14:05Z`, in UTC, with seconds only when it has
+/// some.
+pub fn utc(secs: u64) -> String {
+    let (y, m, d) = civil((secs / 86_400) as i64);
+    let rest = secs % 86_400;
+    let (h, min, s) = (rest / 3600, rest % 3600 / 60, rest % 60);
+    if s == 0 {
+        format!("{y:04}-{m:02}-{d:02}T{h:02}:{min:02}Z")
+    } else {
+        format!("{y:04}-{m:02}-{d:02}T{h:02}:{min:02}:{s:02}Z")
+    }
+}
+
+/// Reads `2026-10-01T14:05Z`, with seconds or a space for the `T` too. Only
+/// UTC, so the file means one moment wherever it is read.
+pub fn parse_utc(s: &str) -> Option<u64> {
+    let s = s.trim().strip_suffix(['Z', 'z'])?;
+    let (date, time) = s.split_once(['T', 't', ' '])?;
+    let num = |p: &str, len: usize| {
+        (p.len() == len && p.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| p.parse::<u64>().ok())
+            .flatten()
+    };
+    let date: Vec<&str> = date.split('-').collect();
+    let time: Vec<&str> = time.split(':').collect();
+    let ([y, m, d], [h, min, rest @ ..]) = (date.as_slice(), time.as_slice()) else {
+        return None;
+    };
+    let (y, m, d, h, min) = (num(y, 4)?, num(m, 2)?, num(d, 2)?, num(h, 2)?, num(min, 2)?);
+    let sec = match rest {
+        [] => 0,
+        [s] => num(s, 2)?,
+        _ => return None,
+    };
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) || h > 23 || min > 59 || sec > 59 {
+        return None;
+    }
+    let days = u64::try_from(days_from_civil(y as i64, m, d)).ok()?;
+    Some(days * 86_400 + h * 3600 + min * 60 + sec)
+}
+
+/// What `quest blocked --until` takes: `+30m` (or s, h, d) from `now`,
+/// Unix seconds, or a UTC time as `parse_utc` reads it.
+pub fn parse_when(s: &str, now: u64) -> Option<u64> {
+    let s = s.trim();
+    if let Some(rel) = s.strip_prefix('+') {
+        let unit = rel.chars().last()?;
+        let n: u64 = rel[..rel.len() - unit.len_utf8()].parse().ok()?;
+        let each = match unit {
+            's' => 1,
+            'm' => 60,
+            'h' => 3600,
+            'd' => 86_400,
+            _ => return None,
+        };
+        return now.checked_add(n.checked_mul(each)?);
+    }
+    if !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()) {
+        return s.parse().ok();
+    }
+    parse_utc(s)
+}
+
+/// Year, month and day of a day counted from 1970-01-01, after Howard
+/// Hinnant's `civil_from_days`.
+fn civil(days: i64) -> (i64, u64, u64) {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u64;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u64;
+    (yoe + era * 400 + i64::from(m <= 2), m, d)
+}
+
+/// The day counted from 1970-01-01, after Hinnant's `days_from_civil`.
+fn days_from_civil(y: i64, m: u64, d: u64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y.rem_euclid(400);
+    let mp = if m > 2 { m - 3 } else { m + 9 } as i64;
+    let doy = (153 * mp + 2) / 5 + d as i64 - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
 }
 
 /// Splits `Fix it @fix-it-51234: why` into the title, the holder and the
@@ -182,15 +392,25 @@ fn is_id_char(c: char) -> bool {
 }
 
 /// An item's line as Horadric writes it back.
-pub fn item_line(mark: Mark, title: &str, holder: Option<&str>, reason: Option<&str>) -> String {
+pub fn item_line(
+    mark: Mark,
+    title: &str,
+    holder: Option<&str>,
+    reason: Option<&str>,
+    wait: Option<&Wait>,
+) -> String {
     let mut out = format!("- [{}] {}", mark.char(), title);
     if let Some(h) = holder {
         out.push_str(" @");
         out.push_str(h);
-        if let Some(r) = reason.filter(|r| !r.is_empty()) {
+        if let Some(r) = reason.map(one_line).filter(|r| !r.is_empty()) {
             out.push_str(": ");
-            out.push_str(&one_line(r));
+            out.push_str(&r);
         }
+    }
+    if let Some(w) = wait {
+        out.push(' ');
+        out.push_str(&w.spell());
     }
     out
 }
@@ -233,7 +453,7 @@ pub fn append_with_notes(text: &str, title: &str, notes: &str) -> String {
     if !out.is_empty() && !out.ends_with('\n') {
         out.push_str(ending);
     }
-    out.push_str(&item_line(Mark::Open, &one_line(title), None, None));
+    out.push_str(&item_line(Mark::Open, &one_line(title), None, None, None));
     out.push_str(ending);
     for line in notes.lines().map(str::trim).filter(|l| !l.is_empty()) {
         out.push_str("  ");
@@ -243,13 +463,19 @@ pub fn append_with_notes(text: &str, title: &str, notes: &str) -> String {
     out
 }
 
-/// Changes the item held by `holder` to `mark`, keeping the holder. None
-/// when no item is held by it.
-pub fn set_held(text: &str, holder: &str, mark: Mark, reason: Option<&str>) -> Option<String> {
+/// Changes the item held by `holder` to `mark`, keeping the holder, with
+/// why it is blocked and what it waits on. None when no item is held by it.
+pub fn set_held(
+    text: &str,
+    holder: &str,
+    mark: Mark,
+    reason: Option<&str>,
+    wait: Option<&Wait>,
+) -> Option<String> {
     let task = parse(text)
         .into_iter()
         .find(|t| t.holder.as_deref() == Some(holder) && t.mark != Mark::Done)?;
-    let line = item_line(mark, &task.title, Some(holder), reason);
+    let line = item_line(mark, &task.title, Some(holder), reason, wait);
     replace_line(text, task.line, &line)
 }
 
@@ -260,7 +486,7 @@ pub fn pick(text: &str, batch: &str, winner: &str) -> Option<String> {
     let task = parse(text)
         .into_iter()
         .find(|t| t.holder.as_deref() == Some(batch) && t.mark != Mark::Done)?;
-    let line = item_line(Mark::Done, &task.title, Some(winner), None);
+    let line = item_line(Mark::Done, &task.title, Some(winner), None, None);
     replace_line(text, task.line, &line)
 }
 
@@ -274,13 +500,13 @@ pub fn take(text: &str, line: usize, title: &str, holder: &str) -> Option<String
     replace_line(
         text,
         line,
-        &item_line(Mark::Working, title, Some(holder), None),
+        &item_line(Mark::Working, title, Some(holder), None, None),
     )
 }
 
 /// Sets the item on `line` titled `title` to `mark`. `Open` lets go of the
-/// holder; every other mark keeps it. None when the line holds something
-/// else now.
+/// holder; every other mark keeps it. Only a blocked item keeps why and
+/// what it waits on. None when the line holds something else now.
 pub fn set_mark(text: &str, line: usize, title: &str, mark: Mark) -> Option<String> {
     let task = parse(text).into_iter().find(|t| t.line == line)?;
     if task.title != title {
@@ -288,7 +514,8 @@ pub fn set_mark(text: &str, line: usize, title: &str, mark: Mark) -> Option<Stri
     }
     let holder = task.holder.as_deref().filter(|_| mark != Mark::Open);
     let reason = task.reason.as_deref().filter(|_| mark == Mark::Blocked);
-    replace_line(text, line, &item_line(mark, title, holder, reason))
+    let wait = task.wait.as_ref().filter(|_| mark == Mark::Blocked);
+    replace_line(text, line, &item_line(mark, title, holder, reason, wait))
 }
 
 /// The file cut into lines, each keeping its ending, and the ending the
@@ -359,6 +586,7 @@ pub fn edit(text: &str, line: usize, title: &str, new_title: &str, notes: &str) 
             &new_title,
             task.holder.as_deref(),
             task.reason.as_deref(),
+            task.wait.as_ref(),
         ) + ending,
     ];
     item.extend(
@@ -562,9 +790,13 @@ pub enum Next {
     /// As many items are in hand as the project lets run at once, or one
     /// of them waits for a click to resume.
     Wait,
-    /// The item at this index is in the way: blocked, or held by a session
-    /// that is gone. The order is the order, so the runner stops there.
+    /// The item at this index is in the way: blocked on the human, or held
+    /// by a session that is gone. The order is the order, so the runner
+    /// stops there.
     Stuck(usize),
+    /// The blocked item at this index waited on something that is over:
+    /// its session goes on, or it starts again when that is gone.
+    Resume(usize),
     /// Nothing left to do.
     Finished,
 }
@@ -580,8 +812,17 @@ pub enum Holder {
 }
 
 /// The runner's decision, given the list, the mode, how many items may be
-/// in hand at once, and what became of each holder.
-pub fn next(tasks: &[Task], mode: Mode, parallel: usize, holder: impl Fn(&str) -> Holder) -> Next {
+/// in hand at once, what became of each holder, and whether what a blocked
+/// item waits on is over. A blocked item that waits on something the
+/// runner can check is passed by until then; one that waits on the human
+/// stops the list.
+pub fn next(
+    tasks: &[Task],
+    mode: Mode,
+    parallel: usize,
+    holder: impl Fn(&str) -> Holder,
+    met: impl Fn(&Task) -> bool,
+) -> Next {
     if !mode.runs() {
         return Next::Off;
     }
@@ -597,16 +838,21 @@ pub fn next(tasks: &[Task], mode: Mode, parallel: usize, holder: impl Fn(&str) -
     if in_hand.iter().any(|(h, _)| *h == Holder::Paused) || places >= parallel.max(1) {
         return Next::Wait;
     }
+    let mut waits = false;
     for (i, t) in tasks.iter().enumerate() {
         match t.mark {
             Mark::Done => {}
             Mark::Open if t.title.trim().is_empty() => {}
             Mark::Open => return Next::Start(i),
             Mark::Working | Mark::Review if of(t) == Holder::Live => {}
-            Mark::Working | Mark::Review | Mark::Blocked => return Next::Stuck(i),
+            Mark::Working | Mark::Review => return Next::Stuck(i),
+            Mark::Blocked if t.wait.is_none() => return Next::Stuck(i),
+            // A paused session comes back only by a click.
+            Mark::Blocked if met(t) && of(t) != Holder::Paused => return Next::Resume(i),
+            Mark::Blocked => waits = true,
         }
     }
-    if in_hand.is_empty() {
+    if in_hand.is_empty() && !waits {
         Next::Finished
     } else {
         Next::Wait
@@ -666,8 +912,15 @@ pub fn system_prompt(horadric: &str, file: &str, list: Option<&str>) -> String {
          `{horadric} quest done \"<one short line on what you achieved>\"` with your \
          Bash tool; that line is kept as the quest's record. If you can not go on \
          without the human, run `{horadric} quest blocked \"<why>\"` instead and say \
-         what you need. If you find other work worth doing, add it to the list with \
-         `{horadric} quest add \"<title>\"` instead of doing it now. Quests in \
+         what you need. When what you wait on is something Horadric can check, say so and it \
+         wakes you itself once that holds: add `--on-quest \"<title>\"` for another \
+         quest in the log being done, `--on-main <commit or branch>` for one being on \
+         the main branch, `--on-file <path>` for a file existing, `--on-cmd \
+         \"<command>\"` for a command cmd.exe runs in the project folder exiting 0, \
+         or `--until <+30m or 2026-10-01T14:05Z>` for a time. Use one whenever it \
+         fits: the list goes on past a quest that waits on one, and stops at one that \
+         waits on the human. If you find other work worth doing, add it to the list \
+         with `{horadric} quest add \"<title>\"` instead of doing it now. Quests in \
          {file} are lines like `- [ ] Title`, in the order they should be \
          done, with notes indented under them; when your item is to plan work, \
          write the items you decide on into the file below your own line."
@@ -716,6 +969,16 @@ pub fn go_on(horadric: &str) -> String {
         "The usage limit has reset. Go on with this item where you left off, \
          and when it is finished, commit your work and run \
          `{horadric} quest done \"<one short line on what you achieved>\"`."
+    )
+}
+
+/// What a blocked session is told once what it waited on is over.
+pub fn waited(horadric: &str, wait: &Wait) -> String {
+    format!(
+        "{}, which this quest waited on. Go on with it where you left off, \
+         and when it is finished, commit your work and run \
+         `{horadric} quest done \"<one short line on what you achieved>\"`.",
+        wait.over()
     )
 }
 
@@ -842,15 +1105,22 @@ mod tests {
 
     #[test]
     fn the_holder_reports_done_or_blocked() {
-        let out = set_held(SAMPLE, "fix-login-51234", Mark::Review, None).unwrap();
+        let out = set_held(SAMPLE, "fix-login-51234", Mark::Review, None, None).unwrap();
         assert_eq!(parse(&out)[1].mark, Mark::Review);
-        let out = set_held(&out, "fix-login-51234", Mark::Blocked, Some("no\nkey")).unwrap();
+        let out = set_held(
+            &out,
+            "fix-login-51234",
+            Mark::Blocked,
+            Some("no\nkey"),
+            None,
+        )
+        .unwrap();
         let t = &parse(&out)[1];
         assert_eq!(t.mark, Mark::Blocked);
         assert_eq!(t.reason.as_deref(), Some("no key"));
         // Notes stay under it.
         assert_eq!(t.notes.len(), 2);
-        assert_eq!(set_held(SAMPLE, "nobody", Mark::Done, None), None);
+        assert_eq!(set_held(SAMPLE, "nobody", Mark::Done, None, None), None);
     }
 
     #[test]
@@ -877,14 +1147,23 @@ mod tests {
 - [ ] B
 ",
         );
-        assert_eq!(next(&list, Mode::Auto, 3, |_| Holder::Live), Next::Wait);
-        assert_eq!(next(&list, Mode::Auto, 4, |_| Holder::Live), Next::Start(1));
+        assert_eq!(
+            next(&list, Mode::Auto, 3, |_| Holder::Live, unmet),
+            Next::Wait
+        );
+        assert_eq!(
+            next(&list, Mode::Auto, 4, |_| Holder::Live, unmet),
+            Next::Start(1)
+        );
         let list = parse(
             "- [/] A @a-1
 - [ ] B
 ",
         );
-        assert_eq!(next(&list, Mode::Auto, 2, |_| Holder::Live), Next::Start(1));
+        assert_eq!(
+            next(&list, Mode::Auto, 2, |_| Holder::Live, unmet),
+            Next::Start(1)
+        );
     }
 
     #[test]
@@ -931,29 +1210,215 @@ mod tests {
         Holder::Live
     }
 
+    fn unmet(_: &Task) -> bool {
+        false
+    }
+
+    fn met(_: &Task) -> bool {
+        true
+    }
+
+    #[test]
+    fn a_wait_in_braces_parses_off_the_end_of_the_line() {
+        let t = &parse("- [!] Wire it @wire-1: needs the engine {on quest: Build the engine}\n")[0];
+        assert_eq!(t.title, "Wire it");
+        assert_eq!(t.holder.as_deref(), Some("wire-1"));
+        assert_eq!(t.reason.as_deref(), Some("needs the engine"));
+        assert_eq!(t.wait, Some(Wait::Quest("Build the engine".into())));
+        let t = &parse("- [!] A @a-1 {on file: out/x.txt}\n")[0];
+        assert_eq!(
+            (t.holder.as_deref(), t.reason.as_deref()),
+            (Some("a-1"), None)
+        );
+        assert_eq!(t.wait, Some(Wait::File("out/x.txt".into())));
+        // Written by a human, with no holder.
+        let t = &parse("- [!] A {on cmd: exit /b 0}\n")[0];
+        assert_eq!(
+            (t.title.as_str(), t.wait.clone()),
+            ("A", Some(Wait::Cmd("exit /b 0".into())))
+        );
+        let t = &parse("- [!] A @a-1 {until: 2026-10-01T14:05Z}\n")[0];
+        assert_eq!(t.wait, Some(Wait::Until(1_790_863_500)));
+        // Braces that are not a wait stay in the title.
+        let t = &parse("- [ ] Fix {braces} in {on nothing: x}\n")[0];
+        assert_eq!(t.title, "Fix {braces} in {on nothing: x}");
+        assert_eq!(t.wait, None);
+        let t = &parse("- [!] Use {x} @a-1: why {on main: feature}\n")[0];
+        assert_eq!(t.title, "Use {x}");
+        assert_eq!(t.wait, Some(Wait::Main("feature".into())));
+    }
+
+    #[test]
+    fn every_kind_of_wait_round_trips() {
+        for w in [
+            Wait::Quest("Build {it}".into()),
+            Wait::Main("abc123".into()),
+            Wait::File("C:/x y/z.txt".into()),
+            Wait::Cmd("git diff --quiet".into()),
+            Wait::Until(1_790_863_500),
+            Wait::Until(1_790_863_501),
+        ] {
+            let line = item_line(Mark::Blocked, "T", Some("t-1"), Some("why"), Some(&w));
+            let t = &parse(&line)[0];
+            assert_eq!(t.wait.as_ref(), Some(&w), "{line}");
+            assert_eq!(t.reason.as_deref(), Some("why"));
+        }
+        assert_eq!(Wait::read("{until: soon}"), None);
+        assert_eq!(Wait::read("{on quest:   }"), None);
+    }
+
+    #[test]
+    fn blocking_with_a_wait_writes_it_and_going_on_drops_it() {
+        let w = Wait::Quest("Add dark mode".into());
+        let out = set_held(
+            SAMPLE,
+            "fix-login-51234",
+            Mark::Blocked,
+            Some("later"),
+            Some(&w),
+        )
+        .unwrap();
+        let t = &parse(&out)[1];
+        assert_eq!((t.mark, t.wait.as_ref()), (Mark::Blocked, Some(&w)));
+        assert_eq!(t.notes.len(), 2);
+        let back = set_mark(&out, t.line, &t.title, Mark::Working).unwrap();
+        let t = &parse(&back)[1];
+        assert_eq!(t.mark, Mark::Working);
+        assert_eq!(t.holder.as_deref(), Some("fix-login-51234"));
+        assert_eq!((t.reason.as_deref(), t.wait.as_ref()), (None, None));
+        // An edit keeps it.
+        let edited = edit(&out, 3, "Fix the login redirect", "Fix login", "").unwrap();
+        assert_eq!(parse(&edited)[1].wait.as_ref(), Some(&w));
+    }
+
+    #[test]
+    fn a_quest_wait_is_over_when_that_quest_is_done() {
+        let list = parse("- [!] B @b-1 {on quest: the  first one}\n- [ ] The first one\n");
+        let w = list[0].wait.clone().unwrap();
+        assert_eq!(w.met(&list, 0), Some(false));
+        let list = parse("- [!] B @b-1 {on quest: the first one}\n- [x] The first one\n");
+        assert_eq!(w.met(&list, 0), Some(true));
+        assert_eq!(Wait::Quest("Missing".into()).met(&list, 0), Some(false));
+        assert_eq!(Wait::Until(100).met(&list, 99), Some(false));
+        assert_eq!(Wait::Until(100).met(&list, 100), Some(true));
+        assert_eq!(Wait::File("x".into()).met(&list, 0), None);
+    }
+
+    #[test]
+    fn the_runner_passes_a_quest_that_waits_on_something_it_can_check() {
+        let t = parse("- [!] A @a-1: later {on quest: B}\n- [ ] B\n");
+        assert_eq!(next(&t, Mode::Auto, 1, live, unmet), Next::Start(1));
+        assert_eq!(next(&t, Mode::Auto, 1, live, met), Next::Resume(0));
+        assert_eq!(
+            next(&t, Mode::Auto, 1, |_| Holder::Gone, met),
+            Next::Resume(0)
+        );
+        // A paused session waits for a click, and the list goes on.
+        assert_eq!(
+            next(&t, Mode::Auto, 1, |_| Holder::Paused, met),
+            Next::Start(1)
+        );
+        // A wait that is not over is not the end of the list.
+        let t = parse("- [!] A @a-1 {on quest: B}\n- [x] C\n");
+        assert_eq!(next(&t, Mode::Auto, 1, live, unmet), Next::Wait);
+        // A plain why still stops it.
+        let t = parse("- [!] A @a-1 {on quest: B}\n- [!] C @c-1: why\n- [ ] D\n");
+        assert_eq!(next(&t, Mode::Auto, 1, live, unmet), Next::Stuck(1));
+        assert_eq!(next(&t, Mode::Manual, 1, live, met), Next::Off);
+    }
+
+    #[test]
+    fn going_on_takes_a_free_place_like_a_start() {
+        let t = parse("- [/] A @a-1\n- [!] B @b-1 {on quest: X}\n- [ ] C\n");
+        assert_eq!(next(&t, Mode::Auto, 1, live, met), Next::Wait);
+        assert_eq!(next(&t, Mode::Auto, 2, live, met), Next::Resume(1));
+    }
+
+    #[test]
+    fn times_read_and_write_in_utc() {
+        assert_eq!(utc(0), "1970-01-01T00:00Z");
+        assert_eq!(utc(1_790_863_500), "2026-10-01T14:05Z");
+        assert_eq!(utc(951_782_400), "2000-02-29T00:00Z");
+        assert_eq!(utc(1_790_863_501), "2026-10-01T14:05:01Z");
+        assert_eq!(parse_utc("2026-10-01T14:05Z"), Some(1_790_863_500));
+        assert_eq!(parse_utc("2026-10-01 14:05:01z"), Some(1_790_863_501));
+        assert_eq!(parse_utc("2000-02-29T00:00Z"), Some(951_782_400));
+        assert_eq!(parse_utc("2026-10-01T14:05"), None);
+        assert_eq!(parse_utc("2026-13-01T14:05Z"), None);
+        assert_eq!(parse_utc("2026-10-01T14:05:01:02Z"), None);
+        assert_eq!(parse_utc("1969-12-31T23:59Z"), None);
+        for secs in [0, 59, 86_399, 1_000_000_000, 4_102_444_800] {
+            assert_eq!(parse_utc(&utc(secs)), Some(secs));
+        }
+    }
+
+    #[test]
+    fn until_takes_a_span_from_now_a_unix_time_or_a_utc_time() {
+        assert_eq!(parse_when("+30m", 1000), Some(2800));
+        assert_eq!(parse_when("+2h", 0), Some(7200));
+        assert_eq!(parse_when("+1d", 0), Some(86_400));
+        assert_eq!(parse_when("+45s", 5), Some(50));
+        assert_eq!(parse_when("+3w", 0), None);
+        assert_eq!(parse_when("+m", 0), None);
+        assert_eq!(parse_when("1790863500", 0), Some(1_790_863_500));
+        assert_eq!(parse_when("2026-10-01T14:05Z", 0), Some(1_790_863_500));
+        assert_eq!(parse_when("tomorrow", 0), None);
+    }
+
+    #[test]
+    fn a_row_says_in_a_few_words_what_it_waits_on() {
+        assert_eq!(Wait::Quest("Build".into()).label(0), "after Build");
+        assert_eq!(
+            Wait::Quest("Build the Runetome engine".into()).label(0),
+            "after Build the Runetom\u{2026}"
+        );
+        assert_eq!(Wait::Until(4000).label(400), "in 1 h 00 min");
+        assert_eq!(Wait::Until(4000).label(5000), "due");
+        assert!(waited("hx", &Wait::Quest("B".into())).starts_with("The quest \"B\" is done"));
+        assert!(waited("hx", &Wait::File("x".into())).contains("`hx quest done \""));
+    }
+
+    #[test]
+    fn the_system_prompt_offers_the_checkable_waits() {
+        let p = system_prompt("hx", QUESTS_FILE, None);
+        for flag in [
+            "--on-quest",
+            "--on-main",
+            "--on-file",
+            "--on-cmd",
+            "--until",
+        ] {
+            assert!(p.contains(flag), "{flag}");
+        }
+        assert!(!p.contains("  "));
+    }
+
     #[test]
     fn the_runner_waits_for_the_item_in_hand() {
         let t = parse(SAMPLE);
-        assert_eq!(next(&t, Mode::Manual, 1, live), Next::Off);
-        assert_eq!(next(&t, Mode::Auto, 1, live), Next::Wait);
+        assert_eq!(next(&t, Mode::Manual, 1, live, unmet), Next::Off);
+        assert_eq!(next(&t, Mode::Auto, 1, live, unmet), Next::Wait);
     }
 
     #[test]
     fn the_runner_stops_at_a_blocked_item_or_one_whose_session_is_gone() {
         let t = parse(SAMPLE);
         // The login fix's session is gone: that item is in the way.
-        assert_eq!(next(&t, Mode::Auto, 1, |_| Holder::Gone), Next::Stuck(1));
+        assert_eq!(
+            next(&t, Mode::Auto, 1, |_| Holder::Gone, unmet),
+            Next::Stuck(1)
+        );
         let t = parse("- [x] A\n- [!] B @b-1: why\n- [ ] C\n");
-        assert_eq!(next(&t, Mode::Review, 1, live), Next::Stuck(1));
+        assert_eq!(next(&t, Mode::Review, 1, live, unmet), Next::Stuck(1));
     }
 
     #[test]
     fn the_runner_starts_the_first_open_item_then_finishes() {
         let t = parse("- [x] A @a-1\n- [ ]\n- [ ] B\n- [ ] C\n");
-        assert_eq!(next(&t, Mode::Auto, 1, live), Next::Start(2));
+        assert_eq!(next(&t, Mode::Auto, 1, live, unmet), Next::Start(2));
         let t = parse("- [x] A\n");
-        assert_eq!(next(&t, Mode::Auto, 1, live), Next::Finished);
-        assert_eq!(next(&[], Mode::Review, 1, live), Next::Finished);
+        assert_eq!(next(&t, Mode::Auto, 1, live, unmet), Next::Finished);
+        assert_eq!(next(&[], Mode::Review, 1, live, unmet), Next::Finished);
     }
 
     #[test]
@@ -961,7 +1426,7 @@ mod tests {
         // Its session is still there, but it waits on the human: nothing
         // else starts past it either.
         let t = parse("- [!] A @a-1: why\n- [ ] B\n");
-        assert_eq!(next(&t, Mode::Auto, 1, live), Next::Stuck(0));
+        assert_eq!(next(&t, Mode::Auto, 1, live, unmet), Next::Stuck(0));
     }
 
     #[test]
@@ -972,18 +1437,18 @@ mod tests {
 - [ ] C
 ",
         );
-        assert_eq!(next(&t, Mode::Auto, 1, live), Next::Wait);
-        assert_eq!(next(&t, Mode::Auto, 2, live), Next::Start(1));
+        assert_eq!(next(&t, Mode::Auto, 1, live, unmet), Next::Wait);
+        assert_eq!(next(&t, Mode::Auto, 2, live, unmet), Next::Start(1));
         let t = parse(
             "- [/] A @a-1
 - [?] B @b-1
 - [ ] C
 ",
         );
-        assert_eq!(next(&t, Mode::Review, 2, live), Next::Wait);
-        assert_eq!(next(&t, Mode::Review, 3, live), Next::Start(2));
+        assert_eq!(next(&t, Mode::Review, 2, live, unmet), Next::Wait);
+        assert_eq!(next(&t, Mode::Review, 3, live, unmet), Next::Start(2));
         // Everything started, nothing finished yet.
-        assert_eq!(next(&t[..2], Mode::Auto, 3, live), Next::Wait);
+        assert_eq!(next(&t[..2], Mode::Auto, 3, live, unmet), Next::Wait);
     }
 
     #[test]
@@ -994,7 +1459,7 @@ mod tests {
 - [ ] C
 ",
         );
-        assert_eq!(next(&t, Mode::Auto, 3, live), Next::Stuck(1));
+        assert_eq!(next(&t, Mode::Auto, 3, live, unmet), Next::Stuck(1));
         let t = parse(
             "- [/] A @a-1
 - [/] B @b-1
@@ -1008,7 +1473,7 @@ mod tests {
                 Holder::Live
             }
         };
-        assert_eq!(next(&t, Mode::Auto, 3, gone), Next::Stuck(1));
+        assert_eq!(next(&t, Mode::Auto, 3, gone, unmet), Next::Stuck(1));
     }
 
     #[test]
@@ -1018,7 +1483,10 @@ mod tests {
 - [ ] B
 ",
         );
-        assert_eq!(next(&t, Mode::Auto, 4, |_| Holder::Paused), Next::Wait);
+        assert_eq!(
+            next(&t, Mode::Auto, 4, |_| Holder::Paused, unmet),
+            Next::Wait
+        );
     }
 
     #[test]

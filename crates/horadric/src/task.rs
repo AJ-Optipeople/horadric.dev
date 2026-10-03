@@ -11,7 +11,7 @@
 use std::path::{Path, PathBuf};
 
 use horadric_core::chronicle::{self, Happened, Record};
-use horadric_core::tasks::{self, Mark};
+use horadric_core::tasks::{self, Mark, Wait};
 use horadric_core::tombs;
 use horadric_hooks::listener::TasksChanged;
 use horadric_hooks::{
@@ -22,6 +22,11 @@ const USAGE: &str = "\
 usage: horadric quest done [\"summary\"]  The quest this session works is completed,
                                         with one line on what it achieved
        horadric quest blocked \"why\"     It can not go on without the human
+             [--on-quest \"title\"]     or until another quest is done,
+             [--on-main <ref>]         a commit or branch is on main,
+             [--on-file <path>]        a file exists,
+             [--on-cmd \"command\"]     a command (cmd.exe) exits 0,
+             [--until <+30m|UTC time>] or a time comes: then it goes on
        horadric quest add \"title\"       Add a quest to the end of the log
              [--notes \"text\"]          with notes for the agent under it
        horadric quest list              Show the log";
@@ -31,15 +36,11 @@ const NO_LOG: &str = "no quest log (.horadric/quests.md or .horadric/tasks.md) a
 
 pub fn run(args: &[String]) -> Result<(), String> {
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
-    let rest = || args[1..].join(" ");
     match args.first().map(String::as_str) {
-        Some("done") => report(&cwd, None, &rest()),
+        Some("done") => report(&cwd, None, &args[1..].join(" ")),
         Some("blocked") => {
-            let why = rest();
-            if why.trim().is_empty() {
-                return Err("say why: horadric quest blocked \"what you need\"".into());
-            }
-            report(&cwd, Some(&why), "")
+            let (why, wait) = why_and_wait(&args[1..], unix_now())?;
+            report(&cwd, Some((&why, wait.as_ref())), "")
         }
         Some("add") => {
             let (title, notes) = title_and_notes(&args[1..]);
@@ -53,9 +54,51 @@ pub fn run(args: &[String]) -> Result<(), String> {
     }
 }
 
-/// The agent's item is done, or blocked with `why`, and what the agent
-/// says it achieved, for the chronicle.
-fn report(cwd: &Path, why: Option<&str>, summary: &str) -> Result<(), String> {
+/// Why `quest blocked` is blocked, and what it waits on when a flag says:
+/// the words before the flag are the why, the word after it the wait. A
+/// wait is reason enough, so the why may be left out then.
+fn why_and_wait(args: &[String], now: u64) -> Result<(String, Option<Wait>), String> {
+    let flag = args.iter().position(|a| a.starts_with("--"));
+    let (words, rest) = args.split_at(flag.unwrap_or(args.len()));
+    let why = tasks::one_line(&words.join(" "));
+    let wait = match rest {
+        [] => None,
+        [flag, value @ ..] => {
+            let value = value.join(" ");
+            if value.trim().is_empty() {
+                return Err(format!("say what {flag} waits on"));
+            }
+            Some(match flag.as_str() {
+                "--on-quest" => Wait::Quest(value),
+                "--on-main" => Wait::Main(value),
+                "--on-file" => Wait::File(value),
+                "--on-cmd" => Wait::Cmd(value),
+                "--until" => Wait::Until(tasks::parse_when(&value, now).ok_or(format!(
+                    "--until takes +30m (or s, h, d), Unix seconds or a UTC time like \
+                     2026-10-01T14:05Z, not {value}"
+                ))?),
+                _ => return Err(USAGE.into()),
+            })
+        }
+    };
+    match (why.is_empty(), &wait) {
+        (true, None) => Err("say why: horadric quest blocked \"what you need\"".into()),
+        (true, Some(_)) => Ok(("waits".into(), wait)),
+        (false, _) => Ok((why, wait)),
+    }
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+/// The agent's item is done, or blocked with why and what it waits on,
+/// and what the agent says it achieved, for the chronicle.
+fn report(cwd: &Path, blocked: Option<(&str, Option<&Wait>)>, summary: &str) -> Result<(), String> {
+    let why = blocked.map(|(w, _)| w);
+    let wait = blocked.and_then(|(_, w)| w);
     let id = session().ok_or("this is not a Horadric session, so there is no item to report on")?;
     if let Some((batch, _)) = tombs::of(&id) {
         let project = held(cwd, batch).ok_or(format!("{NO_LOG} has a quest held by {batch}"))?;
@@ -69,15 +112,23 @@ fn report(cwd: &Path, why: Option<&str>, summary: &str) -> Result<(), String> {
         Some(_) => Mark::Blocked,
         None => mode.finished(),
     };
-    let changed = file::update(&project, |text| tasks::set_held(text, &id, mark, why))
+    let changed = file::update(&project, |text| tasks::set_held(text, &id, mark, why, wait))
         .map_err(|e| format!("{}: {e}", file::file(&project).display()))?;
     if !changed {
         return Err(format!("the quest held by {id} is already completed"));
     }
     tell_app(&project);
-    match (why, mark) {
-        (Some(_), _) => println!("Marked blocked. Say what you need, then wait for the human."),
-        (None, Mark::Done) => println!("Quest completed. The next one starts once this turn ends."),
+    match (why, wait, mark) {
+        (Some(_), Some(_), _) => println!(
+            "Marked blocked until then. Horadric tells this session to go on once it \
+             holds, so stop here."
+        ),
+        (Some(_), None, _) => {
+            println!("Marked blocked. Say what you need, then wait for the human.")
+        }
+        (None, _, Mark::Done) => {
+            println!("Quest completed. The next one starts once this turn ends.")
+        }
         _ => println!("Marked for review. The human looks next; stop here."),
     }
     Ok(())
@@ -222,6 +273,36 @@ mod tests {
 
     fn words(s: &[&str]) -> Vec<String> {
         s.iter().map(|w| w.to_string()).collect()
+    }
+
+    #[test]
+    fn blocked_takes_why_then_what_it_waits_on() {
+        let w = |a: &[&str]| why_and_wait(&words(a), 1000);
+        assert_eq!(w(&["needs", "a key"]), Ok(("needs a key".into(), None)));
+        assert_eq!(
+            w(&["needs B", "--on-quest", "Build", "B"]),
+            Ok(("needs B".into(), Some(Wait::Quest("Build B".into()))))
+        );
+        assert_eq!(
+            w(&["--on-file", "out/x"]),
+            Ok(("waits".into(), Some(Wait::File("out/x".into()))))
+        );
+        assert_eq!(
+            w(&["later", "--until", "+1m"]),
+            Ok(("later".into(), Some(Wait::Until(1060))))
+        );
+        assert_eq!(
+            w(&["x", "--on-cmd", "git diff --quiet"]),
+            Ok(("x".into(), Some(Wait::Cmd("git diff --quiet".into()))))
+        );
+        assert_eq!(
+            w(&["x", "--on-main", "abc"]),
+            Ok(("x".into(), Some(Wait::Main("abc".into()))))
+        );
+        assert!(w(&[]).is_err());
+        assert!(w(&["x", "--on-quest"]).is_err());
+        assert!(w(&["x", "--until", "soon"]).is_err());
+        assert!(w(&["x", "--on-moon", "y"]).is_err());
     }
 
     #[test]

@@ -2297,8 +2297,12 @@ impl Pane {
             WM_SIZE => {
                 let w = (lparam.0 & 0xffff) as u32;
                 let h = ((lparam.0 >> 16) & 0xffff) as u32;
+                // A resized target keeps none of its pixels, so a pane back
+                // at the size it was drawn at (a stage minimized and
+                // restored) must draw again, not show the frame it lost.
                 if let Some(t) = self.target.borrow().as_ref() {
                     let _ = t.resize(w, h);
+                    *self.drawn.borrow_mut() = None;
                 }
                 if w > 0 && h > 0 && !self.held.get() {
                     self.fit_grid();
