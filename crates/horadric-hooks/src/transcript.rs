@@ -43,6 +43,35 @@ pub fn mid_turn(cwd: &str, id: &str) -> Option<bool> {
     })
 }
 
+/// The transcript of the conversation `id` held in `cwd`, if it is on
+/// disk. A quest's worktree may be long gone, and with it the spelling of
+/// its folder, so failing that every folder is looked in.
+pub fn path(cwd: &str, id: &str) -> Option<PathBuf> {
+    let root = projects_root(
+        std::env::var("CLAUDE_CONFIG_DIR").ok().as_deref(),
+        std::env::var("USERPROFILE").ok().as_deref(),
+    )?;
+    path_in(&root, cwd, id)
+}
+
+fn path_in(root: &Path, cwd: &str, id: &str) -> Option<PathBuf> {
+    // An id is a file name, never a way out of the folder.
+    if id.is_empty() || id.contains(['/', '\\', '.']) {
+        return None;
+    }
+    let file = format!("{id}.jsonl");
+    let found = |dir: &Path| Some(dir.join(&file)).filter(|p| p.is_file());
+    folders(root, cwd)
+        .iter()
+        .find_map(|d| found(d))
+        .or_else(|| {
+            std::fs::read_dir(root)
+                .ok()?
+                .flatten()
+                .find_map(|e| found(&e.path()))
+        })
+}
+
 /// A conversation an agent kept, which its resume carries on.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Past {
@@ -198,6 +227,28 @@ mod tests {
             writeln!(f, "{l}").unwrap();
         }
         path.to_string_lossy().to_string()
+    }
+
+    #[test]
+    fn a_transcript_is_found_by_its_folder_or_else_anywhere() {
+        let root = std::env::temp_dir().join(format!("horadric-test-paths-{}", std::process::id()));
+        let own = root.join("C--code-app");
+        let other = root.join("C--code-app-tree");
+        std::fs::create_dir_all(&own).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        File::create(own.join("a1.jsonl")).unwrap();
+        File::create(other.join("b2.jsonl")).unwrap();
+        assert_eq!(
+            path_in(&root, r"C:\code\app", "a1"),
+            Some(own.join("a1.jsonl"))
+        );
+        assert_eq!(
+            path_in(&root, r"C:\gone\tree", "b2"),
+            Some(other.join("b2.jsonl"))
+        );
+        assert_eq!(path_in(&root, r"C:\code\app", "c3"), None);
+        assert_eq!(path_in(&root, r"C:\code\app", "../a1"), None);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
