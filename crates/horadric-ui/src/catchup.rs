@@ -70,6 +70,15 @@ pub struct Away {
 }
 
 impl Away {
+    /// Since when you have been away, in Unix seconds, while you are.
+    pub fn since(&self) -> Option<u64> {
+        self.since
+    }
+
+    pub fn locked(&self) -> bool {
+        self.locked
+    }
+
     pub fn lock(&mut self, now: u64) {
         self.locked = true;
         self.since.get_or_insert(now);

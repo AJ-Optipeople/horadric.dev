@@ -121,6 +121,10 @@ pub enum Happened {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         handed: Vec<String>,
     },
+    /// A session, or Warriv, made a choice that can be changed later and
+    /// wrote it under the quest `title` as an `Assumed:` line, which is
+    /// `text` without that word. It names no quest holder.
+    Assumed { text: String },
 }
 
 /// An event that woke Warriv: its kind and the quest it is about, empty
@@ -368,6 +372,16 @@ pub struct Away {
     pub wakes: Vec<AwayLine>,
     /// The quests only the human can move on, in the log's order.
     pub questions: Vec<Question>,
+    /// What was assumed, oldest first, for the human to overrule.
+    pub assumed: Vec<Assumption>,
+}
+
+/// A choice made while the human was away, which an answer overrules.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Assumption {
+    pub at: u64,
+    pub title: String,
+    pub text: String,
 }
 
 /// A line of the card, with a fainter one under it.
@@ -392,7 +406,10 @@ impl Away {
     /// Whether anything happened, which is what opens the card. A question
     /// left from before is no news, though the card asks it again.
     pub fn happened(&self) -> bool {
-        !self.landed.is_empty() || !self.wakes.is_empty() || self.questions.iter().any(|q| q.new)
+        !self.landed.is_empty()
+            || !self.wakes.is_empty()
+            || !self.assumed.is_empty()
+            || self.questions.iter().any(|q| q.new)
     }
 }
 
@@ -421,7 +438,18 @@ pub fn away(
     }
     let mut landed: Vec<AwayLine> = Vec::new();
     let mut blocked_since: Vec<&str> = Vec::new();
+    let mut assumed: Vec<Assumption> = Vec::new();
     for r in mine.iter().filter(|r| r.at >= since) {
+        if let Happened::Assumed { text } = &r.what {
+            // Said twice, it is overruled once.
+            assumed.retain(|a| !(a.title == r.title && a.text == *text));
+            assumed.push(Assumption {
+                at: r.at,
+                title: r.title.clone(),
+                text: text.clone(),
+            });
+            continue;
+        }
         let Happened::Marked { mark, .. } = &r.what else {
             continue;
         };
@@ -476,6 +504,7 @@ pub fn away(
         landed,
         wakes,
         questions,
+        assumed,
     }
 }
 
@@ -537,6 +566,7 @@ fn wake_line(w: &WarrivWake) -> AwayLine {
         for e in &w.events {
             let s = match e.kind {
                 Kind::Stalled => "the log stalled".to_string(),
+                Kind::Dry => "the log ran dry".to_string(),
                 Kind::Blocked => format!("{} blocked", quoted(&e.quest)),
                 Kind::Asks => format!("{} stopped", quoted(&e.quest)),
                 Kind::Tangled => format!("{} tangled", quoted(&e.quest)),
@@ -703,7 +733,7 @@ pub fn quests(
             }
             Happened::Commits { commits } => q.commits = commits.clone(),
             Happened::Merged { branch, .. } => q.merged = Some(branch.clone()),
-            Happened::Shipped => {}
+            Happened::Shipped | Happened::Assumed { .. } => {}
         }
     }
     for t in list {
@@ -1726,6 +1756,30 @@ mod tests {
         let a = away(&records, "p", &list, &Default::default(), 2);
         assert!(a.questions[0].new);
         assert!(a.happened());
+    }
+
+    #[test]
+    fn away_lists_every_assumption_since_the_human_left() {
+        let said = |at, title: &str, text: &str| {
+            rec(at, "", title, Happened::Assumed { text: text.into() })
+        };
+        let records = [
+            said(3, "A", "before you left"),
+            said(11, "A", "port 4100"),
+            said(12, "B", "the blue one"),
+            said(13, "A", "port 4100"),
+        ];
+        let a = away(&records, "p", &[], &Default::default(), 10);
+        let got: Vec<(u64, &str, &str)> = a
+            .assumed
+            .iter()
+            .map(|x| (x.at, x.title.as_str(), x.text.as_str()))
+            .collect();
+        assert_eq!(got, [(12, "B", "the blue one"), (13, "A", "port 4100")]);
+        assert!(a.happened(), "an assumption alone opens the card");
+        assert!(away(&records, "p", &[], &Default::default(), 20)
+            .assumed
+            .is_empty());
     }
 
     #[test]

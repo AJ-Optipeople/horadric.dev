@@ -143,6 +143,9 @@ mod drive;
 #[path = "chronicler.rs"]
 mod chronicler;
 
+#[path = "spectating.rs"]
+mod spectating;
+
 pub use runner::ssh_prompt;
 
 /// Hook events changed the registry. What they did waits in [`EVENTS`].
@@ -255,6 +258,9 @@ const SCREEN_TIMER: usize = 2;
 const GLIDE_TIMER: usize = 3;
 /// Runs while a session works, to breathe the tray icon's light.
 const BREATH_TIMER: usize = 4;
+/// Runs while the stage follows the work, to give it back at the first
+/// input.
+const SPECTATE_TIMER: usize = 5;
 const ENDED_LINGER: Duration = Duration::from_secs(20);
 /// A crash this long after resuming sessions after a crash is a crash of
 /// its own, not the same one again, so the next start resumes once more.
@@ -370,10 +376,11 @@ pub(crate) enum Input {
     /// was.
     Listened(Option<String>),
     /// An answer typed on the away card, for the quest `title` in the
-    /// project at `dir`.
+    /// project at `dir`: to its question, or against what was `assumed`.
     Answered {
         dir: String,
         title: String,
+        assumed: Option<String>,
         text: String,
     },
     /// The away card closed.
@@ -723,6 +730,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             drives: saved.drives.clone(),
             stopped: saved.stopped.iter().cloned().collect(),
             away: Away::default(),
+            spectating: Default::default(),
             catchup: None,
             away_card: None,
             quest_log: None,
@@ -2622,6 +2630,8 @@ struct App {
     stopped: HashSet<String>,
     /// Whether you are away, for the catch-up when you come back.
     away: Away,
+    /// Spectator mode: the stage following the work while you are away.
+    spectating: spectating::Spectating,
     /// The catch-up, while it is open.
     catchup: Option<Box<Catchup>>,
     /// What happened while you were away, while it is open.
@@ -2901,6 +2911,7 @@ impl App {
                 crate::vsync::took(self.notify, GLIDE_TIMER);
                 self.glide();
             }
+            WM_TIMER if wparam == SPECTATE_TIMER => self.watch_return(),
             WM_TIMER if wparam == BREATH_TIMER => {
                 self.tray.step();
                 self.breathe_stage();
@@ -3858,8 +3869,15 @@ impl App {
             })
             // Empty, so one this Horadric was started with, as a dev
             // instance from a quest's worktree is, never sends `horadric
-            // quest` to another project's list.
-            .unwrap_or_else(|| vec![(TASKS_ENV.into(), String::new())]);
+            // quest` to another project's list. Warriv works on its own
+            // project's list from wherever its shell has wandered.
+            .unwrap_or_else(|| {
+                let main = match horadric_core::warriv::is_warriv(id) {
+                    true => folder_key(&cwd.to_string_lossy()),
+                    false => String::new(),
+                };
+                vec![(TASKS_ENV.into(), main)]
+            });
         let serial = self.next_serial;
         self.next_serial += 1;
         let console = Console::spawn(
@@ -5512,6 +5530,13 @@ impl App {
             let _ = std::fs::remove_file(back);
             self.welcome_back(unix_now().saturating_sub(3600));
         }
+        // And leaves at once, which only spectator mode looks at.
+        let left = store::dir().map(|d| d.join("spectate-now"));
+        let left = left.filter(|l| horadric_hooks::dev() && l.exists());
+        if let Some(l) = &left {
+            let _ = std::fs::remove_file(l);
+        }
+        self.spectate(left.is_some());
         // A run of work ends after a quiet spell no event marks.
         self.sync_discord();
         self.refresh_quest_log(false);
@@ -6109,6 +6134,10 @@ impl App {
     /// The session whose pane has the keyboard, with the stage in front,
     /// has been looked at, so a turn it finished is no longer unread.
     fn identify(&mut self) {
+        // What spectating shows was not looked at by anyone.
+        if self.spectating() {
+            return;
+        }
         let Some(id) = self
             .stage
             .as_ref()
@@ -6273,8 +6302,22 @@ impl App {
                     }
                 }
                 Input::SetDefault(agent, setting, value) => self.set_default(agent, setting, value),
-                Input::Answered { dir, title, text } => {
+                Input::Answered {
+                    dir,
+                    title,
+                    assumed: None,
+                    text,
+                } => {
                     self.human_tell(&dir, &title, &text);
+                    self.run_tasks();
+                }
+                Input::Answered {
+                    dir,
+                    title,
+                    assumed: Some(assumed),
+                    text,
+                } => {
+                    self.overrule(&dir, &title, &assumed, &text);
                     self.run_tasks();
                 }
                 Input::AwayClosed => {
