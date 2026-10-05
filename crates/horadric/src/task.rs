@@ -10,7 +10,7 @@
 
 use std::path::{Path, PathBuf};
 
-use horadric_core::chronicle::{self, Happened, Record};
+use horadric_core::chronicle::{self, Command, Happened, Record};
 use horadric_core::tasks::{self, Mark, Wait};
 use horadric_core::{aim, tombs, warriv};
 use horadric_hooks::listener::TasksChanged;
@@ -299,6 +299,7 @@ fn add(cwd: &Path, title: &str, notes: &str, below: Option<&str>) -> Result<(), 
             Happened::Added { by, conversation },
         );
     }
+    warriv_ran(&project, Command::Add, title, notes);
     tell_app(&project);
     println!("Added to {}", file::file(&project).display());
     Ok(())
@@ -333,6 +334,7 @@ fn note(cwd: &Path, title: &str, text: &str) -> Result<(), String> {
         _ => text.to_string(),
     };
     write(&project, |log| warriv::add_note(log, title, &line))?;
+    warriv_ran(&project, Command::Note, title, text);
     tell_app(&project);
     println!("Noted under the quest.");
     Ok(())
@@ -342,6 +344,7 @@ fn note(cwd: &Path, title: &str, text: &str) -> Result<(), String> {
 fn hand_on(cwd: &Path, title: &str, question: &str) -> Result<(), String> {
     let project = log_of(cwd)?;
     write(&project, |log| warriv::hand_on(log, title, question))?;
+    warriv_ran(&project, Command::Blocked, title, question);
     tell_app(&project);
     println!("Handed to the human. The quest waits for their answer.");
     Ok(())
@@ -373,6 +376,7 @@ fn tell(cwd: &Path, title: &str, text: &str) -> Result<(), String> {
     if heard != Some(200) {
         return Err("Horadric did not hear it. Add a note to the quest instead.".into());
     }
+    warriv_ran(&project, Command::Tell, &t.title, text);
     println!("Horadric types it into the quest's session once that is between turns.");
     Ok(())
 }
@@ -429,6 +433,25 @@ fn record_summary(project: &Path, id: &str, summary: &str) {
         .map(|t| t.title.clone())
         .unwrap_or_default();
     record(project, id.to_string(), &title, Happened::Summary { text });
+}
+
+/// A command Warriv ran, for the chronicle's story of its wake. Anyone
+/// else's command is no part of one.
+fn warriv_ran(project: &Path, command: Command, title: &str, text: &str) {
+    let Some(wake) = session().filter(|id| warriv::is_warriv(id)) else {
+        return;
+    };
+    record(
+        project,
+        String::new(),
+        title,
+        Happened::WarrivRan {
+            wake,
+            conversation: std::env::var("CLAUDE_CODE_SESSION_ID").unwrap_or_default(),
+            command,
+            text: text.to_string(),
+        },
+    );
 }
 
 /// Appends to the same chronicle the app writes. It is a record, not the

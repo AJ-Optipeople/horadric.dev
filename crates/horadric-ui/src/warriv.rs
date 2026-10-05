@@ -12,13 +12,16 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::{Instant, SystemTime};
 
+use horadric_core::chronicle::{self, Happened, Woken};
 use horadric_core::tasks::{self, Mark, Task};
-use horadric_core::warriv::{self, Brief, Desk, Dried, Event, Kind, Wake};
+use horadric_core::warriv::{self, Brief, Desk, Dried, Drive, Event, Kind, Wake};
 use horadric_core::{tombs, Agent, Phase};
 use horadric_hooks::tasks as file;
 
 use super::{horadric_command, Board};
 use crate::app::{unix_now, App, Run};
+use crate::board::Ink;
+use crate::store;
 use crate::toast::Kind as Toast;
 use crate::window::{folder_key, project_name};
 
@@ -62,23 +65,63 @@ impl Awake {
     }
 }
 
+impl Awake {
+    /// The events it was given that still hold and that it has not
+    /// answered: what it is settling.
+    fn open(&self, now: &[Event]) -> usize {
+        self.given
+            .iter()
+            .filter(|e| now.contains(e) && !self.settled.contains(&e.title))
+            .count()
+    }
+}
+
 impl Camp {
     /// The session is done with: each event it was given that still holds
     /// and whose quest it did not answer is the human's now. A dry log is
     /// heard again unless three wakes in a row moved nothing, and then its
-    /// aims are the human's, which is true when it says so.
-    fn retire(&mut self, a: Awake, now: &[Event], b: &Board) -> bool {
+    /// aims are the human's. Says which quests went to the human, those and
+    /// the ones it handed on itself, and whether the aims did.
+    fn retire(&mut self, a: &Awake, now: &[Event], b: &Board) -> (Vec<String>, bool) {
         let moved = warriv::filed_count(&b.tasks) > a.filed || b.aims != a.aims;
         let mut stuck = false;
-        for e in a.given {
+        let mut handed = Vec::new();
+        for e in &a.given {
             if e.kind == Kind::Dry {
-                let holds = now.contains(&e);
-                stuck |= self.desk.dry_ended(e, holds, moved) == Dried::Human;
-            } else if now.contains(&e) && !a.settled.contains(&e.title) {
-                self.desk.hand(e);
+                let holds = now.contains(e);
+                stuck |= self.desk.dry_ended(e.clone(), holds, moved) == Dried::Human;
+            } else if now.contains(e) && !a.settled.contains(&e.title) {
+                self.desk.hand(e.clone());
+                handed.push(e.title.clone());
+            } else if b.tasks.iter().any(|t| {
+                t.title == e.title
+                    && t.mark == Mark::Blocked
+                    && t.reason
+                        .as_deref()
+                        .is_some_and(|r| r.starts_with(warriv::HANDED))
+            }) {
+                handed.push(e.title.clone());
             }
         }
-        stuck
+        handed.retain(|t| !t.is_empty());
+        handed.sort();
+        handed.dedup();
+        (handed, stuck)
+    }
+}
+
+/// The line for a wake given `events`.
+fn woke(id: &str, events: &[Event]) -> Happened {
+    Happened::WarrivWoke {
+        wake: id.to_string(),
+        conversation: String::new(),
+        events: events
+            .iter()
+            .map(|e| Woken {
+                kind: e.kind,
+                quest: e.title.clone(),
+            })
+            .collect(),
     }
 }
 
@@ -88,6 +131,8 @@ pub(in crate::app) struct Tell {
     key: String,
     title: String,
     text: String,
+    /// The human answered, from the away card, not Warriv.
+    human: bool,
 }
 
 /// Camps by project, and the tells not typed yet.
@@ -101,8 +146,11 @@ impl App {
     /// One look at a project's events with Warriv on. True when its
     /// session closed, which the clusters have to hear.
     pub(super) fn orchestrate(&mut self, key: &str, b: &Board) -> bool {
-        if !b.orchestrator {
-            return self.shared.warriv.borrow_mut().remove(key).is_some();
+        let drive = self.drives.get(key).copied();
+        if !warriv::orchestrates(b.orchestrator, drive.is_some()) {
+            self.shared.warriv_line.borrow_mut().remove(key);
+            let astir = self.shared.astir.borrow_mut().remove(key);
+            return self.shared.warriv.borrow_mut().remove(key).is_some() | astir;
         }
         let asks: Vec<String> = b
             .tasks
@@ -118,13 +166,46 @@ impl App {
         let now = warriv::events(&b.tasks, b.mode, &asks, &b.aims);
         let mut camp = self.tasks.warriv.camps.remove(key).unwrap_or_default();
         if let Some(a) = camp.awake.take_if(|a| !self.live(&a.id)) {
-            let stuck = camp.retire(a, &now, b);
+            let (handed, stuck) = camp.retire(&a, &now, b);
+            self.record_wake(key, &a.id, Happened::slept(&a.id, "", true, handed));
             self.ask_aims(key, b, stuck);
         }
+        camp.desk.drive(drive.is_some());
         camp.desk.hear(now.clone(), camp.awake.is_some());
         let mut closed = self.wake(key, b, &mut camp, &now);
         let holding = camp.desk.holding(&now);
+        let awake = camp.awake.is_some();
+        let watch = camp
+            .desk
+            .watch(camp.awake.as_ref().map(|a| a.open(&now)), unix_now());
+        let ink = match (drive, watch) {
+            (Some(_), _) => Ink::Drives,
+            (None, Some(w)) if w.working() => Ink::Working,
+            _ => Ink::Quiet,
+        };
+        let line = warriv::line(
+            watch.map(|w| w.words(crate::app::local_secs(), unix_now())),
+            drive,
+        )
+        .map(|words| (words, ink));
         self.tasks.warriv.camps.insert(key.to_string(), camp);
+        let mut lines = self.shared.warriv_line.borrow_mut();
+        if lines.get(key) != line.as_ref() {
+            match line {
+                Some(l) => lines.insert(key.to_string(), l),
+                None => lines.remove(key),
+            };
+            closed = true;
+        }
+        drop(lines);
+        // The quests tile starts or stops breathing.
+        let mut astir = self.shared.astir.borrow_mut();
+        closed |= if awake {
+            astir.insert(key.to_string())
+        } else {
+            astir.remove(key)
+        };
+        drop(astir);
         // The rows of what changed hands read anew.
         let mut shown = self.shared.warriv.borrow_mut();
         if shown.get(key) != Some(&holding) {
@@ -148,9 +229,7 @@ impl App {
         match camp.desk.wake(unix_now()) {
             Wake::Nothing => match camp.awake.take() {
                 Some(a) => {
-                    self.forget(&a.id);
-                    let stuck = camp.retire(a, now, b);
-                    self.ask_aims(key, b, stuck);
+                    self.close_wake(key, b, camp, a, now);
                     true
                 }
                 None => false,
@@ -164,6 +243,7 @@ impl App {
                         };
                         c.write(warriv::more(&briefs).into_bytes());
                         self.tasks.enters.push((a.id.clone(), Instant::now()));
+                        self.record_wake(key, &a.id, woke(&a.id, &events));
                         a.told_at = SystemTime::now();
                         for e in &events {
                             a.told.remove(&e.title);
@@ -192,15 +272,62 @@ impl App {
                 }
                 match camp.awake.take() {
                     Some(a) => {
-                        self.forget(&a.id);
-                        let stuck = camp.retire(a, now, b);
-                        self.ask_aims(key, b, stuck);
+                        self.close_wake(key, b, camp, a, now);
                         true
                     }
                     None => false,
                 }
             }
         }
+    }
+
+    /// Warriv is done for now: its session closes, and the chronicle hears
+    /// how the wake ended.
+    fn close_wake(&mut self, key: &str, b: &Board, camp: &mut Camp, a: Awake, now: &[Event]) {
+        let (handed, stuck) = camp.retire(&a, now, b);
+        self.record_wake(key, &a.id, Happened::slept(&a.id, "", false, handed));
+        self.forget(&a.id);
+        self.ask_aims(key, b, stuck);
+    }
+
+    /// The app is going: each wake still awake is cut short, since the
+    /// next app knows nothing of it.
+    pub(in crate::app) fn cut_wakes_short(&mut self) {
+        let awake: Vec<(String, String)> = self
+            .tasks
+            .warriv
+            .camps
+            .iter()
+            .filter_map(|(key, c)| Some((key.clone(), c.awake.as_ref()?.id.clone())))
+            .collect();
+        for (key, id) in awake {
+            self.record_wake(&key, &id, Happened::slept(&id, "", true, Vec::new()));
+        }
+    }
+
+    /// A line of the wake's story, with its conversation once the session
+    /// has one.
+    fn record_wake(&self, key: &str, id: &str, mut what: Happened) {
+        let known = self
+            .shared
+            .registry
+            .lock()
+            .ok()
+            .and_then(|r| r.get(id)?.claude_session_id.clone());
+        if let (
+            Happened::WarrivWoke { conversation, .. } | Happened::WarrivSlept { conversation, .. },
+            Some(c),
+        ) = (&mut what, known)
+        {
+            *conversation = c;
+        }
+        store::chronicle(&chronicle::Record {
+            at: unix_now(),
+            project: key.to_string(),
+            quest: String::new(),
+            title: String::new(),
+            what,
+        });
     }
 
     /// Each event with its quest's notes and its session's last turn.
@@ -252,6 +379,7 @@ impl App {
             self.toasts.show(Toast::Failed, "Cannot start Warriv", &e);
             return None;
         }
+        self.record_wake(key, &id, woke(&id, &given));
         Some(Awake::new(id, given, b))
     }
 
@@ -318,6 +446,23 @@ impl App {
             key,
             title: title.to_string(),
             text: text.to_string(),
+            human: false,
+        });
+    }
+
+    /// The human answered a quest's question on the away card: told as
+    /// `quest tell` tells it, in the human's name.
+    pub(in crate::app) fn human_tell(&mut self, dir: &str, title: &str, text: &str) {
+        let key = folder_key(dir);
+        self.tasks
+            .warriv
+            .tells
+            .retain(|t| !(t.key == key && t.title == title));
+        self.tasks.warriv.tells.push(Tell {
+            key,
+            title: title.to_string(),
+            text: text.to_string(),
+            human: true,
         });
     }
 
@@ -360,10 +505,15 @@ impl App {
         let Some(c) = self.consoles.get(&h) else {
             return true;
         };
-        c.write(warriv::told(&horadric_command(), &tell.text).into_bytes());
+        let told = if tell.human {
+            warriv::answered(&horadric_command(), &tell.text)
+        } else {
+            warriv::told(&horadric_command(), &tell.text)
+        };
+        c.write(told.into_bytes());
         self.tasks.enters.push((h.clone(), Instant::now()));
         self.tasks.nudged.remove(&h);
-        if !self.quiet {
+        if !self.quiet && !tell.human {
             self.toasts.show(
                 Toast::Info,
                 &format!("Warriv answered: {}", tasks::one_line(&t.title)),
@@ -379,7 +529,11 @@ impl App {
         let Some(dir) = self.project_dir(&tell.key) else {
             return;
         };
-        let line = warriv::note(&tell.text);
+        let line = if tell.human {
+            warriv::human_note(&tell.text)
+        } else {
+            warriv::note(&tell.text)
+        };
         let _ = file::update(&dir, |text| warriv::add_note(text, &t.title, &line).ok());
         self.refresh_boards(true);
         if t.mark == Mark::Blocked {
@@ -399,10 +553,10 @@ impl App {
 
     /// A finished quest that did not merge by itself, for Warriv to hear.
     pub(super) fn merge_event(&mut self, dir: &Path, title: &str, detail: String) {
-        if !file::orchestrator(dir) {
+        let key = folder_key(&dir.to_string_lossy());
+        if !warriv::orchestrates(file::orchestrator(dir), self.drives.contains_key(&key)) {
             return;
         }
-        let key = folder_key(&dir.to_string_lossy());
         self.tasks
             .warriv
             .camps
@@ -414,5 +568,119 @@ impl App {
                 title: title.to_string(),
                 detail,
             });
+    }
+
+    /// The projects the tray's "Warriv drives" lists: each with a quest
+    /// log, and each Warriv drives, by name.
+    pub(in crate::app) fn driven(&self) -> Vec<crate::tray::Driven> {
+        let mut keys: Vec<String> = self.shared.boards.borrow().keys().cloned().collect();
+        keys.extend(self.drives.keys().cloned());
+        keys.sort();
+        keys.dedup();
+        let mut out: Vec<crate::tray::Driven> = keys
+            .into_iter()
+            .map(|key| crate::tray::Driven {
+                name: project_name(&key),
+                drive: self.drive_of(&key),
+                key,
+            })
+            .collect();
+        out.sort_by_key(|d| d.name.to_lowercase());
+        out
+    }
+
+    /// Whether Warriv drives the project `key`, and how.
+    pub(in crate::app) fn drive_of(&self, key: &str) -> Option<Drive> {
+        self.drives.get(key).copied()
+    }
+
+    /// "Warriv drives" flipped by the human. On, the runner works the log
+    /// in auto mode, since Warriv runs the project alone, and a stop
+    /// before is lifted. Off, it ends as the stop key ends it.
+    pub(in crate::app) fn set_drive(&mut self, key: &str, on: bool) {
+        if !on {
+            self.stop_drive(key);
+            self.save();
+            return;
+        }
+        self.drives.entry(key.to_string()).or_default();
+        self.stopped.remove(key);
+        self.save();
+        let auto = self
+            .shared
+            .boards
+            .borrow()
+            .get(key)
+            .is_some_and(|b| b.mode == tasks::Mode::Auto);
+        if auto {
+            self.refresh_boards(true);
+            self.run_tasks();
+        } else {
+            // Writes the mode, then looks at the list.
+            self.set_mode(key, tasks::Mode::Auto);
+        }
+    }
+
+    /// "and ships public" flipped by the human, only while Warriv drives.
+    pub(in crate::app) fn set_ships_public(&mut self, key: &str, on: bool) {
+        if let Some(d) = self.drives.get_mut(key) {
+            d.ships_public = on;
+            self.save();
+            self.run_tasks();
+        }
+    }
+
+    /// The stop key and the tray's "Stop Warriv": every drive ends at once.
+    /// The quests in hand finish and land as in auto mode, but the runner
+    /// starts nothing new in those projects until the human picks a mode
+    /// or lets Warriv drive again.
+    pub(in crate::app) fn stop_warriv(&mut self) {
+        let keys: Vec<String> = self.drives.keys().cloned().collect();
+        if keys.is_empty() {
+            if !self.quiet {
+                self.toasts.show(
+                    Toast::Info,
+                    "Warriv is not driving",
+                    "There was nothing to stop.",
+                );
+            }
+            return;
+        }
+        for key in &keys {
+            self.stop_drive(key);
+        }
+        self.save();
+        let names: Vec<String> = keys.iter().map(|k| project_name(k)).collect();
+        self.toasts.show(
+            Toast::Done,
+            "Warriv stopped",
+            &format!(
+                "{} runs no more by itself. The quests in hand finish; nothing new starts.",
+                names.join(", ")
+            ),
+        );
+        self.refresh_boards(true);
+        self.run_tasks();
+        self.reconcile(false);
+    }
+
+    /// One project's drive ends: the switch goes off, its Warriv session
+    /// closes, and its runner starts nothing new.
+    fn stop_drive(&mut self, key: &str) {
+        if self.drives.remove(key).is_none() {
+            return;
+        }
+        self.stopped.insert(key.to_string());
+        let awake = self
+            .tasks
+            .warriv
+            .camps
+            .get_mut(key)
+            .and_then(|c| c.awake.take());
+        if let Some(a) = awake {
+            self.record_wake(key, &a.id, Happened::slept(&a.id, "", true, Vec::new()));
+            self.forget(&a.id);
+        }
+        // Errand sessions close here too, once errands are built.
     }
 }

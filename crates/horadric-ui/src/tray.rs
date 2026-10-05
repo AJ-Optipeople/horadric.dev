@@ -20,6 +20,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use horadric_core::experience;
 use horadric_core::saved::Discord;
+use horadric_core::warriv::Drive;
 
 use crate::menu::{self, Item};
 use crate::screens::{self, Screen};
@@ -93,6 +94,12 @@ pub enum Choice {
     CheckUpdates,
     /// Install the newer release the menu offered.
     Update,
+    /// Let Warriv drive this project, by key, or stop it.
+    Drive(String, bool),
+    /// Let Warriv ship this project public, by key, or no longer.
+    ShipsPublic(String, bool),
+    /// Stop every drive at once.
+    StopWarriv,
     /// End every session in every project, after asking.
     EndAll,
     Quit,
@@ -206,6 +213,17 @@ impl Drop for Tray {
 
 /// Where the Quest log menu's ids start, one per recent project.
 const QUEST_LOG: usize = 1000;
+/// "Warriv drives" for the project at this place in the list given, and
+/// its "and ships public". Past the recent projects' quest logs.
+const DRIVE: usize = 5000;
+const PUBLIC: usize = 6000;
+
+/// A project with a quest log, as the "Warriv drives" menu lists it.
+pub struct Driven {
+    pub key: String,
+    pub name: String,
+    pub drive: Option<Drive>,
+}
 
 /// The tray menu. `autostart` is None when the switch is not offered,
 /// `hotkeys` are the shortcuts for the next waiting session and for the
@@ -221,7 +239,8 @@ const QUEST_LOG: usize = 1000;
 pub fn menu(
     recent_projects: &[String],
     autostart: Option<bool>,
-    hotkeys: [Option<&str>; 2],
+    hotkeys: [Option<&str>; 3],
+    driven: &[Driven],
     notify: bool,
     sounds: bool,
     discord: Discord,
@@ -248,6 +267,7 @@ pub fn menu(
     const UPDATE: usize = 12;
     const LISTEN: usize = 13;
     const SOUNDS: usize = 14;
+    const STOP: usize = 15;
     const DISCORD: usize = 20;
     const THEME: usize = 40;
     const SCREEN: usize = 50;
@@ -294,6 +314,40 @@ pub fn menu(
         LISTEN,
         with_key("Stay a while and listen", hotkeys[1]),
     ));
+    if !driven.is_empty() {
+        let mut lines: Vec<Item> = driven
+            .iter()
+            .enumerate()
+            .map(|(i, d)| Item::Action {
+                id: DRIVE + i,
+                label: d.name.clone(),
+                checked: d.drive.is_some(),
+            })
+            .collect();
+        let public: Vec<Item> = driven
+            .iter()
+            .enumerate()
+            .filter_map(|(i, d)| {
+                Some(Item::Action {
+                    id: PUBLIC + i,
+                    label: d.name.clone(),
+                    checked: d.drive?.ships_public,
+                })
+            })
+            .collect();
+        if !public.is_empty() {
+            lines.push(Item::Separator);
+            lines.push(Item::Disabled("And ships public".into()));
+            lines.extend(public);
+        }
+        items.push(Item::Submenu("Warriv drives".into(), lines));
+        let stop = with_key("Stop Warriv", hotkeys[2]);
+        if driven.iter().any(|d| d.drive.is_some()) {
+            items.push(Item::action(STOP, stop));
+        } else {
+            items.push(Item::Disabled(stop));
+        }
+    }
     // A closed terminal leaves only its tiles, and a tile click shows one
     // project. This is the way back without picking one.
     if terminal {
@@ -393,6 +447,13 @@ pub fn menu(
         CHECK => Some(Choice::CheckUpdates),
         UPDATE => Some(Choice::Update),
         END_ALL => Some(Choice::EndAll),
+        STOP => Some(Choice::StopWarriv),
+        i if i >= PUBLIC => driven
+            .get(i - PUBLIC)
+            .map(|d| Choice::ShipsPublic(d.key.clone(), !d.drive.is_some_and(|d| d.ships_public))),
+        i if i >= DRIVE => driven
+            .get(i - DRIVE)
+            .map(|d| Choice::Drive(d.key.clone(), d.drive.is_none())),
         i if (THEME..SCREEN).contains(&i) => Theme::ALL.get(i - THEME).copied().map(Choice::Theme),
         i if (DISCORD..THEME).contains(&i) => {
             Discord::ALL.get(i - DISCORD).copied().map(Choice::Discord)

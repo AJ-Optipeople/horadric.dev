@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use horadric_core::chronicle::{self, Quest, Talk};
+use horadric_core::chronicle::{self, Quest, Talk, WakeEnd, WarrivWake};
 use horadric_core::journal;
 use horadric_core::tasks::Task;
 use horadric_core::Agent;
@@ -55,23 +55,32 @@ impl App {
                 }
             }
             Ask::Read(key, id) => self.read_quest(&key, &id),
+            Ask::ReadWake(key, id, woke) => self.read_wake(&key, &id, woke),
             Ask::Carry(key, id) => self.carry_on_quest(&key, &id),
             Ask::All(key) => self.pick_conversation(&key),
         }
     }
 
     /// The project's quests, oldest first, with its conversations no quest
-    /// holds among them.
-    fn quests_of(&self, key: &str) -> Vec<Quest> {
+    /// holds among them, and Warriv's wakes.
+    fn log_of(&self, key: &str) -> (Vec<Quest>, Vec<WarrivWake>) {
         let list = self.list_of(key);
-        let quests = chronicle::quests(
-            &store::chronicle_all(),
-            &store::journal_since(0),
-            key,
-            &list,
-        );
+        let records = store::chronicle_all();
+        let quests = chronicle::quests(&records, &store::journal_since(0), key, &list);
         let talks = self.talks_of(key, &quests);
-        chronicle::with_talks(quests, &talks)
+        let mut wakes = chronicle::wakes(&records, key);
+        // An app that crashed wrote no end: a wake with none whose session
+        // is gone was cut short.
+        for w in wakes.iter_mut().filter(|w| w.end.is_none()) {
+            if !self.live(&w.id) {
+                w.end = Some(WakeEnd::CutShort);
+            }
+        }
+        (chronicle::with_talks(quests, &talks), wakes)
+    }
+
+    fn quests_of(&self, key: &str) -> Vec<Quest> {
+        self.log_of(key).0
     }
 
     /// The newest conversations held in the project's folder, leaving out
@@ -112,15 +121,21 @@ impl App {
 
     /// Shows the quest log for the project `key`, raising the one open.
     fn open_quest_log(&mut self, key: &str) {
-        let quests = self.quests_of(key);
+        let (quests, wakes) = self.log_of(key);
         let name = project_name(key);
         SEEN.with(|s| s.replace(None));
         match &self.quest_log {
             Some(w) => {
-                w.set(key.to_string(), name, quests);
+                w.set(key.to_string(), name, quests, wakes);
                 w.raise();
             }
-            None => match QuestLog::open(Rc::clone(&self.shared), key.to_string(), name, quests) {
+            None => match QuestLog::open(
+                Rc::clone(&self.shared),
+                key.to_string(),
+                name,
+                quests,
+                wakes,
+            ) {
                 Ok(w) => self.quest_log = Some(w),
                 Err(e) => eprintln!("horadric: cannot open the quest log: {e}"),
             },
@@ -143,12 +158,14 @@ impl App {
         let changed = SEEN.with(|s| s.borrow().as_ref() != Some(&now));
         if changed || force {
             SEEN.with(|s| s.replace(Some(now)));
-            w.set(key.clone(), project_name(&key), self.quests_of(&key));
+            let (quests, wakes) = self.log_of(&key);
+            w.set(key.clone(), project_name(&key), quests, wakes);
         } else if TICKS.with(|t| {
             t.set(t.get().wrapping_add(1));
             t.get() % AGES_EVERY == 0
         }) {
-            w.set(key.clone(), project_name(&key), self.quests_of(&key));
+            let (quests, wakes) = self.log_of(&key);
+            w.set(key.clone(), project_name(&key), quests, wakes);
             w.invalidate();
         }
     }
@@ -180,6 +197,37 @@ impl App {
         }
         if let Err(e) = fs::write(&path, questlog::session_doc(&q, &transcript)) {
             eprintln!("horadric: cannot write out the quest's session: {e}");
+            return;
+        }
+        self.open_view(key, &dir, &rel);
+    }
+
+    /// Writes out the conversation of Warriv's wake, its story on top, and
+    /// shows it on the stage as a quest's is. Warriv works in the
+    /// project's folder.
+    fn read_wake(&mut self, key: &str, id: &str, woke: u64) {
+        let (quests, wakes) = self.log_of(key);
+        let Some(w) = wakes.iter().find(|w| w.id == id && w.woke == woke) else {
+            return;
+        };
+        let Some(project) = self.project_dir(key) else {
+            return;
+        };
+        let cwd = project.to_string_lossy();
+        let transcript = match horadric_hooks::transcript::path(&cwd, &w.conversation) {
+            Some(p) => chronicle::transcript_text(&fs::read_to_string(p).unwrap_or_default()),
+            None => "_The conversation is no longer on disk._\n".to_string(),
+        };
+        let Some(dir) = store::dir() else {
+            return;
+        };
+        let rel = questlog::session_file(&format!("{id}-{woke}"));
+        let path = dir.join(rel.replace('/', "\\"));
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        if let Err(e) = fs::write(&path, questlog::wake_doc(w, &quests, &transcript)) {
+            eprintln!("horadric: cannot write out Warriv's session: {e}");
             return;
         }
         self.open_view(key, &dir, &rel);

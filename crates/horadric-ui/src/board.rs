@@ -85,6 +85,17 @@ pub fn gated(state: RowState, ready: &Ready) -> RowState {
     }
 }
 
+/// The ink of the quests tile's Warriv line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ink {
+    /// Asleep or resting.
+    Quiet,
+    /// Awake, in the working colour.
+    Working,
+    /// Warriv drives the project, in gold whatever it is about.
+    Drives,
+}
+
 /// How a row reads when Warriv has its quest: one that would be blocked
 /// or tangled needs nobody but Warriv yet, so it is not red.
 pub fn with_warriv(state: RowState, has: bool) -> RowState {
