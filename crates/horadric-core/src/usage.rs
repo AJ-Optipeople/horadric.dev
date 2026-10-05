@@ -150,7 +150,21 @@ impl Limits {
             .max_by(|a, b| a.0.total_cmp(&b.0))
             .map(|&(_, t)| t)
     }
+    /// The fullest limit at `now`, with its name, when it is at
+    /// `PACE_AT` or more: the runner starts nothing then, rather than learn
+    /// at 100 % that a session it started cannot finish its turn. A limit
+    /// whose reset has passed is empty again.
+    pub fn too_full(&self, now: u64) -> Option<(&'static str, f32)> {
+        self.named()
+            .into_iter()
+            .map(|(name, l)| (name, l.at(now).0))
+            .filter(|&(_, used)| used >= PACE_AT)
+            .max_by(|a, b| a.1.total_cmp(&b.1))
+    }
 }
+
+/// How full, in percent, a limit may be before the runner starts no more.
+pub const PACE_AT: f32 = 90.0;
 
 /// The limits as last heard, and when, in Unix seconds.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -376,6 +390,24 @@ impl Defaults {
         }
         out
     }
+
+    /// `flags`, with permission prompts bypassed in place of the mode
+    /// picked when `bypass`. A mode the session's own `args` chose still
+    /// wins.
+    pub fn flags_for(&self, agent: Agent, args: &[String], bypass: bool) -> Vec<String> {
+        if !bypass {
+            return self.flags(agent, args);
+        }
+        let others = Defaults {
+            permission_mode: None,
+            ..self.clone()
+        };
+        let mut out = others.flags(agent, args);
+        if !agent.chosen(Setting::Permissions, args) {
+            out.extend(agent.bypass_args());
+        }
+        out
+    }
 }
 
 /// Whether `args` hold `flag`, alone or as `flag=value`.
@@ -573,6 +605,29 @@ mod tests {
     }
 
     #[test]
+    fn the_runner_paces_at_ninety_percent_of_the_fullest_limit() {
+        let l = Limits {
+            five_hour: limit(92.0, 500),
+            seven_day: limit(95.0, 9000),
+            spend: None,
+        };
+        assert_eq!(l.too_full(100), Some(("Week", 95.0)));
+        let under = Limits {
+            five_hour: limit(89.9, 500),
+            ..Limits::default()
+        };
+        assert_eq!(under.too_full(100), None);
+        assert_eq!(Limits::default().too_full(100), None);
+        let edge = Limits {
+            five_hour: limit(90.0, 500),
+            ..Limits::default()
+        };
+        assert_eq!(edge.too_full(100), Some(("Session", 90.0)));
+        // Reset since it was heard, so it is empty again.
+        assert_eq!(edge.too_full(500), None);
+    }
+
+    #[test]
     fn resets_read_like_a_human_wrote_them() {
         assert_eq!(format_until(20), "1 min");
         assert_eq!(format_until(40 * 60), "40 min");
@@ -607,6 +662,35 @@ mod tests {
             args("--model opus")
         );
         assert!(Defaults::default().flags(Agent::Claude, &[]).is_empty());
+    }
+
+    #[test]
+    fn a_bypass_takes_the_place_of_the_mode_picked() {
+        let d = Defaults {
+            model: Some("opus".into()),
+            effort: None,
+            permission_mode: Some("plan".into()),
+        };
+        assert_eq!(
+            d.flags_for(Agent::Claude, &[], true),
+            args("--model opus --permission-mode bypassPermissions")
+        );
+        assert_eq!(
+            d.flags_for(Agent::Claude, &[], false),
+            d.flags(Agent::Claude, &[])
+        );
+        assert_eq!(
+            d.flags_for(Agent::Claude, &args("--permission-mode auto"), true),
+            args("--model opus")
+        );
+        assert_eq!(
+            Defaults::default().flags_for(Agent::Codex, &[], true),
+            args("--dangerously-bypass-approvals-and-sandbox")
+        );
+        assert_eq!(
+            Defaults::default().flags_for(Agent::Grok, &args("--always-approve"), true),
+            Vec::<String>::new()
+        );
     }
 
     #[test]

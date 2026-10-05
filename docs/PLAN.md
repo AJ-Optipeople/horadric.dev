@@ -3153,7 +3153,8 @@ on, unless the ten minute gap passed meanwhile.
 
 ### Orchestration
 
-Asked for on 2026-10-01. Proposed, not built. The goal is development
+Asked for on 2026-10-01, decided on 2026-10-05 (see the end of this
+section). Every step is built (2026-10-05). The goal is development
 that runs itself across many sessions, with the human hearing only
 about what needs a human. Today the human is the orchestrator: with
 several sessions in a project, a quest that cannot go on because it
@@ -3173,8 +3174,22 @@ in this order.
 
 **1. Dependencies in the quest log, declared before work starts.**
 
-This reopens "No dependencies" in The task list, so it waits for the
-human's yes before it is built.
+This reopens "No dependencies" in The task list. The human said yes on
+2026-10-05. **Built on 2026-10-05**, as below, with three things the
+plan did not say:
+
+- `quest blocked "why" --on "title"` writes `{after}` at the end of the
+  blocked line beside the `After:` line. Without it a quest blocked on
+  the human that has `After:` lines from planning, all done, reads the
+  same as one blocked until its quest is done, and would be resumed.
+  `{on quest: ...}` and `--on-quest` still read as before and mean the
+  same as `--on`.
+- The waits on a file, a command, `main` and a time stay: they were
+  built and work, and dropping them would break lists that use them.
+- A name that matches nothing or several, and a cycle, read "tangled"
+  in red on the row with the name, and a toast says what is wrong,
+  since no quest finishing frees them. A click on a quest that waits
+  still briefs and starts it: the human may overrule the order.
 
 - **The form.** A notes line `After: <title>` names a quest this one
   waits for, one line each. The title is matched exactly or by a unique
@@ -3257,6 +3272,52 @@ and the file.
   quest blocked with a question its notes answer, Warriv wakes, tells the
   session, the quest goes on. Count `claude.exe` after.
 
+Built on 2026-10-05. `horadric_core::warriv` decides: `events` reads
+what the log holds now (a quest `[!]` with no wait and a reason Warriv
+did not write, a quest whose session stopped after the nudge, a tangled
+`After:` line, and a log in auto mode with nothing in hand or ready and
+nobody blocked on the human), a `Desk` per project hears each event once
+by its key, queues the new ones and spends the budget of six wakes an
+hour, and `prompt`, `more`, `told` and `system_prompt` are what Warriv
+and the told session read. A failed merge is pushed onto the desk by
+`after_landing`, since the log does not hold it. The UI's `warriv.rs`
+starts a fresh session named Warriv in the main tree when events wait
+and none is awake, types the queued ones in as one line at its next
+`Stop`, and closes it at a `Stop` with nothing left. What the plan did
+not say:
+
+- **Never woken by itself** is by kind. Warriv can only cause a tangled
+  `After:` line or a stalled log, so one of those that first shows up
+  while it is awake is taken as its own and not queued. A quest it hands
+  on is blocked with a reason that starts `Warriv asks: `, which wakes
+  nobody and tells step 3 which quests are the human's.
+- **Its commands.** Besides `quest tell` and `quest add --after`:
+  `quest note "title" "text"` (marked `Warriv: ` when Warriv runs it),
+  `quest add --below "title"`, and `quest blocked "question" --quest
+  "title"` to hand a held quest to the human. It starts with
+  `--allowedTools "Bash(<horadric> quest:*)"`, so in the project's mode
+  these never prompt, and its system prompt says to change the log only
+  through them. A tell goes once per quest a wake; the app types it,
+  with how to report done, once the holder is at `Stop`, and a blocked
+  quest goes `[/]`. A tell for a quest whose session is gone becomes a
+  `Warriv:` note and the quest starts again.
+- **The last turn** is the `Stop` hook's whole `last_assistant_message`,
+  kept on the session (not saved) and cut to its last 2000 characters.
+- **Found on screen:** a session in the main tree inherited
+  `HORADRIC_TASKS` from the Horadric that started it, so a dev instance
+  started from a quest's worktree pointed `horadric quest` at that quest's
+  own log. Warriv read the real horadric.dev log that way. Sessions
+  without a worktree now get it empty.
+- Seen on a dev instance with a scratch repository and a real Claude: the
+  quest blocked on "Which port should the server listen on?", Warriv woke,
+  ran `quest tell` and `quest note` without a prompt, the session got the
+  answer, wrote the port, committed and ran `quest done`, and Warriv
+  closed. No `claude.exe` left under the dev hosts after. A folder Claude
+  has not been told to trust stops every session, Warriv's too, at the
+  trust check before any hook, which nothing in Horadric sees yet.
+- Not done: a Warriv session restored after a restart is paused like any
+  other, and a new event starts a fresh one beside it.
+
 **3. The human hears only what Warriv could not settle.**
 
 Not an inbox: that was dropped on 2026-09-26, and the tiles, the hotkey
@@ -3266,15 +3327,394 @@ red only when it handed the question on, and its reason is that
 question. "N quests need you" counts only those. The notes say what
 Warriv tried, so the human answers without reading the session first.
 
+Built on 2026-10-05. A project's `Desk` keeps the events that went to
+the human: those that came while Warriv rested (its six wakes spent),
+a tangle or stall that showed up while it was awake (its own doing,
+which it would not settle), and each event it was given that still
+holds when its session ends without telling that quest anything.
+`Desk::holding` is every other quest among the events, which the app
+keeps per project; Warriv hears before the toasts are said, so those
+are left out of them, and "N quests need you" counts the rest. On the
+tile, a blocked or tangled row Warriv holds reads "Warriv" in the
+working colour with no red. A quest Warriv handed on is red "blocked",
+and its toast is "Warriv asks: <title>" with the question alone.
+`quest blocked --quest` refuses until the quest has a `Warriv:` note,
+so the notes say what was tried. What the plan did not say:
+
+- A quest's own session tile is untouched: a session stopped on a
+  question still lights as waiting and the hotkey still walks to it,
+  since the tile shows the session, not the quest.
+- Seen on a dev instance with `cmd.exe` for the agent: a quest blocked
+  on a question read "Warriv" while Warriv was up; handed on with a
+  note it read red "blocked"; blocked anew and its Warriv killed
+  mid wake, it read red "blocked" and no second Warriv started.
+
+**Decided on 2026-10-05.** The human asked for an orchestrator that runs
+"an insane amount of tasks" without them, and chose four things. Step 1
+has its yes, and the work grows by three layers the section above did
+not have. Built in this order: 1, 4, 5, 6, then 2 and 3.
+
+- **Warriv is a full planner.** Everything in step 2 above: it answers,
+  splits quests, adds `After:` lines and files fix-up quests. It still
+  changes no code and starts no session.
+- **4. Finished quests merge themselves.** In auto mode, a quest done in
+  its own worktree is rebased on `main`, the project's checks run in the
+  worktree, and `main` is fast forwarded to it. The checks are a
+  `"checks"` list of commands in `.horadric/config.json`; none means
+  merge without. A rebase conflict or a red check does not wait for the
+  human: the branch stays, a fix-up quest is added right below the
+  finished one with the failing output in its notes, and the quests
+  that name the finished one in `After:` wait for the fix-up too. This
+  also answers the open question about conflicts: a worker resolves
+  them, Warriv only files the quest. One merge at a time per project,
+  since two fast forwards race. Review mode keeps the click.
+
+  Built on 2026-10-05. `horadric_core::merge` decides: `checks` reads
+  the list (one string is one check), `plan` is rebase, each check,
+  fast forward, `failed` reads what a step's failure means, `fix_up`
+  writes the quest, and `add_fix_up` puts it in the list. The UI's
+  `worktree::land` runs the plan on a thread when an auto mode quest's
+  session ends, before its worktree goes, holding a lock per project.
+  A rebase that conflicts is aborted. A check runs with `cmd /c` in
+  the worktree, stdout and stderr in one pipe, for at most 30 minutes.
+  A fast forward refused because `main` moved starts over, three times
+  at most. A merged branch goes with its worktree, journaled and
+  toasted as a clicked merge is. A conflict or a red check removes the
+  worktree, keeps the branch, and adds "Fix the merge of <branch>" with
+  the last 40 lines of output in its notes, which tell the worker to
+  merge the branch into its own. Anything else (uncommitted changes in
+  the worktree, or work in the main tree in the way of the fast
+  forward) is no quest a worker can do, so it falls back to the
+  toast whose click merges by hand. `add_fix_up` puts the fix-up right
+  below the finished quest and gives every quest whose `After:` names
+  the finished one an `After:` line for the fix-up as well, so nothing
+  built on the work starts before it is on `main`. A line of output
+  that reads as an `After:` line is quoted with `>`. The notes tell the
+  worker to cherry-pick the branch's commits rather than merge it,
+  since the auto merge rebases, which drops a merge commit and meets
+  the same conflict again (seen on screen). While a merge runs, the
+  runner sees its quest as still in hand (`while_landing`), so a quest
+  after it does not start on a `main` without the work. Manual and review
+  mode keep the click. This repository's checks are fmt, clippy and
+  test.
+- **5. Up to 16 at once, paced by usage.** `MOST_PARALLEL` goes from 8
+  to 16, and the menu offers 1, 2, 4, 8 and 16. The runner stops
+  starting quests while the fullest limit the status line reports is at
+  90 % or more, rather than learning at 100 % mid turn. The 10 second
+  gap between starts and every other fuse stays. Built on 2026-10-05:
+  `Limits::too_full` is the check, the hold says "Quests wait on
+  usage" once, and tombs stay at most 8, since a human picks among
+  them. Seen on a dev instance with `cmd.exe`: starts 10 s apart, a
+  faked 92 % held the next for a minute, 50 % let it start.
+- **6. Quests in worktrees skip permission prompts.** A runner or click
+  started quest in its own worktree runs with prompts bypassed, so it
+  never stops for one. Sessions in the main tree, Warriv included, keep
+  the project's mode, since there a wrong command touches what the
+  human and other agents work in.
+
+  Built on 2026-10-05. A session that holds a quest and has a worktree
+  of its own (`tasks::bypasses_prompts`) starts with
+  `Defaults::flags_for(.., bypass)`: the mode picked in the usage window
+  gives way to `Agent::bypass_args`, which is `--permission-mode
+  bypassPermissions` for Claude Code, the form its other modes take,
+  `--dangerously-bypass-approvals-and-sandbox` for Codex and
+  `--always-approve` for Grok. A mode the session's own arguments chose
+  still wins. It is worked out at every start, so a resume after the
+  quest is done gets the project's mode back. Tried with a dev instance
+  and Haiku in a scratch repository: the worktree quest ran `echo` and
+  `quest done` with no prompt, a main tree session in the same project
+  stopped at "Do you want to proceed?". Claude's folder trust check still
+  comes first in a folder Claude has not been told to trust, as it did
+  for the scratch repository in `%TEMP%`; Horadric's own worktrees
+  beside a trusted checkout do not show it.
+
 **Open questions.**
 
 - Whether Warriv may review `[?]` quests in review mode, as a first
-  reader before the human. It would make review mode run alone for
-  longer, and it is the first place a wrong judgment costs real work.
-- Whether a merge conflict between worktrees is Warriv's to resolve, or
-  a quest it files for a worker. The second keeps "changes no code".
+  reader before the human. Decided on 2026-10-05: yes, as a mode of its
+  own. See "The caravan moves on its own".
 - Which model Warriv runs on. Its turns are short and many, which says a
   small one, but a wrong call costs more than the turn saves.
+
+### Warriv in the quest log
+
+Asked for on 2026-10-05. Warriv's work is hard to see: a tile named
+Warriv while it is awake, rows on the quests tile that read "Warriv",
+and `Warriv:` notes in each quest's detail. Nothing shows a wake as a
+whole, what woke it, what it did and how it ended, and nothing shows
+it after its session closes.
+
+- **The chronicle records wakes.** A line when Warriv wakes (the
+  wake's id, its conversation id, the events, each by kind and quest),
+  a line for each `quest` command it runs (`tell`, `note`, `add`,
+  `blocked`, with the quest and the text), and a line when it closes:
+  settled, or handed on (the quests it handed to the human), or cut
+  short (its session killed or the app quit). The app writes the first
+  and last from `warriv.rs`; the CLI writes the commands, since it
+  already knows when Warriv runs one (`warriv::is_warriv` on the
+  session id, as `quest note` uses to mark `Warriv: `).
+  Built on 2026-10-05. The lines are `warriv_woke`, `warriv_ran` and
+  `warriv_slept`, keyed by the Warriv session's id; none names a quest
+  holder, so `chronicle::quests` passes them by. A wake given more
+  events while awake is another `warriv_woke` with the same id.
+  `chronicle::wakes` folds them into wakes, joining a command or an end
+  to the latest open wake of its id, since an id comes back each day.
+  The conversation is filled from whichever line knew it: the app's
+  once the registry has it, the CLI's from `CLAUDE_CODE_SESSION_ID`.
+  Handed on lists both the events left holding and the quests Warriv
+  handed on itself. A Quit or reload with Warriv awake writes a cut
+  short line from `freeze`; a crash writes none, so a wake with no end
+  and no session is one that was cut short.
+- **Its own lane.** In the quest log diagram Warriv's wakes sit on a
+  lane of their own beside the trunk, a dot a wake in Warriv's own
+  colour, a gold that is neither a lamp nor the magic blue. A thin
+  line runs from the dot to each quest the wake touched, at that
+  quest's row. `chronicle::graph` places them, pure and tested.
+- **A wake's detail.** Click the dot: when, how long, the events that
+  woke it, each command in order, and how it ended, with the question
+  for each quest it handed on. Read the session works as for a quest.
+- **A live line on the quests tile.** While Warriv is awake, a line
+  under the mode reads "Warriv: settling 2" in the working colour; when
+  its six wakes are spent, "Warriv rests until 21:40" in the dim colour.
+  Nothing when it is off or asleep with wakes left. The words are pure
+  and tested. **Built on 2026-10-05**: `Desk::watch` says which, from
+  the events the awake session has not answered plus those queued, or
+  the hour's first wake; `Watch::words` says it. The line is a strip of
+  its own under the header, right aligned to the mode, shown folded too.
+
+### The caravan moves on its own
+
+Asked for on 2026-10-05. The human wants the app to feel like autonomy.
+Warriv today is a firefighter: it wakes only when something goes wrong,
+and it can only rearrange quests that already exist. When the log runs
+dry the caravan stops, in review mode every `[?]` waits for the human,
+and what happened while the human was away is spread over toasts and
+notes. Autonomy needs the work to move forward when nothing is wrong
+and nobody watches, and to show what it did when the human comes back.
+Six parts, each useful alone.
+
+**1. Aims.** The human writes where the work is going, not each quest.
+
+- **The form.** `Aim: <text>` lines at the top of `.horadric/tasks.md`,
+  above the first section, in order. An aim names what done looks like
+  and may point at a plan section ("Warriv in the quest log, all of
+  it"). `horadric quest aim "text"` adds one, `quest aim done "text"`
+  marks it `Aim reached: <text>` so it stays as a record.
+- **Warriv files the next quests.** The stalled event (auto mode,
+  nothing in hand or ready, nobody blocked on the human) already wakes
+  it. With an aim open, its prompt carries the aims and says: read what
+  they point at, file the next quests with `quest add` and `After:`
+  lines, at most eight a wake, or mark the aim reached. Each quest it
+  files gets a `Filed by Warriv for: <aim>` notes line. With no aim
+  open, stalled is handed to the human as today.
+- **Fuses.** It never files a quest whose title matches one already in
+  the log. An aim with three wakes in a row that filed nothing goes to
+  the human as a question.
+- Pure and tested: reading and writing aims, the prompt with aims, the
+  title match.
+
+**2. Warriv reads first in review mode.** A fourth mode beside manual,
+review and auto: "Warriv reviews". A quest going `[?]` wakes a reviewer
+session with the quest, its notes, and the branch's diff against `main`.
+It ends one of three ways:
+
+- `quest pass "title"`: merges as the human's click would, through the
+  same landing (rebase, checks, fast forward).
+- `quest fix "title" "what is wrong"`: tells the holding session if it
+  is alive, otherwise adds a fix-up quest below as a failed merge does.
+- `quest blocked "question" --quest "title"`: the human gets it, with
+  what the reviewer saw in a `Warriv:` note.
+
+Reviews have their own budget, not the six wakes: one reviewer a
+project at a time, the rest queued. The reviewer runs no checks, since
+landing runs them. The mode menu says what the mode does in one line.
+
+**3. While you were away.** When the human has given no input for 30
+minutes (`GetLastInputInfo`, already read in `app.rs`) and then comes
+back, one card opens on the stage if anything happened: quests landed,
+what Warriv decided and why (one line a wake), errands run and what
+they found, and last the questions only the human can answer, each
+with a one line answer field. Enter on an answer does what
+`quest tell` does for that quest. Esc closes it; it does not come back
+until the next absence. `chronicle::away(since)` builds it, pure and
+tested. Nothing happened, no card.
+
+**4. Errands: runewords on a clock.** A stone in the Runetome may carry
+`"every"`, and then Warriv casts it unattended:
+
+```json
+{ "runewords": {
+    "Feedback to quests": {
+      "every": "1h",
+      "steps": [ { "say": "Read Slack #horadric and the inbox since {since} for feedback on Horadric. File each new point as a quest with a From: line." } ] },
+    "Nightly ship": { "every": "day 03:00", "steps": [ { "say": "Ship local" } ] },
+    "Clean target": { "every": "sunday 12:00", "steps": [ { "run": "cargo clean" } ] } } }
+```
+
+- **When.** `"every"` reads `30m`, `1h`, `day 09:00`, `weekday 08:30`,
+  or a weekday name and a time. `runeword::every` parses it and
+  `runeword::due` says the next cast from the last one, pure and
+  tested. A cast missed while Horadric was off runs once at start, not
+  once per missed slot.
+- **How.** A stone of only `run` steps runs as a sessionless runeword
+  does today. A stone with `say` steps starts a fresh session named
+  after the stone, in Warriv's gold, in the main tree, and its steps
+  are cast on it turn by turn as any runeword. After the last step's
+  `Stop` it closes. Its system prompt (`warriv::errand_prompt`) says
+  what Horadric and the quest commands are, that what it finds becomes
+  quests, that each quest carries a `From: <link or id>` notes line,
+  and that it files nothing whose `From:` is already in the log. `{since}`
+  in a step is the time of the last cast that finished. The `test`,
+  `review` and `merge` runes need a quest's session, so a stone with
+  them and `"every"` shows cracked with that reason.
+- **What it can reach** is whatever the agent can: `gh` for pull
+  requests, MCP connectors for Slack and mail, any command. Horadric
+  adds no integration of its own.
+- **Arming.** An `"every"` stone does nothing until the human arms it
+  from the tome once: a click shows the steps, the schedule and the
+  permission mode, and asks "Run this unattended?". The arming keeps a
+  hash of the steps in `state.json`. A stone whose steps change is
+  disarmed and shows the mark, so a pull that changes an errand never
+  runs it unseen. Arming an errand that publishes (a push, a release, a
+  post) is the human's standing go ahead for it; that is the one way
+  "ship public" happens without the human saying it that day, and
+  CLAUDE.md says so.
+- **Permission mode.** The project's, so a prompt stops the errand as an
+  "asks you" like any session. `"mode": "bypass"` on the stone skips
+  prompts, and arming says so in red.
+- **Fuses.** One errand at a time a project, the rest wait their turn. A
+  due errand is skipped (not queued) while the fullest limit is at 90 %
+  or more. An errand running past `"for"` (default 30 minutes) is
+  stopped. A failure toasts once and the stone shows red until a cast
+  succeeds. Errands do not spend Warriv's six wakes. Count `claude.exe`
+  after any test, since this starts agents on a clock.
+- **In the tome** an errand stone has a thin ring that fills toward its
+  next cast; hover shows the last cast, how it ended and the next one.
+  Unarmed, the ring is dim. **In the chronicle** each cast is a dot on
+  Warriv's lane like a wake, with the quests it filed.
+- **The Runesmith** knows `"every"`, `{since}` and the `From:` rule, so
+  "check Slack every hour for feedback" is a sentence to it.
+
+Event triggers (`"on": "landed"`, `"on": "away"`) are the next step once
+the clock works, and are left out until an errand needs one.
+
+**5. Ships proposed.** When three or more quests have landed on `main`
+since the last ship local and the checks passed on `main`'s head, a
+toast says "5 quests landed. Ship local?" and its click casts the
+project's "Ship Local" stone. Once per landing count; ignored, it waits
+for the next landing. The rule is pure and tested.
+
+**6. A pulse.** While Warriv, a reviewer or an errand works, the quests
+tile's edge breathes slowly in Warriv's gold, so the camp is seen moving
+without reading anything. Still when nothing runs. Beside the live line
+already planned in "Warriv in the quest log".
+
+Already built and left alone: a session cut off by a usage limit is
+told to go on a minute after the reset (`tasks::go_on`).
+
+### Warriv drives
+
+Asked for on 2026-10-05. The human wants to leave the PC on, glance at
+Warriv working now and then, and come back to what shipped: the
+autonomous agent pushed as far as Claude goes today. Today Warriv is
+several reflexes (event wakes, the reviewer, errands), each a fresh
+session with no shared picture. This section makes it one mind that
+uses all of them on purpose. The human decided:
+
+- **One switch, "Warriv drives".** Off, Horadric is as today. On,
+  Warriv runs the project alone. A second switch, "and ships public",
+  lets it cut public releases unattended. Both are the human's to flip.
+- **No caps.** No daily quest cap, no spend cap, no usage ceiling, no
+  weekly pacing. While Warriv drives, its six wakes an hour are lifted
+  too. What stays is what only waits: at 90 % of a limit the runner
+  holds until the reset and goes on (`Limits::too_full`, `go_on`),
+  since a turn cut off at 100 % is lost work, not saved money. An
+  errand due in that hold waits for the reset instead of being skipped.
+- What stops runaways is not a budget but the rules already there:
+  Warriv is never woken by itself, each event is heard once, and the
+  shipping rails below.
+
+**1. A memory, `.horadric/warriv.md`.** Every Warriv session (a wake, a
+round, the reviewer, an errand) reads it first and writes to it last.
+Three parts: **Rules** (how this project wants things done), **Lately**
+(what it did and why, newest first, compacted by Warriv when it passes
+about 200 lines) and **Open** (what it is waiting to see). When the
+human answers a question Warriv handed on, the next wake writes the
+answer as a rule, so the same kind of question never comes twice.
+Committed with the project, so it travels with the repository and its
+history shows how Warriv's judgment grew. `warriv::memory_prompt` and
+the compaction rule are pure and tested.
+
+**2. Rounds.** While Warriv drives, a round every hour, after each
+landing and when the human leaves: a Warriv session that looks at the
+whole project (the log, the aims, `main`'s checks, the memory, open
+questions, errands due) and decides. Events stay for speed; rounds are
+for judgment. In a round it may do everything a wake may, and also
+cast a stone (`horadric runeword cast "name"`, new), ship (below) and
+reorder the log. A round that finds nothing to do writes one line to
+Lately and closes. One Warriv session at a time a project still: a
+round due while one is awake is folded into it.
+
+**3. Decide what can be undone, ask about what cannot.** While Warriv
+drives, the quest sessions' prompt says: a choice that can be changed
+later (a name, a layout, which of two fixes) is made, with a
+`quest note "title" "Assumed: ..."` line, and the work goes on. Only a
+choice that cannot be undone, or that only the human can know, blocks.
+Warriv does the same with what it is told. A quest blocked on the human
+no longer stops the list: it is passed over like a quest that waits,
+and the rest of the caravan moves. The away card lists every
+`Assumed:` line since the human left, so each can be overruled in one
+line.
+
+**4. Warriv ships.** While it drives, a round ships local when `main` is
+green and quests have landed since the last ship, by casting the
+project's "Ship Local" stone in a session of its own. With "and ships
+public" on, it ships public instead when the landed work is worth a
+release to users (a feature or a fix a user would notice), picking the
+version and writing the notes per RELEASING.md and CLAUDE.md. The
+rails:
+
+- After a ship, the next round reads `reload.log`. A build that rolled
+  back, or `main`'s checks red twice in a row, stops shipping: the
+  switch shows "shipping held" and a fix-up quest is filed with the
+  log. Shipping goes on by itself once that quest lands and the checks
+  pass.
+- The drive switches live in `state.json`, so they survive the reload a
+  ship causes; the new build picks the rounds up where they were.
+- CLAUDE.md says the switch is the human's go ahead to ship, the one
+  way besides their words.
+
+**5. A model per quest.** Warriv writes a `Model: haiku|sonnet|opus`
+notes line on quests it files or meets without one, by how hard the
+work is, and the runner starts the quest with that `--model` (Claude
+Code only; other agents ignore it). A human's `Model:` line is never
+changed. Pure and tested: reading the line, the flag.
+
+**6. Event triggers for errands.** `"on": "landed"`, `"shipped"`,
+`"away"` or `"back"` on a stone casts it at that event instead of on a
+clock, so "post what shipped to me on Slack" is a stone. Armed like a
+clock errand.
+
+**7. Spectator mode.** While Warriv drives and the human is away, the
+stage follows the work: it shows the project where something last
+happened, the pane mid turn focused, staying at least 20 seconds on
+each. A Warriv session gets the stage first. It never takes the
+foreground from another program: it only moves when the stage was the
+foreground window when the human left. The first input gives the stage
+back exactly as the human left it.
+
+**8. A look back.** While it drives, once a day (at the first round
+after 04:00) Warriv reads the day's chronicle and its memory: repeated
+merge conflicts, a flaky check, sessions that stopped without
+reporting, quests that came back from review twice. Each pattern
+becomes a quest, and a lesson worth keeping becomes a rule.
+
+**The switch and the stop.** "Warriv drives" and "and ships public" are
+in the tray menu and the quests tile's mode menu; the quests tile reads
+"Warriv drives" in gold while it is on. A tray item and a hotkey
+(Ctrl+Alt+W, with Shift on a dev instance like the other keys) stop it at once: the switch goes off, Warriv's
+sessions and errand sessions are closed, the runner stops starting
+quests. Quests in hand finish and land as they would in auto mode.
 
 ### The agent's cursor
 

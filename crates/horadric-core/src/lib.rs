@@ -16,6 +16,7 @@ pub mod event;
 pub mod experience;
 pub mod fleet;
 pub mod journal;
+pub mod merge;
 pub mod overlap;
 pub mod presence;
 pub mod rarity;
@@ -29,6 +30,7 @@ pub mod tasks;
 pub mod title;
 pub mod tombs;
 pub mod usage;
+pub mod warriv;
 pub mod worktree;
 
 pub use agent::Agent;

@@ -112,11 +112,25 @@ pub struct TasksChanged {
     pub tomb: Option<String>,
     /// Why the tomb is blocked, none when it is done.
     pub why: Option<String>,
+    /// The quest whose session Warriv answers, with `tell`.
+    pub quest: Option<String>,
+    /// What Warriv tells that quest's session, typed in between turns.
+    pub tell: Option<String>,
+    /// The session that ran the command, so the app knows Warriv's own.
+    pub by: Option<String>,
 }
 
 impl TasksChanged {
     pub fn to_json(&self) -> String {
-        json!({ "dir": self.dir, "tomb": self.tomb, "why": self.why }).to_string()
+        json!({
+            "dir": self.dir,
+            "tomb": self.tomb,
+            "why": self.why,
+            "quest": self.quest,
+            "tell": self.tell,
+            "by": self.by,
+        })
+        .to_string()
     }
 
     pub fn from_json(body: &[u8]) -> Option<Self> {
@@ -126,6 +140,9 @@ impl TasksChanged {
             dir: v.get("dir")?.as_str()?.to_string(),
             tomb: text("tomb"),
             why: text("why"),
+            quest: text("quest"),
+            tell: text("tell"),
+            by: text("by"),
         })
     }
 }
@@ -682,6 +699,9 @@ X-Horadric-Port: {dev}
             dir: "C:/dev/app".into(),
             tomb: Some("fix-1.x3.2".into()),
             why: None,
+            quest: Some("Serve the API".into()),
+            tell: Some("Use port 4100.".into()),
+            by: Some("warriv-5".into()),
         };
         let json = want.to_json();
         let reply = post_to(port, TASKS_PATH, "X-Horadric-Command: new\r\n", &json);
@@ -729,7 +749,7 @@ X-Horadric-Port: {dev}
     #[test]
     fn a_task_list_change_from_an_older_build_has_no_tomb() {
         let t = TasksChanged::from_json(br#"{"dir":"C:/dev/app"}"#).unwrap();
-        assert_eq!((t.tomb, t.why), (None, None));
+        assert_eq!((t.tomb, t.why, t.tell), (None, None, None));
     }
 
     #[test]

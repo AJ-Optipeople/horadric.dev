@@ -11,7 +11,7 @@
 
 use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -113,6 +113,12 @@ pub struct Shared {
     /// Each project's Runetome as last read, by project key, the empty
     /// stone last.
     pub tomes: RefCell<HashMap<String, Vec<TomeStone>>>,
+    /// The quests Warriv has, by project key: blocked or tangled ones it
+    /// settles before the human hears of them. None with Warriv off.
+    pub warriv: RefCell<HashMap<String, BTreeSet<String>>>,
+    /// What the quests tile says of Warriv, by project key, and whether it
+    /// reads in the working colour. None while it sleeps with wakes left.
+    pub warriv_line: RefCell<HashMap<String, (String, bool)>>,
 }
 
 impl Shared {
@@ -608,6 +614,9 @@ impl Cluster {
             None => board::row_state(t, None),
         };
         let now = crate::app::unix_now();
+        let ready = horadric_core::tasks::readiness(&b.tasks);
+        let warriv = self.shared.warriv.borrow();
+        let with_warriv = |title: &str| warriv.get(&self.key).is_some_and(|w| w.contains(title));
         let mut items: Vec<Item> = b
             .shown()
             .into_iter()
@@ -616,8 +625,11 @@ impl Cluster {
                 Item {
                     line: t.line,
                     title: t.title.clone(),
-                    state: state(t),
-                    note: board::note(t, now),
+                    state: board::with_warriv(
+                        board::gated(state(t), &ready[i]),
+                        with_warriv(&t.title),
+                    ),
+                    note: board::note(t, &ready[i], now),
                     finish: None,
                     holder: t.holder.clone(),
                 }
@@ -670,6 +682,12 @@ impl Cluster {
         )
     }
 
+    /// What the quests tile says of Warriv, and whether in the working
+    /// colour.
+    fn warriv_line(&self) -> Option<(String, bool)> {
+        self.shared.warriv_line.borrow().get(&self.key).cloned()
+    }
+
     /// The item on the `i`th row showing, counted from the top.
     fn item_at(&self, i: usize) -> Option<Item> {
         let scroll = self.tasks.borrow().scroll;
@@ -687,7 +705,7 @@ impl Cluster {
             &self.shared.metrics,
             n,
             self.collapsed,
-            tasks.as_deref(),
+            tasks.as_deref().map(|a| (a, self.warriv_line().is_some())),
             tome,
             folded,
         )
@@ -721,7 +739,7 @@ impl Cluster {
             m,
             self.sessions().len(),
             self.collapsed,
-            tasks.as_deref(),
+            tasks.as_deref().map(|a| (a, self.warriv_line().is_some())),
             tome,
             body,
         )
@@ -826,7 +844,14 @@ impl Cluster {
         let wanted = self.files.borrow().wanted();
         let tasks = self.task_rows(items.as_deref());
         let tome = self.stone_count(self.stones().as_deref());
-        let mut l = layout::cluster(m, n, self.collapsed, tasks.as_deref(), tome, wanted);
+        let mut l = layout::cluster(
+            m,
+            n,
+            self.collapsed,
+            tasks.as_deref().map(|a| (a, self.warriv_line().is_some())),
+            tome,
+            wanted,
+        );
         let marked: Vec<bool> = {
             let browsing = self.shared.browsing.borrow();
             sessions.iter().map(|s| browsing.contains(&s.id)).collect()
@@ -930,6 +955,7 @@ impl Cluster {
                 scroll: t.scroll,
                 summary: b.map_or_else(String::new, Board::summary),
                 mode: b.map_or_else(|| Mode::default().label().into(), Board::mode_key),
+                warriv: self.warriv_line(),
                 collapsed: t.collapsed,
             }
         });

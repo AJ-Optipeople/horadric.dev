@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::journal::{self, Commit};
 use crate::tasks::{Mark, Task};
+use crate::warriv::Kind;
 use crate::{tombs, Agent};
 
 /// The file, beside `state.json`.
@@ -83,6 +84,85 @@ pub enum Happened {
     Commits { commits: Vec<Commit> },
     /// The quest's branch went into the main tree.
     Merged { branch: String },
+    /// Warriv woke, the session `wake`, and was given these events. Given
+    /// more while awake, it is another line with the same `wake`. None of
+    /// Warriv's lines name a quest holder: they are about the wake.
+    WarrivWoke {
+        wake: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        conversation: String,
+        events: Vec<Woken>,
+    },
+    /// Warriv ran a `quest` command about the quest `title`, from the
+    /// session `wake`.
+    WarrivRan {
+        wake: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        conversation: String,
+        command: Command,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        text: String,
+    },
+    /// The wake closed.
+    WarrivSlept {
+        wake: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        conversation: String,
+        end: WakeEnd,
+        /// The quests it handed to the human.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        handed: Vec<String>,
+    },
+}
+
+/// An event that woke Warriv: its kind and the quest it is about, empty
+/// for one about the whole log.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Woken {
+    pub kind: Kind,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub quest: String,
+}
+
+/// A `quest` command Warriv runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Command {
+    Tell,
+    Note,
+    Add,
+    /// `quest blocked --quest`, a quest handed to the human.
+    Blocked,
+}
+
+/// How a wake closed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WakeEnd {
+    /// Nothing it was given is left for the human.
+    Settled,
+    /// It left quests to the human.
+    HandedOn,
+    /// Its session was killed, or the app quit, before it was done.
+    CutShort,
+}
+
+impl Happened {
+    /// The line for a wake that closed: cut short, or else settled unless
+    /// it left quests to the human.
+    pub fn slept(wake: &str, conversation: &str, cut_short: bool, handed: Vec<String>) -> Self {
+        let end = match (cut_short, handed.is_empty()) {
+            (true, _) => WakeEnd::CutShort,
+            (false, true) => WakeEnd::Settled,
+            (false, false) => WakeEnd::HandedOn,
+        };
+        Self::WarrivSlept {
+            wake: wake.to_string(),
+            conversation: conversation.to_string(),
+            end,
+            handed,
+        }
+    }
 }
 
 /// Where a quest stands, or how it ended.
@@ -185,6 +265,86 @@ pub fn marks(project: &str, old: &[Task], new: &[Task], now: u64) -> Vec<Record>
                 mark: Outcome::of(t.mark),
                 reason: t.reason.clone().unwrap_or_default(),
             }));
+        }
+    }
+    out
+}
+
+/// One wake of Warriv, as the chronicle tells it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WarrivWake {
+    /// The Warriv session's id.
+    pub id: String,
+    /// Its conversation, from whichever line knew it.
+    pub conversation: String,
+    pub woke: u64,
+    /// When it closed, None while it is awake, or when the app that woke
+    /// it ended without a word.
+    pub slept: Option<u64>,
+    pub events: Vec<Woken>,
+    /// Each command it ran, in order: when, what, the quest and the text.
+    pub commands: Vec<(u64, Command, String, String)>,
+    pub end: Option<WakeEnd>,
+    pub handed: Vec<String>,
+}
+
+/// Every wake of Warriv in `project`, oldest first. A session id comes
+/// back each day, so a command or an end belongs to the latest wake of
+/// its id, and a wake line for an id whose wake closed starts a new one.
+pub fn wakes(records: &[Record], project: &str) -> Vec<WarrivWake> {
+    let mut out: Vec<WarrivWake> = Vec::new();
+    for r in records.iter().filter(|r| r.project == project) {
+        let (id, conversation) = match &r.what {
+            Happened::WarrivWoke {
+                wake, conversation, ..
+            }
+            | Happened::WarrivRan {
+                wake, conversation, ..
+            }
+            | Happened::WarrivSlept {
+                wake, conversation, ..
+            } => (wake, conversation),
+            _ => continue,
+        };
+        let open = out
+            .iter()
+            .rposition(|w| &w.id == id)
+            .filter(|&i| out[i].end.is_none());
+        let i = match (open, &r.what) {
+            (Some(i), _) => i,
+            (None, Happened::WarrivWoke { .. }) => {
+                out.push(WarrivWake {
+                    id: id.clone(),
+                    conversation: String::new(),
+                    woke: r.at,
+                    slept: None,
+                    events: Vec::new(),
+                    commands: Vec::new(),
+                    end: None,
+                    handed: Vec::new(),
+                });
+                out.len() - 1
+            }
+            // A command or an end with no wake open, from before the
+            // chronicle heard wakes, has nothing to join.
+            (None, _) => continue,
+        };
+        let w = &mut out[i];
+        if !conversation.is_empty() {
+            w.conversation = conversation.clone();
+        }
+        match &r.what {
+            Happened::WarrivWoke { events, .. } => w.events.extend(events.iter().cloned()),
+            Happened::WarrivRan { command, text, .. } => {
+                w.commands
+                    .push((r.at, *command, r.title.clone(), text.clone()));
+            }
+            Happened::WarrivSlept { end, handed, .. } => {
+                w.slept = Some(r.at);
+                w.end = Some(*end);
+                w.handed = handed.clone();
+            }
+            _ => {}
         }
     }
     out
@@ -294,7 +454,10 @@ pub fn quests(
             q.title = r.title.clone();
         }
         match &r.what {
-            Happened::Added { .. } => {}
+            Happened::Added { .. }
+            | Happened::WarrivWoke { .. }
+            | Happened::WarrivRan { .. }
+            | Happened::WarrivSlept { .. } => {}
             Happened::Accepted { notes } => {
                 q.accepted.get_or_insert(r.at);
                 q.notes = notes.clone();
@@ -335,7 +498,10 @@ pub fn quests(
         let (Some(holder), true) = (&t.holder, t.mark != Mark::Open) else {
             continue;
         };
-        let known = index.contains_key(holder.as_str());
+        // A picked tomb's winner holds the item, but its records are
+        // under the batch.
+        let holder = quest_of(holder);
+        let known = index.contains_key(holder);
         let i = find(&mut out, &mut index, holder, &t.title);
         let q = &mut out[i];
         if q.notes.is_empty() {
@@ -757,6 +923,134 @@ mod tests {
         }
     }
 
+    fn woke(at: u64, wake: &str, quest: &str) -> Record {
+        rec(
+            at,
+            "",
+            "",
+            Happened::WarrivWoke {
+                wake: wake.into(),
+                conversation: String::new(),
+                events: vec![Woken {
+                    kind: Kind::Blocked,
+                    quest: quest.into(),
+                }],
+            },
+        )
+    }
+
+    fn ran(at: u64, wake: &str, command: Command, title: &str, text: &str) -> Record {
+        rec(
+            at,
+            "",
+            title,
+            Happened::WarrivRan {
+                wake: wake.into(),
+                conversation: "c9".into(),
+                command,
+                text: text.into(),
+            },
+        )
+    }
+
+    #[test]
+    fn warriv_lines_read_as_written() {
+        let lines = [
+            woke(1, "warriv-5", "A"),
+            ran(2, "warriv-5", Command::Tell, "A", "Use the port."),
+            rec(3, "", "", Happened::slept("warriv-5", "", true, vec![])),
+        ];
+        let text: String = lines.iter().map(Record::line).collect();
+        assert_eq!(parse(&text), lines);
+        assert!(text.contains(r#""what":"warriv_woke""#));
+        assert!(text.contains(r#""kind":"blocked""#));
+        assert!(text.contains(r#""command":"tell""#));
+        assert!(text.contains(r#""end":"cut_short""#));
+    }
+
+    #[test]
+    fn an_old_chronicle_still_reads() {
+        let old = concat!(
+            r#"{"at":1,"project":"p","quest":"a-1","title":"A","what":"accepted"}"#,
+            "
+",
+            r#"{"at":2,"project":"p","quest":"a-1","what":"marked","mark":"done"}"#,
+            "
+",
+        );
+        let records = parse(old);
+        assert_eq!(records.len(), 2);
+        assert_eq!(quests(&records, &[], "p", &[])[0].outcome, Outcome::Done);
+        assert!(wakes(&records, "p").is_empty());
+    }
+
+    #[test]
+    fn a_wake_ends_settled_handed_on_or_cut_short() {
+        let end = |h: Happened| match h {
+            Happened::WarrivSlept { end, .. } => end,
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            end(Happened::slept("w", "", false, vec![])),
+            WakeEnd::Settled
+        );
+        assert_eq!(
+            end(Happened::slept("w", "", false, vec!["A".into()])),
+            WakeEnd::HandedOn
+        );
+        assert_eq!(
+            end(Happened::slept("w", "", true, vec!["A".into()])),
+            WakeEnd::CutShort
+        );
+    }
+
+    #[test]
+    fn a_wake_gathers_its_events_commands_and_end_and_is_no_quest() {
+        let records = [
+            ran(
+                1,
+                "warriv-5",
+                Command::Note,
+                "A",
+                "before the chronicle heard wakes",
+            ),
+            woke(10, "warriv-5", "A"),
+            accepted(11, "b-1", "B"),
+            ran(12, "warriv-5", Command::Tell, "A", "Use the port."),
+            woke(13, "warriv-5", "B"),
+            ran(14, "warriv-5", Command::Blocked, "B", "Which account?"),
+            rec(
+                15,
+                "",
+                "",
+                Happened::slept("warriv-5", "", false, vec!["B".into()]),
+            ),
+            woke(20, "warriv-5", "C"),
+        ];
+        let w = wakes(&records, "p");
+        assert_eq!(w.len(), 2, "the same id a day later is a new wake");
+        let first = &w[0];
+        assert_eq!((first.woke, first.slept), (10, Some(15)));
+        assert_eq!(first.conversation, "c9");
+        let quests_of: Vec<&str> = first.events.iter().map(|e| e.quest.as_str()).collect();
+        assert_eq!(quests_of, ["A", "B"]);
+        assert_eq!(
+            first.commands,
+            vec![
+                (12, Command::Tell, "A".into(), "Use the port.".into()),
+                (14, Command::Blocked, "B".into(), "Which account?".into()),
+            ]
+        );
+        assert_eq!(
+            (first.end, first.handed.clone()),
+            (Some(WakeEnd::HandedOn), vec!["B".to_string()])
+        );
+        assert_eq!((w[1].woke, w[1].end), (20, None));
+        let q = quests(&records, &[], "p", &[]);
+        assert_eq!(q.len(), 1, "Warriv's lines make no quest");
+        assert_eq!(q[0].id, "b-1");
+    }
+
     #[test]
     fn records_round_trip_and_torn_lines_are_left_out() {
         let r = rec(
@@ -925,6 +1219,18 @@ mod tests {
         assert_eq!((q[0].outcome, q[0].result()), (Outcome::Done, "A is in."));
         assert_eq!(q[0].name, "Tile A");
         assert_eq!((q[1].outcome, q[1].result()), (Outcome::Blocked, "no key"));
+    }
+
+    #[test]
+    fn a_picked_tomb_is_one_quest_under_its_batch() {
+        let records = [
+            accepted(1, "c-1.x3", "C"),
+            marked(5, "c-1.x3", Outcome::Done),
+        ];
+        let list = [task(0, Mark::Done, "C", Some("c-1.x3.2"))];
+        let q = quests(&records, &[], "p", &list);
+        assert_eq!(q.len(), 1);
+        assert_eq!((q[0].accepted, q[0].outcome), (Some(1), Outcome::Done));
     }
 
     fn quest(id: &str, accepted: u64, ended: Option<u64>, outcome: Outcome) -> Quest {

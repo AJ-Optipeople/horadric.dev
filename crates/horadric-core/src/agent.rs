@@ -184,6 +184,19 @@ impl Agent {
         };
         flags.iter().any(|f| has_flag(args, f))
     }
+
+    /// The flags that start it with no permission prompt at all, for a
+    /// quest in a worktree of its own, where a wrong command touches only
+    /// that worktree. Claude's in the `--permission-mode` form its other
+    /// modes take.
+    pub fn bypass_args(self) -> Vec<String> {
+        let flags: &[&str] = match self {
+            Agent::Claude => &["--permission-mode", "bypassPermissions"],
+            Agent::Codex => &["--dangerously-bypass-approvals-and-sandbox"],
+            Agent::Grok => &["--always-approve"],
+        };
+        flags.iter().map(|f| f.to_string()).collect()
+    }
 }
 
 impl Agent {
@@ -958,6 +971,17 @@ mod tests {
         );
         assert_eq!(a.carry_on(None, &args("-m g pong")), args("-m g pong"));
         assert_eq!(a.carry_on(None, &args("--continue pong")), args("pong"));
+    }
+
+    #[test]
+    fn a_bypass_is_a_permission_choice_of_its_own_agent() {
+        for a in Agent::ALL {
+            assert!(a.chosen(Setting::Permissions, &a.bypass_args()));
+        }
+        assert_eq!(
+            Agent::Claude.bypass_args(),
+            args("--permission-mode bypassPermissions")
+        );
     }
 
     #[test]

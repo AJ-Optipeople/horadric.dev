@@ -649,6 +649,8 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
         boards: RefCell::new(HashMap::new()),
         cube: Cell::new(None),
         tomes: RefCell::new(HashMap::new()),
+        warriv: RefCell::new(HashMap::new()),
+        warriv_line: RefCell::new(HashMap::new()),
     });
     menu::init(Rc::clone(&shared));
     let toasts = Toasts::new(Rc::clone(&shared), notify, WM_HORADRIC_TRAY);
@@ -2816,6 +2818,9 @@ impl App {
                             if let Some(tomb) = &t.tomb {
                                 self.tomb_reported(tomb, t.why.as_deref());
                             }
+                            if let (Some(quest), Some(tell)) = (&t.quest, &t.tell) {
+                                self.hear_tell(&t.dir, quest, tell, t.by.as_deref());
+                            }
                             self.refresh_boards(true);
                             self.run_tasks();
                         }
@@ -3784,7 +3789,10 @@ impl App {
                 env.push((TASKS_ENV.into(), folder_key(&cwd.to_string_lossy())));
                 env
             })
-            .unwrap_or_default();
+            // Empty, so one this Horadric was started with, as a dev
+            // instance from a quest's worktree is, never sends `horadric
+            // quest` to another project's list.
+            .unwrap_or_else(|| vec![(TASKS_ENV.into(), String::new())]);
         let serial = self.next_serial;
         self.next_serial += 1;
         let console = Console::spawn(
@@ -3826,23 +3834,25 @@ impl App {
     }
 
     /// What goes before a session's own arguments this time: the defaults
-    /// from the usage window, the status line that feeds it, the tools for
+    /// from the usage window (prompts bypassed for a quest in its own
+    /// worktree), the status line that feeds it, the tools for
     /// the project's browser pane, and what it is told about the task list
     /// and the project's hosts. Only for Claude
     /// Code, not for a shell put in its place with `HORADRIC_AGENT`, and not
     /// over settings the session brought itself.
     fn extra_args(&mut self, id: &str, program: &Path, args: &[String], cwd: &Path) -> Vec<String> {
+        let bypass = self.bypasses_prompts(id);
         if console::agent_of(program) == Some(Agent::Codex) {
             let hook = store::exe_command(&console::host_program(), "hook codex");
             let mut extra = Agent::Codex.hook_args(&hook);
             extra.extend(Agent::Codex.login_args());
             let exe = console::host_program();
             extra.extend(Agent::Codex.mcp_args(&exe.to_string_lossy(), None));
-            extra.extend(
-                self.shared
-                    .defaults_of(Agent::Codex)
-                    .flags(Agent::Codex, args),
-            );
+            extra.extend(self.shared.defaults_of(Agent::Codex).flags_for(
+                Agent::Codex,
+                args,
+                bypass,
+            ));
             return extra;
         }
         // Grok's hook is in its home, written by `install`.
@@ -3850,15 +3860,15 @@ impl App {
             return self
                 .shared
                 .defaults_of(Agent::Grok)
-                .flags(Agent::Grok, args);
+                .flags_for(Agent::Grok, args, bypass);
         }
         if !console::is_claude(program) {
             return Vec::new();
         }
-        let mut extra = self
-            .shared
-            .defaults_of(Agent::Claude)
-            .flags(Agent::Claude, args);
+        let mut extra =
+            self.shared
+                .defaults_of(Agent::Claude)
+                .flags_for(Agent::Claude, args, bypass);
         if let (Some(path), false) = (&self.status_settings, has_flag(args, "--settings")) {
             extra.push("--settings".into());
             extra.push(path.to_string_lossy().into_owned());
@@ -5571,6 +5581,7 @@ impl App {
     /// Saves one last time and stops saving.
     fn freeze(&mut self) {
         self.save();
+        self.cut_wakes_short();
         // Nothing brings an attached pane back, so its host must not
         // outlive this app. The session itself runs on in the daemon.
         if let Ok(r) = self.shared.registry.lock() {

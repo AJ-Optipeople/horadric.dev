@@ -138,6 +138,11 @@ pub struct Session {
     pub since: SystemTime,
     /// The last thing worth showing: a tool name, a question, a final message.
     pub last_line: String,
+    /// The whole of the last turn's final message, for Warriv to read what
+    /// a session that stopped asks. Heard again at the next stop, so not
+    /// saved.
+    #[serde(skip)]
+    pub last_turn: Option<String>,
     pub created: SystemTime,
     /// What the status line last heard: the model and how full the
     /// context is. Gone with the process, so never saved.
@@ -192,6 +197,7 @@ impl Session {
             unseen: false,
             since: now,
             last_line: String::new(),
+            last_turn: None,
             created: now,
             status: None,
             tool: None,
@@ -367,6 +373,7 @@ impl Session {
             "Stop" => {
                 if let Some(m) = &event.last_assistant_message {
                     self.last_line = first_line(m);
+                    self.last_turn = Some(m.clone());
                 }
                 Some(Phase::Done)
             }
@@ -711,6 +718,7 @@ mod tests {
         assert!(s.apply(&stop, now()));
         assert_eq!(s.phase, Phase::Done);
         assert_eq!(s.last_line, "All green.");
+        assert_eq!(s.last_turn.as_deref(), Some("All green.\nDetails..."));
     }
 
     #[test]
