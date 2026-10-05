@@ -267,7 +267,7 @@ Runewords as rune stones in a tile of their own. See "The Runetome" under Next i
 - [ ] Bind the hook listener with SO_EXCLUSIVEADDRUSE and check whether port squatting works (docs/PRIVACY.md item 6)
 - [ ] Add an off switch for the daily update check and say it in the README (docs/PRIVACY.md item 7)
 - [ ] Refuse Origin headers on /horadric/hook too, and check host pipe owners before attaching (docs/PRIVACY.md items 8 and 9)
-- [?] Quest log - Horadric @quest-log-horadric-33953
+- [x] Quest log - Horadric @quest-log-horadric-33953
   Branch the release out to any amount of agents you need and  Build a quest log. My isssue: When i run a quest and it auto-disappears from the QUESTS window, i have no way of going back and checking what the session did or how it ended up, without aasking the main session again. The quest log could de designed as a new window which shows a tree of every quest this tile has ever undertaken, which quests lead to which other quests and where quests converged into main sessions again with a branching diagram. Clicking each quest opens its old quest log, and a ultra-short summary of what the quest achieved and the result of the session. Ship local afterwards, so i can test the app.
 
 ## Runetome feedback
@@ -282,7 +282,9 @@ From the human on 2026-10-01, after using the tome.
   A click on a stone asks whether to cast it, showing what it will do, with a "Do not ask again" check kept in state.json.
 - [x] Review the runeword and Runetome implementation for other quality of life fixes @horadric.dev-78569
   Read the tile, casting and the engine end to end and fix what gets in the way. List what was found and done in the plan.
-- [?] Fold the History menu into the Quest Log window @fold-the-history-menu-into-the-quest-log-36361
+- [x] Fold the History menu into the Quest Log window @fold-the-history-menu-into-the-quest-log-36361
   History (project menu, tray, start window right click; see History in docs/PLAN.md) lists a project's newest Claude Code conversations and resumes one, quests or not. The Quest Log now does the same for quests. Put the conversations no quest holds (transcript::history, same skip rules) on the Quest Log's own timeline, in time order between the quests, as rows on the main line itself (they are the main sessions quests grow from and converge into), drawn with a dot of their own colour and a faint row background so they read apart from quests at a glance. A quest added by one of them branches from its dot. Their detail shows the conversation's title, when it was last touched, and Read the session and Carry it on. Keep the All conversations picker in the window. Asked for by the human on 2026-10-03. Then the project menu, tray and start window offer Quest log... for that project instead of their History submenus, and the History submenu code goes. Check on screen with a dev instance, including a project with no open cluster from the tray.
-- [?] Keep a new quest's text when the input loses focus @keep-a-new-quest-s-text-when-the-input-37605
+- [x] Keep a new quest's text when the input loses focus @keep-a-new-quest-s-text-when-the-input-37605
   The themed input from the quests tile's + (ask.rs, see The task list and Replace the Win32 text dialog in docs/PLAN.md) cancels on a click outside, so clicking away to look something up loses the title and notes typed so far. Asked for by the human on 2026-10-03. A click outside should no longer throw the text away: either keep the input open (only Esc and its own cancel close it), or keep the draft per project and fill it back in the next time + is clicked, cleared once the quest is added. Same for Edit quest. Check on screen with a dev instance: type, click another window, come back, the text is there.
+- [?] Fold Issue @fold-issue-67746
+  I cannot Unfold Files section in the Project tiles. Branch out and fix it, push to PR.
