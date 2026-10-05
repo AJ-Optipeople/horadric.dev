@@ -12,6 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use horadric_core::chronicle::{self, Quest, Talk, WakeEnd, WarrivWake};
 use horadric_core::journal;
+use horadric_core::runeword;
 use horadric_core::tasks::Task;
 use horadric_core::Agent;
 
@@ -62,7 +63,7 @@ impl App {
     }
 
     /// The project's quests, oldest first, with its conversations no quest
-    /// holds among them, and Warriv's wakes.
+    /// holds among them, and Warriv's wakes and errands' casts.
     fn log_of(&self, key: &str) -> (Vec<Quest>, Vec<WarrivWake>) {
         let list = self.list_of(key);
         let records = store::chronicle_all();
@@ -70,13 +71,21 @@ impl App {
         let talks = self.talks_of(key, &quests);
         let mut wakes = chronicle::wakes(&records, key);
         // An app that crashed wrote no end: a wake with none whose session
-        // is gone was cut short.
+        // is gone was cut short. An errand of only commands has none, and
+        // is going while the clock says it is.
         for w in wakes.iter_mut().filter(|w| w.end.is_none()) {
-            if !self.live(&w.id) {
+            let going = match w.errand.is_empty() || runeword::is_errand(&w.id) {
+                true => self.live(&w.id),
+                false => self.errand_running(key, &w.errand),
+            };
+            if !going {
                 w.end = Some(WakeEnd::CutShort);
             }
         }
-        (chronicle::with_talks(quests, &talks), wakes)
+        (
+            chronicle::with_talks(quests, &talks),
+            chronicle::lane(wakes),
+        )
     }
 
     fn quests_of(&self, key: &str) -> Vec<Quest> {

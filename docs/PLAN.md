@@ -3612,8 +3612,9 @@ say:
   `Warriv:` one, and starts again. Enter moves the keyboard to the next
   question not yet told, and the one told reads "told" with its lamp
   out. Tab and the arrows move between questions.
-- **Errands** have no chronicle line yet, so the card has no errands
-  part; part 4 adds both.
+- **Errands** had no chronicle line yet, so the card had no errands
+  part. Part 4 added both: an "errands" part under Warriv's, a line a
+  cast that filed something (its quests) or failed (why).
 - A dev instance treats a file `away-now` in its state folder as coming
   back from an hour away, since an absence can not be tried while
   anyone uses the machine.
@@ -3728,7 +3729,48 @@ finding, and lists the `From:` lines in the log as the cast began
 `{since}` (when none finished yet, the arming or the last cast).
 CLAUDE.md says arming a publishing errand is the human's standing go
 ahead. The stop key's `halt_errands` closes an errand's session too.
-The tome's ring and the chronicle's dots are their own quest.
+
+What the human sees is built (2026-10-05). In the tome an errand stone
+stands in a thin ring, drawn behind the slab, that fills clockwise in
+Warriv's gold from its last cast to its next (`runeword::toward`), full
+while it is cast; unarmed it is the faint track alone. The app paints
+the tome again every 5 seconds while any errand is armed. Hovering adds
+two lines, `runeword::cast_lines`: the last cast and how it ended
+("Last cast at 21:40: failed, it exited with 1", "Casting, begun at
+...", "Not cast yet"), then the next ("Next at 21:42", "Next Sunday at
+12:00"). `Armed` keeps `cast`, when the last cast began (`last` also
+moves on a skip or an arming), and `why` it failed. In the chronicle a
+cast is `errand_cast` (its session, or its label when it has none) and
+`errand_ended` (settled, failed with why, or cut short by the stop key
+or lost with the app), and the `quest` commands an errand's session runs
+are `warriv_ran` lines as Warriv's are. `chronicle::wakes` folds them in
+with Warriv's wakes, with the errand's label, so `wake_dots` puts each
+cast on the lane with lines to the quests it filed. A cast is a small
+square there, not a dot, red when it failed; its detail says when, what
+it filed, what else it did and how it ended. The Runesmith's prompt
+explains `"every"`, `"for"`, `"mode"`, `{since}`, the `From:` rule, and
+that only the human arms a stone. What the plan did not say:
+
+- **Not every cast is a dot.** An errand cast each minute would be a
+  dot a minute. `chronicle::lane` leaves off a cast that ran no command
+  when the next cast of its errand ran none either and ended the same
+  way, so each run of quiet casts, or of failures alike, is one square,
+  its newest. The away card folds the same way.
+- **Nor a line for good.** A cast of only `run` steps is told to the
+  chronicle when it ends, both lines at once, and one that went well is
+  told at most once an hour, so an errand each minute does not grow the
+  chronicle by two lines a minute. A cast with a session is told when it
+  starts, so its square glows while it runs.
+
+Checked on a dev instance of its own (port 4101, scratch `APPDATA`) in
+Skeuomorphism and Flat, with three stones of `run` steps or never armed,
+so no agent started: one each minute that succeeds, one each two minutes
+that fails, and an unarmed one with a `say` step, two of them armed
+through `state.json`, and a seeded chronicle. The rings filled, the
+unarmed track was dim, hovering read the last and next cast, the lane
+showed one square for the quiet errand and one a distinct failure, a
+square's detail read as above with its line to the quest it filed, and
+`away-now` opened the card with the errands part.
 
 Checked on a dev instance of its own (port 4180, scratch `APPDATA`), a
 scratch repository with Haiku and a stone `"every": "2m"` of two `say`

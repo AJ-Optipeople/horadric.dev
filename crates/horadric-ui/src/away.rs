@@ -1,7 +1,8 @@
 //! While you were away: one card on the stage when the human comes back
 //! after a long absence, built from the chronicle. Quests that landed, a
-//! line for each wake of Warriv, what was assumed while Warriv drove, and
-//! last the questions only the human can answer. An assumption and a
+//! line for each wake of Warriv, the errands that filed or failed, what
+//! was assumed while Warriv drove, and last the questions only the human
+//! can answer. An assumption and a
 //! question each have a one line field. Enter on a question does what
 //! `quest tell` does for its quest; on an assumption it overrules it.
 //!
@@ -145,6 +146,12 @@ pub fn rows(projects: &[(String, String, Away)], now: u64) -> (Vec<Row>, Vec<Ans
         if !a.wakes.is_empty() {
             heading(&mut out, name, "Warriv");
             for l in &a.wakes {
+                line(&mut out, Tone::Warriv, l);
+            }
+        }
+        if !a.errands.is_empty() {
+            heading(&mut out, name, "errands");
+            for l in &a.errands {
                 line(&mut out, Tone::Warriv, l);
             }
         }
@@ -840,10 +847,11 @@ mod tests {
     }
 
     #[test]
-    fn landed_then_warriv_then_assumed_then_questions_each_with_a_field() {
+    fn landed_then_warriv_then_errands_then_assumed_then_questions_each_with_a_field() {
         let a = Away {
             landed: vec![line(40, "Serve the API", "Served on 4100")],
             wakes: vec![line(50, "Told \u{201C}A\u{201D}", "")],
+            errands: vec![line(60, "Feedback", "filed \u{201C}B\u{201D}")],
             questions: vec![Question {
                 title: "Pick a port".into(),
                 question: "Which port?".into(),
@@ -865,6 +873,8 @@ mod tests {
                 Tone::Heading,
                 Tone::Warriv,
                 Tone::Heading,
+                Tone::Warriv,
+                Tone::Heading,
                 Tone::Assumed,
                 Tone::Field,
                 Tone::Heading,
@@ -872,13 +882,15 @@ mod tests {
                 Tone::Field,
             ]
         );
-        assert_eq!(rows[4].text, "app \u{00B7} assumed");
-        assert_eq!(rows[5].detail, "port 4100");
+        assert_eq!(rows[4].text, "app \u{00B7} errands");
+        assert_eq!(rows[5].detail, "filed \u{201C}B\u{201D}");
+        assert_eq!(rows[6].text, "app \u{00B7} assumed");
+        assert_eq!(rows[7].detail, "port 4100");
         assert_eq!(rows[0].text, "app \u{00B7} landed");
         assert_eq!(rows[1].kind, CatchupKind::Line { detail: true });
         assert_eq!(rows[3].kind, CatchupKind::Line { detail: false });
         assert_eq!(rows[1].age, "1 min");
-        assert_eq!(rows[9].kind, CatchupKind::Field);
+        assert_eq!(rows[11].kind, CatchupKind::Field);
         assert_eq!(
             answers,
             [

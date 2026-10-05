@@ -121,6 +121,21 @@ pub enum Happened {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         handed: Vec<String>,
     },
+    /// The clock cast the errand `label`. `wake` is its session, or its
+    /// label when it runs only commands and has none. Its quest commands
+    /// are [`Happened::WarrivRan`] lines from that session, and it sits on
+    /// Warriv's lane as a wake does.
+    ErrandCast { wake: String, label: String },
+    /// An errand's cast ended: settled when it went well, failed with
+    /// `why`, or cut short when the human stopped it.
+    ErrandEnded {
+        wake: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        conversation: String,
+        end: WakeEnd,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        why: String,
+    },
     /// A session, or Warriv, made a choice that can be changed later and
     /// wrote it under the quest `title` as an `Assumed:` line, which is
     /// `text` without that word. It names no quest holder.
@@ -157,6 +172,8 @@ pub enum WakeEnd {
     HandedOn,
     /// Its session was killed, or the app quit, before it was done.
     CutShort,
+    /// An errand's cast that failed.
+    Failed,
 }
 
 impl Happened {
@@ -298,11 +315,27 @@ pub struct WarrivWake {
     pub commands: Vec<(u64, Command, String, String)>,
     pub end: Option<WakeEnd>,
     pub handed: Vec<String>,
+    /// The errand's label when this is an errand's cast, not a wake.
+    pub errand: String,
+    /// Why an errand's cast failed.
+    pub why: String,
 }
 
-/// Every wake of Warriv in `project`, oldest first. A session id comes
-/// back each day, so a command or an end belongs to the latest wake of
-/// its id, and a wake line for an id whose wake closed starts a new one.
+impl WarrivWake {
+    /// The quests it filed, in order.
+    pub fn filed(&self) -> Vec<&str> {
+        self.commands
+            .iter()
+            .filter(|(_, c, t, _)| *c == Command::Add && !t.is_empty())
+            .map(|(_, _, t, _)| t.as_str())
+            .collect()
+    }
+}
+
+/// Every wake of Warriv in `project`, and every cast of an errand, oldest
+/// first. A session id comes back each day, so a command or an end belongs
+/// to the latest wake of its id, and a wake line for an id whose wake
+/// closed starts a new one.
 pub fn wakes(records: &[Record], project: &str) -> Vec<WarrivWake> {
     let mut out: Vec<WarrivWake> = Vec::new();
     for r in records.iter().filter(|r| r.project == project) {
@@ -315,16 +348,29 @@ pub fn wakes(records: &[Record], project: &str) -> Vec<WarrivWake> {
             }
             | Happened::WarrivSlept {
                 wake, conversation, ..
+            }
+            | Happened::ErrandEnded {
+                wake, conversation, ..
             } => (wake, conversation),
+            Happened::ErrandCast { wake, .. } => (wake, &String::new()),
             _ => continue,
         };
         let open = out
             .iter()
             .rposition(|w| &w.id == id)
             .filter(|&i| out[i].end.is_none());
+        // A cast is a new one each time: one of its id still open never
+        // heard its end, so the app went down under it.
+        let open = match (open, &r.what) {
+            (Some(i), Happened::ErrandCast { .. }) => {
+                out[i].end = Some(WakeEnd::CutShort);
+                None
+            }
+            (open, _) => open,
+        };
         let i = match (open, &r.what) {
             (Some(i), _) => i,
-            (None, Happened::WarrivWoke { .. }) => {
+            (None, Happened::WarrivWoke { .. } | Happened::ErrandCast { .. }) => {
                 out.push(WarrivWake {
                     id: id.clone(),
                     conversation: String::new(),
@@ -334,6 +380,8 @@ pub fn wakes(records: &[Record], project: &str) -> Vec<WarrivWake> {
                     commands: Vec::new(),
                     end: None,
                     handed: Vec::new(),
+                    errand: String::new(),
+                    why: String::new(),
                 });
                 out.len() - 1
             }
@@ -356,10 +404,43 @@ pub fn wakes(records: &[Record], project: &str) -> Vec<WarrivWake> {
                 w.end = Some(*end);
                 w.handed = handed.clone();
             }
+            Happened::ErrandCast { label, .. } => w.errand = label.clone(),
+            Happened::ErrandEnded { end, why, .. } => {
+                w.slept = Some(r.at);
+                w.end = Some(*end);
+                w.why = why.clone();
+            }
             _ => {}
         }
     }
     out
+}
+
+/// The wakes and casts Warriv's lane shows: every wake, and every cast
+/// that ran a command. A cast that ran none is left off when the next cast
+/// of its errand ran none either and ended the same way, so an errand
+/// cast each minute, or failing each minute, is one dot for the run of
+/// them, its newest, not a dot a minute.
+pub fn lane(wakes: Vec<WarrivWake>) -> Vec<WarrivWake> {
+    let same =
+        |a: &WarrivWake, b: &WarrivWake| b.commands.is_empty() && a.end == b.end && a.why == b.why;
+    let keep: Vec<bool> = wakes
+        .iter()
+        .enumerate()
+        .map(|(i, w)| {
+            w.errand.is_empty()
+                || !w.commands.is_empty()
+                || !wakes[i + 1..]
+                    .iter()
+                    .find(|n| n.errand == w.errand)
+                    .is_some_and(|n| same(w, n))
+        })
+        .collect();
+    wakes
+        .into_iter()
+        .zip(keep)
+        .filter_map(|(w, k)| k.then_some(w))
+        .collect()
 }
 
 /// What happened in a project while the human was away, for the card that
@@ -370,6 +451,9 @@ pub struct Away {
     pub landed: Vec<AwayLine>,
     /// One line a wake of Warriv: what it decided, and why.
     pub wakes: Vec<AwayLine>,
+    /// One line an errand's cast that found something or failed: what it
+    /// filed, or why it failed. A cast that found nothing is no news.
+    pub errands: Vec<AwayLine>,
     /// The quests only the human can move on, in the log's order.
     pub questions: Vec<Question>,
     /// What was assumed, oldest first, for the human to overrule.
@@ -408,6 +492,7 @@ impl Away {
     pub fn happened(&self) -> bool {
         !self.landed.is_empty()
             || !self.wakes.is_empty()
+            || !self.errands.is_empty()
             || !self.assumed.is_empty()
             || self.questions.iter().any(|q| q.new)
     }
@@ -475,11 +560,12 @@ pub fn away(
             _ => {}
         }
     }
-    let wakes = wakes(records, project)
-        .iter()
+    let (casts, wakes): (Vec<WarrivWake>, Vec<WarrivWake>) = wakes(records, project)
+        .into_iter()
         .filter(|w| w.woke >= since || w.slept.is_some_and(|s| s >= since))
-        .map(wake_line)
-        .collect();
+        .partition(|w| !w.errand.is_empty());
+    let wakes = wakes.iter().map(wake_line).collect();
+    let errands = lane(casts).iter().filter_map(errand_line).collect();
     let questions = list
         .iter()
         .filter(|t| {
@@ -503,9 +589,33 @@ pub fn away(
     Away {
         landed,
         wakes,
+        errands,
         questions,
         assumed,
     }
+}
+
+/// An errand's cast in one line, its label over what it filed or why it
+/// failed. None for one that found nothing or is still going.
+fn errand_line(w: &WarrivWake) -> Option<AwayLine> {
+    let filed = w.filed();
+    let detail = match w.end {
+        Some(WakeEnd::Failed) if w.why.is_empty() => "failed".to_string(),
+        Some(WakeEnd::Failed) => format!("failed: {}", w.why),
+        _ if filed.is_empty() => return None,
+        _ => {
+            let titles: Vec<String> = filed
+                .iter()
+                .map(|t| format!("\u{201C}{}\u{201D}", crate::tasks::one_line(t)))
+                .collect();
+            format!("filed {}", titles.join(", "))
+        }
+    };
+    Some(AwayLine {
+        at: w.slept.unwrap_or(w.woke),
+        text: w.errand.clone(),
+        detail,
+    })
 }
 
 /// A wake in one line: what Warriv did, then why, in its own words, or
@@ -698,7 +808,9 @@ pub fn quests(
             Happened::Added { .. }
             | Happened::WarrivWoke { .. }
             | Happened::WarrivRan { .. }
-            | Happened::WarrivSlept { .. } => {}
+            | Happened::WarrivSlept { .. }
+            | Happened::ErrandCast { .. }
+            | Happened::ErrandEnded { .. } => {}
             Happened::Accepted { notes } => {
                 q.accepted.get_or_insert(r.at);
                 q.notes = notes.clone();
@@ -1261,6 +1373,120 @@ mod tests {
                 text: text.into(),
             },
         )
+    }
+
+    fn cast(at: u64, wake: &str, label: &str) -> Record {
+        rec(
+            at,
+            "",
+            "",
+            Happened::ErrandCast {
+                wake: wake.into(),
+                label: label.into(),
+            },
+        )
+    }
+
+    fn cast_ended(at: u64, wake: &str, end: WakeEnd, why: &str) -> Record {
+        rec(
+            at,
+            "",
+            "",
+            Happened::ErrandEnded {
+                wake: wake.into(),
+                conversation: String::new(),
+                end,
+                why: why.into(),
+            },
+        )
+    }
+
+    #[test]
+    fn an_errand_cast_is_a_wake_with_its_label_and_the_quests_it_filed() {
+        let records = [
+            cast(10, "errand-1", "Feedback"),
+            ran(12, "errand-1", Command::Add, "Fix the toast", "From: fb-17"),
+            ran(13, "errand-1", Command::Note, "Other", "seen again"),
+            cast_ended(14, "errand-1", WakeEnd::Settled, ""),
+            cast(20, "Clean", "Clean"),
+            cast_ended(21, "Clean", WakeEnd::Failed, "cargo clean failed"),
+            // The app went down mid cast, and the clock cast it again.
+            cast(30, "errand-2", "Feedback"),
+            cast(40, "errand-2", "Feedback"),
+        ];
+        let w = wakes(&records, "p");
+        assert_eq!(w.len(), 4);
+        assert_eq!(w[0].errand, "Feedback");
+        assert_eq!((w[0].woke, w[0].slept), (10, Some(14)));
+        assert_eq!(w[0].end, Some(WakeEnd::Settled));
+        assert_eq!(w[0].conversation, "c9");
+        assert_eq!(w[0].filed(), ["Fix the toast"]);
+        assert_eq!(
+            (w[1].errand.as_str(), w[1].end, w[1].why.as_str()),
+            ("Clean", Some(WakeEnd::Failed), "cargo clean failed")
+        );
+        assert_eq!((w[2].end, w[2].slept), (Some(WakeEnd::CutShort), None));
+        assert_eq!((w[3].woke, w[3].end), (40, None));
+        assert!(quests(&records, &[], "p", &[]).is_empty());
+    }
+
+    #[test]
+    fn the_lane_folds_each_run_of_casts_that_did_nothing_alike_into_its_newest() {
+        let records = [
+            woke(1, "warriv-1", "A"),
+            cast(10, "Clean", "Clean"),
+            cast_ended(11, "Clean", WakeEnd::Settled, ""),
+            cast(20, "errand-1", "Feedback"),
+            ran(21, "errand-1", Command::Add, "B", ""),
+            cast_ended(22, "errand-1", WakeEnd::Settled, ""),
+            cast(25, "Clean", "Clean"),
+            cast_ended(26, "Clean", WakeEnd::Failed, "exit 1"),
+            cast(30, "Clean", "Clean"),
+            cast_ended(31, "Clean", WakeEnd::Failed, "exit 1"),
+            cast(40, "Clean", "Clean"),
+            cast_ended(41, "Clean", WakeEnd::Settled, ""),
+            cast(50, "Clean", "Clean"),
+            cast_ended(51, "Clean", WakeEnd::Settled, ""),
+            cast(60, "errand-2", "Feedback"),
+            cast_ended(61, "errand-2", WakeEnd::Settled, ""),
+            cast(70, "errand-3", "Feedback"),
+        ];
+        let at: Vec<u64> = lane(wakes(&records, "p")).iter().map(|w| w.woke).collect();
+        assert_eq!(at, [1, 10, 20, 30, 50, 60, 70]);
+    }
+
+    #[test]
+    fn away_tells_the_errands_that_filed_or_failed_apart_from_the_wakes() {
+        let records = [
+            cast(10, "errand-1", "Feedback"),
+            ran(12, "errand-1", Command::Add, "Fix the toast", ""),
+            cast_ended(14, "errand-1", WakeEnd::Settled, ""),
+            cast(20, "errand-2", "Feedback"),
+            cast_ended(21, "errand-2", WakeEnd::Settled, ""),
+            cast(25, "Clean", "Clean"),
+            cast_ended(26, "Clean", WakeEnd::Failed, "it ran past 30m"),
+            cast(30, "Clean", "Clean"),
+            cast_ended(31, "Clean", WakeEnd::Failed, "it ran past 30m"),
+        ];
+        let a = away(&records, "p", &[], &Default::default(), 0);
+        assert!(a.wakes.is_empty());
+        let lines: Vec<(&str, &str)> = a
+            .errands
+            .iter()
+            .map(|l| (l.text.as_str(), l.detail.as_str()))
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                ("Feedback", "filed \u{201C}Fix the toast\u{201D}"),
+                ("Clean", "failed: it ran past 30m"),
+            ]
+        );
+        assert!(a.happened());
+        assert_eq!(a.errands[1].at, 31, "a run of failures alike is one line");
+        // A cast that found nothing is no news.
+        let quiet = away(&records[3..5], "p", &[], &Default::default(), 0);
+        assert!(!quiet.happened());
     }
 
     #[test]
@@ -1882,6 +2108,8 @@ mod tests {
                 .collect(),
             end: None,
             handed: handed.iter().map(|t| t.to_string()).collect(),
+            errand: String::new(),
+            why: String::new(),
         };
         let wakes = [
             wake(5, &["A"], &[], &[]),

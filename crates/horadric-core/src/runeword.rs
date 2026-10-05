@@ -30,8 +30,8 @@ mod errand;
 mod stone;
 pub use edit::unwrite;
 pub use errand::{
-    arm_text, describe, due, every, is_errand, length, since, span, tick, Armed, Clocked, Errand,
-    Every, Tick, FOR_DEFAULT, ID as ERRAND_ID,
+    arm_text, cast_lines, describe, due, every, is_errand, length, since, span, tick, toward,
+    Armed, Clocked, Errand, Every, Tick, FOR_DEFAULT, ID as ERRAND_ID,
 };
 pub use stone::{
     ask_text, carve, fingerprint, name, reforge_prompt, smith_prompt, tip, Carving, Stroke,

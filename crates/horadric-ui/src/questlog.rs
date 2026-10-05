@@ -17,6 +17,7 @@ use std::ffi::c_void;
 use std::rc::Rc;
 
 use horadric_core::chronicle::{self, Command, Outcome, Quest, Row, WakeDot, WakeEnd, WarrivWake};
+use horadric_core::runeword;
 use horadric_core::warriv::Kind;
 use horadric_core::Agent;
 use windows::core::{w, Result, BOOL, PCWSTR};
@@ -527,6 +528,7 @@ pub fn end_word(end: Option<WakeEnd>) -> &'static str {
         Some(WakeEnd::Settled) => "settled",
         Some(WakeEnd::HandedOn) => "handed on",
         Some(WakeEnd::CutShort) => "cut short",
+        Some(WakeEnd::Failed) => "failed",
     }
 }
 
@@ -538,6 +540,7 @@ pub fn end_color(end: Option<WakeEnd>) -> Color {
         Some(WakeEnd::Settled) => theme::done(),
         Some(WakeEnd::HandedOn) => theme::error(),
         Some(WakeEnd::CutShort) => theme::idle(),
+        Some(WakeEnd::Failed) => theme::error(),
     }
 }
 
@@ -600,6 +603,9 @@ fn about(title: &str, text: &str) -> String {
 /// and how long, what woke it, each command in order, and how it ended,
 /// with the question for each quest it handed on.
 pub fn wake_detail(w: &WarrivWake, quests: &[Quest], now: u64, offset: i64) -> QuestDetail {
+    if !w.errand.is_empty() {
+        return cast_detail(w, now, offset);
+    }
     let mut facts: Vec<(&'static str, String)> = vec![("Woke", when(w.woke, now, offset))];
     match (w.end, w.slept) {
         (None, _) => facts.push(("Awake for", duration(now.saturating_sub(w.woke)))),
@@ -644,6 +650,8 @@ pub fn wake_detail(w: &WarrivWake, quests: &[Quest], now: u64, offset: i64) -> Q
         None => "Still at it.".to_string(),
         Some(WakeEnd::Settled) => "Nothing it was given was left for the human.".into(),
         Some(WakeEnd::CutShort) => "Its session closed before it was done.".into(),
+        // Only an errand's cast fails, and that has a detail of its own.
+        Some(WakeEnd::Failed) => "It failed.".into(),
         Some(WakeEnd::HandedOn) => match w.handed.len() {
             1 => "It left 1 quest to the human.".into(),
             n => format!("It left {n} quests to the human."),
@@ -684,10 +692,93 @@ pub fn wake_detail(w: &WarrivWake, quests: &[Quest], now: u64, offset: i64) -> Q
     }
 }
 
+/// What the section beside the list says about an errand's cast: when and
+/// how long, the quests it filed, the rest it did, and how it ended.
+fn cast_detail(w: &WarrivWake, now: u64, offset: i64) -> QuestDetail {
+    let mut facts: Vec<(&'static str, String)> = vec![("Cast", when(w.woke, now, offset))];
+    match (w.end, w.slept) {
+        (None, _) => facts.push(("Running for", duration(now.saturating_sub(w.woke)))),
+        (_, Some(at)) => {
+            facts.push(("Ended", when(at, now, offset)));
+            facts.push(("Took", duration(at.saturating_sub(w.woke))));
+        }
+        (_, None) => {}
+    }
+    if runeword::is_errand(&w.id) {
+        facts.push(("Session", w.id.clone()));
+    }
+    let mut filed: Vec<(String, String)> = w
+        .commands
+        .iter()
+        .filter(|(_, c, t, _)| *c == Command::Add && !t.is_empty())
+        .map(|(at, _, title, text)| (clock(*at, offset), about(title, text)))
+        .collect();
+    if filed.is_empty() {
+        filed.push((String::new(), "Nothing.".into()));
+    }
+    let rest: Vec<(String, String)> = w
+        .commands
+        .iter()
+        .filter(|(_, c, _, _)| *c != Command::Add)
+        .map(|(at, c, title, text)| {
+            (
+                format!("{} {}", clock(*at, offset), command_word(*c)),
+                about(title, text),
+            )
+        })
+        .collect();
+    let said = match w.end {
+        None => "Still at it.".to_string(),
+        Some(WakeEnd::Failed) if w.why.is_empty() => "It failed.".into(),
+        Some(WakeEnd::Failed) => format!("It failed: {}.", w.why),
+        Some(WakeEnd::CutShort) => "It was stopped before it was done.".into(),
+        Some(_) => "Every step was cast.".into(),
+    };
+    let mut lists = vec![DetailList {
+        name: "WHAT IT FILED",
+        lead: warriv_color(),
+        items: filed,
+    }];
+    if !rest.is_empty() {
+        lists.push(DetailList {
+            name: "WHAT ELSE IT DID",
+            lead: theme::legend(),
+            items: rest,
+        });
+    }
+    lists.push(DetailList {
+        name: "HOW IT ENDED",
+        lead: end_color(w.end),
+        items: vec![(end_word(w.end).to_string(), said)],
+    });
+    QuestDetail {
+        title: format!("Errand {}", w.errand),
+        word: end_word(w.end),
+        color: end_color(w.end),
+        facts,
+        result: String::new(),
+        notes: String::new(),
+        commits: Vec::new(),
+        main: false,
+        wake: true,
+        lists,
+        added: Vec::new(),
+        can_read: !w.conversation.is_empty(),
+        can_carry: false,
+    }
+}
+
 /// The page "Read the session" opens for a wake: its story, then the
 /// conversation.
 pub fn wake_doc(w: &WarrivWake, quests: &[Quest], transcript: &str) -> String {
-    let mut out = format!("# Warriv's wake\n\n**{}**\n\n", end_word(w.end));
+    let title = match w.errand.as_str() {
+        "" => "Warriv's wake".to_string(),
+        label => format!("Errand {label}"),
+    };
+    let mut out = format!("# {title}\n\n**{}**\n\n", end_word(w.end));
+    if !w.why.is_empty() {
+        out.push_str(&format!("- failed: {}\n", w.why));
+    }
     for e in &w.events {
         let quest = if e.quest.is_empty() {
             "the whole log".to_string()
@@ -1188,6 +1279,7 @@ impl QuestLog {
                 at: d.at,
                 touched: d.touched.clone(),
                 end: data.wakes.get(d.wake).and_then(|w| w.end),
+                errand: data.wakes.get(d.wake).is_some_and(|w| !w.errand.is_empty()),
             })
             .collect();
         let detail = match picked_dot.and_then(|d| data.wakes.get(data.dots[d].wake)) {
@@ -2008,6 +2100,8 @@ mod tests {
             ],
             end,
             handed: vec!["B".into(), "C".into()],
+            errand: String::new(),
+            why: String::new(),
         }
     }
 
@@ -2101,6 +2195,53 @@ mod tests {
         assert_eq!(d.lists[1].items[0].1, "Ran no commands.");
         assert!(!d.can_read);
         assert_ne!(warriv_color(), conversation_color());
+    }
+
+    #[test]
+    fn an_errands_cast_tells_what_it_filed_and_how_it_ended() {
+        // 2026-10-03 12:00 UTC.
+        let now = 1_791_028_800;
+        let mut w = wake(now - 3600, Some(WakeEnd::Failed));
+        w.id = "errand-3".into();
+        w.errand = "Feedback".into();
+        w.why = "it ran past 30m".into();
+        w.events.clear();
+        w.commands = vec![
+            (
+                now - 3570,
+                Command::Add,
+                "Fix the toast".into(),
+                "From: fb-1".into(),
+            ),
+            (
+                now - 3560,
+                Command::Note,
+                "Other".into(),
+                "seen again".into(),
+            ),
+        ];
+        let d = wake_detail(&w, &[], now, 0);
+        assert_eq!(d.title, "Errand Feedback");
+        assert_eq!((d.word, d.wake), ("failed", true));
+        assert_eq!(d.facts[0], ("Cast", "today 11:00".to_string()));
+        assert_eq!(d.facts[3], ("Session", "errand-3".to_string()));
+        let names: Vec<&str> = d.lists.iter().map(|l| l.name).collect();
+        assert_eq!(names, ["WHAT IT FILED", "WHAT ELSE IT DID", "HOW IT ENDED"]);
+        assert_eq!(
+            d.lists[0].items,
+            [("11:00".to_string(), "Fix the toast: From: fb-1".to_string())]
+        );
+        assert_eq!(d.lists[2].items[0].1, "It failed: it ran past 30m.");
+        // One of only commands has no session, and found nothing.
+        w.id = "Feedback".into();
+        w.commands.clear();
+        w.end = Some(WakeEnd::Settled);
+        let d = wake_detail(&w, &[], now, 0);
+        assert!(d.facts.iter().all(|(k, _)| *k != "Session"));
+        assert_eq!(d.lists.len(), 2);
+        assert_eq!(d.lists[0].items[0].1, "Nothing.");
+        assert_eq!(d.lists[1].items[0].1, "Every step was cast.");
+        assert!(wake_doc(&w, &[], "").starts_with("# Errand Feedback\n\n**settled**"));
     }
 
     #[test]

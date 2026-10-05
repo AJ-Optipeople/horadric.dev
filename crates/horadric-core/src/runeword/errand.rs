@@ -277,6 +277,13 @@ pub struct Armed {
     /// The session the running cast has, for steps that need one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session: Option<String>,
+    /// When its last cast began, None until one has. Unlike `last` it does
+    /// not move when a cast is skipped or the errand armed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cast: Option<u64>,
+    /// Why its last cast failed, while `failed`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub why: String,
 }
 
 impl Armed {
@@ -289,6 +296,8 @@ impl Armed {
             failed: false,
             running: false,
             session: None,
+            cast: None,
+            why: String::new(),
         }
     }
 
@@ -371,6 +380,70 @@ pub fn tick(errands: &[Clocked], now: u64, offset: i64, full: Option<Full>) -> V
         .map(|(_, e)| Tick::Cast(e.label.clone()))
         .into_iter()
         .collect()
+}
+
+/// How far an errand is toward its next cast, 0 just cast and 1 due, for
+/// the ring round its stone. `next` is [`due`] from `last`.
+pub fn toward(last: u64, next: u64, now: u64) -> f32 {
+    if next <= last {
+        return 1.0;
+    }
+    (now.saturating_sub(last) as f64 / (next - last) as f64).clamp(0.0, 1.0) as f32
+}
+
+/// What hovering an armed errand says of its casts: the last one and how
+/// it ended, then the next, in the local time `offset` seconds ahead of
+/// UTC.
+pub fn cast_lines(armed: &Armed, every: Every, now: u64, offset: i64) -> Vec<String> {
+    let last = match armed.cast {
+        None => "Not cast yet".to_string(),
+        Some(at) if armed.running => format!("Casting, begun {}", moment(at, now, offset)),
+        Some(at) if armed.failed && !armed.why.is_empty() => {
+            format!(
+                "Last cast {}: failed, {}",
+                moment(at, now, offset),
+                armed.why
+            )
+        }
+        Some(at) if armed.failed => format!("Last cast {}: failed", moment(at, now, offset)),
+        Some(at) => format!("Last cast {}: ended well", moment(at, now, offset)),
+    };
+    let next = due(every, armed.last, offset);
+    let next = if armed.running {
+        "Next once this one ends".to_string()
+    } else if next <= now {
+        "Next now".to_string()
+    } else {
+        format!("Next {}", moment(next, now, offset))
+    };
+    vec![last, next]
+}
+
+/// A moment near `now` in the fewest words: "at 14:05" today, "yesterday
+/// at 14:05", "Sunday at 12:00" within the week, else "on 2026-10-01 at
+/// 14:05".
+fn moment(at: u64, now: u64, offset: i64) -> String {
+    let local = at as i64 + offset;
+    let (day, today) = (
+        local.div_euclid(86_400),
+        (now as i64 + offset).div_euclid(86_400),
+    );
+    let secs = local.rem_euclid(86_400);
+    let time = format!("{:02}:{:02}", secs / 3600, secs % 3600 / 60);
+    match day - today {
+        0 => format!("at {time}"),
+        -1 => format!("yesterday at {time}"),
+        1 => format!("tomorrow at {time}"),
+        2..=6 => {
+            let mut name = DAYS[usize::from(weekday(day))].to_string();
+            name[..1].make_ascii_uppercase();
+            format!("{name} at {time}")
+        }
+        _ => {
+            let date = crate::tasks::utc(day.max(0) as u64 * 86_400);
+            format!("on {} at {time}", &date[..10])
+        }
+    }
 }
 
 /// What the human reads before arming an errand: what it is for, when it
@@ -499,6 +572,8 @@ mod tests {
                 failed: false,
                 running: false,
                 session: None,
+                cast: None,
+                why: String::new(),
             },
         }
     }
@@ -661,5 +736,58 @@ mod tests {
         a.finished = Some(900);
         a.last = 2000;
         assert_eq!(a.since(), 900);
+    }
+
+    #[test]
+    fn the_ring_fills_from_the_last_cast_to_the_next() {
+        assert_eq!(toward(1000, 2000, 1000), 0.0);
+        assert_eq!(toward(1000, 2000, 1500), 0.5);
+        assert_eq!(toward(1000, 2000, 9000), 1.0);
+        assert_eq!(toward(1000, 2000, 10), 0.0);
+        assert_eq!(toward(1000, 1000, 1000), 1.0);
+    }
+
+    #[test]
+    fn hovering_says_the_last_cast_how_it_ended_and_the_next() {
+        let now = MONDAY + 10 * HOUR;
+        let mut a = clocked("A", Every::Span(HOUR), now - 20 * 60).armed;
+        let lines = |a: &Armed| cast_lines(a, Every::Span(HOUR), now, 0);
+        assert_eq!(lines(&a), ["Not cast yet", "Next at 10:40"]);
+        a.cast = Some(now - 20 * 60);
+        assert_eq!(
+            lines(&a),
+            ["Last cast at 09:40: ended well", "Next at 10:40"]
+        );
+        a.failed = true;
+        a.why = "it ran past 30m".into();
+        assert_eq!(lines(&a)[0], "Last cast at 09:40: failed, it ran past 30m");
+        a.running = true;
+        assert_eq!(
+            lines(&a),
+            ["Casting, begun at 09:40", "Next once this one ends"]
+        );
+        a.running = false;
+        a.last = now - 2 * HOUR;
+        assert_eq!(lines(&a)[1], "Next now");
+    }
+
+    #[test]
+    fn a_moment_reads_as_today_a_near_day_or_a_date() {
+        let now = MONDAY + 10 * HOUR;
+        assert_eq!(moment(now + HOUR, now, 0), "at 11:00");
+        // Two hours ahead, 23:00 UTC is already tomorrow.
+        assert_eq!(
+            moment(now + 13 * HOUR, now, 2 * HOUR as i64),
+            "tomorrow at 01:00"
+        );
+        assert_eq!(moment(now - 24 * HOUR, now, 0), "yesterday at 10:00");
+        assert_eq!(
+            moment(MONDAY + 6 * 24 * HOUR + 12 * HOUR, now, 0),
+            "Sunday at 12:00"
+        );
+        assert_eq!(
+            moment(MONDAY + 9 * 24 * HOUR, now, 0),
+            "on 2026-10-14 at 00:00"
+        );
     }
 }
