@@ -216,6 +216,25 @@ pub fn checked_out(main: &Path) -> Option<String> {
         .filter(|b| !b.is_empty() && b != "HEAD")
 }
 
+/// Commits the file `rel` in the main tree `main` by itself, leaving
+/// whatever else is staged there to the sessions that staged it. True when
+/// there was something to commit. Nothing on a detached head, or where git
+/// ignores the file.
+pub fn commit_file(main: &Path, rel: &str, message: &str) -> Result<bool, String> {
+    if git(main, &["status", "--porcelain", "--", rel])?
+        .trim()
+        .is_empty()
+    {
+        return Ok(false);
+    }
+    if checked_out(main).is_none() {
+        return Err("the main tree is not on a branch".to_string());
+    }
+    git(main, &["add", "--", rel])?;
+    git(main, &["commit", "--only", "-m", message, "--", rel])?;
+    Ok(true)
+}
+
 /// Merges `branch` into what the main tree has checked out, always with a
 /// merge commit so the item stays one piece in the history, and then
 /// deletes the branch. A merge that stops on a conflict is undone, so the

@@ -538,6 +538,150 @@ pub fn add_below(text: &str, name: &str, title: &str, notes: &str) -> Result<Str
     Ok(insert_with_notes(text, end_of(text, t.line), title, notes))
 }
 
+/// Warriv's memory, from the project folder: what one session leaves the
+/// next, committed with the project so it travels with the repository.
+pub const MEMORY: &str = ".horadric/warriv.md";
+
+/// Past this many lines the memory is compacted, so it stays something a
+/// session reads whole before it starts.
+pub const MEMORY_LINES: usize = 200;
+
+/// What a line in the memory's Open part starts with when it holds the
+/// human's answer to a question Warriv handed on.
+pub const ANSWERED: &str = "- Answered: ";
+
+const RULES: &str = "## Rules";
+const LATELY: &str = "## Lately";
+const OPEN: &str = "## Open";
+
+/// A memory with nothing in it yet.
+pub fn blank_memory() -> String {
+    format!("# Warriv's memory\n\n{RULES}\n\n{LATELY}\n\n{OPEN}\n")
+}
+
+/// Whether the memory has grown past [`MEMORY_LINES`].
+pub fn compact_due(memory: &str) -> bool {
+    memory.lines().count() > MEMORY_LINES
+}
+
+/// How many answers from the human wait in the memory to become rules.
+fn answers(memory: &str) -> usize {
+    memory
+        .lines()
+        .filter(|l| l.trim_start().starts_with(ANSWERED))
+        .count()
+}
+
+/// What every Warriv session is told about its memory, `file` from the
+/// project folder, given what the memory holds now, or `None` when there
+/// is none yet. Read and written by the session itself, so the prompt
+/// says how rather than carrying it.
+pub fn memory_prompt(file: &str, memory: Option<&str>) -> String {
+    let mut out = format!(
+        "Your memory is {file}, kept between your sessions. Read it before anything \
+         else and follow its rules. Write to it last, before you stop, with your file \
+         tools; it is the one file you edit that way. Horadric commits it when you stop, \
+         so do not commit it yourself. It has three parts:\n\
+         - {RULES}: how this project wants things done, one line each. Add one when the \
+         human settles a kind of question, or when you learn what every later session \
+         should know.\n\
+         - {LATELY}: what you did and why, newest first, one line each that starts with \
+         the date, like `- 2026-10-05 Told \"Port\" to use 4210, as the plan says.` Add a \
+         line for this session even when it changed nothing.\n\
+         - {OPEN}: what you wait to see, one line each: the questions you handed to the \
+         human and what to check next time. Remove a line once it is settled."
+    );
+    let Some(memory) = memory.filter(|m| !m.trim().is_empty()) else {
+        out.push_str(
+            "\nIt does not exist yet: create it with a `# Warriv's memory` title and \
+             those three headings.",
+        );
+        return out;
+    };
+    match answers(memory) {
+        0 => {}
+        n => out.push_str(&format!(
+            "\n{OPEN} holds {} starting `{}`: the human's answer to a question you \
+             handed on. Write each as a rule under {RULES}, worded so the same kind of \
+             question never has to be asked again, then remove the line.",
+            if n == 1 { "a line" } else { "lines" },
+            ANSWERED.trim_start_matches("- ").trim_end()
+        )),
+    }
+    if compact_due(memory) {
+        out.push_str(&format!(
+            "\nIt is {} lines, past {MEMORY_LINES}: compact it before you stop. Keep every \
+             rule, merging those that say the same, and keep {OPEN}. Keep the newest twenty \
+             lines of {LATELY} as they are and fold the older ones into a line a day or a \
+             week, until the file is under {} lines.",
+            memory.lines().count(),
+            MEMORY_LINES * 3 / 4
+        ));
+    }
+    out
+}
+
+/// `memory` with the human's answer to the question Warriv handed on
+/// about `title` added to its Open part, for the next wake to make a rule
+/// of. `None` when the quest went on without words Horadric heard.
+pub fn with_answer(memory: &str, title: &str, question: &str, answer: Option<&str>) -> String {
+    let line = match answer.map(one_line).filter(|a| !a.is_empty()) {
+        Some(a) => format!(
+            "{ANSWERED}on \"{}\" you asked \"{}\". The human said: {a}",
+            one_line(title),
+            one_line(question)
+        ),
+        None => format!(
+            "{ANSWERED}on \"{}\" you asked \"{}\". The human settled it without words \
+             Horadric heard: read the quest and its notes for how.",
+            one_line(title),
+            one_line(question)
+        ),
+    };
+    let memory = if memory.trim().is_empty() {
+        blank_memory()
+    } else {
+        memory.to_string()
+    };
+    let mut lines: Vec<&str> = memory.lines().collect();
+    let at = match lines.iter().position(|l| l.trim_end() == OPEN) {
+        Some(head) => {
+            // After the part's last line, before the next heading.
+            let end = lines[head + 1..]
+                .iter()
+                .position(|l| l.starts_with("## "))
+                .map_or(lines.len(), |i| head + 1 + i);
+            let last = lines[head + 1..end]
+                .iter()
+                .rposition(|l| !l.trim().is_empty())
+                .map_or(head, |i| head + 1 + i);
+            if last > head {
+                last + 1
+            } else {
+                if !lines.get(head + 1).is_some_and(|l| l.trim().is_empty()) {
+                    lines.insert(head + 1, "");
+                }
+                head + 2
+            }
+        }
+        None => {
+            if lines.last().is_some_and(|l| !l.trim().is_empty()) {
+                lines.push("");
+            }
+            lines.push(OPEN);
+            lines.push("");
+            lines.len()
+        }
+    };
+    lines.insert(at, &line);
+    if lines.get(at + 1).is_some_and(|l| l.starts_with("## ")) {
+        lines.insert(at + 1, "");
+    }
+    let mut out = lines.join("\n");
+    out.push('\n');
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1001,5 +1145,85 @@ mod tests {
 - [ ] Two
 "
         );
+    }
+
+    #[test]
+    fn the_memory_prompt_says_how_to_read_and_write_it() {
+        let p = memory_prompt(MEMORY, Some(&blank_memory()));
+        assert!(p.starts_with("Your memory is .horadric/warriv.md,"));
+        for part in ["## Rules", "## Lately", "## Open"] {
+            assert!(p.contains(part), "{part}");
+        }
+        assert!(p.contains("Read it before anything else"));
+        assert!(p.contains("Write to it last"));
+        assert!(p.contains("do not commit it yourself"));
+        assert!(!p.contains("does not exist"));
+        assert!(!p.contains("compact"));
+        assert!(!p.contains("Answered"));
+    }
+
+    #[test]
+    fn with_no_memory_it_is_told_to_make_one() {
+        for m in [None, Some(""), Some("  \n")] {
+            assert!(memory_prompt(MEMORY, m).contains("It does not exist yet"));
+        }
+    }
+
+    #[test]
+    fn a_memory_past_two_hundred_lines_is_compacted() {
+        let mut m = blank_memory();
+        while m.lines().count() < MEMORY_LINES {
+            m.push_str("- 2026-10-05 Did a thing.\n");
+        }
+        assert!(!compact_due(&m));
+        assert!(!memory_prompt(MEMORY, Some(&m)).contains("compact it"));
+        m.push_str("- 2026-10-05 One more.\n");
+        assert!(compact_due(&m));
+        let p = memory_prompt(MEMORY, Some(&m));
+        assert!(p.contains("It is 201 lines, past 200: compact it before you stop."));
+        assert!(p.contains("under 150 lines"));
+    }
+
+    #[test]
+    fn an_answer_goes_under_open_and_the_prompt_makes_it_a_rule() {
+        let m = with_answer(
+            &blank_memory(),
+            "Port",
+            "Which\nport?",
+            Some("4210,\nalways"),
+        );
+        assert_eq!(
+            m,
+            "# Warriv's memory\n\n## Rules\n\n## Lately\n\n## Open\n\n\
+             - Answered: on \"Port\" you asked \"Which port?\". The human said: 4210, always\n"
+        );
+        let p = memory_prompt(MEMORY, Some(&m));
+        assert!(p.contains("## Open holds a line starting `Answered:`"));
+        assert!(p.contains("Write each as a rule under ## Rules"));
+        let two = with_answer(&m, "Pay", "Which account?", None);
+        assert!(memory_prompt(MEMORY, Some(&two)).contains("holds lines starting"));
+        assert!(two.ends_with("Horadric heard: read the quest and its notes for how.\n"));
+    }
+
+    #[test]
+    fn an_answer_goes_after_what_open_holds_and_before_the_next_part() {
+        let m = "# M\n\n## Open\n\n- Watch CI.\n\n## Rules\n\n- Be brief.\n";
+        assert_eq!(
+            with_answer(m, "A", "Q?", Some("Yes")),
+            "# M\n\n## Open\n\n- Watch CI.\n\
+             - Answered: on \"A\" you asked \"Q?\". The human said: Yes\n\n\
+             ## Rules\n\n- Be brief.\n"
+        );
+        assert_eq!(
+            with_answer("# M\n\n## Open\n## Rules\n", "A", "Q?", Some("Yes")),
+            "# M\n\n## Open\n\n- Answered: on \"A\" you asked \"Q?\". The human said: Yes\n\n\
+             ## Rules\n"
+        );
+        assert_eq!(
+            with_answer("# M\n\n## Rules\n- Be brief.\n", "A", "Q?", Some("Yes")),
+            "# M\n\n## Rules\n- Be brief.\n\n## Open\n\n\
+             - Answered: on \"A\" you asked \"Q?\". The human said: Yes\n"
+        );
+        assert!(with_answer("", "A", "Q?", None).starts_with(&blank_memory()));
     }
 }

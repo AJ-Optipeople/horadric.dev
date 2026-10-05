@@ -3644,6 +3644,30 @@ answer as a rule, so the same kind of question never comes twice.
 Committed with the project, so it travels with the repository and its
 history shows how Warriv's judgment grew. `warriv::memory_prompt` and
 the compaction rule are pure and tested.
+**Built on 2026-10-05**, for the wake, the one Warriv session there is
+yet: rounds, the reviewer and errands push `warriv::memory_prompt` onto
+their system prompt the same way. The session reads and writes the file
+itself, so the prompt says how instead of carrying it; it is the one
+file Warriv may edit (`Edit(./.horadric/warriv.md)` is in its allowed
+tools, and covers writing it too; Claude Code refuses a `Write(...)`
+rule). Past `MEMORY_LINES` (200) the prompt asks for a compaction to
+under 150: every rule and Open kept, the newest twenty Lately lines as
+they are, older ones folded a line a day or week. The app commits the
+file alone (`git commit --only`) when a wake closes. A handed on
+question is noted with when Horadric first saw it; the next prompt into
+its quest's session, or a `quest tell` from the human, is the answer,
+and Horadric writes it into Open as an `- Answered:` line
+(`warriv::with_answer`). The next wake's prompt says to make each such
+line a rule and remove it. A quest that goes on without words Horadric
+heard leaves a line that says to read the quest's notes. An answer is
+kept once, though the quest still reads as blocked on it a moment after.
+Seen on a dev instance with Haiku in a scratch repository: the first
+wake created the memory with a Lately line and the question in Open,
+and the app committed it alone; a `quest tell` from the human became an
+`Answered:` line; the next wake made it the rule "anything under 50 EUR
+a year goes on the company Visa" and settled a new quest by it without
+asking. The prompt names the memory by its whole path, since Haiku read
+a relative one against a parent folder, and says not to commit it.
 
 **2. Rounds.** While Warriv drives, a round every hour, after each
 landing and when the human leaves: a Warriv session that looks at the

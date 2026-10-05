@@ -29,7 +29,25 @@ use crate::window::{folder_key, project_name};
 pub(in crate::app) struct Camp {
     desk: Desk,
     awake: Option<Awake>,
+    /// The questions Warriv handed to the human, by quest, until the
+    /// human answers.
+    asked: HashMap<String, Asked>,
+    /// The questions answered while their quest still reads as blocked
+    /// on them, by quest and question, so each answer is kept once.
+    answered: HashSet<(String, String)>,
 }
+
+/// A question Warriv handed on, and since when Horadric knows of it, so
+/// only a prompt after that is the human's answer.
+struct Asked {
+    question: String,
+    holder: String,
+    since: SystemTime,
+}
+
+/// The commit message the memory is kept with.
+const MEMORY_COMMIT: &str = "Warriv's memory after a wake\n\n\
+    What Warriv did and learned, kept with the project so the next wake reads it.";
 
 /// A Warriv session at work.
 struct Awake {
@@ -136,9 +154,11 @@ impl App {
             .collect();
         let now = warriv::events(&b.tasks, b.mode, &asks);
         let mut camp = self.tasks.warriv.camps.remove(key).unwrap_or_default();
+        self.hear_answers(key, b, &mut camp);
         if let Some(a) = camp.awake.take_if(|a| !self.live(&a.id)) {
             let handed = camp.retire(&a, &now, &b.tasks);
             self.record_wake(key, &a.id, Happened::slept(&a.id, "", true, handed));
+            self.keep_memory(key);
         }
         camp.desk.hear(now.clone(), camp.awake.is_some());
         let mut closed = self.wake(key, b, &mut camp, &now);
@@ -234,6 +254,91 @@ impl App {
         let handed = camp.retire(&a, now, &b.tasks);
         self.record_wake(key, &a.id, Happened::slept(&a.id, "", false, handed));
         self.forget(&a.id);
+        self.keep_memory(key);
+    }
+
+    /// Commits what the wake wrote to Warriv's memory, off the UI thread.
+    fn keep_memory(&self, key: &str) {
+        let Some(dir) = self.project_dir(key) else {
+            return;
+        };
+        std::thread::spawn(move || {
+            if let Err(e) = crate::worktree::commit_file(&dir, warriv::MEMORY, MEMORY_COMMIT) {
+                eprintln!("horadric: cannot commit Warriv's memory: {e}");
+            }
+        });
+    }
+
+    /// Notes each question Warriv handed on, and once the human answers
+    /// one, by a prompt into its quest's session or by the quest going on
+    /// some other way, puts the answer in Warriv's memory, where the next
+    /// wake makes a rule of it.
+    fn hear_answers(&self, key: &str, b: &Board, camp: &mut Camp) {
+        let asking: Vec<(&str, &str, &str)> = b
+            .tasks
+            .iter()
+            .filter(|t| t.mark == Mark::Blocked)
+            .filter_map(|t| {
+                let q = warriv::question(t.reason.as_deref()?)?;
+                Some((t.title.as_str(), q, t.holder.as_deref()?))
+            })
+            .collect();
+        camp.answered
+            .retain(|(t, q)| asking.iter().any(|&(at, aq, _)| at == t && aq == q));
+        for &(title, question, holder) in &asking {
+            let done = camp
+                .answered
+                .contains(&(title.to_string(), question.to_string()));
+            if !done && camp.asked.get(title).is_none_or(|a| a.question != question) {
+                camp.asked.insert(
+                    title.to_string(),
+                    Asked {
+                        question: question.to_string(),
+                        holder: holder.to_string(),
+                        since: SystemTime::now(),
+                    },
+                );
+            }
+        }
+        let mut heard = Vec::new();
+        if let Ok(r) = self.shared.registry.lock() {
+            camp.asked.retain(|title, a| {
+                let said = r
+                    .get(&a.holder)
+                    .filter(|s| s.prompted_at.is_some_and(|p| p > a.since))
+                    .and_then(|s| s.last_prompt.clone());
+                let still = asking
+                    .iter()
+                    .any(|&(t, q, _)| t == title && q == a.question);
+                if said.is_none() && still {
+                    return true;
+                }
+                heard.push((title.clone(), a.question.clone(), said));
+                false
+            });
+        }
+        camp.answered
+            .extend(heard.iter().map(|(t, q, _)| (t.clone(), q.clone())));
+        for (title, question, said) in heard {
+            self.remember_answer(key, &title, &question, said.as_deref());
+        }
+    }
+
+    /// The human's answer to `question` about `title`, in Warriv's memory.
+    fn remember_answer(&self, key: &str, title: &str, question: &str, said: Option<&str>) {
+        let Some(dir) = self.project_dir(key) else {
+            return;
+        };
+        let path = dir.join(warriv::MEMORY);
+        let old = std::fs::read_to_string(&path).unwrap_or_default();
+        let new = warriv::with_answer(&old, title, question, said);
+        let written = path
+            .parent()
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|()| std::fs::write(&path, new));
+        if let Err(e) = written {
+            eprintln!("horadric: cannot keep the answer in Warriv's memory: {e}");
+        }
     }
 
     /// The app is going: each wake still awake is cut short, since the
@@ -333,12 +438,26 @@ impl App {
         let allowed = vec![
             "--allowedTools".to_string(),
             format!("Bash({} quest:*)", horadric.trim_matches('"')),
+            // An Edit rule covers every tool that writes files.
+            format!("Edit(./{})", warriv::MEMORY),
         ];
+        let main = folder_key(&cwd.to_string_lossy());
+        let memory = std::fs::read_to_string(cwd.join(warriv::MEMORY)).ok();
+        // The whole path, since a relative one was read against the wrong
+        // folder.
+        let at = format!(
+            "{}/{}",
+            cwd.to_string_lossy()
+                .replace('\\', "/")
+                .trim_end_matches('/'),
+            warriv::MEMORY
+        );
         (
             allowed,
-            warriv::system_prompt(
-                &horadric,
-                file::rel(Path::new(&folder_key(&cwd.to_string_lossy()))),
+            format!(
+                "{}\n\n{}",
+                warriv::system_prompt(&horadric, file::rel(Path::new(&main))),
+                warriv::memory_prompt(&at, memory.as_deref())
             ),
         )
     }
@@ -353,6 +472,16 @@ impl App {
         by: Option<&str>,
     ) {
         let key = folder_key(dir);
+        // A tell from the human to a quest Warriv handed on is the answer;
+        // Warriv's own is not.
+        let asked = self.tasks.warriv.camps.get_mut(&key).and_then(|c| {
+            let a = c.asked.remove(title)?;
+            c.answered.insert((title.to_string(), a.question.clone()));
+            Some(a)
+        });
+        if let Some(a) = asked.filter(|_| !by.is_some_and(warriv::is_warriv)) {
+            self.remember_answer(&key, title, &a.question, Some(text));
+        }
         if let Some(by) = by.filter(|b| warriv::is_warriv(b)) {
             let awake = self
                 .tasks
