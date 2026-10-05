@@ -165,6 +165,8 @@ pub enum Command {
     Blocked,
     /// `quest fix`, a quest a review sent back.
     Fix,
+    /// `quest move`, a quest put elsewhere in the log.
+    Move,
 }
 
 /// How a wake closed.
@@ -638,6 +640,7 @@ fn wake_line(w: &WarrivWake) -> AwayLine {
                 Command::Add => format!("added {t}"),
                 Command::Blocked => format!("handed {t} to you"),
                 Command::Fix => format!("sent {t} back"),
+                Command::Move => format!("moved {t}"),
             }
         })
         .collect();

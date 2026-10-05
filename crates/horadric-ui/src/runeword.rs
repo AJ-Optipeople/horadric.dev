@@ -989,7 +989,7 @@ impl App {
     pub(in crate::app) fn cast_from_shell(&mut self, dir: &str, label: &str, by: Option<&str>) {
         let key = folder_key(dir);
         let by_warriv = by.is_some_and(horadric_core::warriv::is_warriv);
-        let drive = self.drives.get(&key).copied();
+        let drive = self.drives.get(&key);
         let refused = horadric_core::warriv::may_cast(by_warriv, drive, label)
             .err()
             .or_else(|| {

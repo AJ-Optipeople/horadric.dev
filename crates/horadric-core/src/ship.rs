@@ -1,8 +1,11 @@
 //! When to propose shipping local: enough quests have landed on `main`
 //! since the last ship, and the checks passed on `main` as it stands, so
 //! the human is asked once whether to put that work on this machine.
+//! While Warriv drives: when a round ships by itself, and the rails that
+//! hold it, a build that rolled back or checks red twice in a row.
 
 use crate::chronicle::{Happened, Record};
+use crate::merge::FixUp;
 
 /// The project stone a proposal casts.
 pub const STONE: &str = "Ship Local";
@@ -118,6 +121,146 @@ pub fn propose(landed: usize, checked: bool, proposed: Option<usize>) -> Option<
 /// The toast's title.
 pub fn title(landed: usize) -> String {
     format!("{landed} quests landed. Ship local?")
+}
+
+/// Landings in a row whose checks failed before shipping holds.
+pub const RED: u32 = 2;
+
+/// The quest a rollback files, which shipping waits for.
+pub const ROLLED_BACK: &str = "Fix the build that rolled back";
+
+/// Shipping held by a rail, kept with the drive in `state.json`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Held {
+    /// What held it, a phrase.
+    pub why: String,
+    /// The fix-up quest it waits for.
+    pub quest: String,
+    /// When it began, so only a landing after counts.
+    pub at: u64,
+}
+
+/// Which rail holds shipping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Hold {
+    /// A ship's build did not come up, and the old one was put back.
+    RolledBack,
+    /// The checks failed on [`RED`] landings in a row.
+    Red,
+}
+
+impl Hold {
+    pub fn says(self) -> &'static str {
+        match self {
+            Hold::RolledBack => "the last ship's build did not come up and was rolled back",
+            Hold::Red => "the checks failed on two landings in a row",
+        }
+    }
+}
+
+/// When the reload `reload.log` tells of put in a build of the project at
+/// `key` that did not come up, the time of its last line.
+pub fn rolled_back(key: &str, log: &str) -> Option<u64> {
+    reloaded(key, log)?;
+    if came_up(log)? {
+        return None;
+    }
+    newest(log)
+}
+
+/// The time of the newest line of `reload.log`.
+pub fn newest(log: &str) -> Option<u64> {
+    log.lines()
+        .rev()
+        .find_map(|l| l.split_once(' ')?.0.parse().ok())
+}
+
+/// Landings in a row whose checks failed, after one more landing that
+/// `failed` its checks or merged.
+pub fn red_after(red: u32, failed: bool) -> u32 {
+    if failed {
+        red + 1
+    } else {
+        0
+    }
+}
+
+/// Whether a rail holds shipping: a rollback at `rolled` newer than the
+/// reload a round read last, at `judged`, or `red` landings in a row.
+pub fn holds(red: u32, rolled: Option<u64>, judged: u64) -> Option<Hold> {
+    if rolled.is_some_and(|at| at > judged) {
+        return Some(Hold::RolledBack);
+    }
+    (red >= RED).then_some(Hold::Red)
+}
+
+/// Whether held shipping goes on: its quest landed after the hold began,
+/// and the checks passed on `main` as it stands.
+pub fn resumes(held: &Held, records: &[Record], checked: bool) -> bool {
+    checked
+        && records.iter().any(|r| {
+            r.at >= held.at && r.title == held.quest && matches!(r.what, Happened::Merged { .. })
+        })
+}
+
+/// Whether a round of a driven project ships: quests landed since the last
+/// ship, the checks passed on `main`, and no rail holds it.
+pub fn due(landed: usize, checked: bool, held: bool) -> bool {
+    landed > 0 && checked && !held
+}
+
+/// What a round is told of shipping, None when there is nothing to say:
+/// cast a ship stone when one is `due`, and with `public` choose which;
+/// or that shipping is held, and until when.
+pub fn brief(due: bool, public: bool, held: Option<&Held>) -> Option<String> {
+    if let Some(h) = held {
+        return Some(format!(
+            "Shipping is held: {}. Cast neither \"{STONE}\" nor \"{PUBLIC}\": Horadric goes \
+             on shipping by itself once the quest \"{}\" lands and the checks pass.",
+            h.why, h.quest
+        ));
+    }
+    if !due {
+        return None;
+    }
+    Some(if public {
+        format!(
+            "Ship now, it is yours to do: quests landed since the last ship and the checks \
+             passed. If what landed since the last release is worth one to users (a feature \
+             or a fix a user would notice), cast \"{PUBLIC}\", which picks the version, writes \
+             the notes and ships local too. Else cast \"{STONE}\"."
+        )
+    } else {
+        format!(
+            "Ship now, it is yours to do: quests landed since the last ship and the checks \
+             passed. Cast \"{STONE}\"."
+        )
+    })
+}
+
+/// The quest a rollback files, with what `reload.log` said in its notes.
+pub fn fix_rollback(log: &str) -> FixUp {
+    let mut notes = vec![
+        "Warriv shipped local and the new build did not come up, so the old one was put \
+         back. Shipping waits for this quest."
+            .to_string(),
+        "Find why it did not come up (the log below, then the build on a dev instance), \
+         fix it and make every check pass."
+            .to_string(),
+        "reload.log said:".to_string(),
+        "```".to_string(),
+    ];
+    notes.extend(
+        log.lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(str::to_string),
+    );
+    notes.push("```".to_string());
+    FixUp {
+        title: ROLLED_BACK.to_string(),
+        notes: notes.join("\n"),
+    }
 }
 
 #[cfg(test)]
@@ -258,5 +401,89 @@ mod tests {
     fn a_ship_is_a_chronicle_line() {
         let r = rec(1, KEY, Happened::Shipped);
         assert_eq!(crate::chronicle::parse(&r.line()), vec![r]);
+    }
+    const BACK: &str = "100 waiting for Horadric (pid 5672) to exit\n\
+        103 installing C:\\Users\\me\\code\\horadric.dev\\target\\release into C:\\Programs\\Horadric\n\
+        103 starting C:\\Programs\\Horadric\\horadric.exe\n\
+        130 rolled back\n";
+
+    #[test]
+    fn a_rollback_of_the_project_is_read_once_it_is_over() {
+        assert_eq!(rolled_back(KEY, BACK), Some(130));
+        assert_eq!(rolled_back(KEY, LOG), None);
+        assert_eq!(rolled_back("c:/users/me/code/other", BACK), None);
+        assert_eq!(
+            rolled_back(KEY, &BACK.replace("130 rolled back\n", "")),
+            None
+        );
+        assert_eq!(newest(LOG), Some(107));
+        assert_eq!(newest(""), None);
+    }
+
+    #[test]
+    fn red_counts_landings_in_a_row() {
+        assert_eq!(red_after(0, true), 1);
+        assert_eq!(red_after(1, true), 2);
+        assert_eq!(red_after(2, false), 0);
+    }
+
+    #[test]
+    fn a_new_rollback_or_red_twice_holds_shipping() {
+        assert_eq!(holds(0, Some(130), 0), Some(Hold::RolledBack));
+        assert_eq!(holds(0, Some(130), 130), None);
+        assert_eq!(holds(1, None, 0), None);
+        assert_eq!(holds(2, None, 0), Some(Hold::Red));
+        assert_eq!(holds(2, Some(130), 0), Some(Hold::RolledBack));
+    }
+
+    #[test]
+    fn shipping_goes_on_once_the_fix_lands_and_the_checks_pass() {
+        let held = Held {
+            why: Hold::RolledBack.says().into(),
+            quest: ROLLED_BACK.into(),
+            at: 50,
+        };
+        let mut fix = merged(60, "abc");
+        fix.title = ROLLED_BACK.into();
+        let mut old = merged(40, "abc");
+        old.title = ROLLED_BACK.into();
+        assert!(resumes(&held, std::slice::from_ref(&fix), true));
+        assert!(!resumes(&held, std::slice::from_ref(&fix), false));
+        assert!(!resumes(&held, &[old], true));
+        assert!(!resumes(&held, &[merged(60, "abc")], true));
+    }
+
+    #[test]
+    fn a_round_ships_when_quests_landed_on_green_and_nothing_holds() {
+        assert!(due(1, true, false));
+        assert!(!due(0, true, false));
+        assert!(!due(1, false, false));
+        assert!(!due(1, true, true));
+    }
+
+    #[test]
+    fn a_round_is_told_to_ship_or_that_shipping_is_held() {
+        assert_eq!(brief(false, true, None), None);
+        let local = brief(true, false, None).unwrap();
+        assert!(local.contains("Cast \"Ship Local\"."));
+        assert!(!local.contains(PUBLIC));
+        let public = brief(true, true, None).unwrap();
+        assert!(public.contains("cast \"Ship Public\""));
+        assert!(public.contains("Else cast \"Ship Local\""));
+        let held = Held {
+            why: Hold::Red.says().into(),
+            quest: "Fix x".into(),
+            at: 1,
+        };
+        let told = brief(true, true, Some(&held)).unwrap();
+        assert!(told.starts_with("Shipping is held: the checks failed on two landings"));
+        assert!(told.contains("the quest \"Fix x\" lands"));
+    }
+
+    #[test]
+    fn a_rollback_files_its_log() {
+        let fix = fix_rollback(BACK);
+        assert_eq!(fix.title, ROLLED_BACK);
+        assert!(fix.notes.contains("\n130 rolled back\n```"));
     }
 }

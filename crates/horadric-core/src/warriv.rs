@@ -19,7 +19,7 @@ use crate::merge::{add_fix_up, FixUp};
 use crate::runeword::{describe, due, Armed, Every};
 use crate::session::made_from;
 use crate::tasks::{
-    end_of, find, insert_note, insert_with_notes, item_line, one_line, parse, readiness,
+    end_of, find, insert_note, insert_with_notes, item_line, move_item, one_line, parse, readiness,
     replace_line, set_mark, Mark, Mode, Ready, Task, ASSUMED,
 };
 
@@ -73,12 +73,26 @@ pub fn on(config: &str) -> bool {
 /// "Warriv drives" switched on for a project: Warriv runs it alone, the
 /// orchestrator on whatever its config says, with no budget on its wakes.
 /// The human's to flip, kept in `state.json` so a reload keeps driving.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Drive {
     /// "and ships public": it may cut a public release unattended, not
     /// only ship local.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub ships_public: bool,
+    /// Shipping stopped by a rail until a quest lands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held: Option<crate::ship::Held>,
+    /// Landings in a row whose checks failed.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub red: u32,
+    /// The unix time of the newest reload a round has read in
+    /// `reload.log`, so one rollback holds shipping once.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub judged: u64,
+}
+
+fn is_zero<T: Default + PartialEq>(n: &T) -> bool {
+    *n == T::default()
 }
 
 /// Whether Warriv hears a project's events: its config turns it on, and so
@@ -108,14 +122,14 @@ pub fn when_full(drives: bool) -> Full {
 
 /// The words of the quests tile's Warriv line: what it is about, after
 /// "Warriv drives" while it does, which is never left out.
-pub fn line(watch: Option<String>, drive: Option<Drive>) -> Option<String> {
+pub fn line(watch: Option<String>, drive: Option<&Drive>) -> Option<String> {
     let Some(d) = drive else {
         return watch;
     };
-    let head = if d.ships_public {
-        "Warriv drives and ships public"
-    } else {
-        "Warriv drives"
+    let head = match (d.ships_public, d.held.is_some()) {
+        (_, true) => "Warriv drives, shipping held",
+        (true, false) => "Warriv drives and ships public",
+        (false, false) => "Warriv drives",
     };
     Some(
         match watch.as_deref().and_then(|w| w.strip_prefix("Warriv")) {
@@ -595,6 +609,8 @@ pub struct Picture {
     pub errands: Vec<String>,
     /// The stones the project has, by label.
     pub stones: Vec<String>,
+    /// Whether to ship, or that shipping is held ([`crate::ship::brief`]).
+    pub ship: Option<String>,
 }
 
 /// At most this many quests not done are listed in a round's prompt, the
@@ -670,21 +686,29 @@ pub fn driven_prompt(horadric: &str) -> String {
          the whole picture it gives you and your memory, then do what moves the project \
          on. That may be anything a wake does, and also casting one of the project's \
          stones, which runs its steps in a session of its own: `{horadric} runeword cast \
-         \"<stone>\"`. Cast a stone only when the picture calls for it. When a round finds \
-         nothing to do, write one line to Lately in your memory and stop."
+         \"<stone>\"`. Cast a stone only when the picture calls for it. A round may also \
+         reorder the log when its order no longer fits the picture: `{horadric} quest move \
+         \"<title>\" --below \"<title>\"`, or `--above`, moves a quest and its notes, and its \
+         `After:` lines still hold it back wherever it stands. When a round finds nothing \
+         to do, write one line to Lately in your memory and stop."
     )
 }
 
 /// Whether a stone `label` cast from a shell goes ahead. The human's own
-/// casts always do. A Warriv's only while it drives the project, and the
+/// casts always do. A Warriv's only while it drives the project, the
 /// public release only with "and ships public" on, since every install
-/// sees it.
-pub fn may_cast(by_warriv: bool, drive: Option<Drive>, label: &str) -> Result<(), String> {
+/// sees it, and neither ship while shipping is held.
+pub fn may_cast(by_warriv: bool, drive: Option<&Drive>, label: &str) -> Result<(), String> {
     if !by_warriv {
         return Ok(());
     }
+    let ship = label == crate::ship::STONE || label == crate::ship::PUBLIC;
     match drive {
         None => Err("Warriv casts stones only while it drives the project".into()),
+        Some(Drive { held: Some(h), .. }) if ship => Err(format!(
+            "shipping is held until \"{}\" lands and the checks pass",
+            h.quest
+        )),
         Some(d) if label == crate::ship::PUBLIC && !d.ships_public => Err(format!(
             "\"{label}\" waits for \"and ships public\", which is off"
         )),
@@ -909,6 +933,9 @@ fn round(why: &str, p: Option<&Picture>) -> String {
         let names: Vec<String> = p.stones.iter().map(|s| format!("\"{s}\"")).collect();
         out.push_str(&format!("  Stones: {}.\n", names.join(", ")));
     }
+    if let Some(ship) = &p.ship {
+        out.push_str(&format!("  {}\n", one_line(ship)));
+    }
     out.push_str(
         "  Read the Open part of your memory for what you were waiting to see. If nothing \
          needs doing, write one line to Lately saying so, and stop.\n",
@@ -1081,6 +1108,16 @@ pub fn hand_on(text: &str, name: &str, question: &str) -> Result<String, String>
 pub fn add_below(text: &str, name: &str, title: &str, notes: &str) -> Result<String, String> {
     let t = quest(text, name)?;
     Ok(insert_with_notes(text, end_of(text, t.line), title, notes))
+}
+
+/// `text` with the quest `name` and its notes moved right under the
+/// quest `to`, or right above it when `above`, for `quest move`.
+pub fn move_quest(text: &str, name: &str, to: &str, above: bool) -> Result<String, String> {
+    let (t, other) = (quest(text, name)?, quest(text, to)?);
+    if t.line == other.line {
+        return Err(format!("\"{}\" can not move next to itself", t.title));
+    }
+    move_item(text, t.line, other.line, above).ok_or_else(|| "the log changed".to_string())
 }
 
 /// What a reviewer session's id starts with. It is a Warriv too, so its
@@ -1882,6 +1919,7 @@ mod tests {
                 checks: "The checks passed on main at abc1234.".into(),
                 errands: vec!["\"Mail\": every day at 09:00, next at 09:00".into()],
                 stones: vec!["Ship Local".into(), "Mail".into()],
+                ship: Some("Ship now. Cast \"Ship Local\".".into()),
             }),
             ..Brief::default()
         }]);
@@ -1898,7 +1936,9 @@ mod tests {
         assert!(p.contains("  The aims still open, in order:\n    Aim: Ship the API\n"));
         assert!(p.contains("  Main: The checks passed on main at abc1234.\n"));
         assert!(p.contains("  Errands armed:\n    \"Mail\": every day at 09:00"));
-        assert!(p.contains("  Stones: \"Ship Local\", \"Mail\".\n"));
+        assert!(
+            p.contains("  Stones: \"Ship Local\", \"Mail\".\n  Ship now. Cast \"Ship Local\".\n")
+        );
         assert!(p.contains("write one line to Lately"));
         // Nothing armed, no aim: said, so the round does not go looking.
         let bare = prompt(&[Brief {
@@ -1917,6 +1957,7 @@ mod tests {
         assert!(p.contains("`hx runeword cast \"<stone>\"`"));
         assert!(p.contains("every hour, after a quest lands and when the human leaves"));
         assert!(p.contains("write one line to Lately"));
+        assert!(p.contains("`hx quest move \"<title>\" --below \"<title>\"`"));
         assert_eq!(
             cast_tools("\"C:/h.exe\""),
             vec![
@@ -1991,12 +2032,37 @@ mod tests {
     #[test]
     fn warriv_casts_only_while_it_drives_and_public_only_when_it_ships_public() {
         let local = Drive::default();
-        let public = Drive { ships_public: true };
+        let public = Drive {
+            ships_public: true,
+            ..Drive::default()
+        };
         assert!(may_cast(false, None, "Ship Public").is_ok());
         assert!(may_cast(true, None, "Ship Local").is_err());
-        assert!(may_cast(true, Some(local), "Ship Local").is_ok());
-        assert!(may_cast(true, Some(local), "Ship Public").is_err());
-        assert!(may_cast(true, Some(public), "Ship Public").is_ok());
+        assert!(may_cast(true, Some(&local), "Ship Local").is_ok());
+        assert!(may_cast(true, Some(&local), "Ship Public").is_err());
+        assert!(may_cast(true, Some(&public), "Ship Public").is_ok());
+    }
+
+    #[test]
+    fn held_shipping_refuses_both_ship_stones_but_not_the_others() {
+        let held = Drive {
+            ships_public: true,
+            held: Some(crate::ship::Held {
+                why: "x".into(),
+                quest: "Fix the build that rolled back".into(),
+                at: 1,
+            }),
+            ..Drive::default()
+        };
+        let refused = may_cast(true, Some(&held), "Ship Local").unwrap_err();
+        assert!(refused.contains("until \"Fix the build that rolled back\" lands"));
+        assert!(may_cast(true, Some(&held), "Ship Public").is_err());
+        assert!(may_cast(true, Some(&held), "Mail").is_ok());
+        assert!(may_cast(false, Some(&held), "Ship Local").is_ok());
+        assert_eq!(
+            line(Some("Warriv: settling".into()), Some(&held)).as_deref(),
+            Some("Warriv drives, shipping held, settling")
+        );
     }
 
     #[test]
@@ -2249,8 +2315,13 @@ mod tests {
 
     #[test]
     fn the_tile_says_warriv_drives_whatever_else_it_says() {
-        let drive = Some(Drive::default());
-        let public = Some(Drive { ships_public: true });
+        let local = Drive::default();
+        let drive = Some(&local);
+        let public = Drive {
+            ships_public: true,
+            ..Drive::default()
+        };
+        let public = Some(&public);
         assert_eq!(line(None, None), None);
         assert_eq!(
             line(Some("Warriv: settling 2".into()), None).as_deref(),
@@ -2277,6 +2348,18 @@ mod tests {
         assert_eq!(off, "{}");
         let on: Drive = serde_json::from_str(r#"{"ships_public": true}"#).unwrap();
         assert!(on.ships_public);
+        let held = Drive {
+            held: Some(crate::ship::Held {
+                why: "w".into(),
+                quest: "q".into(),
+                at: 5,
+            }),
+            red: 2,
+            judged: 9,
+            ..Drive::default()
+        };
+        let json = serde_json::to_string(&held).unwrap();
+        assert_eq!(serde_json::from_str::<Drive>(&json).unwrap(), held);
         assert_eq!(
             serde_json::from_str::<Drive>("{}").unwrap(),
             Drive::default()
@@ -2537,6 +2620,34 @@ not green."
         // Handed on, it no longer wakes Warriv.
         let handed = hand_on(text, "Pay", "Which card?").unwrap();
         assert!(events(&parse(&handed), Mode::Manual, &[], &[]).is_empty());
+    }
+
+    #[test]
+    fn a_quest_moves_by_name_under_or_above_another() {
+        let text = "- [ ] One
+  n
+- [ ] Two
+- [ ] Three
+";
+        assert_eq!(
+            move_quest(text, "One", "Three", false).unwrap(),
+            "- [ ] Two
+- [ ] Three
+- [ ] One
+  n
+"
+        );
+        assert_eq!(
+            move_quest(text, "three", "One", true).unwrap(),
+            "- [ ] Three
+- [ ] One
+  n
+- [ ] Two
+"
+        );
+        assert!(move_quest(text, "Two", "Two", false).is_err());
+        assert!(move_quest(text, "Four", "One", false).is_err());
+        assert!(move_quest(text, "T", "One", false).is_err());
     }
 
     #[test]

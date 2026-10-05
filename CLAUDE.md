@@ -125,7 +125,16 @@ There are two kinds, and the human's words pick one.
   for users from the commits since the last tag, and says both before
   publishing.
 
-An errand is the one other way. A stone with `"every"` runs only once the
+Two things besides the human's words are a go ahead. The first is the
+"Warriv drives" switch. Flipping it on is the human's go ahead for
+Warriv to ship local by itself: a round casts "Ship Local" when quests landed and the checks
+passed on `main`. "And ships public", the second switch, is the go
+ahead for public releases too, cast when the landed work is worth one
+to users. A build that rolled back, or checks red on two landings in a
+row, holds shipping ("shipping held" on the switch) until the fix-up
+quest Horadric files lands on green.
+
+The second is an errand. A stone with `"every"` runs only once the
 human has armed it in the Runetome, after reading its steps and its
 schedule. Arming an errand that publishes (a push, a release, a post,
 "ship public") is the human's standing go ahead for it: an errand session

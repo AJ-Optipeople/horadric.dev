@@ -31,6 +31,9 @@ usage: horadric quest done [\"summary\"]  The quest this session works is comple
              [--notes \"text\"]          with notes for the agent under it,
              [--after \"title\"]         to start once that quest is done,
              [--below \"title\"]         right under that quest
+       horadric quest move \"title\" --below \"title\"
+                                        Move a quest and its notes under another,
+             [--above \"title\"]         or above it
        horadric quest note \"title\" \"text\"  Add a notes line under a quest
        horadric quest tell \"title\" \"text\"  Tell the session on a quest, between turns
        horadric quest pass \"title\"      A quest waiting for review is good: it lands
@@ -63,6 +66,10 @@ pub fn run(args: &[String]) -> Result<(), String> {
                 return Err("say what: horadric quest add \"title\"".into());
             }
             add(&cwd, &title, &notes, below.as_deref())
+        }
+        Some("move") => {
+            let (title, to, above) = title_and_place(&args[1..])?;
+            move_quest(&cwd, &title, &to, above)
         }
         Some("note") => {
             let (title, text) = title_and_text(&args[1..], "note")?;
@@ -128,6 +135,23 @@ fn title_and_text(args: &[String], verb: &str) -> Result<(String, String), Strin
         return Err(usage());
     }
     Ok((tasks::one_line(title), text))
+}
+
+/// The quest `quest move` moves, the quest it goes next to, and whether
+/// above that one rather than below.
+fn title_and_place(args: &[String]) -> Result<(String, String, bool), String> {
+    let usage =
+        || "usage: horadric quest move \"title\" --below \"title\" (or --above)".to_string();
+    let at = args
+        .iter()
+        .position(|a| a == "--below" || a == "--above")
+        .ok_or_else(usage)?;
+    let title = tasks::one_line(&args[..at].join(" "));
+    let to = tasks::one_line(&args[at + 1..].join(" "));
+    if title.is_empty() || to.is_empty() || args[at + 1..].iter().any(|a| a.starts_with("--")) {
+        return Err(usage());
+    }
+    Ok((title, to, args[at] == "--above"))
 }
 
 /// What `quest blocked` waits on: a quest in the log, written as an
@@ -357,6 +381,17 @@ fn note(cwd: &Path, title: &str, text: &str) -> Result<(), String> {
     }
     tell_app(&project);
     println!("Noted under the quest.");
+    Ok(())
+}
+
+/// Moves a quest and its notes right under another quest, or above it.
+fn move_quest(cwd: &Path, title: &str, to: &str, above: bool) -> Result<(), String> {
+    let project = log_of(cwd)?;
+    write(&project, |log| warriv::move_quest(log, title, to, above))?;
+    let place = format!("{} {to}", if above { "above" } else { "below" });
+    warriv_ran(&project, Command::Move, title, &place);
+    tell_app(&project);
+    println!("Moved.");
     Ok(())
 }
 
@@ -684,6 +719,22 @@ mod tests {
         );
         assert!(quest_flag(&words(&["x", "--quest"])).is_err());
         assert!(quest_flag(&words(&["x", "--quest", "A", "--on", "B"])).is_err());
+    }
+
+    #[test]
+    fn move_takes_a_quest_then_where_it_goes() {
+        assert_eq!(
+            title_and_place(&words(&["Ship", "it", "--below", "Build", "it"])),
+            Ok(("Ship it".into(), "Build it".into(), false))
+        );
+        assert_eq!(
+            title_and_place(&words(&["Ship it", "--above", "Build it"])),
+            Ok(("Ship it".into(), "Build it".into(), true))
+        );
+        assert!(title_and_place(&words(&["Ship it", "Build it"])).is_err());
+        assert!(title_and_place(&words(&["--below", "Build it"])).is_err());
+        assert!(title_and_place(&words(&["Ship it", "--below"])).is_err());
+        assert!(title_and_place(&words(&["Ship", "--below", "A", "--above", "B"])).is_err());
     }
 
     #[test]

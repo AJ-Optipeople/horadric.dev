@@ -566,6 +566,7 @@ pub fn command_word(c: Command) -> &'static str {
         Command::Add => "added",
         Command::Blocked => "handed on",
         Command::Fix => "sent back",
+        Command::Move => "moved",
     }
 }
 

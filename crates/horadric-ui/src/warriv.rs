@@ -198,7 +198,7 @@ impl App {
     /// One look at a project's events with Warriv on. True when its
     /// session closed, which the clusters have to hear.
     pub(super) fn orchestrate(&mut self, key: &str, b: &Board) -> bool {
-        let drive = self.drives.get(key).copied();
+        let drive = self.drives.get(key).cloned();
         if !warriv::orchestrates(b.orchestrator, drive.is_some()) {
             self.shared.warriv_line.borrow_mut().remove(key);
             let astir = self.shared.astir.borrow_mut().remove(key);
@@ -237,14 +237,14 @@ impl App {
         let watch = camp
             .desk
             .watch(camp.awake.as_ref().map(|a| a.open(&now)), unix_now());
-        let ink = match (drive, watch) {
+        let ink = match (&drive, watch) {
             (Some(_), _) => Ink::Drives,
             (None, Some(w)) if w.working() => Ink::Working,
             _ => Ink::Quiet,
         };
         let line = warriv::line(
             watch.map(|w| w.words(crate::app::local_secs(), unix_now())),
-            drive,
+            drive.as_ref(),
         )
         .map(|words| (words, ink));
         self.tasks.warriv.camps.insert(key.to_string(), camp);
@@ -294,6 +294,9 @@ impl App {
                 None => false,
             },
             Wake::Go(events) => {
+                if events.iter().any(|e| e.kind == Kind::Round) {
+                    self.ship_rails(key);
+                }
                 let briefs = self.briefs(key, b, &events);
                 match &mut camp.awake {
                     Some(a) => {
@@ -506,17 +509,24 @@ impl App {
     /// itself: the log, the aims, how `main` stands, the armed errands and
     /// the stones it may cast.
     fn picture(&self, key: &str, b: &Board) -> Picture {
-        let checks = self.project_dir(key).map_or_else(String::new, |main| {
+        let stones = self.stones_of(key);
+        let drive = self.drives.get(key);
+        let (checks, ship) = self.project_dir(key).map_or_else(Default::default, |main| {
             let records = store::chronicle_all();
-            let log = store::dir()
-                .and_then(|d| std::fs::read_to_string(d.join("reload.log")).ok())
-                .unwrap_or_default();
+            let log = reload_log();
             let head = crate::worktree::head(&main).unwrap_or_default();
             let landed = ship::landed_since(key, &records, ship::last(key, &log, &records));
-            warriv::main_line(&head, ship::checked(key, &records, &head), landed)
+            let checked = ship::checked(key, &records, &head);
+            let held = drive.and_then(|d| d.held.as_ref());
+            let ship = drive
+                .filter(|_| stones.iter().any(|s| s.label == ship::STONE))
+                .and_then(|d| {
+                    let due = ship::due(landed, checked, held.is_some());
+                    ship::brief(due, d.ships_public, held)
+                });
+            (warriv::main_line(&head, checked, landed), ship)
         });
         let offset = crate::questlog::utc_offset(unix_now());
-        let stones = self.stones_of(key);
         let errands = stones
             .iter()
             .filter_map(|s| {
@@ -535,6 +545,100 @@ impl App {
                 .filter(|s| s.source != runeword::Source::BuiltIn && s.steps.is_ok())
                 .map(|s| s.label)
                 .collect(),
+            ship,
+        }
+    }
+
+    /// The rails, read as a round is told in a project Warriv drives: a
+    /// reload of its build that rolled back since the last round holds
+    /// shipping and files a quest with the log, and a hold whose quest
+    /// landed on green is lifted.
+    fn ship_rails(&mut self, key: &str) {
+        let Some(main) = self.project_dir(key) else {
+            return;
+        };
+        let Some(mut d) = self.drives.get(key).cloned() else {
+            return;
+        };
+        let log = reload_log();
+        let now = unix_now();
+        let before = d.clone();
+        if let Some(h) = d.held.clone() {
+            let records = store::chronicle_all();
+            let head = crate::worktree::head(&main).unwrap_or_default();
+            if ship::resumes(&h, &records, ship::checked(key, &records, &head)) {
+                d.held = None;
+                d.red = 0;
+                if !self.quiet {
+                    self.toasts.show(
+                        Toast::Done,
+                        &format!("Shipping goes on: {}", project_name(key)),
+                        &format!("\"{}\" landed and the checks passed.", h.quest),
+                    );
+                }
+            }
+        } else if ship::holds(0, ship::rolled_back(key, &log), d.judged)
+            == Some(ship::Hold::RolledBack)
+        {
+            let fix = ship::fix_rollback(&log);
+            let added = file::update(&main, |text| {
+                horadric_core::merge::add_fix_up(text, "", &fix)
+            });
+            if let Err(e) = added {
+                eprintln!("horadric: cannot add \"{}\": {e}", fix.title);
+            }
+            self.hold_shipping(key, &mut d, ship::Hold::RolledBack, fix.title, now);
+        }
+        d.judged = ship::newest(&log).unwrap_or(d.judged).max(d.judged);
+        if d != before {
+            self.drives.insert(key.to_string(), d);
+            self.save();
+            self.refresh_boards(false);
+        }
+    }
+
+    /// A rail holds shipping in the project `key` until the quest `quest`
+    /// lands on green.
+    pub(super) fn hold_shipping(
+        &mut self,
+        key: &str,
+        d: &mut Drive,
+        hold: ship::Hold,
+        quest: String,
+        now: u64,
+    ) {
+        if !self.quiet {
+            self.toasts.show(
+                Toast::Failed,
+                &format!("Shipping held: {}", project_name(key)),
+                &format!(
+                    "Because {}. It goes on once \"{quest}\" lands.",
+                    hold.says()
+                ),
+            );
+        }
+        d.held = Some(ship::Held {
+            why: hold.says().to_string(),
+            quest,
+            at: now,
+        });
+    }
+
+    /// A landing in a project Warriv drives: checks red on `RED` in a row
+    /// hold shipping until `fix`, the fix-up quest the last one filed,
+    /// lands.
+    pub(super) fn count_red(&mut self, key: &str, failed: bool, fix: Option<&str>) {
+        let Some(mut d) = self.drives.get(key).cloned() else {
+            return;
+        };
+        let before = d.clone();
+        d.red = ship::red_after(d.red, failed);
+        if let (None, Some(fix), Some(hold)) = (&d.held, fix, ship::holds(d.red, None, 0)) {
+            self.hold_shipping(key, &mut d, hold, fix.to_string(), unix_now());
+        }
+        if d != before {
+            self.drives.insert(key.to_string(), d);
+            self.save();
         }
     }
 
@@ -1047,7 +1151,7 @@ impl App {
 
     /// Whether Warriv drives the project `key`, and how.
     pub(in crate::app) fn drive_of(&self, key: &str) -> Option<Drive> {
-        self.drives.get(key).copied()
+        self.drives.get(key).cloned()
     }
 
     /// "Warriv drives" flipped by the human. On, the runner works the log
@@ -1059,7 +1163,9 @@ impl App {
             self.save();
             return;
         }
-        self.drives.entry(key.to_string()).or_default();
+        // A rollback from before the drive is not this drive's to hold on.
+        let d = self.drives.entry(key.to_string()).or_default();
+        d.judged = d.judged.max(ship::newest(&reload_log()).unwrap_or(0));
         self.stopped.remove(key);
         self.save();
         let auto = self
@@ -1163,4 +1269,11 @@ fn memory_prompt(cwd: &Path) -> String {
         warriv::MEMORY
     );
     warriv::memory_prompt(&at, memory.as_deref())
+}
+
+/// What the newest reload wrote, empty when there was none.
+fn reload_log() -> String {
+    store::dir()
+        .and_then(|d| std::fs::read_to_string(d.join("reload.log")).ok())
+        .unwrap_or_default()
 }

@@ -1638,11 +1638,16 @@ impl App {
             crate::worktree::remove(l.w);
             match l.landing {
                 Landing::Merged(checked) => {
+                    self.count_red(&l.key, false, None);
                     self.merged(&main, &branch, &l.title, &l.into, &checked)
                 }
                 Landing::Failed(why, out) if why.fixable() => {
                     eprintln!("horadric: cannot merge {branch}: {why:?}");
                     let fix = merge::fix_up(&l.title, &branch, &l.into, &why, &out);
+                    // A conflict says nothing of the checks either way.
+                    if matches!(why, merge::Failure::Red(_)) {
+                        self.count_red(&l.key, true, Some(&fix.title));
+                    }
                     self.merge_event(
                         &l.dir,
                         &l.title,
@@ -2104,13 +2109,20 @@ fn mode_menu(key: &str) {
         label: "Warriv drives".into(),
         checked: drive.is_some(),
     });
-    match drive {
-        Some(d) => items.push(Item::Action {
+    let public = drive.as_ref().is_some_and(|d| d.ships_public);
+    match &drive {
+        Some(_) => items.push(Item::Action {
             id: PUBLIC,
             label: "and ships public".into(),
-            checked: d.ships_public,
+            checked: public,
         }),
         None => items.push(Item::Disabled("and ships public".into())),
+    }
+    if let Some(h) = drive.as_ref().and_then(|d| d.held.as_ref()) {
+        items.push(Item::Disabled(format!(
+            "Shipping held until \"{}\" lands",
+            tasks::one_line(&h.quest)
+        )));
     }
     items.push(Item::Separator);
     if board.own_trees {
@@ -2131,13 +2143,13 @@ fn mode_menu(key: &str) {
     if picked == Some(LOG) {
         return push(Input::QuestLog(Ask::Open(key.to_string())));
     }
-    if picked == Some(PUBLIC) && !drive.is_some_and(|d| d.ships_public) && !ships_public(key) {
+    if picked == Some(PUBLIC) && !public && !ships_public(key) {
         return;
     }
     with_app(|app| match picked {
         Some(EDIT) => app.edit_list(key),
         Some(DRIVES) => app.set_drive(key, drive.is_none()),
-        Some(PUBLIC) => app.set_ships_public(key, !drive.is_some_and(|d| d.ships_public)),
+        Some(PUBLIC) => app.set_ships_public(key, !public),
         Some(i) if i > PARALLEL => app.set_parallel(key, i - PARALLEL),
         Some(i) => {
             if let Some(m) = Mode::ALL.get(i - 1) {
