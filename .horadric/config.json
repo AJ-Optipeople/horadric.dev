@@ -1,5 +1,20 @@
 {
   "tasks": {
-    "mode": "manual"
+    "mode": "auto",
+    "parallel": 4
+  },
+  "runewords": {
+    "Ship Local": {
+      "about": "Ships the work on main to this machine only, as CLAUDE.md describes",
+      "steps": [
+        { "say": "Ship local" }
+      ]
+    },
+    "Ship Public": {
+      "about": "Cuts a public release every install is offered, following RELEASING.md, then ships local",
+      "steps": [
+        { "say": "Ship public" }
+      ]
+    }
   }
 }
