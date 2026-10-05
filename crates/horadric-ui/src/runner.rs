@@ -205,9 +205,11 @@ fn read_board(dir: &Path) -> Board {
     // get worktrees of their own even in trunk mode, and only a repository
     // can give them.
     let own_trees = crate::worktree::main_tree(dir).is_some();
+    let text = file::read(dir);
     Board {
         mode: file::mode(dir),
-        tasks: tasks::parse(&file::read(dir)),
+        tasks: tasks::parse(&text),
+        aims: horadric_core::aim::open(&text),
         parallel: if own_trees { file::parallel(dir) } else { 1 },
         own_trees,
         orchestrator: file::orchestrator(dir),
@@ -965,6 +967,7 @@ impl App {
         self.refresh_boards(false);
         self.run_tasks();
         self.tick_runewords();
+        self.tick_errands();
         self.refresh_tomes();
     }
 

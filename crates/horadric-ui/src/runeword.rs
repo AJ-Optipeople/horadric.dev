@@ -36,6 +36,9 @@ use crate::window::{project_key, project_name};
 /// takes each as typed rather than as one paste.
 const KEYS_APART: Duration = Duration::from_millis(400);
 
+#[path = "errand.rs"]
+mod errand;
+
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
 
@@ -54,6 +57,8 @@ pub(in crate::app) struct Tome {
     pub(in crate::app) hidden: Vec<String>,
     /// The order each project's stones were dragged to, by project key.
     pub(in crate::app) order: BTreeMap<String, Vec<String>>,
+    /// The errands armed, by project key and label.
+    pub(in crate::app) errands: BTreeMap<String, runeword::Armed>,
     /// Keystrokes still to be written, by session, each when it is due.
     typing: Vec<(String, Vec<u8>, Instant)>,
     /// The hidden commands this run of the app started, by file, to tell
@@ -79,6 +84,7 @@ impl Tome {
             ask: !saved.cast_without_asking,
             hidden: saved.stones_hidden.clone(),
             order: saved.stones_order.clone(),
+            errands: saved.errands.clone(),
             ..Tome::default()
         }
     }
@@ -347,6 +353,12 @@ impl App {
                 }
                 Act::Complete => {
                     self.set_on(&on, &w.name, None);
+                    // An errand that did its work says nothing.
+                    if let On::Project(key) = &on {
+                        if self.errand_ended(key, &w.name, None) {
+                            continue;
+                        }
+                    }
                     self.toasts.show(
                         Kind::Done,
                         &format!("{} is complete", w.name),
@@ -359,6 +371,11 @@ impl App {
                         forget_files(file);
                     }
                     self.set_on(&on, &w.name, None);
+                    if let On::Project(key) = &on {
+                        if self.errand_ended(key, &w.name, Some(&why)) {
+                            continue;
+                        }
+                    }
                     self.stopped(&on, s.as_ref(), &w, &why);
                 }
             }
@@ -668,7 +685,13 @@ impl App {
         let mut out: Vec<TomeStone> = runeword::arrange(self.tome.stones(Some(dir)), order)
             .into_iter()
             .map(|stone| {
-                let marked = self.changed(key, &stone);
+                // An errand's mark is that it is not armed for its steps.
+                let armed = self.armed(key, &stone);
+                let marked = match errand::clocked(&stone) {
+                    true => armed.is_none(),
+                    false => self.changed(key, &stone),
+                };
+                let failed = armed.is_some_and(|a| a.failed);
                 let progress = casting
                     .iter()
                     .find(|w| w.name == stone.label)
@@ -680,6 +703,7 @@ impl App {
                     label: Some(stone.label),
                     progress,
                     marked,
+                    failed,
                 }
             })
             .collect();
@@ -690,6 +714,7 @@ impl App {
             cracked: false,
             progress: None,
             marked: false,
+            failed: false,
         });
         out
     }
@@ -749,7 +774,8 @@ impl App {
         let out = runeword::unwrite(text.trim_start_matches('\u{feff}'), label)?;
         std::fs::write(&file, format!("{bom}{out}"))
             .map_err(|e| format!("cannot write {}: {e}", file.display()))?;
-        if self.tome.cast.remove(&cast_key(key, label)).is_some() {
+        let armed = self.tome.errands.remove(&cast_key(key, label)).is_some();
+        if self.tome.cast.remove(&cast_key(key, label)).is_some() || armed {
             self.save();
         }
         self.redraw_tiles();
@@ -1048,7 +1074,6 @@ fn cast_key(key: &str, label: &str) -> String {
 /// the app's borrow, since a menu runs a loop of its own.
 pub(in crate::app) fn stone_clicked(key: &str, label: &str) {
     const STOP: usize = 1;
-    const SESSION: usize = 100;
     let casting = app::with_app(|a| a.casting(key, label)).unwrap_or_default();
     if !casting.is_empty() {
         let items: Vec<Item> = casting
@@ -1065,6 +1090,16 @@ pub(in crate::app) fn stone_clicked(key: &str, label: &str) {
         }
         return;
     }
+    // An errand not armed for its steps is armed by a click, not cast.
+    if app::with_app(|a| a.unarmed(key, label).is_some()).unwrap_or(false) {
+        return errand::ask_to_arm(key, label);
+    }
+    cast_by_hand(key, label);
+}
+
+/// Casts a stone where it can without asking, or asks which session.
+fn cast_by_hand(key: &str, label: &str) {
+    const SESSION: usize = 100;
     let plan = app::with_app(|a| {
         a.stone(key, label)
             .map(|s| (a.cast_at_once(key, &s), a.castable_in(key)))
@@ -1149,11 +1184,17 @@ pub(in crate::app) fn stone_menu(key: &str, label: Option<&str>) {
     const HIDE: usize = 5;
     const ASK: usize = 6;
     const UNHIDE: usize = 7;
+    const ARM: usize = 8;
+    const DISARM: usize = 9;
     const STOP: usize = 100;
-    let Some((stone, casting, ask, hidden)) = app::with_app(|a| {
+    let Some((stone, casting, ask, hidden, armed)) = app::with_app(|a| {
         let stone = label.and_then(|l| a.any_stone(key, l));
         let casting = label.map(|l| a.casting(key, l)).unwrap_or_default();
-        (stone, casting, a.tome.ask, a.tome.hidden.len())
+        let armed = stone
+            .as_ref()
+            .filter(|s| errand::clocked(s))
+            .map(|s| a.armed(key, s).is_some());
+        (stone, casting, a.tome.ask, a.tome.hidden.len(), armed)
     }) else {
         return;
     };
@@ -1171,6 +1212,11 @@ pub(in crate::app) fn stone_menu(key: &str, label: Option<&str>) {
                 }));
             } else if s.steps.is_ok() {
                 items.push(Item::action(CAST, "Cast"));
+            }
+            match armed {
+                Some(true) => items.push(Item::action(DISARM, "Disarm")),
+                Some(false) => items.push(Item::action(ARM, "Arm...")),
+                None => {}
             }
             if s.source == Source::BuiltIn {
                 items.push(Item::action(HIDE, "Put away"));
@@ -1202,7 +1248,18 @@ pub(in crate::app) fn stone_menu(key: &str, label: Option<&str>) {
     };
     let label = stone.as_ref().map(|s| s.label.as_str());
     match (picked, label) {
-        (CAST, Some(l)) => stone_clicked(key, l),
+        (CAST, Some(l)) => {
+            if armed == Some(false) {
+                // Cast once by hand, unarmed: as any stone, asked first.
+                cast_by_hand(key, l);
+            } else {
+                stone_clicked(key, l);
+            }
+        }
+        (ARM, Some(l)) => errand::ask_to_arm(key, l),
+        (DISARM, Some(l)) => {
+            app::with_app(|a| a.arm(key, l, false));
+        }
         (NEW, _) => {
             app::with_app(|a| a.start_runesmith(key, None));
         }

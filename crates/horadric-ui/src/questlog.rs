@@ -451,7 +451,7 @@ pub fn when(at: u64, now: u64, offset: i64) -> String {
 /// Seconds local time is ahead of UTC, from the local clock now: rounded
 /// to the quarter hour, the finest any zone is cut to, so the second the
 /// two clocks are read apart does not show.
-fn utc_offset(now: u64) -> i64 {
+pub(crate) fn utc_offset(now: u64) -> i64 {
     let t = unsafe { GetLocalTime() };
     let local = i64::from(t.wHour) * 3600 + i64::from(t.wMinute) * 60 + i64::from(t.wSecond);
     let utc = (now % 86_400) as i64;
@@ -549,6 +549,7 @@ pub fn kind_word(kind: Kind) -> &'static str {
         Kind::Tangled => "tangled",
         Kind::Merge => "not merged",
         Kind::Stalled => "stalled",
+        Kind::Dry => "ran dry",
     }
 }
 

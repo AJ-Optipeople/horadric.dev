@@ -3527,6 +3527,41 @@ Six parts, each useful alone.
 - Pure and tested: reading and writing aims, the prompt with aims, the
   title match.
 
+Built on 2026-10-05. `horadric_core::aim` reads the aims above the
+first section or quest, adds one after the last (or as its own
+paragraph above the first section) and marks one reached by its text or
+its start, as quests are found; `aim::same` is the title match (case,
+spaces and punctuation do not count). A dry log with an aim open is an
+event of its own, `warriv::Kind::Dry`, which fires even with no quest
+left at all, so an empty log and an aim are enough. It is never taken as
+Warriv's own doing, since filing is its job; the six wakes still bound
+it. Its brief carries the aims and the rules, and the system prompt the
+commands. `quest add` from a Warriv session refuses a title the log
+has. What the plan did not say:
+
+- **Filed nothing** is known when a wake given the dry log ends: the
+  log is still dry the same way, no quest gained a `Filed by Warriv for:`
+  line, and the open aims are as they were. Such a wake is heard again
+  at once, and the third in a row goes to the human as a toast,
+  "Warriv asks", naming the first aim (`Desk::dry_ended`). A wake that
+  moved something but left the log dry is heard again too, with the
+  count started over.
+- **Warriv's log path.** A Warriv session gets `HORADRIC_TASKS` set to
+  its own project, so a `quest` command run from another folder still
+  writes the right log.
+- **Found on screen** with Haiku: it put `cd <dir> &&` before the
+  command, and once used the PowerShell tool, both of which miss the
+  allowed `Bash(<horadric> quest:*)` and stop at a permission prompt.
+  The system prompt now says to run it with the Bash tool, as written.
+  It also rewrote a horadric path that looked like a Claude scratchpad
+  folder into its own; the installed path does not look like one.
+- Seen on a dev instance with a scratch repository and Haiku: an aim
+  and an empty log in auto mode woke Warriv, which filed "Create
+  hello.txt" and "Create bye.txt" (`After: Create hello.txt`, each with
+  its `Filed by` line). The runner started and landed them in turn, the
+  log ran dry again, and the next wake marked the aim reached. No
+  `claude.exe` was left but the one idle session.
+
 **2. Warriv reads first in review mode.** A fourth mode beside manual,
 review and auto: "Warriv reviews". A quest going `[?]` wakes a reviewer
 session with the quest, its notes, and the branch's diff against `main`.
@@ -3647,6 +3682,40 @@ say:
 
 Event triggers (`"on": "landed"`, `"on": "away"`) are the next step once
 the clock works, and are left out until an errand needs one.
+
+The engine is built (2026-10-05), with errands of `run` steps.
+`runeword::every` reads `"every"` (a span of `s`, `m` and `h` pieces,
+once a minute at most, or `day`, `weekday`, a day's name or its first
+three letters, and `H:MM`), `runeword::span` reads `"for"`, and a stone
+with either wrong, or with test, review or merge, is cracked with the
+reason. `runeword::due` is the first slot after the last cast, from the
+local clock's offset, so a slot missed while the app was off is due at
+once and the next one counts from then. `runeword::tick` decides per
+project: while one runs the others wait and it is `Overdue` past its
+`"for"`; otherwise the one due longest is cast, or every due one is
+skipped (its clock moved on to now) while the fullest limit is at 90 %.
+Armed errands are `errands` in `state.json` (`Armed`: the steps'
+fingerprint, the last cast, the last good finish for `{since}`, failed,
+running), and a stone whose steps no longer fit is taken out of it. The
+tome marks an errand that is not armed with the amber dot and one whose
+last cast failed with a red one; a click on an unarmed errand asks "Run
+<label> unattended?" with the schedule and every step, and the right
+click menu offers Arm or Disarm, and Cast to run it once by hand. An
+errand's cast is a sessionless runeword as any: success says nothing,
+a failure toasts once until a cast succeeds, and an overdue one is
+stopped with its command's tree (`taskkill /T`). The tooltip and
+`horadric runeword list` say when it runs. An errand with `say` or
+`keys` steps parses and can be armed, but the clock leaves it for the
+session half (`errand::clocked`).
+
+Checked on a dev instance of its own (port 4170, scratch `APPDATA`) with
+a stone `"every": "1m"` writing the time to a file, armed through
+`state.json` ten minutes back: it ran at once, then each minute; with the
+app off four minutes it ran once at the next start; a status posting 92 %
+held it two minutes, "skipped" in the log, and 10 % let it run at the
+next minute; changing its command disarmed it within the second, no cast
+after, and the stone showed the amber dot. The arming dialog itself was
+not clicked on screen, since the human was using the desktop.
 
 **5. Ships proposed.** When three or more quests have landed on `main`
 since the last ship local and the checks passed on `main`'s head, a
@@ -3811,7 +3880,21 @@ happened, the pane mid turn focused, staying at least 20 seconds on
 each. A Warriv session gets the stage first. It never takes the
 foreground from another program: it only moves when the stage was the
 foreground window when the human left. The first input gives the stage
-back exactly as the human left it.
+back exactly as the human left it. **Built on 2026-10-05**:
+`spectator::next` chooses, pure and tested: only driven projects, a
+Warriv mid turn first, else the session that did something last; in that
+project Warriv, else the pane mid turn, has the keyboard; a view stays
+20 seconds. The app (`spectating.rs`) begins as the absence does, when
+the stage is in front and something is driven, and moves only while the
+stage is still in front, so a program that took the foreground keeps it.
+It keeps the project, the active pane and the zoom as they were; a
+100 ms timer watches the input clock, and the first input puts them
+back without taking the foreground. Sessions shown while spectating are
+not marked read. A dev instance leaves at once with a `spectate-now`
+file in its state folder. Seen on a dev instance with cmd.exe sessions
+in two projects: with Chrome in front nothing moved; with the stage in
+front it went to the busy project, held 20 seconds, moved to the other's
+busy pane, and a key press gave back the project and pane as left.
 
 **8. A look back.** While it drives, once a day (at the first round
 after 04:00) Warriv reads the day's chronicle and its memory: repeated
@@ -3836,9 +3919,18 @@ before it turns on, since every install sees what it publishes. The stop
 (tray, Ctrl+Alt+W, Shift on a dev instance) closes each driven project's
 Warriv session and holds its runner: nothing new starts there until the
 human picks a mode in the mode menu or lets Warriv drive again, which
-the menu says. `warriv::when_full` says a due errand waits out the 90 %
-hold while driving; wiring it in, and closing errand sessions on the
-stop, waits for errands to be on `main` (its own quest).
+the menu says. While Warriv drives, `warriv::when_full` gives
+`runeword::tick` `Full::Wait`: a due errand in the 90 % hold is neither
+cast nor skipped, its clock stays put, and it is cast the tick the limit
+drops. Not driving it is skipped as before. The stop halts every errand
+the clock cast in the project (`halt_errands`, its command's tree with
+it), which is not a failure: it stays armed and goes at its next time.
+Errands with sessions do not exist yet; when they do, theirs close
+there too. Checked on a dev instance (port 4170, scratch `APPDATA`) with
+a `"1m"` errand, driving, at 95 %: nothing cast and nothing skipped for
+75 seconds, a status at 10 % cast it within the second, and the stop
+key (posted as `WM_HOTKEY`) killed its `ping`, turned the drive off and
+left it armed, not running and not failed.
 
 ### The agent's cursor
 
