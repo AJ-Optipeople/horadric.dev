@@ -73,7 +73,7 @@ mod stone;
 pub(crate) use stone::{StoneLook, StoneState};
 
 mod questlog;
-pub(crate) use questlog::{QuestDetail, QuestLogScene, QuestRowLook};
+pub(crate) use questlog::{DetailList, QuestDetail, QuestLogScene, QuestRowLook, WakeLook};
 
 const FONT: PCWSTR = w!("Segoe UI Variable Text");
 /// For the project's name: the optical size cut for larger text.
@@ -105,6 +105,8 @@ const BEAM_H: f32 = 120.0;
 const LEAVE_SINK: f32 = 8.0;
 /// One slow breath of a busy project's wash.
 const BUSY_BREATH: Duration = Duration::from_millis(4000);
+/// One slow breath of the quests tile's edge while Warriv works.
+const WARRIV_BREATH: Duration = Duration::from_millis(3200);
 /// A glint's run along a nearly full context meter.
 const SHIMMER: Duration = Duration::from_millis(2600);
 /// More subagents than this still draw this many sparks.
@@ -313,6 +315,9 @@ pub struct TasksScene {
     /// What the line under the header says of Warriv, and its ink.
     pub warriv: Option<(String, Ink)>,
     pub collapsed: bool,
+    /// Warriv, a reviewer or an errand is at work in the project, and the
+    /// tile's edge breathes in Warriv's gold.
+    pub astir: bool,
 }
 
 /// What the Runetome shows.
@@ -477,6 +482,8 @@ pub struct CatchupScene<'a> {
     pub more: &'a str,
     pub hot: Option<usize>,
     pub close_hot: bool,
+    /// The fields of the rows that are fields, in order.
+    pub fields: Vec<FieldLook<'a>>,
 }
 
 /// A row of the catch-up as it is drawn. A heading uses only the text.
@@ -1878,7 +1885,11 @@ impl Painter<'_> {
                     }
                     self.text(&gpu.small_right, theme::legend(), look.age, age);
                 }
+                CatchupRow::Field(_) => {}
             }
+        }
+        for f in &scene.fields {
+            self.input(gpu, f);
         }
         if let Some(r) = l.more {
             self.text(&gpu.small, theme::legend(), scene.more, r);
@@ -2147,6 +2158,7 @@ impl Painter<'_> {
     unsafe fn light(&self, m: &Metrics, scene: &Scene) {
         let radius = m.tile_radius;
         self.busy_wash(scene);
+        self.astir_breath(m, scene);
         for (r, s, look) in tiles(scene) {
             let phase = &s.phase;
             let c = theme::phase_color(phase);
@@ -2230,6 +2242,44 @@ impl Painter<'_> {
                 self.glow_dot(tx, ty, 22.0, c, 0.6 * flare);
             }
         }
+    }
+
+    /// Warriv's gold round the inside of the quests tile, `breath` from 0
+    /// to 1, so the camp is seen moving without a word read: a rim and a
+    /// softer band inside it.
+    unsafe fn astir(&self, r: &Rect, radius: f32, breath: f32) {
+        let gold = theme::warriv();
+        self.stroke_rounded(
+            &r.inset(3.0),
+            radius - 3.0,
+            gold.with_alpha(0.06 + 0.12 * breath),
+            4.0,
+        );
+        self.stroke_rounded(
+            &r.inset(0.75),
+            radius - 0.75,
+            gold.with_alpha(0.3 + 0.5 * breath),
+            1.5,
+        );
+    }
+
+    /// The quests tile breathing while Warriv works.
+    unsafe fn astir_breath(&self, m: &Metrics, scene: &Scene) {
+        let (Some(l), Some(t)) = (&scene.layout.tasks, &scene.tasks) else {
+            return;
+        };
+        if !t.astir {
+            return;
+        }
+        let clock = scene
+            .now
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default();
+        self.astir(
+            &l.rect,
+            m.tile_radius,
+            motion::breathe(clock, WARRIV_BREATH),
+        );
     }
 
     /// While any of its sessions works, the project's colour glows a little
@@ -3314,6 +3364,11 @@ impl Painter<'_> {
     /// and in the header the mode and a plus for another item.
     unsafe fn tasks(&self, gpu: &Gpu, m: &Metrics, scene: &Scene, l: &TasksLayout, t: &TasksScene) {
         self.screen(gpu, &l.rect, m.tile_radius);
+        // Held at half a breath where animations are off, and drawn over
+        // the kept layer every frame where they are on.
+        if t.astir && !scene.ambient {
+            self.astir(&l.rect, m.tile_radius, 0.5);
+        }
 
         let pad = INNER_PAD;
         let h = l.header;

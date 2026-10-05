@@ -432,6 +432,12 @@ pub fn system_prompt(horadric: &str, file: &str) -> String {
          `--below \"<title>\"` to put it right under another, and `--after \"<title>\"` \
          once for each quest it needs first. Split a quest that is too big by telling its \
          session to do only the first part and adding the rest.\n\
+         - Pick each quest's model: a quest you add, or one you meet in an event, with no \
+         `Model:` line gets one, `--notes \"Model: <name>\"` on a quest you add and \
+         `{horadric} quest note \"<title>\" \"Model: <name>\"` on one there already. \
+         `haiku` for small, plain work (a rename, a string, a test for code already \
+         there), `sonnet` for most, `opus` for design, hard bugs and anything that spans \
+         the code. Never change a `Model:` line you did not write: that one is the human's.\n\
          - Hand a quest to the human when only the human can settle it: `{horadric} quest \
          blocked \"<question>\" --quest \"<title>\"`. Word the question so it can be \
          answered in one line, and say what you tried in a note first.\n\
@@ -513,10 +519,23 @@ fn tail(s: &str, n: usize) -> String {
 /// What a quest's session is told when Warriv answers it, typed into its
 /// terminal, so on one line.
 pub fn told(horadric: &str, message: &str) -> String {
+    answer(
+        "Warriv, who plans this project's quests, answers",
+        horadric,
+        message,
+    )
+}
+
+/// What a quest's session is told when the human answers it from the card
+/// that greets them back.
+pub fn answered(horadric: &str, message: &str) -> String {
+    answer("The human answers", horadric, message)
+}
+
+fn answer(who: &str, horadric: &str, message: &str) -> String {
     format!(
-        "Warriv, who plans this project's quests, answers: {} Go on with this quest, and \
-         when it is finished, commit your work and run `{horadric} quest done \"<one short \
-         line on what you achieved>\"`.",
+        "{who}: {} Go on with this quest, and when it is finished, commit your work and run \
+         `{horadric} quest done \"<one short line on what you achieved>\"`.",
         one_line(message)
     )
 }
@@ -532,6 +551,12 @@ pub fn tired(project: &str) -> String {
 /// The notes line that keeps what Warriv decided.
 pub fn note(text: &str) -> String {
     format!("{NOTE}{}", one_line(text))
+}
+
+/// The notes line for the human's answer to a quest whose session is gone,
+/// which its next session reads.
+pub fn human_note(text: &str) -> String {
+    format!("The human answers: {}", one_line(text))
 }
 
 /// The reason a quest Warriv hands to the human is blocked with.
@@ -1012,6 +1037,8 @@ mod tests {
             "--below \"<title>\"",
             "--after \"<title>\"",
             "hx quest blocked \"<question>\" --quest \"<title>\"",
+            "hx quest note \"<title>\" \"Model: <name>\"",
+            "Never change a `Model:` line you did not write",
         ] {
             assert!(p.contains(c), "{c}");
         }
@@ -1024,6 +1051,16 @@ mod tests {
         assert!(t.starts_with("Warriv, who plans this project's quests, answers: Use port 4100."));
         assert!(t.contains("`hx quest done"));
         assert!(!t.contains('\n'));
+        assert_eq!(
+            human_note(
+                "Blue,
+not green."
+            ),
+            "The human answers: Blue, not green."
+        );
+        let a = answered("hx", "Blue.");
+        assert!(a.starts_with("The human answers: Blue. Go on with this quest"));
+        assert!(a.contains("`hx quest done"));
     }
 
     #[test]

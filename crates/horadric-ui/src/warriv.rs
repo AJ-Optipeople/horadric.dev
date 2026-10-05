@@ -107,6 +107,8 @@ pub(in crate::app) struct Tell {
     key: String,
     title: String,
     text: String,
+    /// The human answered, from the away card, not Warriv.
+    human: bool,
 }
 
 /// Camps by project, and the tells not typed yet.
@@ -123,7 +125,8 @@ impl App {
         let drive = self.drives.get(key).copied();
         if !warriv::orchestrates(b.orchestrator, drive.is_some()) {
             self.shared.warriv_line.borrow_mut().remove(key);
-            return self.shared.warriv.borrow_mut().remove(key).is_some();
+            let astir = self.shared.astir.borrow_mut().remove(key);
+            return self.shared.warriv.borrow_mut().remove(key).is_some() | astir;
         }
         let asks: Vec<String> = b
             .tasks
@@ -146,6 +149,7 @@ impl App {
         camp.desk.hear(now.clone(), camp.awake.is_some());
         let mut closed = self.wake(key, b, &mut camp, &now);
         let holding = camp.desk.holding(&now);
+        let awake = camp.awake.is_some();
         let watch = camp
             .desk
             .watch(camp.awake.as_ref().map(|a| a.open(&now)), unix_now());
@@ -169,6 +173,14 @@ impl App {
             closed = true;
         }
         drop(lines);
+        // The quests tile starts or stops breathing.
+        let mut astir = self.shared.astir.borrow_mut();
+        closed |= if awake {
+            astir.insert(key.to_string())
+        } else {
+            astir.remove(key)
+        };
+        drop(astir);
         // The rows of what changed hands read anew.
         let mut shown = self.shared.warriv.borrow_mut();
         if shown.get(key) != Some(&holding) {
@@ -389,6 +401,23 @@ impl App {
             key,
             title: title.to_string(),
             text: text.to_string(),
+            human: false,
+        });
+    }
+
+    /// The human answered a quest's question on the away card: told as
+    /// `quest tell` tells it, in the human's name.
+    pub(in crate::app) fn human_tell(&mut self, dir: &str, title: &str, text: &str) {
+        let key = folder_key(dir);
+        self.tasks
+            .warriv
+            .tells
+            .retain(|t| !(t.key == key && t.title == title));
+        self.tasks.warriv.tells.push(Tell {
+            key,
+            title: title.to_string(),
+            text: text.to_string(),
+            human: true,
         });
     }
 
@@ -431,10 +460,15 @@ impl App {
         let Some(c) = self.consoles.get(&h) else {
             return true;
         };
-        c.write(warriv::told(&horadric_command(), &tell.text).into_bytes());
+        let told = if tell.human {
+            warriv::answered(&horadric_command(), &tell.text)
+        } else {
+            warriv::told(&horadric_command(), &tell.text)
+        };
+        c.write(told.into_bytes());
         self.tasks.enters.push((h.clone(), Instant::now()));
         self.tasks.nudged.remove(&h);
-        if !self.quiet {
+        if !self.quiet && !tell.human {
             self.toasts.show(
                 Toast::Info,
                 &format!("Warriv answered: {}", tasks::one_line(&t.title)),
@@ -450,7 +484,11 @@ impl App {
         let Some(dir) = self.project_dir(&tell.key) else {
             return;
         };
-        let line = warriv::note(&tell.text);
+        let line = if tell.human {
+            warriv::human_note(&tell.text)
+        } else {
+            warriv::note(&tell.text)
+        };
         let _ = file::update(&dir, |text| warriv::add_note(text, &t.title, &line).ok());
         self.refresh_boards(true);
         if t.mark == Mark::Blocked {

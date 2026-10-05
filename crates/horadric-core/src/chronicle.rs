@@ -82,8 +82,16 @@ pub enum Happened {
     },
     /// The commits made under the quest, newest first.
     Commits { commits: Vec<Commit> },
-    /// The quest's branch went into the main tree.
-    Merged { branch: String },
+    /// The quest's branch went into the main tree. `checked` is the
+    /// commit the main tree's branch was left at when the project's checks
+    /// passed on it, which a merge by hand, running none, leaves empty.
+    Merged {
+        branch: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        checked: String,
+    },
+    /// The project's "Ship Local" stone was cast. It names no quest.
+    Shipped,
     /// Warriv woke, the session `wake`, and was given these events. Given
     /// more while awake, it is another line with the same `wake`. None of
     /// Warriv's lines name a quest holder: they are about the wake.
@@ -350,6 +358,209 @@ pub fn wakes(records: &[Record], project: &str) -> Vec<WarrivWake> {
     out
 }
 
+/// What happened in a project while the human was away, for the card that
+/// greets them when they come back.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Away {
+    /// Quests completed, oldest first.
+    pub landed: Vec<AwayLine>,
+    /// One line a wake of Warriv: what it decided, and why.
+    pub wakes: Vec<AwayLine>,
+    /// The quests only the human can move on, in the log's order.
+    pub questions: Vec<Question>,
+}
+
+/// A line of the card, with a fainter one under it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AwayLine {
+    pub at: u64,
+    pub text: String,
+    pub detail: String,
+}
+
+/// A quest blocked on the human, which an answer tells as `quest tell`
+/// does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Question {
+    pub title: String,
+    pub question: String,
+    /// It was asked while the human was away, not before they left.
+    pub new: bool,
+}
+
+impl Away {
+    /// Whether anything happened, which is what opens the card. A question
+    /// left from before is no news, though the card asks it again.
+    pub fn happened(&self) -> bool {
+        !self.landed.is_empty() || !self.wakes.is_empty() || self.questions.iter().any(|q| q.new)
+    }
+}
+
+/// What happened in `project` since `since`, from the chronicle `records`
+/// and the log `list` as it is now. A blocked quest is a question for the
+/// human unless it waits on something Horadric checks, or Warriv has it
+/// (`warriv_has`, its titles), or nobody holds it to hear the answer.
+pub fn away(
+    records: &[Record],
+    project: &str,
+    list: &[Task],
+    warriv_has: &std::collections::BTreeSet<String>,
+    since: u64,
+) -> Away {
+    let mine: Vec<&Record> = records.iter().filter(|r| r.project == project).collect();
+    let mut titles: HashMap<&str, &str> = HashMap::new();
+    let mut summaries: HashMap<&str, &str> = HashMap::new();
+    for r in &mine {
+        let quest = quest_of(&r.quest);
+        if !r.title.is_empty() && !quest.is_empty() {
+            titles.insert(quest, &r.title);
+        }
+        if let Happened::Summary { text } = &r.what {
+            summaries.insert(quest, text);
+        }
+    }
+    let mut landed: Vec<AwayLine> = Vec::new();
+    let mut blocked_since: Vec<&str> = Vec::new();
+    for r in mine.iter().filter(|r| r.at >= since) {
+        let Happened::Marked { mark, .. } = &r.what else {
+            continue;
+        };
+        let quest = quest_of(&r.quest);
+        let title = if r.title.is_empty() {
+            titles.get(quest).copied().unwrap_or_default()
+        } else {
+            &r.title
+        };
+        match mark {
+            Outcome::Done if !title.is_empty() => {
+                landed.retain(|l| l.text != title);
+                landed.push(AwayLine {
+                    at: r.at,
+                    text: title.to_string(),
+                    detail: summaries
+                        .get(quest)
+                        .map(|s| crate::tasks::one_line(s))
+                        .unwrap_or_default(),
+                });
+            }
+            Outcome::Blocked => blocked_since.push(title),
+            _ => {}
+        }
+    }
+    let wakes = wakes(records, project)
+        .iter()
+        .filter(|w| w.woke >= since || w.slept.is_some_and(|s| s >= since))
+        .map(wake_line)
+        .collect();
+    let questions = list
+        .iter()
+        .filter(|t| {
+            t.mark == Mark::Blocked
+                && t.wait.is_none()
+                && t.holder.is_some()
+                && !warriv_has.contains(&t.title)
+        })
+        .map(|t| {
+            let reason = t.reason.as_deref().unwrap_or_default();
+            Question {
+                title: t.title.clone(),
+                question: crate::warriv::question(reason)
+                    .unwrap_or(reason)
+                    .trim()
+                    .to_string(),
+                new: blocked_since.contains(&t.title.as_str()),
+            }
+        })
+        .collect();
+    Away {
+        landed,
+        wakes,
+        questions,
+    }
+}
+
+/// A wake in one line: what Warriv did, then why, in its own words, or
+/// what woke it when it said nothing.
+fn wake_line(w: &WarrivWake) -> AwayLine {
+    let quoted = |t: &str| format!("\u{201C}{}\u{201D}", crate::tasks::one_line(t));
+    let mut did: Vec<String> = w
+        .commands
+        .iter()
+        .map(|(_, command, title, _)| {
+            let t = quoted(title);
+            match command {
+                Command::Tell => format!("told {t}"),
+                Command::Note => format!("noted on {t}"),
+                Command::Add => format!("added {t}"),
+                Command::Blocked => format!("handed {t} to you"),
+            }
+        })
+        .collect();
+    did.dedup();
+    let handed_itself = |h: &str| {
+        w.commands
+            .iter()
+            .any(|(_, c, t, _)| *c == Command::Blocked && t == h)
+    };
+    did.extend(
+        w.handed
+            .iter()
+            .filter(|h| !handed_itself(h))
+            .map(|h| format!("left {} to you", quoted(h))),
+    );
+    // No end yet is a wake still going: one cut short by a crash reads
+    // the same, and is rare.
+    let mut text = match (did.is_empty(), w.end) {
+        (true, Some(WakeEnd::CutShort)) => "cut short before it did anything".to_string(),
+        (true, None) => "awake, nothing done yet".to_string(),
+        (true, _) => "settled it without a command".to_string(),
+        (false, _) => did.join(", "),
+    };
+    match (did.is_empty(), w.end) {
+        (false, Some(WakeEnd::CutShort)) => text.push_str(", then was cut short"),
+        (false, None) => text.push_str(", still awake"),
+        _ => {}
+    }
+    let mut chars = text.chars();
+    let text = chars
+        .next()
+        .map(|c| c.to_uppercase().chain(chars).collect())
+        .unwrap_or_default();
+    let why: Vec<String> = w
+        .commands
+        .iter()
+        .map(|(_, _, _, t)| crate::tasks::one_line(t).trim().to_string())
+        .filter(|t| !t.is_empty())
+        .collect();
+    let detail = if why.is_empty() {
+        let mut woke: Vec<String> = Vec::new();
+        for e in &w.events {
+            let s = match e.kind {
+                Kind::Stalled => "the log stalled".to_string(),
+                Kind::Blocked => format!("{} blocked", quoted(&e.quest)),
+                Kind::Asks => format!("{} stopped", quoted(&e.quest)),
+                Kind::Tangled => format!("{} tangled", quoted(&e.quest)),
+                Kind::Merge => format!("{} not merged", quoted(&e.quest)),
+            };
+            if !woke.contains(&s) {
+                woke.push(s);
+            }
+        }
+        if woke.is_empty() {
+            String::new()
+        } else {
+            format!("Woke for {}", woke.join(", "))
+        }
+    } else {
+        why.join(" \u{00B7} ")
+    };
+    AwayLine {
+        at: w.woke,
+        text,
+        detail,
+    }
+}
+
 /// One quest, as the window shows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Quest {
@@ -491,7 +702,8 @@ pub fn quests(
                 }
             }
             Happened::Commits { commits } => q.commits = commits.clone(),
-            Happened::Merged { branch } => q.merged = Some(branch.clone()),
+            Happened::Merged { branch, .. } => q.merged = Some(branch.clone()),
+            Happened::Shipped => {}
         }
     }
     for t in list {
@@ -795,6 +1007,74 @@ pub fn graph(quests: &[Quest]) -> (Vec<Row>, usize) {
     }
     rows.reverse();
     (rows, width)
+}
+
+/// One of Warriv's wakes on the diagram, a dot on a lane of its own beside
+/// the trunk.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WakeDot {
+    /// Index into the wakes.
+    pub wake: usize,
+    /// The band it sits in, an index into the rows: the newest quest
+    /// accepted before it woke, or the oldest row when none was.
+    pub row: usize,
+    /// How far down the band, 0 its top edge and 1 its bottom. Wakes
+    /// sharing a band spread over it, the oldest lowest, as time runs up.
+    pub at: f32,
+    /// The rows of the quests it touched, top first: those it woke for,
+    /// ran a command about, or handed on. Of two quests with one title,
+    /// the one nearer the wake.
+    pub touched: Vec<usize>,
+}
+
+/// Where each of `wakes`, as [`wakes`] gave them, sits beside `rows`, as
+/// [`graph`] gave them for `quests`. Nothing without a row to sit by.
+pub fn wake_dots(quests: &[Quest], rows: &[Row], wakes: &[WarrivWake]) -> Vec<WakeDot> {
+    if rows.is_empty() {
+        return Vec::new();
+    }
+    let accepted = |r: &Row| quests[r.quest].accepted.unwrap_or(0);
+    let mut out: Vec<WakeDot> = Vec::with_capacity(wakes.len());
+    for (i, w) in wakes.iter().enumerate() {
+        let row = rows
+            .iter()
+            .position(|r| accepted(r) <= w.woke)
+            .unwrap_or(rows.len() - 1);
+        let titles = w
+            .events
+            .iter()
+            .map(|e| &e.quest)
+            .chain(w.commands.iter().map(|(_, _, t, _)| t))
+            .chain(&w.handed)
+            .filter(|t| !t.is_empty());
+        let mut touched: Vec<usize> = titles
+            .filter_map(|t| {
+                rows.iter()
+                    .enumerate()
+                    .filter(|(_, r)| !quests[r.quest].main && &quests[r.quest].title == t)
+                    .min_by_key(|(k, _)| k.abs_diff(row))
+                    .map(|(k, _)| k)
+            })
+            .collect();
+        touched.sort_unstable();
+        touched.dedup();
+        out.push(WakeDot {
+            wake: i,
+            row,
+            at: 0.0,
+            touched,
+        });
+    }
+    // Spread each band's wakes, oldest at the bottom.
+    let mut order: Vec<(usize, usize)> = (0..out.len()).map(|d| (out[d].row, d)).collect();
+    order.sort_by_key(|&(row, d)| (row, wakes[out[d].wake].woke, d));
+    for band in order.chunk_by(|a, b| a.0 == b.0) {
+        let k = band.len() as f32;
+        for (j, &(_, d)) in band.iter().enumerate() {
+            out[d].at = 1.0 - (j as f32 + 1.0) / (k + 1.0);
+        }
+    }
+    out
 }
 
 /// A conversation's transcript, Claude Code's JSON lines, as text to read:
@@ -1376,5 +1656,197 @@ mod tests {
             transcript_text(&jsonl),
             "## You\n\nFix the clock\n\n## Agent\n\nLooking.\n> Bash: cargo test --all\nDone.\n"
         );
+    }
+
+    fn blocked(title: &str, holder: &str, reason: &str) -> Task {
+        Task {
+            reason: Some(reason.into()),
+            ..task(0, Mark::Blocked, title, Some(holder))
+        }
+    }
+
+    fn slept(at: u64, wake: &str, cut_short: bool, handed: &[&str]) -> Record {
+        rec(
+            at,
+            "",
+            "",
+            Happened::slept(
+                wake,
+                "",
+                cut_short,
+                handed.iter().map(|h| h.to_string()).collect(),
+            ),
+        )
+    }
+
+    #[test]
+    fn away_tells_what_landed_since_with_its_summary() {
+        let records = [
+            accepted(1, "q1", "Old"),
+            marked(5, "q1", Outcome::Done),
+            accepted(6, "q2", "Serve the API"),
+            rec(
+                20,
+                "q2",
+                "Serve the API",
+                Happened::Summary {
+                    text: "Served on\nport 4100".into(),
+                },
+            ),
+            marked(21, "q2", Outcome::Done),
+            accepted(22, "q3", "Still going"),
+        ];
+        let a = away(&records, "p", &[], &Default::default(), 10);
+        assert_eq!(a.landed.len(), 1, "landed before you left is old news");
+        assert_eq!(a.landed[0].text, "Serve the API");
+        assert_eq!(a.landed[0].detail, "Served on port 4100");
+        assert_eq!(a.landed[0].at, 21);
+        assert!(a.happened());
+        assert!(away(&records, "other", &[], &Default::default(), 0)
+            .landed
+            .is_empty());
+    }
+
+    #[test]
+    fn nothing_happened_is_no_card_though_old_questions_stand() {
+        let list = [blocked("Pick a port", "s1", "Which port?")];
+        let records = [rec(
+            3,
+            "s1",
+            "Pick a port",
+            Happened::Marked {
+                mark: Outcome::Blocked,
+                reason: "Which port?".into(),
+            },
+        )];
+        let a = away(&records, "p", &list, &Default::default(), 10);
+        assert_eq!(a.questions.len(), 1);
+        assert!(!a.questions[0].new);
+        assert!(!a.happened());
+        let a = away(&records, "p", &list, &Default::default(), 2);
+        assert!(a.questions[0].new);
+        assert!(a.happened());
+    }
+
+    #[test]
+    fn a_question_is_one_only_the_human_can_answer() {
+        let mut waits = blocked("Waits", "s2", "on a file");
+        waits.wait = Some(crate::tasks::Wait::After);
+        let list = [
+            blocked("Handed", "s1", &crate::warriv::handed("Which port?")),
+            waits,
+            blocked("Warriv has it", "s3", "Which colour?"),
+            Task {
+                holder: None,
+                ..blocked("Nobody holds it", "", "Why?")
+            },
+            task(4, Mark::Open, "Open", None),
+        ];
+        let has = ["Warriv has it".to_string()].into();
+        let a = away(&[], "p", &list, &has, 0);
+        assert_eq!(a.questions.len(), 1);
+        assert_eq!(a.questions[0].title, "Handed");
+        assert_eq!(a.questions[0].question, "Which port?", "the prefix goes");
+    }
+
+    #[test]
+    fn a_wake_is_one_line_of_what_it_did_and_why() {
+        let records = [
+            woke(1, "warriv-1", "Old"),
+            slept(2, "warriv-1", false, &[]),
+            woke(10, "warriv-1", "A"),
+            ran(11, "warriv-1", Command::Tell, "A", "Use port\n4100."),
+            ran(12, "warriv-1", Command::Add, "Fix B", ""),
+            ran(13, "warriv-1", Command::Blocked, "C", "Which colour?"),
+            slept(14, "warriv-1", false, &["C", "D"]),
+        ];
+        let a = away(&records, "p", &[], &Default::default(), 5);
+        assert_eq!(a.wakes.len(), 1, "the wake before you left is not told");
+        assert_eq!(
+            a.wakes[0].text,
+            "Told \u{201C}A\u{201D}, added \u{201C}Fix B\u{201D}, handed \u{201C}C\u{201D} to you, \
+             left \u{201C}D\u{201D} to you"
+        );
+        assert_eq!(a.wakes[0].detail, "Use port 4100. \u{00B7} Which colour?");
+        assert_eq!(a.wakes[0].at, 10);
+    }
+
+    #[test]
+    fn a_silent_wake_says_what_woke_it() {
+        let records = [
+            woke(10, "warriv-1", "A"),
+            slept(14, "warriv-1", false, &[]),
+            woke(20, "warriv-2", "B"),
+            slept(21, "warriv-2", true, &[]),
+            woke(30, "warriv-3", "C"),
+            ran(31, "warriv-3", Command::Note, "C", ""),
+            woke(40, "warriv-4", "D"),
+            ran(41, "warriv-4", Command::Note, "D", ""),
+            slept(42, "warriv-4", true, &[]),
+        ];
+        let a = away(&records, "p", &[], &Default::default(), 0);
+        let texts: Vec<&str> = a.wakes.iter().map(|w| w.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            [
+                "Settled it without a command",
+                "Cut short before it did anything",
+                "Noted on \u{201C}C\u{201D}, still awake",
+                "Noted on \u{201C}D\u{201D}, then was cut short",
+            ]
+        );
+        assert_eq!(a.wakes[0].detail, "Woke for \u{201C}A\u{201D} blocked");
+    }
+
+    #[test]
+    fn a_wake_sits_by_the_newest_quest_before_it_and_reaches_the_quests_it_touched() {
+        let mut q = vec![
+            quest("a", 10, Some(50), Outcome::Done),
+            quest("b", 20, None, Outcome::Working),
+            quest("c", 40, None, Outcome::Blocked),
+        ];
+        q[0].title = "A".into();
+        q[1].title = "B".into();
+        q[2].title = "C".into();
+        let (rows, _) = graph(&q);
+        // Newest first: c, b, a.
+        let wake = |woke: u64, events: &[&str], ran: &[&str], handed: &[&str]| WarrivWake {
+            id: "warriv-5".into(),
+            conversation: String::new(),
+            woke,
+            slept: None,
+            events: events
+                .iter()
+                .map(|t| Woken {
+                    kind: Kind::Blocked,
+                    quest: t.to_string(),
+                })
+                .collect(),
+            commands: ran
+                .iter()
+                .map(|t| (woke, Command::Note, t.to_string(), String::new()))
+                .collect(),
+            end: None,
+            handed: handed.iter().map(|t| t.to_string()).collect(),
+        };
+        let wakes = [
+            wake(5, &["A"], &[], &[]),
+            wake(25, &["B"], &["A", "Gone"], &[]),
+            wake(30, &[""], &[], &["C"]),
+            wake(60, &["C"], &["C"], &[]),
+        ];
+        let dots = wake_dots(&q, &rows, &wakes);
+        let at: Vec<(usize, usize)> = dots.iter().map(|d| (d.wake, d.row)).collect();
+        // Older than every quest, it sits by the oldest row.
+        assert_eq!(at, [(0, 2), (1, 1), (2, 1), (3, 0)]);
+        assert_eq!(dots[1].touched, [1, 2], "B and A, the gone one left out");
+        assert_eq!(dots[2].touched, [0], "a quest handed on is touched");
+        assert_eq!(dots[3].touched, [0], "once, however often");
+        // Alone in a band it sits at the middle; two share one, the
+        // older lower.
+        assert_eq!(dots[0].at, 0.5);
+        assert!(dots[1].at > dots[2].at);
+        assert!((dots[1].at - 2.0 / 3.0).abs() < 1e-6);
+        assert!(wake_dots(&[], &[], &wakes).is_empty());
     }
 }

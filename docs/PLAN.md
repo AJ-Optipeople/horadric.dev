@@ -3470,9 +3470,23 @@ it after its session closes.
   colour, a gold that is neither a lamp nor the magic blue. A thin
   line runs from the dot to each quest the wake touched, at that
   quest's row. `chronicle::graph` places them, pure and tested.
+  Built on 2026-10-05. `chronicle::wake_dots`, beside `graph`, puts each
+  wake in the band of the newest quest accepted before it woke (the
+  oldest row when none was), spreads the wakes sharing a band over it
+  oldest lowest, and finds the rows of the quests it woke for, ran a
+  command about or handed on, by title. The lane sits left of the
+  trunk, only when there are wakes, in `theme::warriv`, a palette
+  colour of its own in every theme. A dot is filled, ringed when cut
+  short, glowing while awake; its lines brighten when it is picked or
+  under the cursor.
 - **A wake's detail.** Click the dot: when, how long, the events that
   woke it, each command in order, and how it ended, with the question
   for each quest it handed on. Read the session works as for a quest.
+  Built on 2026-10-05. The question is the one Warriv asked with `quest
+  blocked`, else the quest's blocked reason. A wake with no end whose
+  session is gone reads cut short. Read the session writes the wake's
+  story over its transcript, read from the project's folder, where
+  Warriv works. Carry it on stays latched: a wake is not carried on.
 - **A live line on the quests tile.** While Warriv is awake, a line
   under the mode reads "Warriv: settling 2" in the working colour; when
   its six wakes are spent, "Warriv rests until 21:40" in the dim colour.
@@ -3539,6 +3553,42 @@ with a one line answer field. Enter on an answer does what
 until the next absence. `chronicle::away(since)` builds it, pure and
 tested. Nothing happened, no card.
 
+Built on 2026-10-05. `chronicle::away(records, project, list,
+warriv_has, since)` gives a project's quests marked done since then
+(with the agent's summary), a line a wake (what Warriv did, then its
+own words for why, or what woke it when it ran nothing), and the
+quests blocked on the human: no wait Horadric checks, a session that
+holds them, and not among those Warriv has. Only news opens the card:
+a question asked before the human left is asked again but opens
+nothing. The UI's `away.rs` draws it with the catch-up's layout and
+plate, which learned a field row and a width. What the plan did not
+say:
+
+- **It takes the catch-up's place.** Away 30 minutes or more with news
+  in any quest log, the card opens and the catch-up does not, so coming
+  back is one card. Shorter, or no news, the catch-up opens as before.
+- **It stands over the stage,** owned by it and centred on it, at most
+  520 DIPs wide and narrower over a narrow stage; with the stage hidden,
+  in the middle of the primary screen. It does not close when the focus
+  goes elsewhere, since answering often means reading a session first.
+- **An answer is the human's, not Warriv's.** The session is told "The
+  human answers: ...", no "Warriv answered" toast is shown, and a quest
+  whose session is gone gets a `The human answers:` notes line, not a
+  `Warriv:` one, and starts again. Enter moves the keyboard to the next
+  question not yet told, and the one told reads "told" with its lamp
+  out. Tab and the arrows move between questions.
+- **Errands** have no chronicle line yet, so the card has no errands
+  part; part 4 adds both.
+- A dev instance treats a file `away-now` in its state folder as coming
+  back from an hour away, since an absence can not be tried while
+  anyone uses the machine.
+- Seen on a dev instance with a seeded chronicle and `cmd.exe` for the
+  agent, in Skeuomorphism (dark), Flat (light) and over a 420 pixel
+  stage: an answer typed and Entered wrote the note, started the quest
+  again, and moved to the next question; Esc closed the card. Not tried
+  on screen: typing into a live session between turns, which is the
+  path Warriv's tells already take.
+
 **4. Errands: runewords on a clock.** A stone in the Runetome may carry
 `"every"`, and then Warriv casts it unattended:
 
@@ -3604,10 +3654,33 @@ toast says "5 quests landed. Ship local?" and its click casts the
 project's "Ship Local" stone. Once per landing count; ignored, it waits
 for the next landing. The rule is pure and tested.
 
+Built 2026-10-05. `ship.rs` in `horadric-core` holds the rule. A landing
+now records `checked`, the commit its checks passed on, in its `merged`
+chronicle line, and "checks passed on `main`'s head" means `main` is still
+at the newest landing's `checked`: a commit made on `main` since was
+checked by nobody, so the proposal waits for the next landing. The last
+ship is `reload.log` when it names the project (written as the binaries
+go in, so surer), else the newest `shipped` chronicle line, which casting
+the "Ship Local" stone writes. Only a project with that stone is asked.
+The click puts the project on the stage and casts the stone as a click
+on it would, asking first. Seen on screen with a dev instance, two fake
+landings in its chronicle and real ones of a scratch repository.
+
 **6. A pulse.** While Warriv, a reviewer or an errand works, the quests
 tile's edge breathes slowly in Warriv's gold, so the camp is seen moving
 without reading anything. Still when nothing runs. Beside the live line
 already planned in "Warriv in the quest log".
+
+Built on 2026-10-05, in `theme::warriv`, the gold of Warriv's lane in the
+quest log. `Shared::astir` holds the projects
+where something of Warriv's works; Warriv's camp sets it while a session
+is awake, and the reviewer and errands set it the same way once they
+exist. The breath is drawn in the light pass, over the kept layer, at the
+waiting tile's frame rate, and asks for no frames when nothing breathes;
+with Windows' animations off the edge holds still at half a breath. On
+the way, `motion::cycle` took the wall clock as an f32, which at today's
+seconds since 1970 has no fractions left, so the busy wash never breathed
+either; it counts whole nanoseconds now.
 
 Already built and left alone: a session cut off by a usage limit is
 told to go on a minute after the reset (`tasks::go_on`).
@@ -3688,7 +3761,17 @@ rails:
 notes line on quests it files or meets without one, by how hard the
 work is, and the runner starts the quest with that `--model` (Claude
 Code only; other agents ignore it). A human's `Model:` line is never
-changed. Pure and tested: reading the line, the flag.
+changed. Pure and tested: reading the line, the flag. **Built on
+2026-10-05**: `tasks::model_line` reads `Model: haiku|sonnet|opus` in
+any case and nothing else, so a typo starts the default model rather
+than a session that fails. `Task::model` takes a human's line over
+Warriv's (written as `Warriv: Model: ...` through `quest note`), and of
+Warriv's its last. The runner adds `--model` for Claude Code only, in
+`extra_args`, read again at every start, so a resume takes a model
+Warriv wrote since, and the usage window's default model stays out.
+Warriv's prompt says how to pick by difficulty. Seen on a dev instance:
+a `Model: haiku` quest started as `claude --model haiku`, and its pane
+read Haiku 4.5.
 
 **6. Event triggers for errands.** `"on": "landed"`, `"shipped"`,
 `"away"` or `"back"` on a stone casts it at that event instead of on a

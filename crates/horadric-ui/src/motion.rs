@@ -272,12 +272,13 @@ pub fn breathe(elapsed: Duration, period: Duration) -> f32 {
 }
 
 /// How far round a loop something going once every `period` has got, from
-/// 0 to 1.
+/// 0 to 1. Whole nanoseconds until the remainder, since a clock read as
+/// time since 1970 is past where an f32 counts single seconds.
 pub fn cycle(elapsed: Duration, period: Duration) -> f32 {
     if period.is_zero() {
         return 0.0;
     }
-    (elapsed.as_secs_f32() % period.as_secs_f32()) / period.as_secs_f32()
+    (elapsed.as_nanos() % period.as_nanos()) as f32 / period.as_nanos() as f32
 }
 
 /// Moves `from` toward `to` by as much as `elapsed` allows, halving the
@@ -315,9 +316,26 @@ pub fn fade(value: f32, target: f32, elapsed: Duration, length: Duration) -> f32
     }
 }
 
+/// The sooner of two frame rates, where None wants no frames at all.
+pub fn sooner(a: Option<Duration>, b: Option<Duration>) -> Option<Duration> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        _ => a.or(b),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_sooner_frame_wins_and_none_asks_for_nothing() {
+        let ms = Duration::from_millis;
+        assert_eq!(sooner(None, None), None);
+        assert_eq!(sooner(Some(ms(66)), None), Some(ms(66)));
+        assert_eq!(sooner(None, Some(ms(40))), Some(ms(40)));
+        assert_eq!(sooner(Some(ms(66)), Some(ms(16))), Some(ms(16)));
+    }
 
     #[test]
     fn a_caret_blinks_lit_first_then_stays_lit() {
@@ -505,6 +523,10 @@ mod tests {
         assert_eq!(cycle(ms(250), ms(1000)), 0.25);
         assert!((cycle(ms(1250), ms(1000)) - 0.25).abs() < 1e-6);
         assert_eq!(cycle(ms(5), Duration::ZERO), 0.0);
+        // A wall clock: the loop still moves from one frame to the next.
+        let epoch = Duration::from_secs(1_791_225_000);
+        assert!((cycle(epoch + ms(250), ms(1000)) - 0.25).abs() < 1e-6);
+        assert!((cycle(epoch + ms(500), ms(1000)) - 0.5).abs() < 1e-6);
     }
 
     #[test]
