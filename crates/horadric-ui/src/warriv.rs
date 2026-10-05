@@ -38,6 +38,22 @@ struct Awake {
     /// The quests it told since it was last given events: one `quest
     /// tell` a quest each time.
     told: HashSet<String>,
+    /// Every event it was given, and every quest it told, so what it left
+    /// unsettled goes to the human once it closes.
+    given: Vec<Event>,
+    settled: HashSet<String>,
+}
+
+impl Camp {
+    /// The session is done with: each event it was given that still holds
+    /// and whose quest it did not answer is the human's now.
+    fn retire(&mut self, a: Awake, now: &[Event]) {
+        for e in a.given {
+            if now.contains(&e) && !a.settled.contains(&e.title) {
+                self.desk.hand(e);
+            }
+        }
+    }
 }
 
 /// What Warriv told a quest's session, waiting until that is between
@@ -60,7 +76,7 @@ impl App {
     /// session closed, which the clusters have to hear.
     pub(super) fn orchestrate(&mut self, key: &str, b: &Board) -> bool {
         if !b.orchestrator {
-            return false;
+            return self.shared.warriv.borrow_mut().remove(key).is_some();
         }
         let asks: Vec<String> = b
             .tasks
@@ -75,16 +91,23 @@ impl App {
             .collect();
         let now = warriv::events(&b.tasks, b.mode, &asks);
         let mut camp = self.tasks.warriv.camps.remove(key).unwrap_or_default();
-        if camp.awake.as_ref().is_some_and(|a| !self.live(&a.id)) {
-            camp.awake = None;
+        if let Some(a) = camp.awake.take_if(|a| !self.live(&a.id)) {
+            camp.retire(a, &now);
         }
-        camp.desk.hear(now, camp.awake.is_some());
-        let closed = self.wake(key, b, &mut camp);
+        camp.desk.hear(now.clone(), camp.awake.is_some());
+        let mut closed = self.wake(key, b, &mut camp, &now);
+        let holding = camp.desk.holding(&now);
         self.tasks.warriv.camps.insert(key.to_string(), camp);
+        // The rows of what changed hands read anew.
+        let mut shown = self.shared.warriv.borrow_mut();
+        if shown.get(key) != Some(&holding) {
+            shown.insert(key.to_string(), holding);
+            closed = true;
+        }
         closed
     }
 
-    fn wake(&mut self, key: &str, b: &Board, camp: &mut Camp) -> bool {
+    fn wake(&mut self, key: &str, b: &Board, camp: &mut Camp, now: &[Event]) -> bool {
         // Awake, it hears more only once the turn it was given ends.
         if let Some(a) = &camp.awake {
             let stopped = self.shared.registry.lock().is_ok_and(|r| {
@@ -99,6 +122,7 @@ impl App {
             Wake::Nothing => match camp.awake.take() {
                 Some(a) => {
                     self.forget(&a.id);
+                    camp.retire(a, now);
                     true
                 }
                 None => false,
@@ -115,11 +139,13 @@ impl App {
                         a.told_at = SystemTime::now();
                         for e in &events {
                             a.told.remove(&e.title);
+                            a.settled.remove(&e.title);
                         }
+                        a.given.extend(events);
                         false
                     }
                     None => {
-                        camp.awake = self.start_warriv(key, &briefs);
+                        camp.awake = self.start_warriv(key, &briefs, events);
                         false
                     }
                 }
@@ -135,6 +161,7 @@ impl App {
                 match camp.awake.take() {
                     Some(a) => {
                         self.forget(&a.id);
+                        camp.retire(a, now);
                         true
                     }
                     None => false,
@@ -163,7 +190,7 @@ impl App {
 
     /// A fresh Warriv session in the project's main tree, with the events
     /// as its first prompt.
-    fn start_warriv(&mut self, key: &str, briefs: &[Brief]) -> Option<Awake> {
+    fn start_warriv(&mut self, key: &str, briefs: &[Brief], given: Vec<Event>) -> Option<Awake> {
         let dir = self.project_dir(key)?;
         let id = self.unique_id(warriv::ID);
         self.tasks
@@ -187,6 +214,8 @@ impl App {
             id,
             told_at,
             told: HashSet::new(),
+            given,
+            settled: HashSet::new(),
         })
     }
 
@@ -230,6 +259,7 @@ impl App {
                     eprintln!("horadric: Warriv already told \"{title}\" this wake");
                     return;
                 }
+                a.settled.insert(title.to_string());
             }
         }
         self.tasks

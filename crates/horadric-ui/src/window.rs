@@ -11,7 +11,7 @@
 
 use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -113,6 +113,9 @@ pub struct Shared {
     /// Each project's Runetome as last read, by project key, the empty
     /// stone last.
     pub tomes: RefCell<HashMap<String, Vec<TomeStone>>>,
+    /// The quests Warriv has, by project key: blocked or tangled ones it
+    /// settles before the human hears of them. None with Warriv off.
+    pub warriv: RefCell<HashMap<String, BTreeSet<String>>>,
 }
 
 impl Shared {
@@ -609,6 +612,8 @@ impl Cluster {
         };
         let now = crate::app::unix_now();
         let ready = horadric_core::tasks::readiness(&b.tasks);
+        let warriv = self.shared.warriv.borrow();
+        let with_warriv = |title: &str| warriv.get(&self.key).is_some_and(|w| w.contains(title));
         let mut items: Vec<Item> = b
             .shown()
             .into_iter()
@@ -617,7 +622,10 @@ impl Cluster {
                 Item {
                     line: t.line,
                     title: t.title.clone(),
-                    state: board::gated(state(t), &ready[i]),
+                    state: board::with_warriv(
+                        board::gated(state(t), &ready[i]),
+                        with_warriv(&t.title),
+                    ),
                     note: board::note(t, &ready[i], now),
                     finish: None,
                     holder: t.holder.clone(),

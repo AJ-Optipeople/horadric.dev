@@ -975,8 +975,9 @@ impl App {
                 }
             }
             self.nudge(b);
-            said.extend(self.worth_saying(key, b));
+            // Warriv hears first, so what it has is not said as well.
             closed |= self.orchestrate(key, b);
+            said.extend(self.worth_saying(key, b));
             if just_closed {
                 continue;
             }
@@ -1214,10 +1215,12 @@ impl App {
     /// same while it holds, each with its title and text.
     fn worth_saying(&self, key: &str, b: &Board) -> Vec<(String, String, String)> {
         let mut out = Vec::new();
+        let warriv = self.shared.warriv.borrow();
+        let has = |title: &str| warriv.get(key).is_some_and(|w| w.contains(title));
         // An After: line no quest finishing can free waits forever unless
         // somebody hears of it.
         for (t, r) in b.tasks.iter().zip(tasks::readiness(&b.tasks)) {
-            if matches!(t.mark, Mark::Open | Mark::Blocked) && r.tangled() {
+            if matches!(t.mark, Mark::Open | Mark::Blocked) && r.tangled() && !has(&t.title) {
                 out.push((
                     format!("tangled:{key}:{}", t.title),
                     format!("Cannot start: {}", t.title),
@@ -1229,6 +1232,9 @@ impl App {
             let Some(h) = t.holder.as_deref() else {
                 continue;
             };
+            if has(&t.title) {
+                continue;
+            }
             match t.mark {
                 Mark::Working if tombs::count(h).is_some() => {
                     if self.ready_to_pick(h) {
@@ -1245,11 +1251,14 @@ impl App {
                     t.title.clone(),
                 )),
                 // One that waits on a check needs nobody.
-                Mark::Blocked if t.wait.is_none() => out.push((
-                    format!("blocked:{h}"),
-                    format!("Blocked: {}", t.title),
-                    t.reason.clone().unwrap_or_default(),
-                )),
+                Mark::Blocked if t.wait.is_none() => {
+                    let reason = t.reason.clone().unwrap_or_default();
+                    let (title, text) = match horadric_core::warriv::question(&reason) {
+                        Some(q) => (format!("Warriv asks: {}", t.title), q.to_string()),
+                        None => (format!("Blocked: {}", t.title), reason),
+                    };
+                    out.push((format!("blocked:{h}"), title, text));
+                }
                 Mark::Working if b.mode.runs() && self.stopped_after_nudge(h) => out.push((
                     format!("asks:{h}"),
                     format!("{} needs you", t.title),

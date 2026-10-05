@@ -186,6 +186,9 @@ pub struct Desk {
     wakes: Vec<u64>,
     /// The budget ran out and the human was told so, until it frees up.
     tired: bool,
+    /// Events that went to the human: the budget was spent, or Warriv
+    /// ended its turn with them still holding. Kept while they hold.
+    human: Vec<Event>,
 }
 
 /// What to do with the events waiting.
@@ -208,10 +211,16 @@ impl Desk {
     pub fn hear(&mut self, now: Vec<Event>, working: bool) {
         let keys: BTreeSet<String> = now.iter().map(Event::key).collect();
         self.seen.retain(|k| keys.contains(k));
+        self.human.retain(|e| keys.contains(&e.key()));
         self.queue
             .retain(|e| e.kind == Kind::Merge || keys.contains(&e.key()));
         for e in now {
-            if !self.seen.insert(e.key()) || (working && e.kind.can_be_own()) {
+            if !self.seen.insert(e.key()) {
+                continue;
+            }
+            // Its own doing is nothing it would settle, so the human hears it.
+            if working && e.kind.can_be_own() {
+                self.hand(e);
                 continue;
             }
             self.queue.push(e);
@@ -223,6 +232,24 @@ impl Desk {
         if !self.queue.contains(&e) {
             self.queue.push(e);
         }
+    }
+
+    /// An event Warriv could not settle, which is the human's while it
+    /// holds and never goes to Warriv again.
+    pub fn hand(&mut self, e: Event) {
+        if !self.human.contains(&e) {
+            self.human.push(e);
+        }
+    }
+
+    /// The quests among the events `now` that Warriv has, so they need
+    /// nobody else: every one but those that went to the human. A quest
+    /// Warriv handed on is no event, so it is the human's too.
+    pub fn holding(&self, now: &[Event]) -> BTreeSet<String> {
+        now.iter()
+            .filter(|e| !e.title.is_empty() && !self.human.contains(e))
+            .map(|e| e.title.clone())
+            .collect()
     }
 
     /// Whether events wait.
@@ -240,6 +267,9 @@ impl Desk {
         self.wakes.retain(|&at| at + HOUR > now);
         if self.wakes.len() >= WAKES_AN_HOUR {
             let first = !std::mem::replace(&mut self.tired, true);
+            for e in &events {
+                self.hand(e.clone());
+            }
             return Wake::Tired { events, first };
         }
         self.tired = false;
@@ -387,6 +417,11 @@ pub fn handed(question: &str) -> String {
     format!("{HANDED}{}", one_line(question))
 }
 
+/// The question Warriv handed on, when `reason` is one.
+pub fn question(reason: &str) -> Option<&str> {
+    reason.strip_prefix(HANDED)
+}
+
 /// The quest `name` means in the log `text`, or why there is none.
 fn quest(text: &str, name: &str) -> Result<Task, String> {
     let tasks = parse(text);
@@ -421,6 +456,13 @@ pub fn hand_on(text: &str, name: &str, question: &str) -> Result<String, String>
             ))
         }
     };
+    // The human answers from the notes, so what was tried is there first.
+    if !t.notes.iter().any(|n| n.trim_start().starts_with(NOTE)) {
+        return Err(format!(
+            "say what you tried first, with `quest note \"{}\" \"...\"`",
+            one_line(&t.title)
+        ));
+    }
     let line = item_line(
         Mark::Blocked,
         &t.title,
@@ -593,6 +635,52 @@ mod tests {
     }
 
     #[test]
+    fn what_it_could_not_settle_is_the_humans_while_it_holds() {
+        let mut d = Desk::default();
+        let now = vec![blocked("A", "x"), blocked("B", "y")];
+        d.hear(now.clone(), false);
+        assert!(matches!(d.wake(0), Wake::Go(_)));
+        assert_eq!(d.holding(&now), ["A", "B"].map(String::from).into());
+        // Its turn ended with A still blocked.
+        d.hand(blocked("A", "x"));
+        d.hear(now.clone(), false);
+        assert_eq!(d.holding(&now), ["B"].map(String::from).into());
+        assert_eq!(d.wake(1), Wake::Nothing);
+        // Blocked again for another reason, it is Warriv's again.
+        let again = vec![blocked("A", "z")];
+        d.hear(again.clone(), false);
+        assert_eq!(d.holding(&again), ["A"].map(String::from).into());
+        // A whole-log event is no quest's.
+        let stalled = Event {
+            kind: Kind::Stalled,
+            title: String::new(),
+            detail: "Waiting: A.".into(),
+        };
+        assert!(d.holding(&[stalled]).is_empty());
+    }
+
+    #[test]
+    fn its_own_tangle_and_what_comes_while_it_rests_go_to_the_human() {
+        let mut d = Desk::default();
+        let tangled = Event {
+            kind: Kind::Tangled,
+            title: "B".into(),
+            detail: "No quest is called \"X\".".into(),
+        };
+        d.hear(vec![tangled.clone()], true);
+        assert!(d.holding(&[tangled]).is_empty());
+        let mut d = Desk::default();
+        for at in 0..WAKES_AN_HOUR as u64 {
+            d.hear(vec![blocked(&at.to_string(), "?")], false);
+            assert!(matches!(d.wake(at), Wake::Go(_)));
+        }
+        let late = vec![blocked("late", "?")];
+        d.hear(late.clone(), false);
+        assert!(matches!(d.wake(10), Wake::Tired { .. }));
+        assert!(d.holding(&late).is_empty());
+    }
+
+    #[test]
     fn a_failed_merge_waits_until_told_even_though_the_log_does_not_hold_it() {
         let mut d = Desk::default();
         let merge = Event {
@@ -725,6 +813,8 @@ mod tests {
         assert_eq!(note("split\ninto two"), "Warriv: split into two");
         assert_eq!(handed("Which\naccount?"), "Warriv asks: Which account?");
         assert!(handed("x").starts_with(HANDED));
+        assert_eq!(question(&handed("Which card?")), Some("Which card?"));
+        assert_eq!(question("which card?"), None);
     }
 
     #[test]
@@ -748,7 +838,9 @@ mod tests {
     fn a_held_quest_is_handed_to_the_human_with_the_question() {
         let text = "- [!] Pay for it @p-1: which card?
   n
+  Warriv: no card in the docs
 - [/] Work @w-1
+  Warriv: asked the docs
 - [ ] Open
 - [x] Old @o-1
 ";
@@ -756,7 +848,9 @@ mod tests {
             hand_on(text, "Pay for it", "Which card pays?").unwrap(),
             "- [!] Pay for it @p-1: Warriv asks: Which card pays?
   n
+  Warriv: no card in the docs
 - [/] Work @w-1
+  Warriv: asked the docs
 - [ ] Open
 - [x] Old @o-1
 "
@@ -767,6 +861,13 @@ mod tests {
         ));
         assert!(hand_on(text, "Open", "?").is_err());
         assert!(hand_on(text, "Old", "?").is_err());
+        // Not before the notes say what Warriv tried.
+        let untried = "- [!] Pay @p-1: which card?
+  n
+";
+        assert!(hand_on(untried, "Pay", "?")
+            .unwrap_err()
+            .starts_with("say what you tried first"));
         // Handed on, it no longer wakes Warriv.
         let handed = hand_on(text, "Pay", "Which card?").unwrap();
         assert!(events(&parse(&handed), Mode::Manual, &[]).is_empty());

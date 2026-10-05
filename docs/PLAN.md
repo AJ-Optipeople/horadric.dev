@@ -3154,16 +3154,14 @@ on, unless the ten minute gap passed meanwhile.
 ### Orchestration
 
 Asked for on 2026-10-01, decided on 2026-10-05 (see the end of this
-section). Steps 1, 4, 5 and 6 are built (2026-10-05); Warriv and what
-the human hears are not yet. The goal is development
+section). Every step is built (2026-10-05). The goal is development
 that runs itself across many sessions, with the human hearing only
 about what needs a human. Today the human is the orchestrator: with
 several sessions in a project, a quest that cannot go on because it
 waits on another sits `[!]` until the human notices, works out what it
 waits on and starts it again. "Blocked quests resume by themselves" in
 the quest log fixes part of that. It is not the whole answer, and this
-section says what is. Step 2, Warriv, is built too (2026-10-05); step 3
-is not yet.
+section says what is.
 
 **Why a blocked quest is the wrong place to start.** When quest B waits
 on quest A, the dependency was there before either started. B finds out
@@ -3328,6 +3326,28 @@ overview. What changes is what reaches them. With Warriv on, a quest is
 red only when it handed the question on, and its reason is that
 question. "N quests need you" counts only those. The notes say what
 Warriv tried, so the human answers without reading the session first.
+
+Built on 2026-10-05. A project's `Desk` keeps the events that went to
+the human: those that came while Warriv rested (its six wakes spent),
+a tangle or stall that showed up while it was awake (its own doing,
+which it would not settle), and each event it was given that still
+holds when its session ends without telling that quest anything.
+`Desk::holding` is every other quest among the events, which the app
+keeps per project; Warriv hears before the toasts are said, so those
+are left out of them, and "N quests need you" counts the rest. On the
+tile, a blocked or tangled row Warriv holds reads "Warriv" in the
+working colour with no red. A quest Warriv handed on is red "blocked",
+and its toast is "Warriv asks: <title>" with the question alone.
+`quest blocked --quest` refuses until the quest has a `Warriv:` note,
+so the notes say what was tried. What the plan did not say:
+
+- A quest's own session tile is untouched: a session stopped on a
+  question still lights as waiting and the hotkey still walks to it,
+  since the tile shows the session, not the quest.
+- Seen on a dev instance with `cmd.exe` for the agent: a quest blocked
+  on a question read "Warriv" while Warriv was up; handed on with a
+  note it read red "blocked"; blocked anew and its Warriv killed
+  mid wake, it read red "blocked" and no second Warriv started.
 
 **Decided on 2026-10-05.** The human asked for an orchestrator that runs
 "an insane amount of tasks" without them, and chose four things. Step 1

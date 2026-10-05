@@ -83,6 +83,15 @@ pub fn gated(state: RowState, ready: &Ready) -> RowState {
     }
 }
 
+/// How a row reads when Warriv has its quest: one that would be blocked
+/// or tangled needs nobody but Warriv yet, so it is not red.
+pub fn with_warriv(state: RowState, has: bool) -> RowState {
+    match state {
+        RowState::Blocked | RowState::Tangled if has => RowState::Warriv,
+        _ => state,
+    }
+}
+
 /// How an item reads on its row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RowState {
@@ -110,6 +119,8 @@ pub enum RowState {
     Tangled,
     /// Its tombs are at it.
     Tombs,
+    /// Blocked or tangled, and Warriv is at it before the human hears.
+    Warriv,
     /// Every tomb still there says it is done: the human picks one.
     Pick,
 }
@@ -192,6 +203,7 @@ impl RowState {
             RowState::Tangled => "tangled",
             RowState::Tombs => "tombs",
             RowState::Pick => "pick one",
+            RowState::Warriv => "Warriv",
         }
     }
 
@@ -209,6 +221,7 @@ impl RowState {
             RowState::Tangled => '\u{E7BA}',
             RowState::Tombs => '\u{E716}',
             RowState::Pick => '\u{E734}',
+            RowState::Warriv => '\u{E99A}',
         }
     }
 
@@ -217,7 +230,7 @@ impl RowState {
     pub fn color(self) -> Color {
         match self {
             RowState::Open | RowState::After => theme::text_dim(),
-            RowState::Working | RowState::Tombs => theme::working(),
+            RowState::Working | RowState::Tombs | RowState::Warriv => theme::working(),
             RowState::Asks | RowState::Review | RowState::Pick => theme::waiting(),
             RowState::Blocked | RowState::Tangled => theme::error(),
             RowState::Paused | RowState::Gone | RowState::Waits => theme::idle(),
@@ -367,6 +380,25 @@ mod tests {
             RowState::Paused
         );
         assert!(RowState::Pick.needs_you() && !RowState::Tombs.needs_you());
+    }
+
+    #[test]
+    fn a_quest_warriv_has_is_not_red_until_it_hands_it_on() {
+        for s in [RowState::Blocked, RowState::Tangled] {
+            assert_eq!(with_warriv(s, true), RowState::Warriv);
+            assert_eq!(with_warriv(s, false), s);
+        }
+        // What Warriv can not settle anyway reads as it did.
+        for s in [
+            RowState::Asks,
+            RowState::Waits,
+            RowState::After,
+            RowState::Review,
+        ] {
+            assert_eq!(with_warriv(s, true), s);
+        }
+        assert!(!RowState::Warriv.needs_you());
+        assert_ne!(RowState::Warriv.color(), RowState::Blocked.color());
     }
 
     #[test]
