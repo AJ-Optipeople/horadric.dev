@@ -3527,6 +3527,41 @@ Six parts, each useful alone.
 - Pure and tested: reading and writing aims, the prompt with aims, the
   title match.
 
+Built on 2026-10-05. `horadric_core::aim` reads the aims above the
+first section or quest, adds one after the last (or as its own
+paragraph above the first section) and marks one reached by its text or
+its start, as quests are found; `aim::same` is the title match (case,
+spaces and punctuation do not count). A dry log with an aim open is an
+event of its own, `warriv::Kind::Dry`, which fires even with no quest
+left at all, so an empty log and an aim are enough. It is never taken as
+Warriv's own doing, since filing is its job; the six wakes still bound
+it. Its brief carries the aims and the rules, and the system prompt the
+commands. `quest add` from a Warriv session refuses a title the log
+has. What the plan did not say:
+
+- **Filed nothing** is known when a wake given the dry log ends: the
+  log is still dry the same way, no quest gained a `Filed by Warriv for:`
+  line, and the open aims are as they were. Such a wake is heard again
+  at once, and the third in a row goes to the human as a toast,
+  "Warriv asks", naming the first aim (`Desk::dry_ended`). A wake that
+  moved something but left the log dry is heard again too, with the
+  count started over.
+- **Warriv's log path.** A Warriv session gets `HORADRIC_TASKS` set to
+  its own project, so a `quest` command run from another folder still
+  writes the right log.
+- **Found on screen** with Haiku: it put `cd <dir> &&` before the
+  command, and once used the PowerShell tool, both of which miss the
+  allowed `Bash(<horadric> quest:*)` and stop at a permission prompt.
+  The system prompt now says to run it with the Bash tool, as written.
+  It also rewrote a horadric path that looked like a Claude scratchpad
+  folder into its own; the installed path does not look like one.
+- Seen on a dev instance with a scratch repository and Haiku: an aim
+  and an empty log in auto mode woke Warriv, which filed "Create
+  hello.txt" and "Create bye.txt" (`After: Create hello.txt`, each with
+  its `Filed by` line). The runner started and landed them in turn, the
+  log ran dry again, and the next wake marked the aim reached. No
+  `claude.exe` was left but the one idle session.
+
 **2. Warriv reads first in review mode.** A fourth mode beside manual,
 review and auto: "Warriv reviews". A quest going `[?]` wakes a reviewer
 session with the quest, its notes, and the branch's diff against `main`.

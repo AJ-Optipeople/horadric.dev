@@ -549,6 +549,7 @@ pub fn kind_word(kind: Kind) -> &'static str {
         Kind::Tangled => "tangled",
         Kind::Merge => "not merged",
         Kind::Stalled => "stalled",
+        Kind::Dry => "ran dry",
     }
 }
 
