@@ -3577,6 +3577,13 @@ It ends one of three ways:
 Reviews have their own budget, not the six wakes: one reviewer a
 project at a time, the rest queued. The reviewer runs no checks, since
 landing runs them. The mode menu says what the mode does in one line.
+Built on 2026-10-05: `Mode::Warriv` (`"mode": "warriv"`) finishes a
+quest as review does and lands it as auto does. `warriv::Reviews` keeps
+the queue, `warriv::review_prompt` puts the diff in (cut at 20 000
+characters, since the prompt goes on a command line), and a reviewer is
+a session `warriv-review-*`, so it counts as a Warriv for notes and for
+handing on. A reviewer that ends without a verdict leaves the quest to
+the human, who hears "Ready for review" then and not before.
 
 **3. While you were away.** When the human has given no input for 30
 minutes (`GetLastInputInfo`, already read in `app.rs`) and then comes

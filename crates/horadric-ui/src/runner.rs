@@ -498,7 +498,11 @@ impl App {
             .ok()
             .and_then(|r| r.get(id)?.worktree.clone());
         let mut allowed = Vec::new();
-        if horadric_core::warriv::is_warriv(id) {
+        if horadric_core::warriv::is_reviewer(id) {
+            let (flags, prompt) = self.reviewer_args(cwd);
+            allowed = flags;
+            system.push(prompt);
+        } else if horadric_core::warriv::is_warriv(id) {
             let (flags, prompt) = self.warriv_args(cwd);
             allowed = flags;
             system.push(prompt);
@@ -1017,6 +1021,7 @@ impl App {
             self.nudge(b);
             // Warriv hears first, so what it has is not said as well.
             closed |= self.orchestrate(key, b);
+            closed |= self.warriv_reviews(key, b);
             said.extend(self.worth_saying(key, b));
             // A stopped drive lets what is in hand finish and starts nothing.
             if just_closed || self.stopped.contains(key) {
@@ -1287,6 +1292,8 @@ impl App {
                         ));
                     }
                 }
+                // The reviewer has it, and says what it can not settle.
+                Mark::Review if b.mode == Mode::Warriv && self.reviewing(key, &t.title) => {}
                 Mark::Review => out.push((
                     format!("review:{h}"),
                     "Ready for review".to_string(),
@@ -1550,7 +1557,7 @@ impl App {
     /// merge into, when `w` holds an item finished in auto mode.
     fn to_land(&self, key: &str, w: &Worktree) -> Option<(PathBuf, Task, String)> {
         let dir = self.project_dir(key)?;
-        if file::mode(&dir) != Mode::Auto {
+        if !file::mode(&dir).lands() {
             return None;
         }
         let list = tasks::parse(&file::read(&dir));
