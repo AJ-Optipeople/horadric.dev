@@ -72,8 +72,7 @@ pub const ID: &str = "errand";
 
 /// Whether the session `id` is one an errand started for itself.
 pub fn is_errand(id: &str) -> bool {
-    id.strip_prefix(ID)
-        .is_some_and(|rest| rest.is_empty() || rest.starts_with('-'))
+    crate::session::made_from(id, ID)
 }
 
 /// The steps of a cast with `{since}` put as `at`, the last cast that
@@ -753,6 +752,7 @@ mod tests {
         assert!(is_errand("errand-51234"));
         assert!(!is_errand("errands-1"));
         assert!(!is_errand("fix-errand-1"));
+        assert!(!is_errand("errand-for-the-mail-1200"));
     }
 
     #[test]

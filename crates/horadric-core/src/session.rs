@@ -613,6 +613,26 @@ pub fn session_id(base: &str, now: SystemTime) -> String {
     format!("{base}-{secs}")
 }
 
+/// Whether `id` is one [`session_id`] made from `base`, with or without
+/// the suffix a collision adds. A quest's session is named after its
+/// title, so "Warriv's rounds" must not read as a session of Warriv's.
+pub fn made_from(id: &str, base: &str) -> bool {
+    let Some(rest) = id.strip_prefix(base) else {
+        return false;
+    };
+    if rest.is_empty() {
+        return true;
+    }
+    let parts: Vec<&str> = match rest.strip_prefix('-') {
+        Some(r) => r.split('-').collect(),
+        None => return false,
+    };
+    parts.len() <= 2
+        && parts
+            .iter()
+            .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+}
+
 fn first_line(s: &str) -> String {
     s.lines().next().unwrap_or("").trim().to_string()
 }
@@ -620,6 +640,17 @@ fn first_line(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_id_is_made_from_its_base_and_a_number() {
+        assert!(made_from("warriv", "warriv"));
+        assert!(made_from("warriv-51234", "warriv"));
+        assert!(made_from("warriv-51234-2", "warriv"));
+        assert!(!made_from("warriv-s-rounds-70758", "warriv"));
+        assert!(!made_from("warrivs-1", "warriv"));
+        assert!(!made_from("warriv-", "warriv"));
+        assert!(!made_from("warriv-1-2-3", "warriv"));
+    }
 
     #[test]
     fn only_working_is_mid_turn() {

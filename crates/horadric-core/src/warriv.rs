@@ -16,6 +16,7 @@ use std::collections::{BTreeSet, VecDeque};
 use serde_json::Value;
 
 use crate::merge::{add_fix_up, FixUp};
+use crate::session::made_from;
 use crate::tasks::{
     end_of, find, insert_note, insert_with_notes, item_line, one_line, parse, readiness,
     replace_line, set_mark, Mark, Mode, Ready, Task, ASSUMED,
@@ -31,8 +32,7 @@ pub const ID: &str = "warriv";
 /// Whether the session `id` is a Warriv, whose `quest` commands are its
 /// own changes and whose notes are marked as its.
 pub fn is_warriv(id: &str) -> bool {
-    id.strip_prefix(ID)
-        .is_some_and(|rest| rest.is_empty() || rest.starts_with('-'))
+    made_from(id, ID) || is_reviewer(id)
 }
 
 /// What a notes line Warriv wrote starts with, so the next wake reads what
@@ -789,8 +789,7 @@ pub const REVIEWER: &str = "warriv-review";
 /// Whether the session `id` is a reviewer, which reads a finished quest
 /// in "Warriv reviews" mode before it lands.
 pub fn is_reviewer(id: &str) -> bool {
-    id.strip_prefix(REVIEWER)
-        .is_some_and(|rest| rest.is_empty() || rest.starts_with('-'))
+    made_from(id, REVIEWER)
 }
 
 /// The longest diff put in a reviewer's prompt, in characters. Its start
@@ -1867,6 +1866,7 @@ not green."
         assert!(is_warriv("warriv-51234"));
         assert!(!is_warriv("warrivs-1"));
         assert!(!is_warriv("fix-warriv-1"));
+        assert!(!is_warriv("warriv-s-rounds-the-whole-project-looked-70758"));
     }
 
     #[test]
@@ -1969,6 +1969,7 @@ not green."
         assert!(is_warriv("warriv-review-4100"));
         assert!(!is_reviewer("warriv-4100"));
         assert!(!is_reviewer("warriv-reviews-a-mode"));
+        assert!(!is_reviewer("warriv-review-the-plan-4100"));
     }
 
     #[test]
