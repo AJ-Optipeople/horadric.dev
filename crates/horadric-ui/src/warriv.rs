@@ -12,6 +12,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::{Instant, SystemTime};
 
+use horadric_core::chronicle::{self, Happened, Woken};
 use horadric_core::tasks::{self, Mark, Task};
 use horadric_core::warriv::{self, Brief, Desk, Event, Kind, Wake};
 use horadric_core::{tombs, Agent, Phase};
@@ -19,6 +20,7 @@ use horadric_hooks::tasks as file;
 
 use super::{horadric_command, Board};
 use crate::app::{unix_now, App, Run};
+use crate::store;
 use crate::toast::Kind as Toast;
 use crate::window::{folder_key, project_name};
 
@@ -47,12 +49,43 @@ struct Awake {
 impl Camp {
     /// The session is done with: each event it was given that still holds
     /// and whose quest it did not answer is the human's now.
-    fn retire(&mut self, a: Awake, now: &[Event]) {
-        for e in a.given {
-            if now.contains(&e) && !a.settled.contains(&e.title) {
-                self.desk.hand(e);
+    /// Says which quests went to the human, those and the ones it handed
+    /// on itself.
+    fn retire(&mut self, a: &Awake, now: &[Event], list: &[Task]) -> Vec<String> {
+        let mut handed = Vec::new();
+        for e in &a.given {
+            if now.contains(e) && !a.settled.contains(&e.title) {
+                self.desk.hand(e.clone());
+                handed.push(e.title.clone());
+            } else if list.iter().any(|t| {
+                t.title == e.title
+                    && t.mark == Mark::Blocked
+                    && t.reason
+                        .as_deref()
+                        .is_some_and(|r| r.starts_with(warriv::HANDED))
+            }) {
+                handed.push(e.title.clone());
             }
         }
+        handed.retain(|t| !t.is_empty());
+        handed.sort();
+        handed.dedup();
+        handed
+    }
+}
+
+/// The line for a wake given `events`.
+fn woke(id: &str, events: &[Event]) -> Happened {
+    Happened::WarrivWoke {
+        wake: id.to_string(),
+        conversation: String::new(),
+        events: events
+            .iter()
+            .map(|e| Woken {
+                kind: e.kind,
+                quest: e.title.clone(),
+            })
+            .collect(),
     }
 }
 
@@ -92,7 +125,8 @@ impl App {
         let now = warriv::events(&b.tasks, b.mode, &asks);
         let mut camp = self.tasks.warriv.camps.remove(key).unwrap_or_default();
         if let Some(a) = camp.awake.take_if(|a| !self.live(&a.id)) {
-            camp.retire(a, &now);
+            let handed = camp.retire(&a, &now, &b.tasks);
+            self.record_wake(key, &a.id, Happened::slept(&a.id, "", true, handed));
         }
         camp.desk.hear(now.clone(), camp.awake.is_some());
         let mut closed = self.wake(key, b, &mut camp, &now);
@@ -121,8 +155,7 @@ impl App {
         match camp.desk.wake(unix_now()) {
             Wake::Nothing => match camp.awake.take() {
                 Some(a) => {
-                    self.forget(&a.id);
-                    camp.retire(a, now);
+                    self.close_wake(key, b, camp, a, now);
                     true
                 }
                 None => false,
@@ -136,6 +169,7 @@ impl App {
                         };
                         c.write(warriv::more(&briefs).into_bytes());
                         self.tasks.enters.push((a.id.clone(), Instant::now()));
+                        self.record_wake(key, &a.id, woke(&a.id, &events));
                         a.told_at = SystemTime::now();
                         for e in &events {
                             a.told.remove(&e.title);
@@ -160,14 +194,61 @@ impl App {
                 }
                 match camp.awake.take() {
                     Some(a) => {
-                        self.forget(&a.id);
-                        camp.retire(a, now);
+                        self.close_wake(key, b, camp, a, now);
                         true
                     }
                     None => false,
                 }
             }
         }
+    }
+
+    /// Warriv is done for now: its session closes, and the chronicle hears
+    /// how the wake ended.
+    fn close_wake(&mut self, key: &str, b: &Board, camp: &mut Camp, a: Awake, now: &[Event]) {
+        let handed = camp.retire(&a, now, &b.tasks);
+        self.record_wake(key, &a.id, Happened::slept(&a.id, "", false, handed));
+        self.forget(&a.id);
+    }
+
+    /// The app is going: each wake still awake is cut short, since the
+    /// next app knows nothing of it.
+    pub(in crate::app) fn cut_wakes_short(&mut self) {
+        let awake: Vec<(String, String)> = self
+            .tasks
+            .warriv
+            .camps
+            .iter()
+            .filter_map(|(key, c)| Some((key.clone(), c.awake.as_ref()?.id.clone())))
+            .collect();
+        for (key, id) in awake {
+            self.record_wake(&key, &id, Happened::slept(&id, "", true, Vec::new()));
+        }
+    }
+
+    /// A line of the wake's story, with its conversation once the session
+    /// has one.
+    fn record_wake(&self, key: &str, id: &str, mut what: Happened) {
+        let known = self
+            .shared
+            .registry
+            .lock()
+            .ok()
+            .and_then(|r| r.get(id)?.claude_session_id.clone());
+        if let (
+            Happened::WarrivWoke { conversation, .. } | Happened::WarrivSlept { conversation, .. },
+            Some(c),
+        ) = (&mut what, known)
+        {
+            *conversation = c;
+        }
+        store::chronicle(&chronicle::Record {
+            at: unix_now(),
+            project: key.to_string(),
+            quest: String::new(),
+            title: String::new(),
+            what,
+        });
     }
 
     /// Each event with its quest's notes and its session's last turn.
@@ -210,6 +291,7 @@ impl App {
             self.toasts.show(Toast::Failed, "Cannot start Warriv", &e);
             return None;
         }
+        self.record_wake(key, &id, woke(&id, &given));
         Some(Awake {
             id,
             told_at,

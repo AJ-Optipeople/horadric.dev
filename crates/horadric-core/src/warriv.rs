@@ -59,7 +59,10 @@ pub fn on(config: &str) -> bool {
 }
 
 /// What woke Warriv.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
 pub enum Kind {
     /// A quest went `[!]` on the human, not on another quest or a check.
     Blocked,

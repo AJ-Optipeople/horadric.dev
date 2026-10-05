@@ -3453,6 +3453,18 @@ it after its session closes.
   and last from `warriv.rs`; the CLI writes the commands, since it
   already knows when Warriv runs one (`warriv::is_warriv` on the
   session id, as `quest note` uses to mark `Warriv: `).
+  Built on 2026-10-05. The lines are `warriv_woke`, `warriv_ran` and
+  `warriv_slept`, keyed by the Warriv session's id; none names a quest
+  holder, so `chronicle::quests` passes them by. A wake given more
+  events while awake is another `warriv_woke` with the same id.
+  `chronicle::wakes` folds them into wakes, joining a command or an end
+  to the latest open wake of its id, since an id comes back each day.
+  The conversation is filled from whichever line knew it: the app's
+  once the registry has it, the CLI's from `CLAUDE_CODE_SESSION_ID`.
+  Handed on lists both the events left holding and the quests Warriv
+  handed on itself. A Quit or reload with Warriv awake writes a cut
+  short line from `freeze`; a crash writes none, so a wake with no end
+  and no session is one that was cut short.
 - **Its own lane.** In the quest log diagram Warriv's wakes sit on a
   lane of their own beside the trunk, a dot a wake in Warriv's own
   colour, a gold that is neither a lamp nor the magic blue. A thin

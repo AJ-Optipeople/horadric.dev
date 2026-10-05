@@ -5580,6 +5580,7 @@ impl App {
     /// Saves one last time and stops saving.
     fn freeze(&mut self) {
         self.save();
+        self.cut_wakes_short();
         // Nothing brings an attached pane back, so its host must not
         // outlive this app. The session itself runs on in the daemon.
         if let Ok(r) = self.shared.registry.lock() {
