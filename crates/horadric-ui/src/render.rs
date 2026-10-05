@@ -73,7 +73,7 @@ mod stone;
 pub(crate) use stone::{StoneLook, StoneState};
 
 mod questlog;
-pub(crate) use questlog::{QuestDetail, QuestLogScene, QuestRowLook};
+pub(crate) use questlog::{DetailList, QuestDetail, QuestLogScene, QuestRowLook, WakeLook};
 
 const FONT: PCWSTR = w!("Segoe UI Variable Text");
 /// For the project's name: the optical size cut for larger text.
