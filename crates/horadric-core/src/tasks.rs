@@ -926,7 +926,8 @@ pub fn prompt(task: &Task, horadric: &str, file: &str) -> String {
         out.push_str(&task.notes.join("\n"));
     }
     out.push_str(&format!(
-        "\n\n(A quest from {file}. When it is finished, run `{horadric} quest done`.)"
+        "\n\n(A quest from {file}. When it is finished, run \
+         `{horadric} quest done \"<one short line on what you achieved>\"`.)"
     ));
     out
 }
@@ -943,9 +944,10 @@ pub fn system_prompt(horadric: &str, file: &str, list: Option<&str>) -> String {
          Horadric started you on it and does not know you are finished until you \
          tell it, so your last step is always a command in your shell. Do only this \
          item. When it is finished, commit your work if you changed files, then run \
-         `{horadric} quest done` with your Bash tool. If you can not go on without \
-         the human, run `{horadric} quest blocked \"<why>\"` instead and say what you \
-         need. When what you wait on is something Horadric can check, say so and it \
+         `{horadric} quest done \"<one short line on what you achieved>\"` with your \
+         Bash tool; that line is kept as the quest's record. If you can not go on \
+         without the human, run `{horadric} quest blocked \"<why>\"` instead and say \
+         what you need. When what you wait on is something Horadric can check, say so and it \
          wakes you itself once that holds: add `--on-quest \"<title>\"` for another \
          quest in the log being done, `--on-main <commit or branch>` for one being on \
          the main branch, `--on-file <path>` for a file existing, `--on-cmd \
@@ -990,7 +992,8 @@ pub fn giver_prompt(horadric: &str, file: &str) -> String {
 pub fn nudge(horadric: &str) -> String {
     format!(
         "If you are finished with this quest, commit your work and run \
-         `{horadric} quest done`. If not, say what you need from me."
+         `{horadric} quest done \"<one short line on what you achieved>\"`. \
+         If not, say what you need from me."
     )
 }
 
@@ -999,7 +1002,8 @@ pub fn nudge(horadric: &str) -> String {
 pub fn go_on(horadric: &str) -> String {
     format!(
         "The usage limit has reset. Go on with this item where you left off, \
-         and when it is finished, commit your work and run `{horadric} quest done`."
+         and when it is finished, commit your work and run \
+         `{horadric} quest done \"<one short line on what you achieved>\"`."
     )
 }
 
@@ -1007,7 +1011,8 @@ pub fn go_on(horadric: &str) -> String {
 pub fn waited(horadric: &str, wait: &Wait) -> String {
     format!(
         "{}, which this quest waited on. Go on with it where you left off, \
-         and when it is finished, commit your work and run `{horadric} quest done`.",
+         and when it is finished, commit your work and run \
+         `{horadric} quest done \"<one short line on what you achieved>\"`.",
         wait.over()
     )
 }
@@ -1405,7 +1410,7 @@ mod tests {
         assert_eq!(Wait::Until(4000).label(400), "in 1 h 00 min");
         assert_eq!(Wait::Until(4000).label(5000), "due");
         assert!(waited("hx", &Wait::Quest("B".into())).starts_with("The quest \"B\" is done"));
-        assert!(waited("hx", &Wait::File("x".into())).contains("`hx quest done`"));
+        assert!(waited("hx", &Wait::File("x".into())).contains("`hx quest done \""));
     }
 
     #[test]
@@ -1596,11 +1601,15 @@ mod tests {
         assert_eq!(
             prompt(t, "hx", QUESTS_FILE),
             "Fix the login redirect\n\nHappens only after a session expires.\nRepro in #12.\n\n\
-             (A quest from .horadric/quests.md. When it is finished, run `hx quest done`.)"
+             (A quest from .horadric/quests.md. When it is finished, run \
+             `hx quest done \"<one short line on what you achieved>\"`.)"
         );
-        assert!(system_prompt("hx", QUESTS_FILE, None).contains("`hx quest done`"));
-        assert!(nudge("hx").contains("`hx quest done`"));
-        assert!(go_on("hx").contains("`hx quest done`"));
+        let report = "`hx quest done \"<one short line on what you achieved>\"`";
+        assert!(system_prompt("hx", QUESTS_FILE, None).contains(report));
+        // Wrapped lines join with one space, not the source's indent.
+        assert!(!system_prompt("hx", QUESTS_FILE, Some("C:/p/q.md")).contains("  "));
+        assert!(nudge("hx").contains(report));
+        assert!(go_on("hx").contains(report));
     }
 
     #[test]
