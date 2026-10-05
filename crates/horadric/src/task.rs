@@ -15,7 +15,8 @@ use horadric_core::tasks::{self, Mark, Wait};
 use horadric_core::{aim, runeword, tombs, warriv};
 use horadric_hooks::listener::TasksChanged;
 use horadric_hooks::{
-    client, tasks as file, COMMAND_HEADER, OWNER_ENV, SESSION_ENV, TASKS_ENV, TASKS_PATH,
+    client, tasks as file, COMMAND_HEADER, OWNER_ENV, SESSION_ENV, STATE_HEADER, TASKS_ENV,
+    TASKS_PATH,
 };
 
 const USAGE: &str = "\
@@ -595,17 +596,25 @@ fn tell_app(project: &Path) {
 
 /// Posts to the Horadric that owns this session, and says what it answered.
 pub(crate) fn post_app(body: &TasksChanged) -> Option<u16> {
-    let port = std::env::var(OWNER_ENV)
-        .ok()
-        .and_then(|p| p.parse().ok())
-        .unwrap_or_else(horadric_hooks::port);
-    client::post(
-        port,
+    let owner = std::env::var(OWNER_ENV).ok().and_then(|p| p.parse().ok());
+    // A session's owner is the one Horadric it may mean. Only a port this
+    // caller chose itself could be another instance's.
+    let state = match owner {
+        Some(_) => String::new(),
+        None => horadric_hooks::state_header(),
+    };
+    let (status, reply) = client::ask(
+        owner.unwrap_or_else(horadric_hooks::port),
         TASKS_PATH,
-        &[(COMMAND_HEADER, "tasks")],
+        &[(COMMAND_HEADER, "tasks"), (STATE_HEADER, &state)],
         &body.to_json(),
+        std::time::Duration::from_secs(2),
     )
-    .ok()
+    .ok()?;
+    if status == client::REFUSED {
+        eprintln!("{}", client::reason(&reply));
+    }
+    Some(status)
 }
 
 #[cfg(test)]

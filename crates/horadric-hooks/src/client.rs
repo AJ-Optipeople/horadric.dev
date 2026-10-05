@@ -44,6 +44,18 @@ pub fn ask(
     Ok((code, body))
 }
 
+/// What a Horadric answers a command from a caller keeping its state in
+/// another folder: the port belongs to someone else.
+pub const REFUSED: u16 = 409;
+
+/// Why a [`REFUSED`] reply's Horadric said no, from its body.
+pub fn reason(body: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| v.get("error")?.as_str().map(str::to_string))
+        .unwrap_or_else(|| "the Horadric on that port belongs to another state folder".into())
+}
+
 /// The status code from the first line of a reply.
 fn status(reply: &str) -> Option<u16> {
     reply.split_whitespace().nth(1)?.parse().ok()
@@ -60,5 +72,11 @@ mod tests {
             Some(503)
         );
         assert_eq!(status("garbage"), None);
+    }
+
+    #[test]
+    fn reads_the_reason_for_a_refusal() {
+        assert_eq!(reason(r#"{"error":"port 1 is taken"}"#), "port 1 is taken");
+        assert!(reason("{}").contains("another state folder"));
     }
 }

@@ -83,6 +83,12 @@ pub const BROWSER_PATH: &str = "/horadric/browser";
 /// what stops a web page from starting processes through localhost.
 pub const COMMAND_HEADER: &str = "x-horadric-command";
 
+/// Header a command from the command line carries the caller's state
+/// folder in, when the caller chose the port itself. Two dev instances in
+/// two worktrees keep their state apart but may be told the same port, and
+/// a command reaching the wrong one starts sessions among its tiles.
+pub const STATE_HEADER: &str = "x-horadric-state";
+
 /// Whether this is a development instance, from [`DEV_ENV`].
 pub fn dev() -> bool {
     is_dev(std::env::var(DEV_ENV).ok().as_deref())
@@ -109,6 +115,49 @@ pub fn instance() -> String {
     port().to_string()
 }
 
+/// Where this Horadric keeps its state: `%APPDATA%\Horadric`, or
+/// `Horadric-dev` for a dev instance, which must never touch the real one.
+pub fn state_dir() -> Option<std::path::PathBuf> {
+    std::env::var_os("APPDATA").map(|a| std::path::PathBuf::from(a).join(state_name()))
+}
+
+/// The state folder's name, used under `%LOCALAPPDATA%` too.
+pub fn state_name() -> &'static str {
+    if dev() {
+        "Horadric-dev"
+    } else {
+        "Horadric"
+    }
+}
+
+/// [`state_dir`] as [`STATE_HEADER`] carries it, empty when unknown.
+pub fn state_header() -> String {
+    state_dir().map_or_else(String::new, |d| d.to_string_lossy().into_owned())
+}
+
+/// Whether a command whose [`STATE_HEADER`] says `theirs` is for the
+/// Horadric keeping its state in `ours`. A caller that sent none (an older
+/// build, or a session posting to the owner it was given) is taken at its
+/// word, and so is every caller when this one does not know its own.
+pub fn same_state(ours: &str, theirs: &str) -> bool {
+    let norm = |p: &str| {
+        p.trim()
+            .replace('/', "\\")
+            .trim_end_matches('\\')
+            .to_lowercase()
+    };
+    ours.trim().is_empty() || theirs.trim().is_empty() || norm(ours) == norm(theirs)
+}
+
+/// Why the Horadric on `port`, keeping its state in `ours`, refused a
+/// command from a caller keeping it in `theirs`.
+pub fn refusal(port: u16, ours: &str, theirs: &str) -> String {
+    format!(
+        "port {port} belongs to the Horadric keeping its state in {ours}, not {theirs}. \
+         Give this one a port of its own with HORADRIC_PORT."
+    )
+}
+
 pub fn hook_url(port: u16) -> String {
     format!("http://127.0.0.1:{port}{HOOK_PATH}")
 }
@@ -124,6 +173,23 @@ mod tests {
         assert!(!is_dev(Some("0")));
         assert!(!is_dev(Some("")));
         assert!(!is_dev(None));
+    }
+
+    #[test]
+    fn state_must_match_when_both_sides_know_it() {
+        let ours = r"C:\Users\a\AppData\Roaming\Horadric-dev";
+        assert!(same_state(ours, "c:/users/a/appdata/roaming/horadric-dev/"));
+        assert!(!same_state(ours, r"C:\scratch\Horadric-dev"));
+        assert!(!same_state(ours, r"C:\Users\a\AppData\Roaming\Horadric"));
+        assert!(same_state(ours, ""));
+        assert!(same_state("", r"C:\scratch\Horadric-dev"));
+    }
+
+    #[test]
+    fn a_refusal_names_the_owner_and_the_caller() {
+        let r = refusal(4110, r"C:\b\Horadric-dev", r"C:\a\Horadric-dev");
+        assert!(r.contains("port 4110"));
+        assert!(r.contains(r"in C:\b\Horadric-dev, not C:\a\Horadric-dev"));
     }
 
     #[test]

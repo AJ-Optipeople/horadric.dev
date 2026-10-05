@@ -19,7 +19,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use horadric_hooks::listener::Reload;
-use horadric_hooks::{client, COMMAND_HEADER, RELOAD_PATH};
+use horadric_hooks::{client, COMMAND_HEADER, RELOAD_PATH, STATE_HEADER};
 use windows::Win32::Foundation::{CloseHandle, WAIT_TIMEOUT};
 use windows::Win32::System::Threading::{OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE};
 
@@ -54,13 +54,15 @@ pub fn request(args: &[String]) -> Result<(), String> {
         now,
     };
     let port = horadric_hooks::port();
-    match client::post(
+    let state = horadric_hooks::state_header();
+    match client::ask(
         port,
         RELOAD_PATH,
-        &[(COMMAND_HEADER, "reload")],
+        &[(COMMAND_HEADER, "reload"), (STATE_HEADER, &state)],
         &request.to_json(),
+        Duration::from_secs(2),
     ) {
-        Ok(200) => {
+        Ok((200, _)) => {
             // A Horadric from before session hosts still waits for idle
             // sessions unless told `--now`, whatever this build says.
             if now {
@@ -74,10 +76,11 @@ pub fn request(args: &[String]) -> Result<(), String> {
             );
             Ok(())
         }
-        Ok(403 | 404) => Err(format!(
+        Ok((client::REFUSED, body)) => Err(client::reason(&body)),
+        Ok((403 | 404, _)) => Err(format!(
             "the Horadric on port {port} is too old to reload. Install this build once by hand."
         )),
-        Ok(status) => Err(format!("Horadric answered {status}")),
+        Ok((status, _)) => Err(format!("Horadric answered {status}")),
         Err(_) => Err(format!("Horadric is not running (nothing on port {port})")),
     }
 }
@@ -257,13 +260,7 @@ fn wait_for_exit(pid: u32, timeout: Duration) -> bool {
 }
 
 fn log_path() -> PathBuf {
-    let name = if horadric_hooks::dev() {
-        "Horadric-dev"
-    } else {
-        "Horadric"
-    };
-    std::env::var_os("APPDATA")
-        .map(|a| PathBuf::from(a).join(name))
+    horadric_hooks::state_dir()
         .unwrap_or_default()
         .join("reload.log")
 }

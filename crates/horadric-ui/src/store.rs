@@ -9,21 +9,13 @@ use horadric_core::journal::{self, Entry};
 use horadric_core::SavedState;
 
 pub(crate) fn dir() -> Option<PathBuf> {
-    std::env::var_os("APPDATA").map(|a| PathBuf::from(a).join(name()))
+    horadric_hooks::state_dir()
 }
 
 /// The same folder under `%LOCALAPPDATA%`, for what should not roam with
 /// the profile: the programs session hosts run from.
 pub(crate) fn local_dir() -> Option<PathBuf> {
-    std::env::var_os("LOCALAPPDATA").map(|a| PathBuf::from(a).join(name()))
-}
-
-fn name() -> &'static str {
-    if horadric_hooks::dev() {
-        "Horadric-dev"
-    } else {
-        "Horadric"
-    }
+    std::env::var_os("LOCALAPPDATA").map(|a| PathBuf::from(a).join(horadric_hooks::state_name()))
 }
 
 pub fn load() -> SavedState {

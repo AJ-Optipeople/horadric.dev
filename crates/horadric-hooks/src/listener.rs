@@ -22,7 +22,7 @@ use serde_json::{json, Value};
 
 use crate::{
     client, transcript, AGENT_HEADER, BROWSER_PATH, COMMAND_HEADER, HOOK_PATH, NEW_PATH,
-    OWNER_HEADER, RELOAD_PATH, SESSION_HEADER, STATUS_PATH, TASKS_PATH,
+    OWNER_HEADER, RELOAD_PATH, SESSION_HEADER, STATE_HEADER, STATUS_PATH, TASKS_PATH,
 };
 
 /// A hook event together with the Horadric session id from the header.
@@ -261,6 +261,7 @@ fn handle(
     let mut horadric_id = String::new();
     let mut owner = None;
     let mut command = String::new();
+    let mut state = String::new();
     let mut from_browser = false;
     let mut agent = None;
     loop {
@@ -280,6 +281,7 @@ fn handle(
                 n if n == SESSION_HEADER => horadric_id = value.to_string(),
                 n if n == OWNER_HEADER => owner = value.parse::<u16>().ok(),
                 n if n == COMMAND_HEADER => command = value.to_string(),
+                n if n == STATE_HEADER => state = value.to_string(),
                 n if n == AGENT_HEADER => agent = Agent::from_name(value),
                 "origin" => from_browser = true,
                 _ => {}
@@ -344,6 +346,15 @@ fn handle(
         };
         if from_browser || command != wanted {
             return respond(&mut stream, "403 Forbidden");
+        }
+        let ours = crate::state_header();
+        if !crate::same_state(&ours, &state) {
+            let why = crate::refusal(port, &ours, &state);
+            return respond_with(
+                &mut stream,
+                "409 Conflict",
+                &json!({ "error": why }).to_string(),
+            );
         }
         let Some(commands) = commands else {
             return respond(&mut stream, "503 Service Unavailable");
@@ -776,6 +787,25 @@ X-Horadric-Port: {dev}
         assert!(post_new(port, "", body).starts_with("HTTP/1.1 403"));
         let browser = "X-Horadric-Command: new\r\nOrigin: https://example.com\r\n";
         assert!(post_new(port, browser, body).starts_with("HTTP/1.1 403"));
+        assert!(rx.recv_timeout(Duration::from_millis(200)).is_err());
+    }
+
+    #[test]
+    fn a_command_from_another_state_folder_is_refused_with_the_owner_named() {
+        let (port, rx) = start_with_new();
+        let ours = crate::state_header();
+        let body = r#"{"cwd":"C:/x"}"#;
+        let from =
+            |state: &str| format!("X-Horadric-Command: new\r\nX-Horadric-State: {state}\r\n");
+        let reply = post_new(port, &from(&ours), body);
+        assert!(reply.starts_with("HTTP/1.1 200"), "{reply}");
+        assert!(rx.recv_timeout(Duration::from_secs(2)).is_ok());
+        if ours.is_empty() {
+            return;
+        }
+        let reply = post_new(port, &from(r"C:\elsewhere\Horadric-dev"), body);
+        assert!(reply.starts_with("HTTP/1.1 409"), "{reply}");
+        assert!(reply.contains(&format!("port {port}")), "{reply}");
         assert!(rx.recv_timeout(Duration::from_millis(200)).is_err());
     }
 

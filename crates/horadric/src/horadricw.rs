@@ -15,7 +15,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use horadric_hooks::listener::NewSession;
-use horadric_hooks::{client, COMMAND_HEADER, NEW_PATH};
+use horadric_hooks::{client, COMMAND_HEADER, NEW_PATH, STATE_HEADER};
 
 /// Runs a console program without giving it a console window.
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -55,14 +55,17 @@ fn run() -> Result<(), String> {
         args: Vec::new(),
         agent: horadric_core::Agent::Claude,
     };
-    match client::post(
+    let state = horadric_hooks::state_header();
+    match client::ask(
         port,
         NEW_PATH,
-        &[(COMMAND_HEADER, "new")],
+        &[(COMMAND_HEADER, "new"), (STATE_HEADER, &state)],
         &request.to_json(),
+        Duration::from_secs(2),
     ) {
-        Ok(200) => Ok(()),
-        Ok(status) => Err(format!("Horadric answered {status}.")),
+        Ok((200, _)) => Ok(()),
+        Ok((client::REFUSED, body)) => Err(client::reason(&body)),
+        Ok((status, _)) => Err(format!("Horadric answered {status}.")),
         Err(e) => Err(format!("Could not reach Horadric: {e}")),
     }
 }

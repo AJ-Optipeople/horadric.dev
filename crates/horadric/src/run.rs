@@ -8,12 +8,13 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use horadric_core::{session_id, Agent, HookEvent};
 use horadric_hooks::listener::NewSession;
 use horadric_hooks::{
     client, COMMAND_HEADER, HOOK_PATH, NEW_PATH, OWNER_ENV, SESSION_ENV, SESSION_HEADER,
+    STATE_HEADER,
 };
 use serde_json::json;
 
@@ -81,15 +82,18 @@ pub fn new(args: &[String]) -> Result<(), String> {
         agent: o.agent,
     };
     let port = horadric_hooks::port();
-    match client::post(
+    let state = horadric_hooks::state_header();
+    match client::ask(
         port,
         NEW_PATH,
-        &[(COMMAND_HEADER, "new")],
+        &[(COMMAND_HEADER, "new"), (STATE_HEADER, &state)],
         &request.to_json(),
+        Duration::from_secs(2),
     ) {
-        Ok(200) => Ok(()),
-        Ok(503) => Err("only `horadric serve` is running, and it has no terminals".into()),
-        Ok(status) => Err(format!("the app answered {status}")),
+        Ok((200, _)) => Ok(()),
+        Ok((client::REFUSED, body)) => Err(client::reason(&body)),
+        Ok((503, _)) => Err("only `horadric serve` is running, and it has no terminals".into()),
+        Ok((status, _)) => Err(format!("the app answered {status}")),
         Err(_) => Err("the tiles are not running, start `horadric` first".into()),
     }
 }

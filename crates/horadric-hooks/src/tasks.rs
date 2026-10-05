@@ -99,12 +99,7 @@ pub fn stones(project: &Path) -> Vec<Stone> {
 /// The file of stones every project shares, `runewords.json` beside the
 /// app's state: `%APPDATA%\Horadric`, or `Horadric-dev` for a dev instance.
 pub fn runewords_file() -> Option<PathBuf> {
-    let name = if crate::dev() {
-        "Horadric-dev"
-    } else {
-        "Horadric"
-    };
-    std::env::var_os("APPDATA").map(|a| PathBuf::from(a).join(name).join("runewords.json"))
+    crate::state_dir().map(|d| d.join("runewords.json"))
 }
 
 fn global_runewords() -> String {
