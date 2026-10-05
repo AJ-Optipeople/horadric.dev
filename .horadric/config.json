@@ -7,14 +7,23 @@
     "Ship Local": {
       "about": "Ships the work on main to this machine only, as CLAUDE.md describes",
       "steps": [
-        { "say": "Ship local" }
+        {
+          "say": "Ship local"
+        }
       ]
     },
     "Ship Public": {
       "about": "Cuts a public release every install is offered, following RELEASING.md, then ships local",
       "steps": [
-        { "say": "Ship public" }
+        {
+          "say": "Ship public"
+        }
       ]
     }
-  }
+  },
+  "checks": [
+    "cargo fmt --all -- --check",
+    "cargo clippy --workspace --all-targets -- -D warnings",
+    "cargo test --workspace"
+  ]
 }
