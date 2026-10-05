@@ -13,7 +13,7 @@ use std::path::Path;
 use std::time::{Instant, SystemTime};
 
 use horadric_core::tasks::{self, Mark, Task};
-use horadric_core::warriv::{self, Brief, Desk, Event, Kind, Wake};
+use horadric_core::warriv::{self, Brief, Desk, Dried, Event, Kind, Wake};
 use horadric_core::{tombs, Agent, Phase};
 use horadric_hooks::tasks as file;
 
@@ -42,17 +42,43 @@ struct Awake {
     /// unsettled goes to the human once it closes.
     given: Vec<Event>,
     settled: HashSet<String>,
+    /// The quests filed for aims and the aims open when it was last given
+    /// a dry log, so its end tells whether it moved anything.
+    filed: usize,
+    aims: Vec<String>,
+}
+
+impl Awake {
+    fn new(id: String, given: Vec<Event>, b: &Board) -> Self {
+        Awake {
+            id,
+            told_at: SystemTime::now(),
+            told: HashSet::new(),
+            given,
+            settled: HashSet::new(),
+            filed: warriv::filed_count(&b.tasks),
+            aims: b.aims.clone(),
+        }
+    }
 }
 
 impl Camp {
     /// The session is done with: each event it was given that still holds
-    /// and whose quest it did not answer is the human's now.
-    fn retire(&mut self, a: Awake, now: &[Event]) {
+    /// and whose quest it did not answer is the human's now. A dry log is
+    /// heard again unless three wakes in a row moved nothing, and then its
+    /// aims are the human's, which is true when it says so.
+    fn retire(&mut self, a: Awake, now: &[Event], b: &Board) -> bool {
+        let moved = warriv::filed_count(&b.tasks) > a.filed || b.aims != a.aims;
+        let mut stuck = false;
         for e in a.given {
-            if now.contains(&e) && !a.settled.contains(&e.title) {
+            if e.kind == Kind::Dry {
+                let holds = now.contains(&e);
+                stuck |= self.desk.dry_ended(e, holds, moved) == Dried::Human;
+            } else if now.contains(&e) && !a.settled.contains(&e.title) {
                 self.desk.hand(e);
             }
         }
+        stuck
     }
 }
 
@@ -89,10 +115,11 @@ impl App {
             })
             .map(|t| t.title.clone())
             .collect();
-        let now = warriv::events(&b.tasks, b.mode, &asks);
+        let now = warriv::events(&b.tasks, b.mode, &asks, &b.aims);
         let mut camp = self.tasks.warriv.camps.remove(key).unwrap_or_default();
         if let Some(a) = camp.awake.take_if(|a| !self.live(&a.id)) {
-            camp.retire(a, &now);
+            let stuck = camp.retire(a, &now, b);
+            self.ask_aims(key, b, stuck);
         }
         camp.desk.hear(now.clone(), camp.awake.is_some());
         let mut closed = self.wake(key, b, &mut camp, &now);
@@ -122,7 +149,8 @@ impl App {
             Wake::Nothing => match camp.awake.take() {
                 Some(a) => {
                     self.forget(&a.id);
-                    camp.retire(a, now);
+                    let stuck = camp.retire(a, now, b);
+                    self.ask_aims(key, b, stuck);
                     true
                 }
                 None => false,
@@ -141,11 +169,15 @@ impl App {
                             a.told.remove(&e.title);
                             a.settled.remove(&e.title);
                         }
+                        if events.iter().any(|e| e.kind == Kind::Dry) {
+                            a.filed = warriv::filed_count(&b.tasks);
+                            a.aims = b.aims.clone();
+                        }
                         a.given.extend(events);
                         false
                     }
                     None => {
-                        camp.awake = self.start_warriv(key, &briefs, events);
+                        camp.awake = self.start_warriv(key, b, &briefs, events);
                         false
                     }
                 }
@@ -161,7 +193,8 @@ impl App {
                 match camp.awake.take() {
                     Some(a) => {
                         self.forget(&a.id);
-                        camp.retire(a, now);
+                        let stuck = camp.retire(a, now, b);
+                        self.ask_aims(key, b, stuck);
                         true
                     }
                     None => false,
@@ -183,6 +216,10 @@ impl App {
                     event: Some(e.clone()),
                     notes: t.map(|t| t.notes.clone()).unwrap_or_default(),
                     last_turn,
+                    aims: match e.kind {
+                        Kind::Dry => b.aims.clone(),
+                        _ => Vec::new(),
+                    },
                 }
             })
             .collect()
@@ -190,13 +227,18 @@ impl App {
 
     /// A fresh Warriv session in the project's main tree, with the events
     /// as its first prompt.
-    fn start_warriv(&mut self, key: &str, briefs: &[Brief], given: Vec<Event>) -> Option<Awake> {
+    fn start_warriv(
+        &mut self,
+        key: &str,
+        b: &Board,
+        briefs: &[Brief],
+        given: Vec<Event>,
+    ) -> Option<Awake> {
         let dir = self.project_dir(key)?;
         let id = self.unique_id(warriv::ID);
         self.tasks
             .prompts
             .insert(id.clone(), warriv::prompt(briefs));
-        let told_at = SystemTime::now();
         if let Err(e) = self.launch(
             &id,
             "Warriv",
@@ -210,13 +252,19 @@ impl App {
             self.toasts.show(Toast::Failed, "Cannot start Warriv", &e);
             return None;
         }
-        Some(Awake {
-            id,
-            told_at,
-            told: HashSet::new(),
-            given,
-            settled: HashSet::new(),
-        })
+        Some(Awake::new(id, given, b))
+    }
+
+    /// Warriv woke for the aims three times in a row and filed nothing,
+    /// so the human is asked what comes next.
+    fn ask_aims(&mut self, key: &str, b: &Board, stuck: bool) {
+        if stuck && !self.quiet {
+            self.toasts.show(
+                Toast::Waiting,
+                &format!("Warriv asks: {}", project_name(key)),
+                &warriv::stuck(&b.aims),
+            );
+        }
     }
 
     /// The flags a Warriv session starts with: the one command it may run

@@ -45,6 +45,16 @@ pub const WAKES_AN_HOUR: usize = 6;
 /// The span the wakes are counted in, in seconds.
 pub const HOUR: u64 = 60 * 60;
 
+/// At most this many quests filed for the aims a wake.
+pub const FILE_AT_MOST: usize = 8;
+
+/// Wakes in a row for the aims that filed nothing, before the aims go to
+/// the human as a question.
+pub const DRY_WAKES: usize = 3;
+
+/// What the notes line starts with on a quest Warriv filed for an aim.
+pub const FILED: &str = "Filed by Warriv for: ";
+
 /// The longest last turn of a holding session put in a prompt, in
 /// characters. Its end says what it asks, so that is what is kept.
 const LAST_TURN: usize = 2000;
@@ -73,6 +83,9 @@ pub enum Kind {
     /// The log runs in auto mode, nothing is in hand, and every quest left
     /// waits.
     Stalled,
+    /// The same with an aim open, even with no quest left: Warriv files the
+    /// next quests toward it.
+    Dry,
 }
 
 impl Kind {
@@ -88,7 +101,7 @@ impl Kind {
             Kind::Asks => "stopped without saying it is completed",
             Kind::Tangled => "can not start: its After: lines are tangled",
             Kind::Merge => "is completed, but did not merge into main by itself",
-            Kind::Stalled => "",
+            Kind::Stalled | Kind::Dry => "",
         }
     }
 }
@@ -112,9 +125,10 @@ impl Event {
 }
 
 /// The events a project's log holds now, given the titles of the quests
-/// whose sessions stopped after the nudge. A merge that failed is not in
-/// the log, so the UI adds it to the [`Desk`] when it happens.
-pub fn events(tasks: &[Task], mode: Mode, asks: &[String]) -> Vec<Event> {
+/// whose sessions stopped after the nudge and the aims still open. A merge
+/// that failed is not in the log, so the UI adds it to the [`Desk`] when it
+/// happens.
+pub fn events(tasks: &[Task], mode: Mode, asks: &[String], aims: &[String]) -> Vec<Event> {
     let ready = readiness(tasks);
     let mut out = Vec::new();
     for (t, r) in tasks.iter().zip(&ready) {
@@ -140,16 +154,16 @@ pub fn events(tasks: &[Task], mode: Mode, asks: &[String]) -> Vec<Event> {
             });
         }
     }
-    if let Some(e) = stalled(tasks, mode, &ready) {
+    if let Some(e) = stalled(tasks, mode, &ready, aims) {
         out.push(e);
     }
     out
 }
 
 /// A log in auto mode that has nothing in hand and nothing ready to start,
-/// while quests are left. A quest blocked on the human is the reason then,
-/// and an event of its own.
-fn stalled(tasks: &[Task], mode: Mode, ready: &[Ready]) -> Option<Event> {
+/// while quests are left or an aim is open. A quest blocked on the human is
+/// the reason then, and an event of its own.
+fn stalled(tasks: &[Task], mode: Mode, ready: &[Ready], aims: &[String]) -> Option<Event> {
     if mode != Mode::Auto
         || tasks.iter().any(|t| {
             matches!(t.mark, Mark::Working | Mark::Review)
@@ -167,14 +181,36 @@ fn stalled(tasks: &[Task], mode: Mode, ready: &[Ready]) -> Option<Event> {
             _ => {}
         }
     }
+    let waits = match waiting.is_empty() {
+        true => "No quest is left to start.".to_string(),
+        false => format!("Waiting: {}.", waiting.join("; ")),
+    };
+    if !aims.is_empty() {
+        return Some(Event {
+            kind: Kind::Dry,
+            title: String::new(),
+            detail: waits,
+        });
+    }
     (!waiting.is_empty()).then(|| Event {
         kind: Kind::Stalled,
         title: String::new(),
-        detail: format!(
-            "Nothing is in hand and no quest is ready to start. Waiting: {}.",
-            waiting.join("; ")
-        ),
+        detail: format!("Nothing is in hand and no quest is ready to start. {waits}"),
     })
+}
+
+/// The notes line on a quest Warriv files for `aim`.
+pub fn filed(aim: &str) -> String {
+    format!("{FILED}{}", one_line(aim))
+}
+
+/// How many quests in the log Warriv filed for an aim, so a wake that
+/// filed nothing is known by the count staying put.
+pub fn filed_count(tasks: &[Task]) -> usize {
+    tasks
+        .iter()
+        .filter(|t| t.notes.iter().any(|n| n.starts_with(FILED)))
+        .count()
 }
 
 /// What a project's Warriv has heard: the events already taken, the ones
@@ -189,6 +225,20 @@ pub struct Desk {
     /// Events that went to the human: the budget was spent, or Warriv
     /// ended its turn with them still holding. Kept while they hold.
     human: Vec<Event>,
+    /// Wakes in a row for the aims that filed nothing.
+    dry: usize,
+}
+
+/// How a wake given the dry log ended.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Dried {
+    /// The log is no longer dry, so the count starts over.
+    Moved,
+    /// Still dry: it is heard again, for another wake.
+    Again,
+    /// The third wake in a row that changed nothing: the aims are the
+    /// human's while the log stays as it is.
+    Human,
 }
 
 /// What to do with the events waiting.
@@ -252,6 +302,26 @@ impl Desk {
             .collect()
     }
 
+    /// A wake given the dry log `e` ended. `holds` is whether the log is
+    /// still dry the same way, `moved` whether it filed a quest or the open
+    /// aims changed meanwhile. Still dry, the event is forgotten so the next
+    /// look hears it again, until [`DRY_WAKES`] in a row that moved nothing
+    /// hand it on.
+    pub fn dry_ended(&mut self, e: Event, holds: bool, moved: bool) -> Dried {
+        if !holds {
+            self.dry = 0;
+            return Dried::Moved;
+        }
+        self.dry = if moved { 0 } else { self.dry + 1 };
+        if self.dry >= DRY_WAKES {
+            self.dry = 0;
+            self.hand(e);
+            return Dried::Human;
+        }
+        self.seen.remove(&e.key());
+        Dried::Again
+    }
+
     /// Whether events wait.
     pub fn waiting(&self) -> bool {
         !self.queue.is_empty()
@@ -285,6 +355,8 @@ pub struct Brief {
     pub event: Option<Event>,
     pub notes: Vec<String>,
     pub last_turn: Option<String>,
+    /// The open aims, for a dry log.
+    pub aims: Vec<String>,
 }
 
 /// What Warriv is told beside its first prompt, every time it starts: who
@@ -314,6 +386,16 @@ pub fn system_prompt(horadric: &str, file: &str) -> String {
          blocked \"<question>\" --quest \"<title>\"`. Word the question so it can be \
          answered in one line, and say what you tried in a note first.\n\
          - Read anything: the log, `{horadric} quest list`, the code, git.\n\n\
+         The human may write where the work is going as `Aim:` lines at the top of {file}. \
+         When the log runs dry with an aim open, you plan ahead:\n\
+         - File the next quests toward the first open aim, at most {FILE_AT_MOST} a wake, in \
+         the order they should be done: `{horadric} quest add \"<title>\" --notes \"<what to \
+         build, where its reasoning lives, how to check it>\" --notes \"{FILED}<the aim>\" \
+         --after \"<title>\"`, with an `--after` for each quest it needs first. Each is one \
+         session's work, small enough to finish and check in one go. Never a title already in \
+         the log, done or not.\n\
+         - When what the aim names is all done, mark it: `{horadric} quest aim done \"<the \
+         aim>\"`. Read the log, the plan and git before you decide either way.\n\n\
          Answer from what is written: the quest's notes, the plan and docs, the code, and \
          what other quests found. Hand on what needs the human's taste, money, accounts or \
          a decision the docs leave open. When you have settled every event, stop. Do not ask \
@@ -348,6 +430,22 @@ fn brief(b: &Brief) -> String {
     };
     let mut out = match e.kind {
         Kind::Stalled => format!("- The log is stalled. {}\n", e.detail),
+        Kind::Dry => {
+            let mut s = format!(
+                "- The log has run dry: nothing is in hand and nothing is ready to start. {}\n  \
+                 The aims still open, in order:\n",
+                e.detail
+            );
+            for a in &b.aims {
+                s.push_str(&format!("    Aim: {a}\n"));
+            }
+            s.push_str(&format!(
+                "  Read what the first aim points at, then file the next quests toward it, at \
+                 most {FILE_AT_MOST}, each with an `--after` for every quest it needs first and \
+                 the notes line `{FILED}<the aim>`. Or, if it is all done, mark it reached.\n"
+            ));
+            s
+        }
         k => {
             let mut s = format!("- The quest \"{}\" {}", one_line(&e.title), k.says());
             if e.detail.is_empty() {
@@ -404,6 +502,16 @@ pub fn tired(project: &str) -> String {
     format!(
         "Warriv woke {WAKES_AN_HOUR} times in {project} this hour, so what happens next \
          comes to you until the hour is over."
+    )
+}
+
+/// What the human is asked when Warriv woke [`DRY_WAKES`] times in a row
+/// for the aims and filed nothing.
+pub fn stuck(aims: &[String]) -> String {
+    let aim = aims.first().map(|a| one_line(a)).unwrap_or_default();
+    format!(
+        "Warriv woke {DRY_WAKES} times for \"{aim}\" and filed nothing. What comes next, \
+         or is it reached?"
     )
 }
 
@@ -506,7 +614,7 @@ mod tests {
              - [!] C @c-1: later {until: 2026-10-01T14:05Z}\n\
              - [!] D @d-1: Warriv asks: which account pays?\n",
         );
-        let e = events(&t, Mode::Manual, &[]);
+        let e = events(&t, Mode::Manual, &[], &[]);
         assert_eq!(
             e,
             vec![Event {
@@ -520,7 +628,7 @@ mod tests {
     #[test]
     fn a_session_that_asks_after_the_nudge_wakes_it() {
         let t = list("- [/] A @a-1\n- [/] B @b-1\n");
-        let e = events(&t, Mode::Review, &["B".into()]);
+        let e = events(&t, Mode::Review, &["B".into()], &[]);
         assert_eq!(e.len(), 1);
         assert_eq!((e[0].kind, e[0].title.as_str()), (Kind::Asks, "B"));
     }
@@ -529,7 +637,7 @@ mod tests {
     fn a_tangled_quest_wakes_it() {
         let t =
             list("- [ ] A\n  After: Nothing like it\n- [ ] B\n  After: C\n- [ ] C\n  After: B\n");
-        let e = events(&t, Mode::Manual, &[]);
+        let e = events(&t, Mode::Manual, &[], &[]);
         let kinds: Vec<(Kind, &str)> = e.iter().map(|e| (e.kind, e.title.as_str())).collect();
         assert_eq!(
             kinds,
@@ -546,28 +654,138 @@ mod tests {
     fn a_log_in_auto_mode_with_nothing_ready_is_stalled() {
         let waiting =
             "- [x] A\n- [!] B @b-1: later {until: 2030-01-01T00:00Z}\n- [ ] C\n  After: B\n";
-        let e = events(&list(waiting), Mode::Auto, &[]);
+        let e = events(&list(waiting), Mode::Auto, &[], &[]);
         assert_eq!(e.last().unwrap().kind, Kind::Stalled);
         assert!(e.last().unwrap().detail.ends_with("Waiting: B; C."));
         // Not in review mode, not with a quest ready, not with one in hand.
-        assert!(events(&list(waiting), Mode::Review, &[])
+        assert!(events(&list(waiting), Mode::Review, &[], &[])
             .iter()
             .all(|e| e.kind != Kind::Stalled));
         let ready = "- [!] B @b-1: needs a key\n- [ ] D\n";
-        assert!(events(&list(ready), Mode::Auto, &[])
+        assert!(events(&list(ready), Mode::Auto, &[], &[])
             .iter()
             .all(|e| e.kind != Kind::Stalled));
         let in_hand = "- [/] A @a-1\n- [ ] C\n  After: A\n";
-        assert!(events(&list(in_hand), Mode::Auto, &[]).is_empty());
+        assert!(events(&list(in_hand), Mode::Auto, &[], &[]).is_empty());
         // One blocked on the human is the event, not the stall.
         let on_human = "- [!] B @b-1: needs a key\n- [ ] C\n  After: B\n";
-        let kinds: Vec<Kind> = events(&list(on_human), Mode::Auto, &[])
+        let kinds: Vec<Kind> = events(&list(on_human), Mode::Auto, &[], &[])
             .iter()
             .map(|e| e.kind)
             .collect();
         assert_eq!(kinds, vec![Kind::Blocked]);
         // A finished log is not stalled.
-        assert!(events(&list("- [x] A\n"), Mode::Auto, &[]).is_empty());
+        assert!(events(&list("- [x] A\n"), Mode::Auto, &[], &[]).is_empty());
+    }
+
+    #[test]
+    fn a_dry_log_with_an_aim_open_wakes_it_even_with_nothing_left() {
+        let aims = ["Ship the API".to_string()];
+        let dry = |text: &str, mode| {
+            events(&list(text), mode, &[], &aims)
+                .into_iter()
+                .find(|e| e.kind == Kind::Dry)
+        };
+        let empty = dry("", Mode::Auto).unwrap();
+        assert_eq!(empty.detail, "No quest is left to start.");
+        assert!(empty.title.is_empty());
+        assert!(dry("- [x] A\n", Mode::Auto).is_some());
+        let waiting = "- [!] B @b-1: later {until: 2030-01-01T00:00Z}\n";
+        assert_eq!(dry(waiting, Mode::Auto).unwrap().detail, "Waiting: B.");
+        // No stall besides it.
+        assert_eq!(events(&list(waiting), Mode::Auto, &[], &aims).len(), 1);
+        // Not outside auto mode, not with work ready, in hand or on the human.
+        assert!(dry("", Mode::Review).is_none());
+        assert!(dry("- [ ] A\n", Mode::Auto).is_none());
+        assert!(dry("- [/] A @a-1\n", Mode::Auto).is_none());
+        assert!(dry("- [!] A @a-1: which key?\n", Mode::Auto).is_none());
+        assert!(dry("- [!] A @a-1: Warriv asks: which key?\n", Mode::Auto).is_none());
+        // No aim, and an empty log is no event at all.
+        assert!(events(&list(""), Mode::Auto, &[], &[]).is_empty());
+    }
+
+    fn dry_log() -> Event {
+        Event {
+            kind: Kind::Dry,
+            title: String::new(),
+            detail: "No quest is left to start.".into(),
+        }
+    }
+
+    #[test]
+    fn a_dry_log_is_not_its_own_doing() {
+        let mut d = Desk::default();
+        d.hear(vec![blocked("A", "x")], false);
+        assert!(matches!(d.wake(0), Wake::Go(_)));
+        d.hear(vec![dry_log()], true);
+        assert_eq!(d.wake(1), Wake::Go(vec![dry_log()]));
+    }
+
+    #[test]
+    fn three_dry_wakes_in_a_row_that_move_nothing_go_to_the_human() {
+        let mut d = Desk::default();
+        let wake = |d: &mut Desk, at| {
+            d.hear(vec![dry_log()], false);
+            assert_eq!(d.wake(at), Wake::Go(vec![dry_log()]));
+        };
+        wake(&mut d, 0);
+        assert_eq!(d.dry_ended(dry_log(), true, false), Dried::Again);
+        wake(&mut d, 1);
+        // Filing something starts the count over.
+        assert_eq!(d.dry_ended(dry_log(), true, true), Dried::Again);
+        wake(&mut d, 2);
+        assert_eq!(d.dry_ended(dry_log(), true, false), Dried::Again);
+        wake(&mut d, 3);
+        assert_eq!(d.dry_ended(dry_log(), true, false), Dried::Again);
+        wake(&mut d, 4);
+        assert_eq!(d.dry_ended(dry_log(), true, false), Dried::Human);
+        // The human's now: heard, not queued, not held by Warriv.
+        d.hear(vec![dry_log()], false);
+        assert_eq!(d.wake(5), Wake::Nothing);
+        assert!(d.holding(&[dry_log()]).is_empty());
+        // A log that is no longer dry starts over too.
+        let mut d = Desk::default();
+        wake(&mut d, 0);
+        assert_eq!(d.dry_ended(dry_log(), false, false), Dried::Moved);
+    }
+
+    #[test]
+    fn the_dry_prompt_carries_the_aims_and_the_rules() {
+        let p = prompt(&[Brief {
+            event: Some(dry_log()),
+            aims: vec!["Ship the API".into(), "Write the docs".into()],
+            ..Brief::default()
+        }]);
+        assert!(p.contains(
+            "- The log has run dry: nothing is in hand and nothing is ready to start. \
+             No quest is left to start.\n"
+        ));
+        assert!(p.contains("    Aim: Ship the API\n    Aim: Write the docs\n"));
+        assert!(p.contains("at most 8"));
+        assert!(p.contains("`Filed by Warriv for: <the aim>`"));
+        assert!(p.contains("mark it reached"));
+        assert!(!more(&[Brief {
+            event: Some(dry_log()),
+            aims: vec!["A".into()],
+            ..Brief::default()
+        }])
+        .contains('\n'));
+    }
+
+    #[test]
+    fn quests_filed_for_an_aim_are_counted_by_their_note() {
+        assert_eq!(filed("Ship\nthe API"), "Filed by Warriv for: Ship the API");
+        let t = list(
+            "- [ ] A\n  Filed by Warriv for: Ship\n  After: B\n- [x] B\n  Filed by Warriv for: Ship\n- [ ] C\n  Warriv: no\n",
+        );
+        assert_eq!(filed_count(&t), 2);
+    }
+
+    #[test]
+    fn the_human_is_asked_about_the_first_aim() {
+        let s = stuck(&["Ship\nthe API".into(), "Docs".into()]);
+        assert!(s.contains("\"Ship the API\""));
+        assert!(!s.contains("Docs"));
     }
 
     fn blocked(title: &str, why: &str) -> Event {
@@ -726,6 +944,7 @@ mod tests {
                     "Warriv: tried".into(),
                 ],
                 last_turn: Some("I built it.\nWhich port should it listen on?".into()),
+                aims: Vec::new(),
             },
             Brief {
                 event: Some(Event {
@@ -758,6 +977,7 @@ mod tests {
             event: Some(blocked("A", "")),
             notes: Vec::new(),
             last_turn: Some(long),
+            aims: Vec::new(),
         }]);
         assert!(p.contains("- The quest \"A\" is blocked.\n"));
         assert!(p.contains("\u{2026}x"));
@@ -771,6 +991,7 @@ mod tests {
             event: Some(blocked("A", "x")),
             notes: vec!["n".into()],
             last_turn: Some("a\nb".into()),
+            aims: Vec::new(),
         }]);
         assert!(!m.contains('\n'));
         assert!(m.starts_with("While you worked, more happened. - The quest \"A\" is blocked: x"));
@@ -786,6 +1007,8 @@ mod tests {
             "--below \"<title>\"",
             "--after \"<title>\"",
             "hx quest blocked \"<question>\" --quest \"<title>\"",
+            "hx quest aim done \"<the aim>\"",
+            "--notes \"Filed by Warriv for: <the aim>\"",
         ] {
             assert!(p.contains(c), "{c}");
         }
@@ -870,7 +1093,7 @@ mod tests {
             .starts_with("say what you tried first"));
         // Handed on, it no longer wakes Warriv.
         let handed = hand_on(text, "Pay", "Which card?").unwrap();
-        assert!(events(&parse(&handed), Mode::Manual, &[]).is_empty());
+        assert!(events(&parse(&handed), Mode::Manual, &[], &[]).is_empty());
     }
 
     #[test]

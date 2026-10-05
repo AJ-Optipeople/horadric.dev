@@ -20,6 +20,8 @@ pub struct Board {
     pub own_trees: bool,
     /// Warriv is on: what needs judgment wakes it before the human.
     pub orchestrator: bool,
+    /// The aims at the top of the log not reached yet, in order.
+    pub aims: Vec<String>,
 }
 
 impl Board {
@@ -264,6 +266,7 @@ mod tests {
             parallel: 1,
             own_trees: false,
             orchestrator: false,
+            aims: Vec::new(),
         }
     }
 
