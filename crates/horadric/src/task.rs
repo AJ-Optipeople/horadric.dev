@@ -10,6 +10,7 @@
 
 use std::path::{Path, PathBuf};
 
+use horadric_core::chronicle::{self, Happened, Record};
 use horadric_core::tasks::{self, Mark, Wait};
 use horadric_core::tombs;
 use horadric_hooks::listener::TasksChanged;
@@ -18,7 +19,8 @@ use horadric_hooks::{
 };
 
 const USAGE: &str = "\
-usage: horadric quest done              The quest this session works is completed
+usage: horadric quest done [\"summary\"]  The quest this session works is completed,
+                                        with one line on what it achieved
        horadric quest blocked \"why\"     It can not go on without the human
              [--on-quest \"title\"]     or until another quest is done,
              [--on-main <ref>]         a commit or branch is on main,
@@ -35,10 +37,10 @@ const NO_LOG: &str = "no quest log (.horadric/quests.md or .horadric/tasks.md) a
 pub fn run(args: &[String]) -> Result<(), String> {
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
     match args.first().map(String::as_str) {
-        Some("done") => report(&cwd, None),
+        Some("done") => report(&cwd, None, &args[1..].join(" ")),
         Some("blocked") => {
             let (why, wait) = why_and_wait(&args[1..], unix_now())?;
-            report(&cwd, Some((&why, wait.as_ref())))
+            report(&cwd, Some((&why, wait.as_ref())), "")
         }
         Some("add") => {
             let (title, notes) = title_and_notes(&args[1..]);
@@ -92,15 +94,19 @@ fn unix_now() -> u64 {
         .map_or(0, |d| d.as_secs())
 }
 
-/// The agent's item is done, or blocked with why and what it waits on.
-fn report(cwd: &Path, blocked: Option<(&str, Option<&Wait>)>) -> Result<(), String> {
+/// The agent's item is done, or blocked with why and what it waits on,
+/// and what the agent says it achieved, for the chronicle.
+fn report(cwd: &Path, blocked: Option<(&str, Option<&Wait>)>, summary: &str) -> Result<(), String> {
     let why = blocked.map(|(w, _)| w);
     let wait = blocked.and_then(|(_, w)| w);
     let id = session().ok_or("this is not a Horadric session, so there is no item to report on")?;
     if let Some((batch, _)) = tombs::of(&id) {
-        return report_tomb(cwd, &id, batch, why);
+        let project = held(cwd, batch).ok_or(format!("{NO_LOG} has a quest held by {batch}"))?;
+        record_summary(&project, &id, summary);
+        return report_tomb(&project, &id, why);
     }
     let project = held(cwd, &id).ok_or(format!("{NO_LOG} has a quest held by {id}"))?;
+    record_summary(&project, &id, summary);
     let mode = file::mode(&project);
     let mark = match why {
         Some(_) => Mark::Blocked,
@@ -130,8 +136,7 @@ fn report(cwd: &Path, blocked: Option<(&str, Option<&Wait>)>) -> Result<(), Stri
 
 /// A tomb's report leaves the list alone, since the item is the batch's
 /// until the human picks. Only the app keeps it, so it has to hear.
-fn report_tomb(cwd: &Path, id: &str, batch: &str, why: Option<&str>) -> Result<(), String> {
-    let project = held(cwd, batch).ok_or(format!("{NO_LOG} has a quest held by {batch}"))?;
+fn report_tomb(project: &Path, id: &str, why: Option<&str>) -> Result<(), String> {
     let heard = post_app(&TasksChanged {
         dir: project.to_string_lossy().into_owned(),
         tomb: Some(id.to_string()),
@@ -167,6 +172,18 @@ fn add(cwd: &Path, title: &str, notes: &str) -> Result<(), String> {
         Some(tasks::append_with_notes(text, title, notes))
     })
     .map_err(|e| format!("{}: {e}", file::file(&project).display()))?;
+    // Inside a session the new quest grows out of whatever that session
+    // works, which the quest log draws as a branch: its quest, or else its
+    // conversation, which Claude Code names to the commands it runs.
+    if let Some(by) = session() {
+        let conversation = std::env::var("CLAUDE_CODE_SESSION_ID").unwrap_or_default();
+        record(
+            &project,
+            String::new(),
+            title,
+            Happened::Added { by, conversation },
+        );
+    }
     tell_app(&project);
     println!("Added to {}", file::file(&project).display());
     Ok(())
@@ -179,6 +196,35 @@ fn list(cwd: &Path) -> Result<(), String> {
         println!("[{}] {}{holder}", t.mark.char(), t.title);
     }
     Ok(())
+}
+
+/// Keeps the agent's word on its quest, before the mark that ends it, so
+/// the quest log has it however the quest ends up. Said nothing, nothing
+/// is kept.
+fn record_summary(project: &Path, id: &str, summary: &str) {
+    let text = tasks::one_line(summary).trim().to_string();
+    if text.is_empty() {
+        return;
+    }
+    let list = tasks::parse(&file::read(project));
+    let title = chronicle::worked_by(&list, id)
+        .map(|t| t.title.clone())
+        .unwrap_or_default();
+    record(project, id.to_string(), &title, Happened::Summary { text });
+}
+
+/// Appends to the same chronicle the app writes. It is a record, not the
+/// report, so it can not fail the command.
+fn record(project: &Path, quest: String, title: &str, what: Happened) {
+    horadric_ui::chronicle(&Record {
+        at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs()),
+        project: horadric_ui::folder_key(&project.to_string_lossy()),
+        quest,
+        title: title.to_string(),
+        what,
+    });
 }
 
 /// The project whose list has the session's item: above `cwd`, or, for a

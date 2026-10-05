@@ -60,9 +60,9 @@ pub enum Choice {
     New,
     /// Start a session in this recent project.
     Recent(String),
-    /// A line of the History menu, by its id, which `history::pick_nested`
-    /// reads from [`HISTORY`].
-    History(usize),
+    /// Open the quest log of this recent project, the way back to its
+    /// quests and its conversations.
+    QuestLog(String),
     /// Put every cluster back in the auto layout.
     Tidy,
     /// Bring every cluster in front of the other windows.
@@ -204,15 +204,14 @@ impl Drop for Tray {
     }
 }
 
-/// Where the History menu's ids start, one span of them per recent project.
-pub const HISTORY: usize = 1000;
+/// Where the Quest log menu's ids start, one per recent project.
+const QUEST_LOG: usize = 1000;
 
 /// The tray menu. `autostart` is None when the switch is not offered,
 /// `hotkeys` are the shortcuts for the next waiting session and for the
 /// catch-up, where they have one, `notify` whether a session that starts
 /// waiting says so, `sounds` whether loot drops are heard, and `discord`
-/// what the Discord profile is allowed to show. `history`
-/// holds a History menu for each of `recent_projects`, in order.
+/// what the Discord profile is allowed to show.
 /// `screens` are offered when there is more than one, with the one named
 /// `shown` checked. `update` is a newer release's version, when a check
 /// found one. `fonts` are the families the terminals can be drawn in,
@@ -221,7 +220,6 @@ pub const HISTORY: usize = 1000;
 #[allow(clippy::too_many_arguments)]
 pub fn menu(
     recent_projects: &[String],
-    history: Vec<Vec<Item>>,
     autostart: Option<bool>,
     hotkeys: [Option<&str>; 2],
     notify: bool,
@@ -275,13 +273,13 @@ pub fn menu(
     }
     // The way back to a project with no tiles left, whose menu went with
     // its cluster.
-    let past: Vec<Item> = recent_projects
+    let logs: Vec<Item> = recent_projects
         .iter()
-        .zip(history)
-        .map(|(path, lines)| Item::Submenu(label(path), lines))
+        .enumerate()
+        .map(|(i, path)| Item::action(QUEST_LOG + i, label(path)))
         .collect();
-    if !past.is_empty() {
-        items.push(Item::Submenu("History".into(), past));
+    if !logs.is_empty() {
+        items.push(Item::Submenu("Quest log".into(), logs));
     }
     items.push(Item::Separator);
     let with_key = |label: &str, key: Option<&str>| match key {
@@ -329,11 +327,11 @@ pub fn menu(
         .collect();
     items.push(Item::Submenu("Theme".into(), lines));
     if !fonts.is_empty() {
-        // Up to the first History id, which is more families than anyone
+        // Up to the first Quest log id, which is more families than anyone
         // has installed.
         let lines = fonts
             .iter()
-            .take(HISTORY - FONT)
+            .take(QUEST_LOG - FONT)
             .enumerate()
             .map(|(i, name)| Item::Action {
                 id: FONT + i,
@@ -399,9 +397,11 @@ pub fn menu(
         i if (DISCORD..THEME).contains(&i) => {
             Discord::ALL.get(i - DISCORD).copied().map(Choice::Discord)
         }
-        i if i >= HISTORY => Some(Choice::History(i)),
+        i if i >= QUEST_LOG => recent_projects
+            .get(i - QUEST_LOG)
+            .map(|p| Choice::QuestLog(p.clone())),
         i if (SCREEN..RECENT).contains(&i) => Some(Choice::Screen(i - SCREEN)),
-        i if (FONT..HISTORY).contains(&i) => Some(Choice::Font(i - FONT)),
+        i if (FONT..QUEST_LOG).contains(&i) => Some(Choice::Font(i - FONT)),
         i if i >= RECENT => recent_projects
             .get(i - RECENT)
             .map(|p| Choice::Recent(p.clone())),

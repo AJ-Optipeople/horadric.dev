@@ -27,6 +27,7 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
+use horadric_core::chronicle::{self, Happened};
 use horadric_core::journal::{self, Commit, Entry, What};
 use horadric_core::tasks::{self, Holder, Mark, Mode, Next, Task, Wait};
 use horadric_core::usage::format_until;
@@ -34,10 +35,11 @@ use horadric_core::worktree::{self, Worktree};
 use horadric_core::{fleet, ssh, tombs, Phase, WaitReason};
 use horadric_hooks::tasks as file;
 
-use super::{post, unix_now, with_app, App, WM_HORADRIC_KEPT, WM_HORADRIC_TASK_MENU};
+use super::{post, push, unix_now, with_app, App, Input, WM_HORADRIC_KEPT, WM_HORADRIC_TASK_MENU};
 use crate::app::Run;
 use crate::board::{self, Board, RowState};
 use crate::menu::{self, Item};
+use crate::questlog::Ask;
 use crate::toast::Kind;
 use crate::window::{folder_key, project_key, project_name};
 use crate::{ask, store, watch};
@@ -87,6 +89,9 @@ pub(super) struct State {
     refused: HashMap<String, Refused>,
     /// Menus and dialogs waiting for the app's window to show them.
     pub(super) menu: Option<Menu>,
+    /// What was typed for a new or edited quest before the input was
+    /// clicked away from, by [`draft_for`], filled back in next time.
+    drafts: HashMap<String, ask::Draft>,
     /// Worktrees whose branch stayed when their session ended, with the
     /// session's project, back from the thread that removed them.
     pub(super) kept: Arc<Mutex<Vec<(String, Worktree)>>>,
@@ -307,13 +312,30 @@ impl App {
             let fresh = read_board(dir);
             let mut boards = self.shared.boards.borrow_mut();
             if boards.get(key) != Some(&fresh) {
+                let at = unix_now();
+                if let Some(old) = boards.get(key) {
+                    for r in chronicle::marks(key, &old.tasks, &fresh.tasks, at) {
+                        store::chronicle(&r);
+                    }
+                }
                 let mut lines = boards
                     .get(key)
-                    .map(|old| journal::marks(key, &old.tasks, &fresh.tasks, unix_now()))
+                    .map(|old| journal::marks(key, &old.tasks, &fresh.tasks, at))
                     .unwrap_or_default();
                 for e in &mut lines {
                     if let What::Finished { title, commits } = &mut e.what {
                         *commits = self.commits_under(key, dir, &e.session, title);
+                        if !commits.is_empty() {
+                            store::chronicle(&chronicle::Record {
+                                at,
+                                project: key.clone(),
+                                quest: e.session.clone(),
+                                title: title.clone(),
+                                what: Happened::Commits {
+                                    commits: commits.clone(),
+                                },
+                            });
+                        }
                     }
                     store::journal(e);
                 }
@@ -1264,14 +1286,34 @@ impl App {
         match crate::worktree::merge(&m.main, &m.branch) {
             Ok(()) => {
                 self.landed(&m.main, &m.branch);
+                let project = folder_key(&m.main.to_string_lossy());
                 store::journal(&Entry {
                     at: unix_now(),
                     session: String::new(),
                     name: String::new(),
-                    project: folder_key(&m.main.to_string_lossy()),
+                    project: project.clone(),
                     what: What::Merged {
                         branch: m.branch.clone(),
                         title: m.title.clone(),
+                    },
+                });
+                // The list still holds the finished item, and its holder is
+                // the quest the chronicle knows it by.
+                let quest = self
+                    .shared
+                    .boards
+                    .borrow()
+                    .get(&project)
+                    .and_then(|b| b.tasks.iter().find(|t| t.title == m.title))
+                    .and_then(|t| t.holder.clone())
+                    .unwrap_or_default();
+                store::chronicle(&chronicle::Record {
+                    at: unix_now(),
+                    project,
+                    quest,
+                    title: m.title.clone(),
+                    what: Happened::Merged {
+                        branch: m.branch.clone(),
                     },
                 });
                 self.toasts.show(
@@ -1360,7 +1402,7 @@ pub(super) fn show_menu(menu: Menu) {
                 notes: true,
                 pick: None,
             };
-            if let Some(a) = super::ask_beside(Some(&key), &question) {
+            if let Some(a) = ask_quest(&key, &draft_for(&key, None), &question, "") {
                 with_app(|app| app.add_task(&key, &a.text, &a.notes));
             }
         }
@@ -1418,6 +1460,7 @@ fn item_menu(key: &str, line: usize, title: &str) {
     const UP: usize = 8;
     const DOWN: usize = 9;
     const DELETE: usize = 10;
+    const LOG: usize = 11;
     // Beyond the ids of `tombs::MOST` tombs.
     const TOMBS: usize = 100;
     const PICK: usize = 200;
@@ -1483,6 +1526,7 @@ fn item_menu(key: &str, line: usize, title: &str) {
         items.push(Item::action(DELETE, "Delete quest"));
     }
     items.push(Item::action(EDIT, "Edit the quest log"));
+    items.push(Item::action(LOG, "Quest log..."));
     // Outside the app's borrow: the menu's loop dispatches its messages.
     let picked = menu::popup(&items);
     if let Some(i) = picked.filter(|i| *i >= PICK) {
@@ -1493,6 +1537,7 @@ fn item_menu(key: &str, line: usize, title: &str) {
     }
     match picked {
         Some(REWRITE) => return rewrite(key, &t),
+        Some(LOG) => return push(Input::QuestLog(Ask::Open(key.to_string()))),
         Some(DELETE) if !confirm_delete(title) => return,
         _ => {}
     }
@@ -1583,21 +1628,12 @@ fn rewrite(key: &str, t: &Task) {
         notes: true,
         pick: None,
     };
-    let Some((shared, beside)) = with_app(|app| {
-        let beside = app.clusters.iter().find(|c| c.key == key).map(|c| c.hwnd);
-        (Rc::clone(&app.shared), beside)
-    }) else {
-        return;
-    };
-    let Some(a) = ask::ask_with_notes(
-        shared,
-        beside,
-        &question,
-        &t.notes.join(
-            "
+    let notes = t.notes.join(
+        "
 ",
-        ),
-    ) else {
+    );
+    let draft = draft_for(key, Some((t.line, &t.title)));
+    let Some(a) = ask_quest(key, &draft, &question, &notes) else {
         return;
     };
     with_app(|app| {
@@ -1605,6 +1641,54 @@ fn rewrite(key: &str, t: &Task) {
             tasks::edit(text, t.line, &t.title, &a.text, &a.notes)
         })
     });
+}
+
+/// Where a quest's draft is kept: by project for a new one, and for an
+/// edit by its line and title too, so a draft for a quest that has since
+/// changed is not filled into another.
+fn draft_for(key: &str, edit: Option<(usize, &str)>) -> String {
+    match edit {
+        None => format!(
+            "{key}
+new"
+        ),
+        Some((line, title)) => format!(
+            "{key}
+edit
+{line}
+{title}"
+        ),
+    }
+}
+
+/// Whether a draft says more than the input started with, and so is worth
+/// filling back in.
+fn worth_keeping(d: &ask::Draft, initial: &str, notes: &str) -> bool {
+    d.text != initial || d.notes != notes
+}
+
+/// Asks for a quest's title and notes beside the project's cluster, filling
+/// in the draft kept under `draft`, and keeps what was typed when the
+/// input is clicked away from. Answering or Esc drops the draft.
+fn ask_quest(key: &str, draft: &str, question: &ask::Ask, notes: &str) -> Option<ask::Answer> {
+    let (shared, beside, kept) = with_app(|app| {
+        let beside = app.clusters.iter().find(|c| c.key == key).map(|c| c.hwnd);
+        let kept = app.tasks.drafts.get(draft).cloned();
+        (Rc::clone(&app.shared), beside, kept)
+    })?;
+    let reply = ask::ask_or_leave(shared, beside, question, notes, kept.as_ref());
+    with_app(|app| match &reply {
+        ask::Reply::Left(d) if worth_keeping(d, question.initial, notes) => {
+            app.tasks.drafts.insert(draft.to_string(), d.clone());
+        }
+        _ => {
+            app.tasks.drafts.remove(draft);
+        }
+    });
+    match reply {
+        ask::Reply::Answered(a) => Some(a),
+        ask::Reply::Cancelled | ask::Reply::Left(_) => None,
+    }
 }
 
 /// Whether the human really means to delete a quest. Its notes go with
@@ -1630,6 +1714,7 @@ const AT_ONCE: [usize; 4] = [1, 2, 3, 4];
 
 fn mode_menu(key: &str) {
     const EDIT: usize = 10;
+    const LOG: usize = 11;
     // Plus how many, so each choice of `AT_ONCE` has an id of its own.
     const PARALLEL: usize = 20;
     let Some(board) = with_app(|app| app.shared.boards.borrow().get(key).cloned()) else {
@@ -1659,7 +1744,11 @@ fn mode_menu(key: &str) {
     }
     items.push(Item::Separator);
     items.push(Item::action(EDIT, "Edit the quest log"));
+    items.push(Item::action(LOG, "Quest log..."));
     let picked = menu::popup(&items);
+    if picked == Some(LOG) {
+        return push(Input::QuestLog(Ask::Open(key.to_string())));
+    }
     with_app(|app| match picked {
         Some(EDIT) => app.edit_list(key),
         Some(i) if i > PARALLEL => app.set_parallel(key, i - PARALLEL),
@@ -1700,6 +1789,33 @@ pub(super) fn merges(dir: &Path) -> Vec<Merge> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_draft_is_kept_by_project_and_by_the_quest_edited() {
+        assert_ne!(draft_for("a", None), draft_for("b", None));
+        assert_ne!(draft_for("a", None), draft_for("a", Some((3, "Fix"))));
+        assert_ne!(
+            draft_for("a", Some((3, "Fix"))),
+            draft_for("a", Some((3, "Fix it")))
+        );
+        assert_ne!(
+            draft_for("a", Some((3, "Fix"))),
+            draft_for("a", Some((4, "Fix")))
+        );
+    }
+
+    #[test]
+    fn only_a_draft_that_changed_something_is_kept() {
+        let d = |text: &str, notes: &str| ask::Draft {
+            text: text.into(),
+            notes: notes.into(),
+        };
+        assert!(!worth_keeping(&d("", ""), "", ""));
+        assert!(worth_keeping(&d("Fix", ""), "", ""));
+        assert!(worth_keeping(&d("", "why"), "", ""));
+        assert!(!worth_keeping(&d("Fix", "why"), "Fix", "why"));
+        assert!(worth_keeping(&d("Fix", "why not"), "Fix", "why"));
+    }
 
     #[test]
     fn the_agent_runs_this_build_by_its_full_path() {

@@ -76,6 +76,8 @@ fn list_in(root: &Path, cwd: &str, skip: &[String], limit: usize) -> Vec<Past> {
                     custom: false,
                 },
                 modified,
+                // Its start is not worth another read: the last touch places it.
+                started: modified,
                 agent: Agent::Codex,
             })
         })
