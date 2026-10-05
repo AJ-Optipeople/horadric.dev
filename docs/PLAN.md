@@ -3465,7 +3465,10 @@ it after its session closes.
   under the mode reads "Warriv: settling 2" in the working colour; when
   its six wakes are spent, "Warriv rests until 21:40" in the dim colour.
   Nothing when it is off or asleep with wakes left. The words are pure
-  and tested.
+  and tested. **Built on 2026-10-05**: `Desk::watch` says which, from
+  the events the awake session has not answered plus those queued, or
+  the hour's first wake; `Watch::words` says it. The line is a strip of
+  its own under the header, right aligned to the mode, shown folded too.
 
 ### The agent's cursor
 

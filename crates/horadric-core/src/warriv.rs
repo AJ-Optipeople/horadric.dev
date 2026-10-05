@@ -276,6 +276,61 @@ impl Desk {
         self.wakes.push(now);
         Wake::Go(events)
     }
+
+    /// What Warriv is about at `now`, for the quests tile: settling the
+    /// `open` events its awake session has not answered and those waiting
+    /// for its next stop, or resting with its wakes spent. None when it
+    /// sleeps with wakes left.
+    pub fn watch(&self, open: Option<usize>, now: u64) -> Option<Watch> {
+        if let Some(open) = open {
+            return Some(Watch::Settling(open + self.queue.len()));
+        }
+        let spent: Vec<u64> = self
+            .wakes
+            .iter()
+            .copied()
+            .filter(|&at| at + HOUR > now)
+            .collect();
+        if spent.len() < WAKES_AN_HOUR {
+            return None;
+        }
+        spent.into_iter().min().map(|first| Watch::Rests {
+            until: first + HOUR,
+        })
+    }
+}
+
+/// What the quests tile's line says of Warriv.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Watch {
+    /// Awake, with this many events in hand.
+    Settling(usize),
+    /// Its wakes are spent until this unix time.
+    Rests { until: u64 },
+}
+
+impl Watch {
+    /// The line's words. `local` is the seconds since local midnight at
+    /// the unix time `now`, which turns `until` into a time of day.
+    pub fn words(self, local: u64, now: u64) -> String {
+        match self {
+            Watch::Settling(0) => "Warriv: settling".to_string(),
+            Watch::Settling(n) => format!("Warriv: settling {n}"),
+            Watch::Rests { until } => {
+                let secs = (local as i64 + until as i64 - now as i64).rem_euclid(86_400);
+                format!(
+                    "Warriv rests until {:02}:{:02}",
+                    secs / 3600,
+                    secs % 3600 / 60
+                )
+            }
+        }
+    }
+
+    /// Whether it is at work, which reads in the working colour.
+    pub fn working(self) -> bool {
+        matches!(self, Watch::Settling(_))
+    }
 }
 
 /// An event with what Warriv needs to judge it: the quest's notes, which
@@ -714,6 +769,48 @@ mod tests {
         // An hour after the first wake, one is free again.
         d.hear(vec![blocked("A", "next hour")], false);
         assert!(matches!(d.wake(HOUR), Wake::Go(_)));
+    }
+
+    #[test]
+    fn the_tile_says_what_it_settles_and_when_it_rests() {
+        let mut d = Desk::default();
+        assert_eq!(d.watch(None, 0), None);
+        d.hear(vec![blocked("A", "x")], false);
+        assert!(matches!(d.wake(0), Wake::Go(_)));
+        assert_eq!(d.watch(Some(1), 1), Some(Watch::Settling(1)));
+        // What waits for its next stop is in hand too.
+        d.hear(vec![blocked("A", "x"), blocked("B", "y")], true);
+        assert_eq!(d.watch(Some(1), 2), Some(Watch::Settling(2)));
+        assert!(Watch::Settling(2).working());
+        // Asleep with wakes left, it says nothing.
+        let mut d = Desk::default();
+        for i in 0..WAKES_AN_HOUR as u64 - 1 {
+            d.hear(vec![blocked("A", &i.to_string())], false);
+            assert!(matches!(d.wake(100 + i * 60), Wake::Go(_)));
+        }
+        assert_eq!(d.watch(None, 400), None);
+        d.hear(vec![blocked("A", "last")], false);
+        assert!(matches!(d.wake(500), Wake::Go(_)));
+        // Spent, it rests until the first wake is an hour old.
+        let rests = Watch::Rests { until: 100 + HOUR };
+        assert_eq!(d.watch(None, 600), Some(rests));
+        assert!(!rests.working());
+        assert_eq!(d.watch(None, 100 + HOUR), None);
+    }
+
+    #[test]
+    fn the_line_reads_plainly() {
+        assert_eq!(Watch::Settling(2).words(0, 0), "Warriv: settling 2");
+        assert_eq!(Watch::Settling(0).words(0, 0), "Warriv: settling");
+        // 20:40 local now, free again an hour on.
+        let local = 20 * 3600 + 40 * 60;
+        let rests = Watch::Rests {
+            until: 1_000 + HOUR,
+        };
+        assert_eq!(rests.words(local, 1_000), "Warriv rests until 21:40");
+        // Past midnight.
+        let late = 23 * 3600 + 30 * 60;
+        assert_eq!(rests.words(late, 1_000), "Warriv rests until 00:30");
     }
 
     #[test]
