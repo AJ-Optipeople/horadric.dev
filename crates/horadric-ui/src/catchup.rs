@@ -70,6 +70,15 @@ pub struct Away {
 }
 
 impl Away {
+    /// Since when you have been away, in Unix seconds, while you are.
+    pub fn since(&self) -> Option<u64> {
+        self.since
+    }
+
+    pub fn locked(&self) -> bool {
+        self.locked
+    }
+
     pub fn lock(&mut self, now: u64) {
         self.locked = true;
         self.since.get_or_insert(now);
@@ -234,7 +243,7 @@ impl Catchup {
         let work = work_area(monitor);
         let max_h = (work[3] - work[1]) as f32 / s - 2.0 * MARGIN;
         let kinds: Vec<CatchupKind> = rows.iter().map(|r| r.kind).collect();
-        let layout = layout::catchup(&kinds, max_h, 0);
+        let layout = layout::catchup(&kinds, layout::CATCHUP_W, max_h, 0);
         let more = more_of(&rows, &layout);
         let size = (
             (layout.size.0 * s).round() as i32,
@@ -343,6 +352,7 @@ impl Catchup {
             more: &more,
             hot: self.hot.get(),
             close_hot: self.close_hot.get(),
+            fields: Vec::new(),
         };
         let failed = slot
             .as_ref()
@@ -378,11 +388,11 @@ impl Catchup {
     fn wheel(&self, wparam: WPARAM, lparam: LPARAM) {
         let notches = ((wparam.0 >> 16) & 0xffff) as i16 as i32 / 120;
         let first = self.layout.borrow().first;
-        let to = layout::catchup_scroll(&self.kinds, self.max_h, first, notches);
+        let to = layout::catchup_scroll(&self.kinds, layout::CATCHUP_W, self.max_h, first, notches);
         if to == first {
             return;
         }
-        let l = layout::catchup(&self.kinds, self.max_h, to);
+        let l = layout::catchup(&self.kinds, layout::CATCHUP_W, self.max_h, to);
         *self.more.borrow_mut() = more_of(&self.rows, &l);
         *self.layout.borrow_mut() = l;
         self.pressed.set(None);

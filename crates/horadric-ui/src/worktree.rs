@@ -440,8 +440,10 @@ const CHECK_LONGEST: Duration = Duration::from_secs(30 * 60);
 
 /// How a finished quest's merge into the main tree came out.
 pub enum Landing {
-    /// `main` holds the branch now. Or held it already.
-    Merged,
+    /// `main` holds the branch now, or held it already. With the commit
+    /// the checks passed on, which `main` was left at, or empty when it
+    /// held the branch already and none ran.
+    Merged(String),
     /// A step failed with this output. The branch stayed.
     Failed(merge::Failure, String),
 }
@@ -457,7 +459,7 @@ pub fn land(w: &Worktree, into: &str, checks: &[String]) -> Landing {
     // The agent was just ended, and may hold its files for a moment.
     std::thread::sleep(Duration::from_secs(1));
     if git(main, &["merge-base", "--is-ancestor", &w.branch, into]).is_ok() {
-        return Landing::Merged;
+        return Landing::Merged(String::new());
     }
     let mut last = (merge::Failure::Moved, String::new());
     for _ in 0..merge::TRIES {
@@ -481,7 +483,7 @@ pub fn land(w: &Worktree, into: &str, checks: &[String]) -> Landing {
             return Landing::Failed(why, out);
         }
         if !moved {
-            return Landing::Merged;
+            return Landing::Merged(head(tree).unwrap_or_default());
         }
     }
     Landing::Failed(last.0, last.1)

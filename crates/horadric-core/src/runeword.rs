@@ -26,8 +26,13 @@ use crate::session::Phase;
 use crate::tasks::one_line;
 
 mod edit;
+mod errand;
 mod stone;
 pub use edit::unwrite;
+pub use errand::{
+    arm_text, describe, due, every, is_errand, length, since, span, tick, Armed, Clocked, Errand,
+    Every, Tick, FOR_DEFAULT, ID as ERRAND_ID,
+};
 pub use stone::{
     ask_text, carve, fingerprint, name, reforge_prompt, smith_prompt, tip, Carving, Stroke,
     EDGE_POINTS, EMPTY_TIP, RUNES,
@@ -332,6 +337,9 @@ pub struct Stone {
     /// What it is for, in a sentence, when it says: `"about"` beside its
     /// `"steps"`. Empty when it does not.
     pub about: String,
+    /// Its clock, when it says `"every"`: an errand, cast unattended once
+    /// armed.
+    pub errand: Option<Errand>,
 }
 
 impl Stone {
@@ -375,12 +383,21 @@ pub type Steps = Result<Vec<Rune>, String>;
 pub fn parse(text: &str) -> Result<Vec<(String, Steps)>, String> {
     Ok(written(text)?
         .into_iter()
-        .map(|(label, steps, _)| (label, steps))
+        .map(|w| (w.label, w.steps))
         .collect())
 }
 
-/// What [`parse`] reads, each stone with its `about` as well.
-fn written(text: &str) -> Result<Vec<(String, Steps, String)>, String> {
+/// One stone as a file has it.
+struct Written {
+    label: String,
+    steps: Steps,
+    about: String,
+    errand: Option<Errand>,
+}
+
+/// What [`parse`] reads, each stone with its `about` and its clock as
+/// well. A stone whose clock does not parse is cracked with the reason.
+fn written(text: &str) -> Result<Vec<Written>, String> {
     if text.trim().is_empty() {
         return Ok(Vec::new());
     }
@@ -399,7 +416,19 @@ fn written(text: &str) -> Result<Vec<(String, Steps, String)>, String> {
                 .and_then(Value::as_str)
                 .map(one_line)
                 .unwrap_or_default();
-            (!label.is_empty()).then(|| (label, steps_of(value), about))
+            let (steps, errand) = match steps_of(value) {
+                Ok(runes) => match errand::errand_of(value, &runes) {
+                    Ok(errand) => (Ok(runes), errand),
+                    Err(e) => (Err(e), None),
+                },
+                Err(e) => (Err(e), None),
+            };
+            (!label.is_empty()).then_some(Written {
+                label,
+                steps,
+                about,
+                errand,
+            })
         })
         .collect())
 }
@@ -434,12 +463,13 @@ fn steps_of(v: &Value) -> Steps {
 pub fn stones(project: &str, global: &str) -> Vec<Stone> {
     let mut theirs: Vec<Stone> = Vec::new();
     for (text, source) in [(project, Source::Project), (global, Source::Global)] {
-        for (label, steps, about) in written(text).unwrap_or_default() {
+        for w in written(text).unwrap_or_default() {
             theirs.push(Stone {
-                label,
-                steps,
+                label: w.label,
+                steps: w.steps,
                 source,
-                about,
+                about: w.about,
+                errand: w.errand,
             });
         }
     }
@@ -455,6 +485,7 @@ pub fn stones(project: &str, global: &str) -> Vec<Stone> {
             steps: Ok(runes),
             source: Source::BuiltIn,
             about: about.into(),
+            errand: None,
         })
         .collect();
     out.extend(theirs);
@@ -1403,5 +1434,68 @@ mod tests {
         assert!(!p.contains('\n'));
         assert!(answer_prompt("C:/r.md").contains("\"C:/r.md\""));
         assert!(!test_prompt().contains('\n'));
+    }
+
+    #[test]
+    fn a_stone_with_every_is_an_errand_and_a_quests_rune_cracks_it() {
+        let text = r#"{ "runewords": {
+            "Clean": { "every": "sunday 12:00", "for": "10m", "steps": [ { "run": "cargo clean" } ] },
+            "Hourly": { "every": "1h", "mode": "bypass", "steps": [ "Read the inbox" ] },
+            "Ship": { "every": "day 03:00", "steps": [ "test", "merge" ] },
+            "Soon": { "every": "now and then", "steps": [ { "run": "echo" } ] },
+            "Long": { "every": "1h", "for": 30, "steps": [ { "run": "echo" } ] },
+            "Plain": [ { "run": "echo" } ] } }"#;
+        let stones = stones(text, "");
+        let get = |l: &str| stones.iter().find(|s| s.label == l).unwrap();
+        assert_eq!(
+            get("Clean").errand,
+            Some(Errand {
+                every: Every::Week(6, 720),
+                most: 600,
+                bypass: false,
+            })
+        );
+        assert_eq!(
+            get("Hourly").errand,
+            Some(Errand {
+                every: Every::Span(3600),
+                most: FOR_DEFAULT,
+                bypass: true,
+            })
+        );
+        assert!(get("Ship")
+            .steps
+            .as_ref()
+            .unwrap_err()
+            .contains("quest's session"));
+        assert!(get("Soon")
+            .steps
+            .as_ref()
+            .unwrap_err()
+            .contains("now and then"));
+        assert!(get("Long").steps.as_ref().unwrap_err().contains("\"for\""));
+        assert_eq!(get("Plain").errand, None);
+        assert!(get("Clean").sessionless());
+    }
+
+    #[test]
+    fn an_errands_tip_says_when_it_runs_and_whether_it_is_armed() {
+        let text = r#"{ "runewords": { "Clean": { "every": "1h", "steps": [ { "run": "cargo clean" } ] } } }"#;
+        let s = stones(text, "")
+            .into_iter()
+            .find(|s| s.label == "Clean")
+            .unwrap();
+        let tip = tip(&s, false);
+        assert!(
+            tip.ends_with("1. run cargo clean\nEvery 1h, for 30m at most"),
+            "{tip}"
+        );
+        assert!(super::tip(&s, true).ends_with("\nNot armed: a click arms it"));
+        let arm = arm_text(&s, "the project app");
+        assert!(
+            arm.starts_with("Runs every 1h without asking, stopped after 30m."),
+            "{arm}"
+        );
+        assert!(arm.contains("On the project app:\n1. run cargo clean"));
     }
 }

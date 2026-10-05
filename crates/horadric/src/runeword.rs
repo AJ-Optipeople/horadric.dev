@@ -75,6 +75,7 @@ fn broken_file(text: &str, source: Source) -> Option<Stone> {
         steps: Err(why),
         source,
         about: String::new(),
+        errand: None,
     })
 }
 
@@ -135,6 +136,18 @@ fn show(s: &Stone) -> String {
         }
         Err(why) => out.push_str(&format!("  CRACKED: {why}\n")),
     }
+    if let Some(e) = &s.errand {
+        out.push_str(&format!(
+            "  an errand: {}, for {} at most{}, once armed in the tome\n",
+            runeword::describe(e.every),
+            runeword::length(e.most),
+            if e.bypass && !s.sessionless() {
+                ", skipping permission prompts"
+            } else {
+                ""
+            }
+        ));
+    }
     out
 }
 
@@ -158,6 +171,21 @@ mod tests {
         let open = show(stones.last().unwrap());
         assert!(open.contains("\"Open\"  (this project)"), "{open}");
         assert!(open.contains("  1. run npm run dev (shown)\n"), "{open}");
+    }
+
+    #[test]
+    fn an_errand_says_when_it_runs() {
+        let stones = runeword::stones(
+            r#"{ "runewords": { "Clean": { "every": "day 03:00", "steps": [ { "run": "cargo clean" } ] } } }"#,
+            "",
+        );
+        let shown = show(stones.last().unwrap());
+        assert!(
+            shown.ends_with(
+                "  an errand: every day at 03:00, for 30m at most, once armed in the tome\n"
+            ),
+            "{shown}"
+        );
     }
 
     #[test]

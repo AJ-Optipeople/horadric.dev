@@ -116,9 +116,12 @@ pub struct Shared {
     /// The quests Warriv has, by project key: blocked or tangled ones it
     /// settles before the human hears of them. None with Warriv off.
     pub warriv: RefCell<HashMap<String, BTreeSet<String>>>,
-    /// What the quests tile says of Warriv, by project key, and whether it
-    /// reads in the working colour. None while it sleeps with wakes left.
-    pub warriv_line: RefCell<HashMap<String, (String, bool)>>,
+    /// The projects where Warriv, a reviewer or an errand is at work, by
+    /// key: their quests tile breathes in Warriv's gold.
+    pub astir: RefCell<HashSet<String>>,
+    /// What the quests tile says of Warriv, by project key, and its ink.
+    /// None while it sleeps with wakes left and does not drive.
+    pub warriv_line: RefCell<HashMap<String, (String, board::Ink)>>,
 }
 
 impl Shared {
@@ -198,6 +201,7 @@ struct Still {
     board: Option<(String, String)>,
     staged: Vec<bool>,
     active: Option<String>,
+    astir: bool,
 }
 
 /// What a tile shows that moves with time alone: its age, and its trace
@@ -682,9 +686,8 @@ impl Cluster {
         )
     }
 
-    /// What the quests tile says of Warriv, and whether in the working
-    /// colour.
-    fn warriv_line(&self) -> Option<(String, bool)> {
+    /// What the quests tile says of Warriv, and its ink.
+    fn warriv_line(&self) -> Option<(String, board::Ink)> {
         self.shared.warriv_line.borrow().get(&self.key).cloned()
     }
 
@@ -826,6 +829,7 @@ impl Cluster {
             board,
             staged,
             active: self.shared.active.borrow().clone(),
+            astir: self.shared.astir.borrow().contains(&self.key),
         }
     }
 
@@ -957,6 +961,7 @@ impl Cluster {
                 mode: b.map_or_else(|| Mode::default().label().into(), Board::mode_key),
                 warriv: self.warriv_line(),
                 collapsed: t.collapsed,
+                astir: self.shared.astir.borrow().contains(&self.key),
             }
         });
         let stones = self.stones();
@@ -1012,6 +1017,7 @@ impl Cluster {
         let now = Instant::now();
         let looks = self.tiles.borrow_mut().step(now, &inputs);
         let ambient = backdrop::animations_on();
+        let breathing = ambient && tasks_scene.as_ref().is_some_and(|t| t.astir);
         let drawn = sessions
             .iter()
             .zip(&looks)
@@ -1114,6 +1120,9 @@ impl Cluster {
         let phases: Vec<&horadric_core::Phase> = refs.iter().map(|s| &s.phase).collect();
         let targets: Vec<f32> = inputs.iter().map(|t| t.y).collect();
         let next = anim::Tiles::next_frame(&looks, &phases, &targets, ambient);
+        // The quests tile's breath needs frames of its own, and only while
+        // it breathes.
+        let next = motion::sooner(next, breathing.then_some(motion::FRAME_BREATH));
         self.schedule(if ghosts.is_empty() && !finishing {
             next
         } else {

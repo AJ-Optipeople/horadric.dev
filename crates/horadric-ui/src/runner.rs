@@ -34,7 +34,7 @@ use horadric_core::journal::{self, Commit, Entry, What};
 use horadric_core::tasks::{self, Holder, Mark, Mode, Next, Task, Wait};
 use horadric_core::usage::{self, format_until};
 use horadric_core::worktree::{self, Worktree};
-use horadric_core::{fleet, merge, ssh, tombs, Phase, WaitReason};
+use horadric_core::{fleet, merge, ship, ssh, tombs, Agent, Phase, Setting, WaitReason};
 use horadric_hooks::tasks as file;
 
 use super::{post, push, unix_now, with_app, App, Input, WM_HORADRIC_KEPT, WM_HORADRIC_TASK_MENU};
@@ -103,6 +103,12 @@ pub(super) struct State {
     /// The finished branch the last notification offered to merge, which
     /// a click on it asks about.
     pub(super) merge_for: Option<Merge>,
+    /// The project the last notification proposed shipping, by key, whose
+    /// "Ship Local" stone a click on it casts.
+    pub(super) ship_for: Option<String>,
+    /// The landing count each project was last proposed a ship at, by
+    /// key, so a count is proposed once.
+    ship_proposed: HashMap<String, usize>,
     /// Auto mode merges that came out, back from the threads that ran them.
     landed: Arc<Mutex<Vec<Landed>>>,
     /// Held by the thread merging into a project, so two fast forwards of
@@ -162,6 +168,8 @@ pub(super) enum Menu {
     Add(String),
     /// Whether to merge a finished item's branch.
     Merge(Merge),
+    /// Casting the project's "Ship Local" stone, by project key.
+    Ship(String),
 }
 
 /// A finished quest's merge by itself, done on its thread.
@@ -197,9 +205,11 @@ fn read_board(dir: &Path) -> Board {
     // get worktrees of their own even in trunk mode, and only a repository
     // can give them.
     let own_trees = crate::worktree::main_tree(dir).is_some();
+    let text = file::read(dir);
     Board {
         mode: file::mode(dir),
-        tasks: tasks::parse(&file::read(dir)),
+        tasks: tasks::parse(&text),
+        aims: horadric_core::aim::open(&text),
         parallel: if own_trees { file::parallel(dir) } else { 1 },
         own_trees,
         orchestrator: file::orchestrator(dir),
@@ -443,6 +453,23 @@ impl App {
             .any(|t| t.mark.held() && t.holder.as_deref().is_some_and(|h| tombs::holds(h, id)))
     }
 
+    /// What a Claude Code session started with `args` is given for its
+    /// quest's `Model:` line, read as the line is now, so a resume takes a
+    /// model Warriv wrote since. Nothing when its own `args` chose one.
+    pub(super) fn quest_model_args(&self, id: &str, args: &[String]) -> Vec<String> {
+        if Agent::Claude.chosen(Setting::Model, args) {
+            return Vec::new();
+        }
+        self.shared
+            .boards
+            .borrow()
+            .values()
+            .flat_map(|b| &b.tasks)
+            .find(|t| t.mark.held() && t.holder.as_deref().is_some_and(|h| tombs::holds(h, id)))
+            .map(|t| t.model_args(Agent::Claude))
+            .unwrap_or_default()
+    }
+
     /// Whether session `id` starts with permission prompts bypassed.
     pub(super) fn bypasses_prompts(&self, id: &str) -> bool {
         let own_tree = self
@@ -450,7 +477,7 @@ impl App {
             .registry
             .lock()
             .is_ok_and(|r| r.get(id).is_some_and(|s| s.worktree.is_some()));
-        tasks::bypasses_prompts(self.holds_quest(id), own_tree)
+        tasks::bypasses_prompts(self.holds_quest(id), own_tree) || self.errand_bypasses(id)
     }
 
     /// What to add to a session's command line started in `cwd`: what it
@@ -475,6 +502,10 @@ impl App {
             let (flags, prompt) = self.warriv_args(cwd);
             allowed = flags;
             system.push(prompt);
+        } else if horadric_core::runeword::is_errand(id) {
+            let (flags, prompt) = self.errand_args(id, cwd);
+            allowed = flags;
+            system.push(prompt);
         }
         if holds {
             let main = folder_key(&cwd.to_string_lossy());
@@ -485,6 +516,9 @@ impl App {
                 rel,
                 list.as_deref(),
             ));
+            if self.drives.contains_key(&main) {
+                system.push(tasks::driven_prompt(&horadric_command()));
+            }
             if let Some((batch, n)) = tombs::of(id) {
                 system.push(tombs::system_prompt(n, tombs::weight(batch)));
             }
@@ -830,6 +864,11 @@ impl App {
         let Some(dir) = self.project_dir(key) else {
             return;
         };
+        // A mode picked by the human is what the runner does now, also
+        // after Warriv's drive was stopped.
+        if self.stopped.remove(key) {
+            self.save();
+        }
         if let Err(e) = file::set_mode(&dir, mode) {
             eprintln!(
                 "horadric: cannot write {}: {e}",
@@ -932,6 +971,7 @@ impl App {
         self.refresh_boards(false);
         self.run_tasks();
         self.tick_runewords();
+        self.tick_errands();
         self.refresh_tomes();
     }
 
@@ -978,7 +1018,8 @@ impl App {
             // Warriv hears first, so what it has is not said as well.
             closed |= self.orchestrate(key, b);
             said.extend(self.worth_saying(key, b));
-            if just_closed {
+            // A stopped drive lets what is in hand finish and starts nothing.
+            if just_closed || self.stopped.contains(key) {
                 continue;
             }
             if held.is_none() && paced.is_none() {
@@ -991,6 +1032,7 @@ impl App {
                         &b.tasks,
                         b.mode,
                         b.parallel,
+                        self.drives.contains_key(key),
                         |id| self.holder(id),
                         |t| self.wait_met(key, t, now),
                     ),
@@ -1268,7 +1310,14 @@ impl App {
             }
         }
         if b.mode.runs() && self.tasks.ran.contains(key) {
-            let finished = tasks::next(&b.tasks, b.mode, b.parallel, |_| Holder::Live, |_| false);
+            let finished = tasks::next(
+                &b.tasks,
+                b.mode,
+                b.parallel,
+                self.drives.contains_key(key),
+                |_| Holder::Live,
+                |_| false,
+            );
             if let Next::Finished = finished {
                 out.push((
                     format!("finished:{key}"),
@@ -1317,6 +1366,7 @@ impl App {
             &b.tasks,
             b.mode,
             b.parallel,
+            self.drives.contains_key(key),
             |id| self.holder(id),
             |t| self.wait_met(key, t, now),
         );
@@ -1392,6 +1442,7 @@ impl App {
                     &format!("Click to merge {branch} into {into}."),
                 );
             }
+            self.tasks.ship_for = None;
             self.tasks.merge_for = Some(Merge {
                 main,
                 branch,
@@ -1405,7 +1456,7 @@ impl App {
         let into = crate::worktree::checked_out(&m.main).unwrap_or_else(|| "main".into());
         match crate::worktree::merge(&m.main, &m.branch) {
             Ok(()) => {
-                self.merged(&m.main, &m.branch, &m.title, &into);
+                self.merged(&m.main, &m.branch, &m.title, &into, "");
                 true
             }
             Err(e) => {
@@ -1420,10 +1471,12 @@ impl App {
         }
     }
 
-    /// Journals and says that `branch`, the item `title`'s, is in `into`.
-    fn merged(&mut self, main: &Path, branch: &str, title: &str, into: &str) {
+    /// Journals and says that `branch`, the item `title`'s, is in `into`,
+    /// where the checks passed on the commit `checked`, if any ran.
+    fn merged(&mut self, main: &Path, branch: &str, title: &str, into: &str, checked: &str) {
         self.landed(main, branch);
         self.tasks.merge_for = None;
+        self.tasks.ship_for = None;
         let project = folder_key(&main.to_string_lossy());
         store::journal(&Entry {
             at: unix_now(),
@@ -1447,11 +1500,12 @@ impl App {
             .unwrap_or_default();
         store::chronicle(&chronicle::Record {
             at: unix_now(),
-            project,
+            project: project.clone(),
             quest,
             title: title.to_string(),
             what: Happened::Merged {
                 branch: branch.to_string(),
+                checked: checked.to_string(),
             },
         });
         self.toasts.show(
@@ -1459,6 +1513,36 @@ impl App {
             &format!("Merged {branch}"),
             &format!("{} is in {into}.", tasks::one_line(title)),
         );
+        self.propose_ship(&project, main);
+    }
+
+    /// Proposes shipping the project at `key` local once enough quests
+    /// landed since its last ship and the checks passed on its `main`, the
+    /// tree at `main`. Only a project with a "Ship Local" stone is asked.
+    fn propose_ship(&mut self, key: &str, main: &Path) {
+        if self.quiet || !self.has_stone(key, ship::STONE) {
+            return;
+        }
+        let records = store::chronicle_all();
+        let log = store::dir()
+            .and_then(|d| std::fs::read_to_string(d.join("reload.log")).ok())
+            .unwrap_or_default();
+        let landed = ship::landed_since(key, &records, ship::last(key, &log, &records));
+        let head = crate::worktree::head(main).unwrap_or_default();
+        let checked = ship::checked(key, &records, &head);
+        let proposed = self.tasks.ship_proposed.get(key).copied();
+        let Some(n) = ship::propose(landed, checked, proposed) else {
+            return;
+        };
+        self.tasks.ship_proposed.insert(key.to_string(), n);
+        self.alert_for = None;
+        self.update_click = false;
+        self.toasts.show(
+            Kind::Done,
+            &ship::title(n),
+            &format!("The checks passed on main. Click to cast {}.", ship::STONE),
+        );
+        self.tasks.ship_for = Some(key.to_string());
     }
 
     /// The project folder, the finished item's title and the branch to
@@ -1528,7 +1612,9 @@ impl App {
             let branch = l.w.branch.clone();
             crate::worktree::remove(l.w);
             match l.landing {
-                Landing::Merged => self.merged(&main, &branch, &l.title, &l.into),
+                Landing::Merged(checked) => {
+                    self.merged(&main, &branch, &l.title, &l.into, &checked)
+                }
                 Landing::Failed(why, out) if why.fixable() => {
                     eprintln!("horadric: cannot merge {branch}: {why:?}");
                     let fix = merge::fix_up(&l.title, &branch, &l.into, &why, &out);
@@ -1546,6 +1632,7 @@ impl App {
                         eprintln!("horadric: cannot add \"{}\": {e}", fix.title);
                     }
                     self.tasks.merge_for = None;
+                    self.tasks.ship_for = None;
                     self.toasts.show(
                         Kind::Failed,
                         &format!("Cannot merge {branch}"),
@@ -1567,6 +1654,7 @@ impl App {
                         &format!("Cannot merge {branch} by itself"),
                         &format!("{} Click to merge it by hand.", merge_failed(&out)),
                     );
+                    self.tasks.ship_for = None;
                     self.tasks.merge_for = Some(Merge {
                         main,
                         branch,
@@ -1647,6 +1735,10 @@ pub(super) fn show_menu(menu: Menu) {
             if let Some(a) = ask_quest(&key, &draft_for(&key, None), &question, "") {
                 with_app(|app| app.add_task(&key, &a.text, &a.notes));
             }
+        }
+        Menu::Ship(key) => {
+            with_app(|app| app.fill_stage(&key));
+            runeword::stone_clicked(&key, ship::STONE);
         }
         Menu::Merge(m) => {
             let into = crate::worktree::checked_out(&m.main).unwrap_or_else(|| "main".into());
@@ -1957,12 +2049,16 @@ const AT_ONCE: [usize; 5] = [1, 2, 4, 8, 16];
 fn mode_menu(key: &str) {
     const EDIT: usize = 10;
     const LOG: usize = 11;
+    const DRIVES: usize = 12;
+    const PUBLIC: usize = 13;
     // Plus how many, so each choice of `AT_ONCE` has an id of its own.
     const PARALLEL: usize = 20;
     let Some(board) = with_app(|app| app.shared.boards.borrow().get(key).cloned()) else {
         return;
     };
     let board = board.unwrap_or_default();
+    let (drive, stopped) =
+        with_app(|app| (app.drive_of(key), app.stopped.contains(key))).unwrap_or_default();
     let mut items: Vec<Item> = Mode::ALL
         .iter()
         .enumerate()
@@ -1972,6 +2068,25 @@ fn mode_menu(key: &str) {
             checked: *m == board.mode,
         })
         .collect();
+    if stopped {
+        items.push(Item::Disabled(
+            "Warriv was stopped: pick a mode to go on".into(),
+        ));
+    }
+    items.push(Item::Separator);
+    items.push(Item::Action {
+        id: DRIVES,
+        label: "Warriv drives".into(),
+        checked: drive.is_some(),
+    });
+    match drive {
+        Some(d) => items.push(Item::Action {
+            id: PUBLIC,
+            label: "and ships public".into(),
+            checked: d.ships_public,
+        }),
+        None => items.push(Item::Disabled("and ships public".into())),
+    }
     items.push(Item::Separator);
     if board.own_trees {
         items.extend(AT_ONCE.iter().map(|&n| Item::Action {
@@ -1991,8 +2106,13 @@ fn mode_menu(key: &str) {
     if picked == Some(LOG) {
         return push(Input::QuestLog(Ask::Open(key.to_string())));
     }
+    if picked == Some(PUBLIC) && !drive.is_some_and(|d| d.ships_public) && !ships_public(key) {
+        return;
+    }
     with_app(|app| match picked {
         Some(EDIT) => app.edit_list(key),
+        Some(DRIVES) => app.set_drive(key, drive.is_none()),
+        Some(PUBLIC) => app.set_ships_public(key, !drive.is_some_and(|d| d.ships_public)),
         Some(i) if i > PARALLEL => app.set_parallel(key, i - PARALLEL),
         Some(i) => {
             if let Some(m) = Mode::ALL.get(i - 1) {
@@ -2001,6 +2121,24 @@ fn mode_menu(key: &str) {
         }
         None => {}
     });
+}
+
+/// Asks before Warriv may cut public releases of a project by itself,
+/// which every install is offered the moment one is published.
+pub(super) fn ships_public(key: &str) -> bool {
+    let pressed = super::ask(&crate::dialog::Dialog {
+        tone: crate::dialog::Tone::Warning,
+        title: "Warriv ships public",
+        text: &format!(
+            "While it drives {}, Warriv may cut public releases by itself, and every \
+             install is offered each one. Let it?",
+            project_name(key)
+        ),
+        buttons: &["Let it ship public", "Cancel"],
+        default: 1,
+        check: None,
+    });
+    pressed == Some(0)
 }
 
 /// A line of the mode menu that says how many items run side by side.

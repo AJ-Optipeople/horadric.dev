@@ -125,6 +125,14 @@ There are two kinds, and the human's words pick one.
   for users from the commits since the last tag, and says both before
   publishing.
 
+An errand is the one other way. A stone with `"every"` runs only once the
+human has armed it in the Runetome, after reading its steps and its
+schedule. Arming an errand that publishes (a push, a release, a post,
+"ship public") is the human's standing go ahead for it: an errand session
+told to ship public does so without the human saying it that day. A
+stone whose steps or mode change is disarmed until the human arms it
+again, so that go ahead covers only what they read.
+
 Shipping local is merging into `main` as above, `cargo build --release`
 from the merged code, then `target\release\horadric.exe
 reload`. The installed Horadric hands over to the new build at once, and
