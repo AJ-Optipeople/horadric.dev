@@ -14,8 +14,10 @@ use crate::tasks::MOST_PARALLEL;
 pub const LEAST: usize = 2;
 
 /// Never more tombs than the runner holds items, the fuse against a crowd
-/// of agents.
-pub const MOST: usize = MOST_PARALLEL;
+/// of agents. Eight, not the runner's sixteen: past that a human cannot
+/// read them all to pick one.
+pub const MOST: usize = 8;
+const _: () = assert!(MOST <= MOST_PARALLEL);
 
 /// The holder written into the list for `count` tombs of an item, from the
 /// id a single session would have had.
