@@ -7,6 +7,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::{Rune, Stone};
+use crate::warriv::Full;
 
 /// How often an errand is cast.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -275,9 +276,10 @@ pub enum Tick {
 /// What the clock does with one project's armed errands at `now`. One
 /// runs at a time: while one does, the others wait, and it is stopped
 /// once it runs past its `"for"`. Otherwise the one due longest is cast,
-/// unless `full` (the account's fullest limit is at 90 % or more), when
-/// every due one is skipped.
-pub fn tick(errands: &[Clocked], now: u64, offset: i64, full: bool) -> Vec<Tick> {
+/// unless `full` says the account's fullest limit is at 90 % or more:
+/// then every due one is skipped, or with `Full::Wait` they all stay due
+/// and the one due longest is cast once the limit has reset.
+pub fn tick(errands: &[Clocked], now: u64, offset: i64, full: Option<Full>) -> Vec<Tick> {
     let running: Vec<&Clocked> = errands.iter().filter(|e| e.armed.running).collect();
     if !running.is_empty() {
         return running
@@ -292,11 +294,15 @@ pub fn tick(errands: &[Clocked], now: u64, offset: i64, full: bool) -> Vec<Tick>
         .filter(|(at, _)| *at <= now)
         .collect();
     due.sort_by_key(|(at, _)| *at);
-    if full {
-        return due
-            .into_iter()
-            .map(|(_, e)| Tick::Skip(e.label.clone()))
-            .collect();
+    match full {
+        None => {}
+        Some(Full::Wait) => return Vec::new(),
+        Some(Full::Skip) => {
+            return due
+                .into_iter()
+                .map(|(_, e)| Tick::Skip(e.label.clone()))
+                .collect();
+        }
     }
     due.first()
         .map(|(_, e)| Tick::Cast(e.label.clone()))
@@ -403,7 +409,7 @@ mod tests {
         let now = last + 3 * 24 * HOUR;
         let e = clocked("Nightly", Every::Day(540), last);
         assert_eq!(
-            tick(std::slice::from_ref(&e), now, 0, false),
+            tick(std::slice::from_ref(&e), now, 0, None),
             [Tick::Cast("Nightly".into())]
         );
         // Cast now, it is due tomorrow at nine, not three more times.
@@ -433,14 +439,14 @@ mod tests {
         let b = clocked("B", Every::Span(600), 500);
         let c = clocked("C", Every::Span(6000), 1000);
         assert_eq!(
-            tick(&[a.clone(), b.clone(), c.clone()], 2000, 0, false),
+            tick(&[a.clone(), b.clone(), c.clone()], 2000, 0, None),
             [Tick::Cast("B".into())]
         );
-        assert_eq!(tick(&[a.clone(), c.clone()], 1500, 0, false), []);
+        assert_eq!(tick(&[a.clone(), c.clone()], 1500, 0, None), []);
         let mut running = b;
         running.armed.running = true;
         running.armed.last = 1900;
-        assert_eq!(tick(&[a, running, c], 2000, 0, false), []);
+        assert_eq!(tick(&[a, running, c], 2000, 0, None), []);
     }
 
     #[test]
@@ -449,9 +455,18 @@ mod tests {
         let b = clocked("B", Every::Span(600), 500);
         let c = clocked("C", Every::Span(6000), 1000);
         assert_eq!(
-            tick(&[a, b, c], 2000, 0, true),
+            tick(&[a, b, c], 2000, 0, Some(Full::Skip)),
             [Tick::Skip("B".into()), Tick::Skip("A".into())]
         );
+    }
+
+    #[test]
+    fn while_warriv_drives_a_due_errand_waits_out_the_hold() {
+        let a = clocked("A", Every::Span(600), 1000);
+        let b = clocked("B", Every::Span(600), 500);
+        assert_eq!(tick(&[a.clone(), b.clone()], 2000, 0, Some(Full::Wait)), []);
+        // Its clock did not move, so the reset finds it due at once.
+        assert_eq!(tick(&[a, b], 2100, 0, None), [Tick::Cast("B".into())]);
     }
 
     #[test]
@@ -459,11 +474,11 @@ mod tests {
         let mut e = clocked("A", Every::Span(600), 1000);
         e.armed.running = true;
         assert_eq!(
-            tick(std::slice::from_ref(&e), 1000 + FOR_DEFAULT - 1, 0, false),
+            tick(std::slice::from_ref(&e), 1000 + FOR_DEFAULT - 1, 0, None),
             []
         );
         assert_eq!(
-            tick(&[e], 1000 + FOR_DEFAULT, 0, true),
+            tick(&[e], 1000 + FOR_DEFAULT, 0, Some(Full::Skip)),
             [Tick::Overdue("A".into())]
         );
     }

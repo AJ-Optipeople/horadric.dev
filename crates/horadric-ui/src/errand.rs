@@ -12,6 +12,7 @@ use std::os::windows::process::CommandExt;
 use std::process::{Command, Stdio};
 
 use horadric_core::runeword::{self, Armed, Clocked, Step, Stone, Tick};
+use horadric_core::warriv;
 
 use super::cast_key;
 use crate::app::{self, unix_now, App};
@@ -47,7 +48,7 @@ impl App {
         }
         let now = unix_now();
         let offset = crate::questlog::utc_offset(now);
-        let full = self.too_full(now).is_some();
+        let too_full = self.too_full(now).is_some();
         let keys: BTreeSet<String> = self
             .tome
             .errands
@@ -81,6 +82,7 @@ impl App {
                     armed: armed.clone(),
                 });
             }
+            let full = too_full.then(|| warriv::when_full(self.drives.contains_key(&key)));
             for t in runeword::tick(&clock, now, offset, full) {
                 changed = true;
                 match t {
@@ -122,6 +124,41 @@ impl App {
     /// Stops an errand that ran past its `"for"`, the command it is
     /// running with it, and tells it as a failure.
     fn overdue(&mut self, key: &str, label: &str) {
+        self.halt_errand(key, label);
+        let most = self
+            .stones_of(key)
+            .into_iter()
+            .find(|s| s.label == label)
+            .and_then(|s| s.errand)
+            .map_or(runeword::FOR_DEFAULT, |e| e.most);
+        let why = format!("it ran past {}", runeword::length(most));
+        self.errand_ended(key, label, Some(&why));
+    }
+
+    /// The stop key: every errand the clock cast in this project stops
+    /// now, with its command's tree. Not a failure, and still armed, so
+    /// it goes again at its next time.
+    pub(in crate::app) fn halt_errands(&mut self, key: &str) {
+        let running: Vec<String> = self
+            .tome
+            .errands
+            .iter()
+            .filter(|(_, a)| a.running)
+            .filter_map(|(k, _)| k.split_once('\n'))
+            .filter(|(project, _)| *project == key)
+            .map(|(_, label)| label.to_string())
+            .collect();
+        for label in running {
+            self.halt_errand(key, &label);
+            if let Some(a) = self.tome.errands.get_mut(&cast_key(key, &label)) {
+                a.running = false;
+            }
+        }
+    }
+
+    /// Stops the errand of this label cast on a project, and the command
+    /// it is running with it.
+    fn halt_errand(&mut self, key: &str, label: &str) {
         let word = self
             .tome
             .projects
@@ -144,15 +181,7 @@ impl App {
             }
             super::forget_files(file);
         }
-        let most = self
-            .stones_of(key)
-            .into_iter()
-            .find(|s| s.label == label)
-            .and_then(|s| s.errand)
-            .map_or(runeword::FOR_DEFAULT, |e| e.most);
         self.stop_project_runeword(key, label);
-        let why = format!("it ran past {}", runeword::length(most));
-        self.errand_ended(key, label, Some(&why));
     }
 
     /// An errand's cast ended: well with `failed` None, otherwise why

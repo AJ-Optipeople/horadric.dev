@@ -3843,9 +3843,18 @@ before it turns on, since every install sees what it publishes. The stop
 (tray, Ctrl+Alt+W, Shift on a dev instance) closes each driven project's
 Warriv session and holds its runner: nothing new starts there until the
 human picks a mode in the mode menu or lets Warriv drive again, which
-the menu says. `warriv::when_full` says a due errand waits out the 90 %
-hold while driving; wiring it in, and closing errand sessions on the
-stop, waits for errands to be on `main` (its own quest).
+the menu says. While Warriv drives, `warriv::when_full` gives
+`runeword::tick` `Full::Wait`: a due errand in the 90 % hold is neither
+cast nor skipped, its clock stays put, and it is cast the tick the limit
+drops. Not driving it is skipped as before. The stop halts every errand
+the clock cast in the project (`halt_errands`, its command's tree with
+it), which is not a failure: it stays armed and goes at its next time.
+Errands with sessions do not exist yet; when they do, theirs close
+there too. Checked on a dev instance (port 4170, scratch `APPDATA`) with
+a `"1m"` errand, driving, at 95 %: nothing cast and nothing skipped for
+75 seconds, a status at 10 % cast it within the second, and the stop
+key (posted as `WM_HOTKEY`) killed its `ping`, turned the drive off and
+left it armed, not running and not failed.
 
 ### The agent's cursor
 

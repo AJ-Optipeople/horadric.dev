@@ -620,7 +620,8 @@ impl App {
     }
 
     /// One project's drive ends: the switch goes off, its Warriv session
-    /// closes, and its runner starts nothing new.
+    /// and the errands running there stop, and its runner starts nothing
+    /// new.
     fn stop_drive(&mut self, key: &str) {
         if self.drives.remove(key).is_none() {
             return;
@@ -636,6 +637,6 @@ impl App {
             self.record_wake(key, &a.id, Happened::slept(&a.id, "", true, Vec::new()));
             self.forget(&a.id);
         }
-        // Errand sessions close here too, once errands are built.
+        self.halt_errands(key);
     }
 }
