@@ -3059,7 +3059,8 @@ on, unless the ten minute gap passed meanwhile.
 
 ### Orchestration
 
-Asked for on 2026-10-01. Proposed, not built. The goal is development
+Asked for on 2026-10-01, decided on 2026-10-05 (see the end of this
+section), not built yet. The goal is development
 that runs itself across many sessions, with the human hearing only
 about what needs a human. Today the human is the orchestrator: with
 several sessions in a project, a quest that cannot go on because it
@@ -3079,8 +3080,8 @@ in this order.
 
 **1. Dependencies in the quest log, declared before work starts.**
 
-This reopens "No dependencies" in The task list, so it waits for the
-human's yes before it is built.
+This reopens "No dependencies" in The task list. The human said yes on
+2026-10-05.
 
 - **The form.** A notes line `After: <title>` names a quest this one
   waits for, one line each. The title is matched exactly or by a unique
@@ -3172,13 +3173,41 @@ red only when it handed the question on, and its reason is that
 question. "N quests need you" counts only those. The notes say what
 Warriv tried, so the human answers without reading the session first.
 
+**Decided on 2026-10-05.** The human asked for an orchestrator that runs
+"an insane amount of tasks" without them, and chose four things. Step 1
+has its yes, and the work grows by three layers the section above did
+not have. Built in this order: 1, 4, 5, 6, then 2 and 3.
+
+- **Warriv is a full planner.** Everything in step 2 above: it answers,
+  splits quests, adds `After:` lines and files fix-up quests. It still
+  changes no code and starts no session.
+- **4. Finished quests merge themselves.** In auto mode, a quest done in
+  its own worktree is rebased on `main`, the project's checks run in the
+  worktree, and `main` is fast forwarded to it. The checks are a
+  `"checks"` list of commands in `.horadric/config.json`; none means
+  merge without. A rebase conflict or a red check does not wait for the
+  human: the branch stays, a fix-up quest is added right below the
+  finished one with the failing output in its notes, and the quests
+  that name the finished one in `After:` wait for the fix-up too. This
+  also answers the open question about conflicts: a worker resolves
+  them, Warriv only files the quest. One merge at a time per project,
+  since two fast forwards race. Review mode keeps the click.
+- **5. Up to 16 at once, paced by usage.** `MOST_PARALLEL` goes from 8
+  to 16, and the menu offers 1, 2, 4, 8 and 16. The runner stops
+  starting quests while the fullest limit the status line reports is at
+  90 % or more, rather than learning at 100 % mid turn. The 10 second
+  gap between starts and every other fuse stays.
+- **6. Quests in worktrees skip permission prompts.** A runner or click
+  started quest in its own worktree runs with prompts bypassed, so it
+  never stops for one. Sessions in the main tree, Warriv included, keep
+  the project's mode, since there a wrong command touches what the
+  human and other agents work in.
+
 **Open questions.**
 
 - Whether Warriv may review `[?]` quests in review mode, as a first
   reader before the human. It would make review mode run alone for
   longer, and it is the first place a wrong judgment costs real work.
-- Whether a merge conflict between worktrees is Warriv's to resolve, or
-  a quest it files for a worker. The second keeps "changes no code".
 - Which model Warriv runs on. Its turns are short and many, which says a
   small one, but a wrong call costs more than the turn saves.
 
