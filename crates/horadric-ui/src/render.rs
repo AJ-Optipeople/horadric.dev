@@ -58,7 +58,7 @@ use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows_numerics::{Matrix3x2, Vector2};
 
 use crate::anim::{Look, Stance};
-use crate::board::RowState;
+use crate::board::{Ink, RowState};
 use crate::files::{Row, Tree};
 use crate::layout::{
     self, AskLayout, Button, CaptionHit, CaptionLayout, CatchupLayout, CatchupRow, ClusterLayout,
@@ -312,9 +312,8 @@ pub struct TasksScene {
     /// What the header says about the whole list.
     pub summary: String,
     pub mode: String,
-    /// What the line under the header says of Warriv, and whether it is at
-    /// work, which reads in the working colour.
-    pub warriv: Option<(String, bool)>,
+    /// What the line under the header says of Warriv, and its ink.
+    pub warriv: Option<(String, Ink)>,
     pub collapsed: bool,
     /// Warriv, a reviewer or an errand is at work in the project, and the
     /// tile's edge breathes in Warriv's gold.
@@ -3433,11 +3432,11 @@ impl Painter<'_> {
         );
 
         // Under the mode, so it reads as part of how the list runs.
-        if let (Some(r), Some((words, working))) = (l.warriv, &t.warriv) {
-            let ink = if *working {
-                theme::working()
-            } else {
-                theme::text_dim()
+        if let (Some(r), Some((words, ink))) = (l.warriv, &t.warriv) {
+            let ink = match ink {
+                Ink::Working => theme::working(),
+                Ink::Drives => theme::quest(),
+                Ink::Quiet => theme::text_dim(),
             };
             let right = l.mode.right();
             self.text(

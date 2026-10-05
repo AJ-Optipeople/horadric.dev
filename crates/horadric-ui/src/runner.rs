@@ -855,6 +855,11 @@ impl App {
         let Some(dir) = self.project_dir(key) else {
             return;
         };
+        // A mode picked by the human is what the runner does now, also
+        // after Warriv's drive was stopped.
+        if self.stopped.remove(key) {
+            self.save();
+        }
         if let Err(e) = file::set_mode(&dir, mode) {
             eprintln!(
                 "horadric: cannot write {}: {e}",
@@ -1004,7 +1009,8 @@ impl App {
             // Warriv hears first, so what it has is not said as well.
             closed |= self.orchestrate(key, b);
             said.extend(self.worth_saying(key, b));
-            if just_closed {
+            // A stopped drive lets what is in hand finish and starts nothing.
+            if just_closed || self.stopped.contains(key) {
                 continue;
             }
             if held.is_none() && paced.is_none() {
@@ -2025,12 +2031,16 @@ const AT_ONCE: [usize; 5] = [1, 2, 4, 8, 16];
 fn mode_menu(key: &str) {
     const EDIT: usize = 10;
     const LOG: usize = 11;
+    const DRIVES: usize = 12;
+    const PUBLIC: usize = 13;
     // Plus how many, so each choice of `AT_ONCE` has an id of its own.
     const PARALLEL: usize = 20;
     let Some(board) = with_app(|app| app.shared.boards.borrow().get(key).cloned()) else {
         return;
     };
     let board = board.unwrap_or_default();
+    let (drive, stopped) =
+        with_app(|app| (app.drive_of(key), app.stopped.contains(key))).unwrap_or_default();
     let mut items: Vec<Item> = Mode::ALL
         .iter()
         .enumerate()
@@ -2040,6 +2050,25 @@ fn mode_menu(key: &str) {
             checked: *m == board.mode,
         })
         .collect();
+    if stopped {
+        items.push(Item::Disabled(
+            "Warriv was stopped: pick a mode to go on".into(),
+        ));
+    }
+    items.push(Item::Separator);
+    items.push(Item::Action {
+        id: DRIVES,
+        label: "Warriv drives".into(),
+        checked: drive.is_some(),
+    });
+    match drive {
+        Some(d) => items.push(Item::Action {
+            id: PUBLIC,
+            label: "and ships public".into(),
+            checked: d.ships_public,
+        }),
+        None => items.push(Item::Disabled("and ships public".into())),
+    }
     items.push(Item::Separator);
     if board.own_trees {
         items.extend(AT_ONCE.iter().map(|&n| Item::Action {
@@ -2059,8 +2088,13 @@ fn mode_menu(key: &str) {
     if picked == Some(LOG) {
         return push(Input::QuestLog(Ask::Open(key.to_string())));
     }
+    if picked == Some(PUBLIC) && !drive.is_some_and(|d| d.ships_public) && !ships_public(key) {
+        return;
+    }
     with_app(|app| match picked {
         Some(EDIT) => app.edit_list(key),
+        Some(DRIVES) => app.set_drive(key, drive.is_none()),
+        Some(PUBLIC) => app.set_ships_public(key, !drive.is_some_and(|d| d.ships_public)),
         Some(i) if i > PARALLEL => app.set_parallel(key, i - PARALLEL),
         Some(i) => {
             if let Some(m) = Mode::ALL.get(i - 1) {
@@ -2069,6 +2103,24 @@ fn mode_menu(key: &str) {
         }
         None => {}
     });
+}
+
+/// Asks before Warriv may cut public releases of a project by itself,
+/// which every install is offered the moment one is published.
+pub(super) fn ships_public(key: &str) -> bool {
+    let pressed = super::ask(&crate::dialog::Dialog {
+        tone: crate::dialog::Tone::Warning,
+        title: "Warriv ships public",
+        text: &format!(
+            "While it drives {}, Warriv may cut public releases by itself, and every \
+             install is offered each one. Let it?",
+            project_name(key)
+        ),
+        buttons: &["Let it ship public", "Cancel"],
+        default: 1,
+        check: None,
+    });
+    pressed == Some(0)
 }
 
 /// A line of the mode menu that says how many items run side by side.
