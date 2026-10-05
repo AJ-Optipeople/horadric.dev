@@ -53,6 +53,8 @@ pub(super) mod runeword;
 pub(super) mod tomb;
 #[path = "transmute.rs"]
 pub(super) mod transmute;
+#[path = "warriv.rs"]
+pub(super) mod warriv;
 
 /// The least time between two sessions the runner starts in one project.
 const START_GAP: Duration = Duration::from_secs(10);
@@ -117,6 +119,8 @@ pub(super) struct State {
     /// Set while the runner acts. Starting a session reconciles, and
     /// nothing in there may start the runner again.
     busy: bool,
+    /// Each project's Warriv, and what it told quests' sessions.
+    pub(super) warriv: warriv::State,
 }
 
 /// The last look at a wait that git or a command answers.
@@ -198,6 +202,7 @@ fn read_board(dir: &Path) -> Board {
         tasks: tasks::parse(&file::read(dir)),
         parallel: if own_trees { file::parallel(dir) } else { 1 },
         own_trees,
+        orchestrator: file::orchestrator(dir),
     }
 }
 
@@ -422,7 +427,7 @@ impl App {
         }
     }
 
-    fn live(&self, id: &str) -> bool {
+    pub(super) fn live(&self, id: &str) -> bool {
         self.consoles
             .get(id)
             .is_some_and(|c| c.exit_code().is_none())
@@ -465,6 +470,12 @@ impl App {
             .lock()
             .ok()
             .and_then(|r| r.get(id)?.worktree.clone());
+        let mut allowed = Vec::new();
+        if horadric_core::warriv::is_warriv(id) {
+            let (flags, prompt) = self.warriv_args(cwd);
+            allowed = flags;
+            system.push(prompt);
+        }
         if holds {
             let main = folder_key(&cwd.to_string_lossy());
             let rel = file::rel(Path::new(&main));
@@ -494,7 +505,8 @@ impl App {
         // The config may be kept out of git, so a worktree reads its
         // project's from the main tree.
         system.extend(ssh_prompt(Path::new(&folder_key(&cwd.to_string_lossy()))));
-        let mut out = Vec::new();
+        // Its list of tools takes every word up to the next flag.
+        let mut out = allowed;
         if !system.is_empty() {
             out.push("--append-system-prompt".into());
             // `cmd.exe` ends a command line at a newline.
@@ -964,6 +976,7 @@ impl App {
             }
             self.nudge(b);
             said.extend(self.worth_saying(key, b));
+            closed |= self.orchestrate(key, b);
             if just_closed {
                 continue;
             }
@@ -1021,6 +1034,7 @@ impl App {
             ));
         }
         self.announce_tasks(said);
+        self.deliver_tells();
         self.tasks.busy = false;
         if closed {
             self.reconcile(false);
@@ -1509,6 +1523,14 @@ impl App {
                 Landing::Failed(why, out) if why.fixable() => {
                     eprintln!("horadric: cannot merge {branch}: {why:?}");
                     let fix = merge::fix_up(&l.title, &branch, &l.into, &why, &out);
+                    self.merge_event(
+                        &l.dir,
+                        &l.title,
+                        format!(
+                            "{:?} on {branch}. Added the fix-up quest \"{}\" below it.",
+                            why, fix.title
+                        ),
+                    );
                     let added =
                         file::update(&l.dir, |text| merge::add_fix_up(text, &l.title, &fix));
                     if let Err(e) = added {
@@ -1524,6 +1546,11 @@ impl App {
                 }
                 Landing::Failed(_, out) => {
                     eprintln!("horadric: cannot merge {branch} by itself: {out}");
+                    self.merge_event(
+                        &l.dir,
+                        &l.title,
+                        format!("{branch} waits for a merge by hand: {}", merge_failed(&out)),
+                    );
                     self.alert_for = None;
                     self.update_click = false;
                     self.toasts.show(

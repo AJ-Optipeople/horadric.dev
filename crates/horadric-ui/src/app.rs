@@ -2816,6 +2816,9 @@ impl App {
                             if let Some(tomb) = &t.tomb {
                                 self.tomb_reported(tomb, t.why.as_deref());
                             }
+                            if let (Some(quest), Some(tell)) = (&t.quest, &t.tell) {
+                                self.hear_tell(&t.dir, quest, tell, t.by.as_deref());
+                            }
                             self.refresh_boards(true);
                             self.run_tasks();
                         }
