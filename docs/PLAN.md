@@ -3470,9 +3470,23 @@ it after its session closes.
   colour, a gold that is neither a lamp nor the magic blue. A thin
   line runs from the dot to each quest the wake touched, at that
   quest's row. `chronicle::graph` places them, pure and tested.
+  Built on 2026-10-05. `chronicle::wake_dots`, beside `graph`, puts each
+  wake in the band of the newest quest accepted before it woke (the
+  oldest row when none was), spreads the wakes sharing a band over it
+  oldest lowest, and finds the rows of the quests it woke for, ran a
+  command about or handed on, by title. The lane sits left of the
+  trunk, only when there are wakes, in `theme::warriv`, a palette
+  colour of its own in every theme. A dot is filled, ringed when cut
+  short, glowing while awake; its lines brighten when it is picked or
+  under the cursor.
 - **A wake's detail.** Click the dot: when, how long, the events that
   woke it, each command in order, and how it ended, with the question
   for each quest it handed on. Read the session works as for a quest.
+  Built on 2026-10-05. The question is the one Warriv asked with `quest
+  blocked`, else the quest's blocked reason. A wake with no end whose
+  session is gone reads cut short. Read the session writes the wake's
+  story over its transcript, read from the project's folder, where
+  Warriv works. Carry it on stays latched: a wake is not carried on.
 - **A live line on the quests tile.** While Warriv is awake, a line
   under the mode reads "Warriv: settling 2" in the working colour; when
   its six wakes are spent, "Warriv rests until 21:40" in the dim colour.
