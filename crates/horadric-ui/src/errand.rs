@@ -13,6 +13,7 @@ use std::collections::BTreeSet;
 use std::os::windows::process::CommandExt;
 use std::process::{Command, Stdio};
 
+use horadric_core::chronicle::{self, Happened, WakeEnd};
 use horadric_core::runeword::{self, Armed, Clocked, Event, Rune, Runeword, Step, Stone, Tick};
 use horadric_core::{ship, warriv, Agent};
 
@@ -24,6 +25,14 @@ use crate::toast::Kind;
 use crate::window::project_name;
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// How often, in seconds, the tome is painted again so its errands' rings
+/// move on.
+const RING_EVERY: u64 = 5;
+
+/// How often, in seconds, a cast of only commands that went well and said
+/// nothing is told to the chronicle.
+const QUIET_EVERY: u64 = 3600;
 
 /// How long after a start from a reload the app watches `reload.log` for
 /// whether the new build came up, which the old one writes once it has.
@@ -42,6 +51,14 @@ impl App {
             .errands
             .get(&cast_key(key, &stone.label))
             .filter(|a| a.fits(stone))
+    }
+
+    /// Whether the errand of this label is being cast now.
+    pub(in crate::app) fn errand_running(&self, key: &str, label: &str) -> bool {
+        self.tome
+            .errands
+            .get(&cast_key(key, label))
+            .is_some_and(|a| a.running)
     }
 
     /// The project key and the label of the errand whose running cast has
@@ -210,7 +227,9 @@ impl App {
                     None => casting.iter().any(|w| w.name == stone.label),
                 };
                 let armed = self.tome.errands.get_mut(&ck).expect("armed");
+                let mut lost = None;
                 if armed.running && !still {
+                    lost = Some(armed.clone());
                     armed.running = false;
                     armed.session = None;
                     changed = true;
@@ -220,6 +239,9 @@ impl App {
                     errand: stone.errand.clone().expect("clocked"),
                     armed: armed.clone(),
                 });
+                if let Some(was) = lost {
+                    self.chronicle_end(&key, &stone.label, &was, WakeEnd::CutShort, "");
+                }
             }
             let full = too_full.then(|| warriv::when_full(self.drives.contains_key(&key)));
             for t in runeword::tick(&clock, now, offset, full) {
@@ -242,6 +264,21 @@ impl App {
         if changed {
             self.save();
             self.redraw_tiles();
+        } else if now.is_multiple_of(RING_EVERY) {
+            // The rings fill with time alone, which nothing else repaints.
+            let keys: BTreeSet<&str> = self
+                .tome
+                .errands
+                .keys()
+                .filter_map(|k| k.split_once('\n').map(|(key, _)| key))
+                .collect();
+            for c in self
+                .clusters
+                .iter()
+                .filter(|c| keys.contains(c.key.as_str()))
+            {
+                c.invalidate();
+            }
         }
     }
 
@@ -259,16 +296,88 @@ impl App {
         };
         let runes = runeword::since(&runes, a.since());
         a.last = now;
+        a.cast = Some(now);
         a.fired = None;
         a.running = true;
         a.session = None;
+        // One of only commands is told to the chronicle once it ends, so
+        // one that went well and said nothing can be left out.
         if runeword::sessionless(&runes) {
             return self.cast_on_project(key, label, runes);
         }
-        if let Err(e) = self.start_errand(key, label, runes) {
+        let started = self.start_errand(key, label, runes);
+        let wake = self
+            .tome
+            .errands
+            .get(&cast_key(key, label))
+            .and_then(|a| a.session.clone())
+            .unwrap_or_else(|| label.to_string());
+        self.chronicle_cast(key, &wake, label, now);
+        if let Err(e) = started {
             let why = format!("its session could not start: {e}");
             self.errand_ended(key, label, Some(&why));
         }
+    }
+
+    /// The chronicle's line for a cast that began at `at`, which puts it
+    /// on Warriv's lane in the quest log.
+    fn chronicle_cast(&self, key: &str, wake: &str, label: &str, at: u64) {
+        store::chronicle(&chronicle::Record {
+            at,
+            project: key.to_string(),
+            quest: String::new(),
+            title: String::new(),
+            what: Happened::ErrandCast {
+                wake: wake.to_string(),
+                label: label.to_string(),
+            },
+        });
+    }
+
+    /// The chronicle's lines for the cast `armed` had going, as it was
+    /// before it ended: its end, with its conversation while the session
+    /// is still known. One of only commands has its start told here too,
+    /// and when it went well, which is all a quiet one does, only once an
+    /// hour, so one cast each minute does not grow the chronicle by a line
+    /// a minute for good.
+    fn chronicle_end(&mut self, key: &str, label: &str, armed: &Armed, end: WakeEnd, why: &str) {
+        let wake = match &armed.session {
+            Some(id) => id.clone(),
+            None => {
+                let now = unix_now();
+                let ck = cast_key(key, label);
+                if end == WakeEnd::Settled {
+                    let told = self.tome.quiet.get(&ck).copied().unwrap_or(0);
+                    if now < told.saturating_add(QUIET_EVERY) {
+                        return;
+                    }
+                    self.tome.quiet.insert(ck, now);
+                }
+                let at = armed.cast.unwrap_or(armed.last);
+                self.chronicle_cast(key, label, label, at);
+                label.to_string()
+            }
+        };
+        let wake = wake.as_str();
+        let conversation = self
+            .shared
+            .registry
+            .lock()
+            .ok()
+            .and_then(|r| r.get(wake)?.claude_session_id.clone())
+            .unwrap_or_default();
+        store::chronicle(&chronicle::Record {
+            at: unix_now(),
+            project: key.to_string(),
+            quest: String::new(),
+            title: String::new(),
+            what: Happened::ErrandEnded {
+                wake: wake.to_string(),
+                conversation,
+                end,
+                why: why.to_string(),
+            },
+        });
     }
 
     /// A fresh session for an errand's cast, in the project's main tree,
@@ -320,10 +429,12 @@ impl App {
         let Some((key, label)) = self.errand_of_session(id) else {
             return false;
         };
+        // Told first, while the session still names its conversation.
+        let told = self.errand_ended(&key, &label, failed);
         if failed.is_none() {
             self.end(id);
         }
-        self.errand_ended(&key, &label, failed)
+        told
     }
 
     /// Stops an errand that ran past its `"for"`, the command it is
@@ -354,6 +465,9 @@ impl App {
             .map(|(_, label)| label.to_string())
             .collect();
         for label in running {
+            if let Some(was) = self.tome.errands.get(&cast_key(key, &label)).cloned() {
+                self.chronicle_end(key, &label, &was, WakeEnd::CutShort, "");
+            }
             self.halt_errand(key, &label);
             if let Some(a) = self.tome.errands.get_mut(&cast_key(key, &label)) {
                 a.running = false;
@@ -417,16 +531,19 @@ impl App {
         else {
             return false;
         };
+        let was = a.clone();
         a.running = false;
         a.session = None;
         let told = a.failed;
         match failed {
             None => {
                 a.failed = false;
+                a.why.clear();
                 a.finished = Some(unix_now());
             }
             Some(why) => {
                 a.failed = true;
+                a.why = why.to_string();
                 if !told {
                     self.toasts.show(
                         Kind::Failed,
@@ -438,6 +555,10 @@ impl App {
                     );
                 }
             }
+        }
+        match failed {
+            None => self.chronicle_end(key, label, &was, WakeEnd::Settled, ""),
+            Some(why) => self.chronicle_end(key, label, &was, WakeEnd::Failed, why),
         }
         // A cast with a session may have written Warriv's memory.
         self.keep_memory(key);

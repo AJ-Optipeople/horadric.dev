@@ -344,6 +344,18 @@ pub struct TomeStone {
     pub marked: bool,
     /// An errand whose last cast failed: its dot is red.
     pub failed: bool,
+    /// An errand's ring, which fills toward its next cast.
+    pub ring: Option<ErrandRing>,
+}
+
+/// The ring round an errand's stone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ErrandRing {
+    /// Armed: when it last went, or was armed, and when it goes next, in
+    /// Unix seconds. None while it is not armed, which draws it dim.
+    pub span: Option<(u64, u64)>,
+    /// Being cast: the ring is full.
+    pub running: bool,
 }
 
 /// How a stone of the tome draws.
@@ -1097,6 +1109,10 @@ impl Painter<'_> {
         let gold = theme::rarity_color(Rarity::Unique);
         let look = tome_look;
         let carried = t.carried.map(|(i, _)| i);
+        let now = scene
+            .now
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
         for (i, ((r, lr), s)) in l.stones.iter().zip(&l.labels).zip(t.stones).enumerate() {
             let lifted = carried == Some(i);
             let hot = !lifted && scene.button(Hit::Stone(i)) != Button::Idle;
@@ -1104,6 +1120,16 @@ impl Painter<'_> {
                 // Its place stays, dim, for where it goes back to.
                 self.fill_rounded(&r.inset(4.0), 10.0, theme::text_dim().with_alpha(0.08));
             } else {
+                if let Some(ring) = s.ring {
+                    let fill = match (ring.running, ring.span) {
+                        (true, _) => 1.0,
+                        (false, Some((last, next))) => {
+                            horadric_core::runeword::toward(last, next, now)
+                        }
+                        (false, None) => 0.0,
+                    };
+                    self.errand_ring(gpu, r, fill, ring.span.is_some());
+                }
                 self.stone(gpu, r, &look(s, hot));
             }
             if (s.marked || s.failed) && !lifted {

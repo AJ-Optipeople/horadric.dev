@@ -40,6 +40,8 @@ pub struct WakeLook {
     pub at: f32,
     pub touched: Vec<usize>,
     pub end: Option<WakeEnd>,
+    /// An errand's cast, drawn square rather than round.
+    pub errand: bool,
 }
 
 /// A named list in the detail: each item a short lead in its colour and
@@ -434,7 +436,8 @@ impl Painter<'_> {
     }
 
     /// Each wake's dot on Warriv's lane: filled in its gold, one cut short
-    /// only ringed, one awake glowing, the one picked ringed again.
+    /// only ringed, one awake glowing, the one picked ringed again. An
+    /// errand's cast is a small square, red when it failed.
     unsafe fn warriv_dots(&self, scene: &QuestLogScene) {
         let l = scene.layout;
         let Some(x) = l.wake_x else {
@@ -458,6 +461,20 @@ impl Painter<'_> {
             }
             if w.end.is_none() {
                 self.glow_dot(x, y, 9.0, gold, 0.55);
+            }
+            if w.errand {
+                let square = |r: f32| Rect::new(x - r, y - r, 2.0 * r, 2.0 * r);
+                let ink = match w.end {
+                    Some(WakeEnd::Failed) => theme::error(),
+                    _ => gold,
+                };
+                self.fill_rounded(&square(WAKE_R + 1.0), 1.5, theme::screen());
+                if w.end == Some(WakeEnd::CutShort) {
+                    self.stroke_rounded(&square(WAKE_R - 0.6), 1.0, ink, 1.4);
+                } else {
+                    self.fill_rounded(&square(WAKE_R - 0.3), 1.0, ink);
+                }
+                continue;
             }
             self.brush.SetColor(&color(theme::screen()));
             self.rt.FillEllipse(&e(WAKE_R + 1.0), self.brush);

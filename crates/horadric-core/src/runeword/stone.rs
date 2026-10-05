@@ -205,6 +205,27 @@ fn smith(horadric: &str, config: &str, global: &str, ask: &str) -> String {
          {{ \"say\": \"Read the plan and take the next quest\" }} ] }},\n    \
          \"Open the site\": {{ \"steps\": [ {{ \"run\": \"start http://localhost:3000\" }} ] }}\n\
          }} }}\n\n\
+         A stone can also be an errand, cast on a clock with nobody clicking, when it \
+         has \"every\": \"30m\", \"1h\", \"day 09:00\", \"weekday 08:30\" or a day's \
+         name and a time such as \"sunday 12:00\", once a minute at most, or instead \
+         \"on\": \"landed\", \"shipped\", \"away\" or \"back\" to be cast each time a \
+         quest lands, the project ships, or I leave or come back. \"for\": \"1h\" \
+         stops a cast that runs longer (30m when left out), and \"mode\": \"bypass\" lets \
+         its session skip every permission prompt; add that only when I ask for it. An \
+         errand has say, keys and run steps only, since test, review and merge need a \
+         quest. One of only run steps runs hidden; one with say steps starts a fresh \
+         session of its own in the project's main folder, which closes after the last \
+         step. {{since}} in a step becomes the time, in UTC, of the last cast that \
+         finished well, so a step can read only what is new. What an errand finds \
+         becomes quests: a say step should tell it to file each finding with \
+         `{horadric} quest add` and a notes line `From: <link or id>` naming the one \
+         thing it came from, which is how it knows not to file it twice. An errand does \
+         nothing until I arm it by clicking its stone in the Runetome, which shows me its \
+         steps and its schedule, and changing its steps or its mode disarms it again. \
+         You can not arm it, so tell me to. For example:\n\n\
+         {{ \"Feedback to quests\": {{ \"about\": \"Turns new feedback into quests\", \
+         \"every\": \"1h\", \"steps\": [ {{ \"say\": \"Read Slack #feedback since \
+         {{since}}. File each new point as a quest with a From: line.\" }} ] }} }}\n\n\
          Keep everything else in the file as it is. {ask} Then write it, run \
          `{horadric} runeword list` to check it parses, and tell me the stone's runeword \
          name from that list."
@@ -436,6 +457,28 @@ mod tests {
         assert!(p.contains("for this project or for every project"));
         assert!(p.contains("`horadric runeword list`"));
         assert!(p.contains("runeword name"));
+    }
+
+    #[test]
+    fn the_smith_knows_errands_since_arming_and_from_lines() {
+        let p = smith_prompt("horadric", "c.json", "g.json");
+        for word in [
+            "\"every\": \"30m\"",
+            "\"day 09:00\"",
+            "\"weekday 08:30\"",
+            "\"sunday 12:00\"",
+            "\"on\": \"landed\"",
+            "\"for\"",
+            "\"mode\": \"bypass\"",
+            "{since} in a step",
+            "since {since}.",
+            "`horadric quest add`",
+            "`From: <link or id>`",
+            "until I arm it",
+            "You can not arm it",
+        ] {
+            assert!(p.contains(word), "{word}");
+        }
     }
 
     #[test]

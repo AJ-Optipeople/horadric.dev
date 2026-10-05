@@ -27,7 +27,7 @@ use crate::app::{self, unix_now, App, Input, Run};
 use crate::console;
 use crate::dialog::{Dialog, Tone};
 use crate::menu::{self, Item};
-use crate::render::TomeStone;
+use crate::render::{ErrandRing, TomeStone};
 use crate::store;
 use crate::toast::Kind;
 use crate::window::{folder_key, project_key, project_name};
@@ -59,6 +59,9 @@ pub(in crate::app) struct Tome {
     pub(in crate::app) order: BTreeMap<String, Vec<String>>,
     /// The errands armed, by project key and label.
     pub(in crate::app) errands: BTreeMap<String, runeword::Armed>,
+    /// When a quiet cast of each errand was last told to the chronicle,
+    /// by project key and label.
+    quiet: HashMap<String, u64>,
     /// Whether errands last heard the human leave rather than come back.
     away: bool,
     /// When the app started from a reload, while it watches whether the
@@ -691,6 +694,8 @@ impl App {
             words
         };
         let order = self.tome.order.get(key).map_or(&[][..], Vec::as_slice);
+        let now = unix_now();
+        let offset = crate::questlog::utc_offset(now);
         let mut out: Vec<TomeStone> = runeword::arrange(self.tome.stones(Some(dir)), order)
             .into_iter()
             .map(|stone| {
@@ -701,18 +706,30 @@ impl App {
                     false => self.changed(key, &stone),
                 };
                 let failed = armed.is_some_and(|a| a.failed);
+                let ring = stone.errand.as_ref().map(|e| ErrandRing {
+                    span: armed.map(|a| (a.last, runeword::due(e.every, a.last, offset))),
+                    running: armed.is_some_and(|a| a.running),
+                });
+                let mut tip = runeword::tip(&stone, marked);
+                if let (Some(e), Some(a)) = (&stone.errand, armed) {
+                    for line in runeword::cast_lines(a, e.every, now, offset) {
+                        tip.push('\n');
+                        tip.push_str(&line);
+                    }
+                }
                 let progress = casting
                     .iter()
                     .find(|w| w.name == stone.label)
                     .map(|w| format!("{}/{}", (w.at + 1).min(w.runes.len()), w.runes.len()));
                 TomeStone {
                     carving: runeword::carve(&stone.label),
-                    tip: runeword::tip(&stone, marked),
+                    tip,
                     cracked: stone.steps.is_err(),
                     label: Some(stone.label),
                     progress,
                     marked,
                     failed,
+                    ring,
                 }
             })
             .collect();
@@ -724,6 +741,7 @@ impl App {
             progress: None,
             marked: false,
             failed: false,
+            ring: None,
         });
         out
     }

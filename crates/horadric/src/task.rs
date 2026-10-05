@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use horadric_core::chronicle::{self, Command, Happened, Record};
 use horadric_core::tasks::{self, Mark, Wait};
-use horadric_core::{aim, tombs, warriv};
+use horadric_core::{aim, runeword, tombs, warriv};
 use horadric_hooks::listener::TasksChanged;
 use horadric_hooks::{
     client, tasks as file, COMMAND_HEADER, OWNER_ENV, SESSION_ENV, TASKS_ENV, TASKS_PATH,
@@ -485,10 +485,11 @@ fn record_summary(project: &Path, id: &str, summary: &str) {
     record(project, id.to_string(), &title, Happened::Summary { text });
 }
 
-/// A command Warriv ran, for the chronicle's story of its wake. Anyone
-/// else's command is no part of one.
+/// A command Warriv ran, for the chronicle's story of its wake, or an
+/// errand's session, for its cast's. Anyone else's command is no part of
+/// one.
 fn warriv_ran(project: &Path, command: Command, title: &str, text: &str) {
-    let Some(wake) = session().filter(|id| warriv::is_warriv(id)) else {
+    let Some(wake) = session().filter(|id| warriv::is_warriv(id) || runeword::is_errand(id)) else {
         return;
     };
     record(

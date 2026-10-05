@@ -9,7 +9,8 @@ use horadric_core::rarity::Rarity;
 use horadric_core::runeword::{Carving, EDGE_POINTS};
 use windows::core::Interface;
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED,
+    D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_BEGIN_HOLLOW, D2D1_FIGURE_END_CLOSED,
+    D2D1_FIGURE_END_OPEN,
 };
 use windows::Win32::Graphics::Direct2D::{
     ID2D1Geometry, ID2D1PathGeometry, ID2D1StrokeStyle, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
@@ -140,6 +141,60 @@ impl Painter<'_> {
                 self.crack(look.carving, &inner, size, round.as_ref());
             }
         });
+    }
+
+    /// The thin ring round an errand's stone, drawn before the stone so
+    /// the slab's corners stand over it: a faint track, and from the top
+    /// clockwise the share `fill` of the way to its next cast in Warriv's
+    /// gold. Not armed, it is the track alone, fainter still.
+    pub(in crate::render) unsafe fn errand_ring(
+        &self,
+        gpu: &Gpu,
+        r: &Rect,
+        fill: f32,
+        armed: bool,
+    ) {
+        let size = r.w.min(r.h);
+        let (cx, cy) = (r.x + r.w / 2.0, r.y + r.h / 2.0);
+        let radius = size * 0.53;
+        let track = theme::text_dim().with_alpha(if armed { 0.22 } else { 0.12 });
+        self.brush.SetColor(&color(track));
+        let e = windows::Win32::Graphics::Direct2D::D2D1_ELLIPSE {
+            point: Vector2 { X: cx, Y: cy },
+            radiusX: radius,
+            radiusY: radius,
+        };
+        self.rt.DrawEllipse(&e, self.brush, 1.2, None);
+        if !armed || fill <= 0.0 {
+            return;
+        }
+        // Enough points that the arc reads round at any size it is drawn.
+        let steps = (64.0 * fill).ceil().max(2.0) as usize;
+        let points: Vec<Vector2> = (0..=steps)
+            .map(|k| {
+                let a = std::f32::consts::TAU * fill * k as f32 / steps as f32;
+                Vector2 {
+                    X: cx + radius * a.sin(),
+                    Y: cy - radius * a.cos(),
+                }
+            })
+            .collect();
+        let (Ok(path), Some((first, rest))) = (gpu.d2d.CreatePathGeometry(), points.split_first())
+        else {
+            return;
+        };
+        let Ok(sink) = path.Open() else {
+            return;
+        };
+        sink.BeginFigure(*first, D2D1_FIGURE_BEGIN_HOLLOW);
+        sink.AddLines(rest);
+        sink.EndFigure(D2D1_FIGURE_END_OPEN);
+        if sink.Close().is_err() {
+            return;
+        }
+        self.brush.SetColor(&color(theme::warriv()));
+        self.rt
+            .DrawGeometry(&path, self.brush, 1.8, round_caps(gpu).as_ref());
     }
 
     /// `geometry` filled `by` off where it is.
