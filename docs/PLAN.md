@@ -3866,6 +3866,40 @@ reorder the log. A round that finds nothing to do writes one line to
 Lately and closes. One Warriv session at a time a project still: a
 round due while one is awake is folded into it.
 
+**Built on 2026-10-05**: a round is an event of its own on Warriv's
+desk, `Kind::Round`, with no quest. `Desk::hourly` brings one an hour
+after the last was due (the first look while driving, after the switch
+or a reload, starts the hour) and `Desk::round` one for a landing or
+the human leaving, heard where errands hear `landed` and `away`. Only
+while driving; turning the drive off drops one waiting. Waiting rounds
+are one with every reason, and a round is told like any event: as the
+first prompt of a fresh Warriv, or at the next stop of one awake,
+which is the fold. Its brief (`warriv::prompt`, pure and tested) is the
+picture: the quests not done (the first 40) with what blocks them, the
+aims, `main`'s commit, whether the checks passed there and what landed
+since the last ship (`warriv::main_line`), each armed errand and when it
+goes next (`warriv::errand_line`), and the project's stones. The memory
+and its Open part it reads itself. It says to build nothing, since Haiku
+first took "what moves it on" as leave to write the open quest's file.
+`horadric runeword cast "name"` (by label or runeword name, any case)
+has the app cast a stone: sessionless on the project, else in a fresh
+session named after it with its first `say` as the prompt. A Warriv
+casts only while it drives, and "Ship Public" only with "and ships
+public" on (`warriv::may_cast`); a driving Warriv may run the command
+without asking. Reordering the log is not built. On the way:
+`is_warriv` read this quest's own session, `warriv-s-rounds-...`, as a
+Warriv, so it was started with Warriv's prompt; session ids made from a
+base are now matched as the base and a number (`session::made_from`).
+Seen on a dev instance (port 4110, scratch `APPDATA` and `LOCALAPPDATA`,
+Haiku) in a scratch repository with a memory rule to cast a `run` stone
+each round: a `round-now` file in the dev state folder (dev only) brought
+a round, a second one twelve seconds later was told at the first's stop
+as "While you worked, more happened", the stone was cast once a round
+with no permission asked, each round wrote one Lately line, the session
+closed as settled and the app committed the memory. No `claude.exe` was
+left. Claude Code's trust prompt for a new folder holds a round as it
+holds any session there.
+
 **3. Decide what can be undone, ask about what cannot.** While Warriv
 drives, the quest sessions' prompt says: a choice that can be changed
 later (a name, a layout, which of two fixes) is made, with a

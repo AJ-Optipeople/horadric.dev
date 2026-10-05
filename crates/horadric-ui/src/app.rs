@@ -5543,6 +5543,13 @@ impl App {
             let _ = std::fs::remove_file(l);
         }
         self.spectate(left.is_some());
+        // And has every driven project's round come due, rather than wait
+        // an hour for the clock.
+        let round = store::dir().map(|d| d.join("round-now"));
+        if let Some(r) = round.filter(|r| horadric_hooks::dev() && r.exists()) {
+            let _ = std::fs::remove_file(r);
+            self.round_for(None, horadric_core::warriv::Why::Hour);
+        }
         // A run of work ends after a quiet spell no event marks.
         self.sync_discord();
         self.refresh_quest_log(false);

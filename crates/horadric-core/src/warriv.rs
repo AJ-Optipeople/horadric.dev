@@ -819,8 +819,12 @@ pub fn errand_line(label: &str, every: Every, armed: &Armed, offset: i64) -> Str
 
 /// A round's brief: why it is due, then the whole project as it stands.
 fn round(why: &str, p: Option<&Picture>) -> String {
-    let mut out =
-        format!("- A round, since {why}. Look at the whole project and decide what moves it on.\n");
+    // Haiku read "what moves it on" as leave to build the next quest itself.
+    let mut out = format!(
+        "- A round is due: {why}. Look at the whole project and decide what moves it on, \
+         with quest commands, your memory and the stones. You still build nothing yourself: \
+         a quest not done is a session's work.\n"
+    );
     let Some(p) = p else {
         return out;
     };
@@ -1702,7 +1706,7 @@ mod tests {
             ..Brief::default()
         }]);
         assert!(!m.contains('\n'));
-        assert!(m.contains("A round, since a quest landed on main."));
+        assert!(m.contains("A round is due: a quest landed on main."));
         assert!(m.contains("[ ] C"));
     }
 
@@ -1751,8 +1755,10 @@ mod tests {
             ..Brief::default()
         }]);
         assert!(p.contains(
-            "- A round, since the human left. Look at the whole project and decide what \
-             moves it on.\n  The log: 1 quests done, 48 not.\n    [/] Working\n    \
+            "- A round is due: the human left. Look at the whole project and decide what \
+             moves it on, with quest commands, your memory and the stones. You still build \
+             nothing yourself: a quest not done is a session's work.\n  \
+             The log: 1 quests done, 48 not.\n    [/] Working\n    \
              [!] Asking (asks the human: which key?)\n    [!] Stuck (blocked: the build fails)\n"
         ));
         assert!(p.contains("    [ ] Q36\n    and 8 more: read the log for them.\n"));
