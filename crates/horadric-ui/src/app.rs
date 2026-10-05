@@ -767,7 +767,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             discord: saved.discord,
             rich: None,
             run: presence::Run::from_saved(saved.run),
-            tome: runner::runeword::Tome::new(&saved),
+            tome: runner::runeword::Tome::new(&saved, reload),
             cube_on: saved.cube,
             font_family: saved.font_family.clone(),
             screen: saved.screen.clone(),

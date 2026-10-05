@@ -3941,7 +3941,24 @@ read Haiku 4.5.
 **6. Event triggers for errands.** `"on": "landed"`, `"shipped"`,
 `"away"` or `"back"` on a stone casts it at that event instead of on a
 clock, so "post what shipped to me on Slack" is a stone. Armed like a
-clock errand.
+clock errand. **Built on 2026-10-05**: `runeword::parse` reads `"on"`
+as `Every::On(Event)`, pure and tested; a stone with both `"every"` and
+`"on"`, or another event, is cracked with the reason. The app marks an
+armed errand that hears the event `fired` (saved in `Armed`), and
+`runeword::tick` treats it as due since then, so one at a time, the
+90 % hold and `"for"` work as for a clock errand; an event while it runs
+casts it once more after. Landed is heard as a quest merges by itself
+(`merged`), away and back as the absence begins and ends (locking the
+screen too), and shipped by a build started from a reload once
+`reload.log` says it came up (`ship::came_up`) and was built from the
+project's folder (`ship::shipped`), watched for two minutes. The arm
+question and the tooltip say "on each landing", "after each ship",
+"when you leave" or "when you come back", without the line about a
+missed cast. Seen on a dev instance (port 4110, scratch `APPDATA`,
+`cmd.exe` for the agent): a quest in an auto log with two at a time
+finished, landed on `main`, and an armed `"on": "landed"` run stone
+appended to a file once within the second. Not tried on screen:
+shipped, away and back.
 
 **7. Spectator mode.** While Warriv drives and the human is away, the
 stage follows the work: it shows the project where something last
