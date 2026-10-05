@@ -58,6 +58,61 @@ pub fn on(config: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// "Warriv drives" switched on for a project: Warriv runs it alone, the
+/// orchestrator on whatever its config says, with no budget on its wakes.
+/// The human's to flip, kept in `state.json` so a reload keeps driving.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Drive {
+    /// "and ships public": it may cut a public release unattended, not
+    /// only ship local.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ships_public: bool,
+}
+
+/// Whether Warriv hears a project's events: its config turns it on, and so
+/// does driving.
+pub fn orchestrates(config: bool, drives: bool) -> bool {
+    config || drives
+}
+
+/// What an errand due while a limit is too full to start anything does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Full {
+    /// Not run this time; it comes round at its next due time.
+    Skip,
+    /// Run once the limit has reset.
+    Wait,
+}
+
+/// A due errand in the 90 % hold. Driving, nobody is there to run it
+/// later by hand, so it waits for the reset instead of being skipped.
+pub fn when_full(drives: bool) -> Full {
+    if drives {
+        Full::Wait
+    } else {
+        Full::Skip
+    }
+}
+
+/// The words of the quests tile's Warriv line: what it is about, after
+/// "Warriv drives" while it does, which is never left out.
+pub fn line(watch: Option<String>, drive: Option<Drive>) -> Option<String> {
+    let Some(d) = drive else {
+        return watch;
+    };
+    let head = if d.ships_public {
+        "Warriv drives and ships public"
+    } else {
+        "Warriv drives"
+    };
+    Some(
+        match watch.as_deref().and_then(|w| w.strip_prefix("Warriv")) {
+            Some(rest) => format!("{head},{}", rest.trim_start_matches(':')),
+            None => head.to_string(),
+        },
+    )
+}
+
 /// What woke Warriv.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
@@ -192,6 +247,8 @@ pub struct Desk {
     /// Events that went to the human: the budget was spent, or Warriv
     /// ended its turn with them still holding. Kept while they hold.
     human: Vec<Event>,
+    /// Warriv drives the project, which lifts the budget on its wakes.
+    driving: bool,
 }
 
 /// What to do with the events waiting.
@@ -255,6 +312,13 @@ impl Desk {
             .collect()
     }
 
+    /// Whether Warriv drives the project now. Driving, it may wake as
+    /// often as events come: what keeps it from running away is that each
+    /// event is heard once and its own doing never wakes it.
+    pub fn drive(&mut self, on: bool) {
+        self.driving = on;
+    }
+
     /// Whether events wait.
     pub fn waiting(&self) -> bool {
         !self.queue.is_empty()
@@ -268,7 +332,7 @@ impl Desk {
         }
         let events = std::mem::take(&mut self.queue);
         self.wakes.retain(|&at| at + HOUR > now);
-        if self.wakes.len() >= WAKES_AN_HOUR {
+        if self.wakes.len() >= WAKES_AN_HOUR && !self.driving {
             let first = !std::mem::replace(&mut self.tired, true);
             for e in &events {
                 self.hand(e.clone());
@@ -294,7 +358,7 @@ impl Desk {
             .copied()
             .filter(|&at| at + HOUR > now)
             .collect();
-        if spent.len() < WAKES_AN_HOUR {
+        if spent.len() < WAKES_AN_HOUR || self.driving {
             return None;
         }
         spent.into_iter().min().map(|first| Watch::Rests {
@@ -772,6 +836,68 @@ mod tests {
         // An hour after the first wake, one is free again.
         d.hear(vec![blocked("A", "next hour")], false);
         assert!(matches!(d.wake(HOUR), Wake::Go(_)));
+    }
+
+    #[test]
+    fn driving_lifts_the_six_wakes_and_it_never_rests() {
+        let mut d = Desk::default();
+        d.drive(true);
+        for i in 0..WAKES_AN_HOUR as u64 * 3 {
+            d.hear(vec![blocked("A", &i.to_string())], false);
+            assert!(matches!(d.wake(i * 60), Wake::Go(_)));
+        }
+        assert_eq!(d.watch(None, 2000), None);
+        // Each event is still heard once.
+        assert_eq!(d.wake(2000), Wake::Nothing);
+        // Stopped, the budget counts the wakes it had.
+        d.drive(false);
+        d.hear(vec![blocked("A", "after the stop")], false);
+        assert!(matches!(d.wake(2100), Wake::Tired { first: true, .. }));
+    }
+
+    #[test]
+    fn driving_turns_the_orchestrator_on_and_errands_wait_out_the_hold() {
+        assert!(!orchestrates(false, false));
+        assert!(orchestrates(true, false));
+        assert!(orchestrates(false, true));
+        assert_eq!(when_full(false), Full::Skip);
+        assert_eq!(when_full(true), Full::Wait);
+    }
+
+    #[test]
+    fn the_tile_says_warriv_drives_whatever_else_it_says() {
+        let drive = Some(Drive::default());
+        let public = Some(Drive { ships_public: true });
+        assert_eq!(line(None, None), None);
+        assert_eq!(
+            line(Some("Warriv: settling 2".into()), None).as_deref(),
+            Some("Warriv: settling 2")
+        );
+        assert_eq!(line(None, drive).as_deref(), Some("Warriv drives"));
+        assert_eq!(
+            line(None, public).as_deref(),
+            Some("Warriv drives and ships public")
+        );
+        assert_eq!(
+            line(Some("Warriv: settling 2".into()), drive).as_deref(),
+            Some("Warriv drives, settling 2")
+        );
+        assert_eq!(
+            line(Some("Warriv: settling".into()), public).as_deref(),
+            Some("Warriv drives and ships public, settling")
+        );
+    }
+
+    #[test]
+    fn a_drive_keeps_in_json_with_ships_public_only_when_on() {
+        let off = serde_json::to_string(&Drive::default()).unwrap();
+        assert_eq!(off, "{}");
+        let on: Drive = serde_json::from_str(r#"{"ships_public": true}"#).unwrap();
+        assert!(on.ships_public);
+        assert_eq!(
+            serde_json::from_str::<Drive>("{}").unwrap(),
+            Drive::default()
+        );
     }
 
     #[test]

@@ -3716,6 +3716,20 @@ in the tray menu and the quests tile's mode menu; the quests tile reads
 sessions and errand sessions are closed, the runner stops starting
 quests. Quests in hand finish and land as they would in auto mode.
 
+**Built on 2026-10-05**: `warriv::Drive` per project key in `state.json`
+(`drives`, and `stopped` for the projects the stop key stopped). Turning
+it on sets the log to auto mode; `warriv::orchestrates` turns Warriv on
+whatever the config says, `Desk::drive` lifts the six wakes and the rest,
+and `warriv::line` puts "Warriv drives" (and "and ships public") in gold
+at the head of the tile's Warriv line. "and ships public" asks once
+before it turns on, since every install sees what it publishes. The stop
+(tray, Ctrl+Alt+W, Shift on a dev instance) closes each driven project's
+Warriv session and holds its runner: nothing new starts there until the
+human picks a mode in the mode menu or lets Warriv drive again, which
+the menu says. `warriv::when_full` says a due errand waits out the 90 %
+hold while driving; wiring it in, and closing errand sessions on the
+stop, waits for errands to be on `main` (its own quest).
+
 ### The agent's cursor
 
 Asked for on 2026-10-01. Proposed, not built. When an agent tests a dev

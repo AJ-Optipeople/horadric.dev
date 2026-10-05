@@ -14,12 +14,13 @@ use std::time::{Instant, SystemTime};
 
 use horadric_core::chronicle::{self, Happened, Woken};
 use horadric_core::tasks::{self, Mark, Task};
-use horadric_core::warriv::{self, Brief, Desk, Event, Kind, Wake};
+use horadric_core::warriv::{self, Brief, Desk, Drive, Event, Kind, Wake};
 use horadric_core::{tombs, Agent, Phase};
 use horadric_hooks::tasks as file;
 
 use super::{horadric_command, Board};
 use crate::app::{unix_now, App, Run};
+use crate::board::Ink;
 use crate::store;
 use crate::toast::Kind as Toast;
 use crate::window::{folder_key, project_name};
@@ -119,7 +120,8 @@ impl App {
     /// One look at a project's events with Warriv on. True when its
     /// session closed, which the clusters have to hear.
     pub(super) fn orchestrate(&mut self, key: &str, b: &Board) -> bool {
-        if !b.orchestrator {
+        let drive = self.drives.get(key).copied();
+        if !warriv::orchestrates(b.orchestrator, drive.is_some()) {
             self.shared.warriv_line.borrow_mut().remove(key);
             return self.shared.warriv.borrow_mut().remove(key).is_some();
         }
@@ -140,13 +142,23 @@ impl App {
             let handed = camp.retire(&a, &now, &b.tasks);
             self.record_wake(key, &a.id, Happened::slept(&a.id, "", true, handed));
         }
+        camp.desk.drive(drive.is_some());
         camp.desk.hear(now.clone(), camp.awake.is_some());
         let mut closed = self.wake(key, b, &mut camp, &now);
         let holding = camp.desk.holding(&now);
-        let line = camp
+        let watch = camp
             .desk
-            .watch(camp.awake.as_ref().map(|a| a.open(&now)), unix_now())
-            .map(|w| (w.words(crate::app::local_secs(), unix_now()), w.working()));
+            .watch(camp.awake.as_ref().map(|a| a.open(&now)), unix_now());
+        let ink = match (drive, watch) {
+            (Some(_), _) => Ink::Drives,
+            (None, Some(w)) if w.working() => Ink::Working,
+            _ => Ink::Quiet,
+        };
+        let line = warriv::line(
+            watch.map(|w| w.words(crate::app::local_secs(), unix_now())),
+            drive,
+        )
+        .map(|words| (words, ink));
         self.tasks.warriv.camps.insert(key.to_string(), camp);
         let mut lines = self.shared.warriv_line.borrow_mut();
         if lines.get(key) != line.as_ref() {
@@ -458,10 +470,10 @@ impl App {
 
     /// A finished quest that did not merge by itself, for Warriv to hear.
     pub(super) fn merge_event(&mut self, dir: &Path, title: &str, detail: String) {
-        if !file::orchestrator(dir) {
+        let key = folder_key(&dir.to_string_lossy());
+        if !warriv::orchestrates(file::orchestrator(dir), self.drives.contains_key(&key)) {
             return;
         }
-        let key = folder_key(&dir.to_string_lossy());
         self.tasks
             .warriv
             .camps
@@ -473,5 +485,119 @@ impl App {
                 title: title.to_string(),
                 detail,
             });
+    }
+
+    /// The projects the tray's "Warriv drives" lists: each with a quest
+    /// log, and each Warriv drives, by name.
+    pub(in crate::app) fn driven(&self) -> Vec<crate::tray::Driven> {
+        let mut keys: Vec<String> = self.shared.boards.borrow().keys().cloned().collect();
+        keys.extend(self.drives.keys().cloned());
+        keys.sort();
+        keys.dedup();
+        let mut out: Vec<crate::tray::Driven> = keys
+            .into_iter()
+            .map(|key| crate::tray::Driven {
+                name: project_name(&key),
+                drive: self.drive_of(&key),
+                key,
+            })
+            .collect();
+        out.sort_by_key(|d| d.name.to_lowercase());
+        out
+    }
+
+    /// Whether Warriv drives the project `key`, and how.
+    pub(in crate::app) fn drive_of(&self, key: &str) -> Option<Drive> {
+        self.drives.get(key).copied()
+    }
+
+    /// "Warriv drives" flipped by the human. On, the runner works the log
+    /// in auto mode, since Warriv runs the project alone, and a stop
+    /// before is lifted. Off, it ends as the stop key ends it.
+    pub(in crate::app) fn set_drive(&mut self, key: &str, on: bool) {
+        if !on {
+            self.stop_drive(key);
+            self.save();
+            return;
+        }
+        self.drives.entry(key.to_string()).or_default();
+        self.stopped.remove(key);
+        self.save();
+        let auto = self
+            .shared
+            .boards
+            .borrow()
+            .get(key)
+            .is_some_and(|b| b.mode == tasks::Mode::Auto);
+        if auto {
+            self.refresh_boards(true);
+            self.run_tasks();
+        } else {
+            // Writes the mode, then looks at the list.
+            self.set_mode(key, tasks::Mode::Auto);
+        }
+    }
+
+    /// "and ships public" flipped by the human, only while Warriv drives.
+    pub(in crate::app) fn set_ships_public(&mut self, key: &str, on: bool) {
+        if let Some(d) = self.drives.get_mut(key) {
+            d.ships_public = on;
+            self.save();
+            self.run_tasks();
+        }
+    }
+
+    /// The stop key and the tray's "Stop Warriv": every drive ends at once.
+    /// The quests in hand finish and land as in auto mode, but the runner
+    /// starts nothing new in those projects until the human picks a mode
+    /// or lets Warriv drive again.
+    pub(in crate::app) fn stop_warriv(&mut self) {
+        let keys: Vec<String> = self.drives.keys().cloned().collect();
+        if keys.is_empty() {
+            if !self.quiet {
+                self.toasts.show(
+                    Toast::Info,
+                    "Warriv is not driving",
+                    "There was nothing to stop.",
+                );
+            }
+            return;
+        }
+        for key in &keys {
+            self.stop_drive(key);
+        }
+        self.save();
+        let names: Vec<String> = keys.iter().map(|k| project_name(k)).collect();
+        self.toasts.show(
+            Toast::Done,
+            "Warriv stopped",
+            &format!(
+                "{} runs no more by itself. The quests in hand finish; nothing new starts.",
+                names.join(", ")
+            ),
+        );
+        self.refresh_boards(true);
+        self.run_tasks();
+        self.reconcile(false);
+    }
+
+    /// One project's drive ends: the switch goes off, its Warriv session
+    /// closes, and its runner starts nothing new.
+    fn stop_drive(&mut self, key: &str) {
+        if self.drives.remove(key).is_none() {
+            return;
+        }
+        self.stopped.insert(key.to_string());
+        let awake = self
+            .tasks
+            .warriv
+            .camps
+            .get_mut(key)
+            .and_then(|c| c.awake.take());
+        if let Some(a) = awake {
+            self.record_wake(key, &a.id, Happened::slept(&a.id, "", true, Vec::new()));
+            self.forget(&a.id);
+        }
+        // Errand sessions close here too, once errands are built.
     }
 }

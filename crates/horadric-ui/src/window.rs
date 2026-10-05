@@ -116,9 +116,9 @@ pub struct Shared {
     /// The quests Warriv has, by project key: blocked or tangled ones it
     /// settles before the human hears of them. None with Warriv off.
     pub warriv: RefCell<HashMap<String, BTreeSet<String>>>,
-    /// What the quests tile says of Warriv, by project key, and whether it
-    /// reads in the working colour. None while it sleeps with wakes left.
-    pub warriv_line: RefCell<HashMap<String, (String, bool)>>,
+    /// What the quests tile says of Warriv, by project key, and its ink.
+    /// None while it sleeps with wakes left and does not drive.
+    pub warriv_line: RefCell<HashMap<String, (String, board::Ink)>>,
 }
 
 impl Shared {
@@ -682,9 +682,8 @@ impl Cluster {
         )
     }
 
-    /// What the quests tile says of Warriv, and whether in the working
-    /// colour.
-    fn warriv_line(&self) -> Option<(String, bool)> {
+    /// What the quests tile says of Warriv, and its ink.
+    fn warriv_line(&self) -> Option<(String, board::Ink)> {
         self.shared.warriv_line.borrow().get(&self.key).cloned()
     }
 

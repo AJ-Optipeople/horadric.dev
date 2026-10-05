@@ -236,6 +236,8 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const HOTKEY_NEXT: i32 = 1;
 /// The catch-up, on demand.
 const HOTKEY_LISTEN: i32 = 2;
+/// Stops every drive of Warriv's at once.
+const HOTKEY_STOP: i32 = 3;
 /// Not in the `windows` crate's WindowsAndMessaging.
 const WM_WTSSESSION_CHANGE: u32 = 0x02B1;
 const WTS_SESSION_LOCK: usize = 7;
@@ -498,6 +500,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
     web::init(notify);
     let hotkey = register_hotkey(notify);
     let listen_key = register_listen_key(notify);
+    let stop_key = register_stop_key(notify);
     // Locking the screen is going away, and unlocking it coming back.
     unsafe {
         let _ = WTSRegisterSessionNotification(notify, NOTIFY_FOR_THIS_SESSION);
@@ -704,6 +707,9 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             tiles_edge: None,
             hotkey,
             listen_key,
+            stop_key,
+            drives: saved.drives.clone(),
+            stopped: saved.stopped.iter().cloned().collect(),
             away: Away::default(),
             catchup: None,
             quest_log: None,
@@ -880,6 +886,28 @@ fn register_listen_key(hwnd: HWND) -> Option<&'static str> {
     };
     if let Err(e) = &ok {
         eprintln!("horadric: {label} is taken, no hotkey for the catch-up: {e}");
+    }
+    ok.ok().map(|_| label)
+}
+
+/// The shortcut that stops Warriv driving, or None when another app holds
+/// it. A dev instance adds Shift, as for the next waiting session.
+fn register_stop_key(hwnd: HWND) -> Option<&'static str> {
+    let (mods, label) = if horadric_hooks::dev() {
+        (MOD_CONTROL | MOD_ALT | MOD_SHIFT, "Ctrl+Alt+Shift+W")
+    } else {
+        (MOD_CONTROL | MOD_ALT, "Ctrl+Alt+W")
+    };
+    let ok = unsafe {
+        RegisterHotKey(
+            Some(hwnd),
+            HOTKEY_STOP,
+            mods | MOD_NOREPEAT,
+            u32::from(b'W'),
+        )
+    };
+    if let Err(e) = &ok {
+        eprintln!("horadric: {label} is taken, no hotkey to stop Warriv: {e}");
     }
     ok.ok().map(|_| label)
 }
@@ -1151,7 +1179,7 @@ fn tray_menu(hwnd: HWND) {
         app.count_experience();
         (
             app.recent.clone(),
-            [app.hotkey, app.listen_key],
+            [app.hotkey, app.listen_key, app.stop_key],
             !app.quiet,
             app.sounds,
             app.discord,
@@ -1175,10 +1203,12 @@ fn tray_menu(hwnd: HWND) {
         )
     })
     .unwrap_or_default();
+    let driven = with_app(|app| app.driven()).unwrap_or_default();
     let menu = tray::menu(
         &projects,
         autostart,
         hotkeys,
+        &driven,
         notify,
         sounds,
         discord,
@@ -1262,6 +1292,17 @@ fn tray_menu(hwnd: HWND) {
             if let Some(m) = with_app(|app| app.update.clone()).flatten() {
                 offer_update(&m);
             }
+        }
+        Some(Choice::Drive(key, on)) => {
+            with_app(|app| app.set_drive(&key, on));
+        }
+        Some(Choice::ShipsPublic(key, on)) => {
+            if !on || runner::ships_public(&key) {
+                with_app(|app| app.set_ships_public(&key, on));
+            }
+        }
+        Some(Choice::StopWarriv) => {
+            with_app(App::stop_warriv);
         }
         Some(Choice::EndAll) => {
             if confirm_end(None) {
@@ -2557,6 +2598,15 @@ struct App {
     hotkey: Option<&'static str>,
     /// The catch-up's shortcut, likewise.
     listen_key: Option<&'static str>,
+    /// The shortcut that stops Warriv driving, likewise.
+    stop_key: Option<&'static str>,
+    /// The projects Warriv drives, by project key, from the tray and the
+    /// quests tile's mode menu. Changed through [`App::set_drive`] and
+    /// [`App::stop_warriv`].
+    drives: BTreeMap<String, horadric_core::warriv::Drive>,
+    /// The projects whose drive was stopped: their runner starts nothing
+    /// until the human picks a mode or lets Warriv drive again.
+    stopped: HashSet<String>,
     /// Whether you are away, for the catch-up when you come back.
     away: Away,
     /// The catch-up, while it is open.
@@ -2831,6 +2881,7 @@ impl App {
             }
             WM_HOTKEY if wparam as i32 == HOTKEY_NEXT => self.next_waiting(),
             WM_HOTKEY if wparam as i32 == HOTKEY_LISTEN => self.listen_on_demand(),
+            WM_HOTKEY if wparam as i32 == HOTKEY_STOP => self.stop_warriv(),
             WM_TIMER if wparam == GLIDE_TIMER => {
                 crate::vsync::took(self.notify, GLIDE_TIMER);
                 self.glide();
@@ -5554,6 +5605,12 @@ impl App {
             stones_hidden: self.tome.hidden.clone(),
             stones_order: self.tome.order.clone(),
             update_told: self.update_told.clone(),
+            drives: self.drives.clone(),
+            stopped: {
+                let mut stopped: Vec<String> = self.stopped.iter().cloned().collect();
+                stopped.sort();
+                stopped
+            },
             ..Default::default()
         }
     }
