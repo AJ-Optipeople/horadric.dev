@@ -14,7 +14,7 @@ use std::time::{Instant, SystemTime};
 
 use horadric_core::chronicle::{self, Happened, Woken};
 use horadric_core::tasks::{self, Mark, Task};
-use horadric_core::warriv::{self, Brief, Desk, Drive, Event, Kind, Wake};
+use horadric_core::warriv::{self, Brief, Desk, Dried, Drive, Event, Kind, Wake};
 use horadric_core::{tombs, Agent, Phase};
 use horadric_hooks::tasks as file;
 
@@ -45,6 +45,24 @@ struct Awake {
     /// unsettled goes to the human once it closes.
     given: Vec<Event>,
     settled: HashSet<String>,
+    /// The quests filed for aims and the aims open when it was last given
+    /// a dry log, so its end tells whether it moved anything.
+    filed: usize,
+    aims: Vec<String>,
+}
+
+impl Awake {
+    fn new(id: String, given: Vec<Event>, b: &Board) -> Self {
+        Awake {
+            id,
+            told_at: SystemTime::now(),
+            told: HashSet::new(),
+            given,
+            settled: HashSet::new(),
+            filed: warriv::filed_count(&b.tasks),
+            aims: b.aims.clone(),
+        }
+    }
 }
 
 impl Awake {
@@ -60,16 +78,22 @@ impl Awake {
 
 impl Camp {
     /// The session is done with: each event it was given that still holds
-    /// and whose quest it did not answer is the human's now.
-    /// Says which quests went to the human, those and the ones it handed
-    /// on itself.
-    fn retire(&mut self, a: &Awake, now: &[Event], list: &[Task]) -> Vec<String> {
+    /// and whose quest it did not answer is the human's now. A dry log is
+    /// heard again unless three wakes in a row moved nothing, and then its
+    /// aims are the human's. Says which quests went to the human, those and
+    /// the ones it handed on itself, and whether the aims did.
+    fn retire(&mut self, a: &Awake, now: &[Event], b: &Board) -> (Vec<String>, bool) {
+        let moved = warriv::filed_count(&b.tasks) > a.filed || b.aims != a.aims;
+        let mut stuck = false;
         let mut handed = Vec::new();
         for e in &a.given {
-            if now.contains(e) && !a.settled.contains(&e.title) {
+            if e.kind == Kind::Dry {
+                let holds = now.contains(e);
+                stuck |= self.desk.dry_ended(e.clone(), holds, moved) == Dried::Human;
+            } else if now.contains(e) && !a.settled.contains(&e.title) {
                 self.desk.hand(e.clone());
                 handed.push(e.title.clone());
-            } else if list.iter().any(|t| {
+            } else if b.tasks.iter().any(|t| {
                 t.title == e.title
                     && t.mark == Mark::Blocked
                     && t.reason
@@ -82,7 +106,7 @@ impl Camp {
         handed.retain(|t| !t.is_empty());
         handed.sort();
         handed.dedup();
-        handed
+        (handed, stuck)
     }
 }
 
@@ -139,11 +163,12 @@ impl App {
             })
             .map(|t| t.title.clone())
             .collect();
-        let now = warriv::events(&b.tasks, b.mode, &asks);
+        let now = warriv::events(&b.tasks, b.mode, &asks, &b.aims);
         let mut camp = self.tasks.warriv.camps.remove(key).unwrap_or_default();
         if let Some(a) = camp.awake.take_if(|a| !self.live(&a.id)) {
-            let handed = camp.retire(&a, &now, &b.tasks);
+            let (handed, stuck) = camp.retire(&a, &now, b);
             self.record_wake(key, &a.id, Happened::slept(&a.id, "", true, handed));
+            self.ask_aims(key, b, stuck);
         }
         camp.desk.drive(drive.is_some());
         camp.desk.hear(now.clone(), camp.awake.is_some());
@@ -224,11 +249,15 @@ impl App {
                             a.told.remove(&e.title);
                             a.settled.remove(&e.title);
                         }
+                        if events.iter().any(|e| e.kind == Kind::Dry) {
+                            a.filed = warriv::filed_count(&b.tasks);
+                            a.aims = b.aims.clone();
+                        }
                         a.given.extend(events);
                         false
                     }
                     None => {
-                        camp.awake = self.start_warriv(key, &briefs, events);
+                        camp.awake = self.start_warriv(key, b, &briefs, events);
                         false
                     }
                 }
@@ -255,9 +284,10 @@ impl App {
     /// Warriv is done for now: its session closes, and the chronicle hears
     /// how the wake ended.
     fn close_wake(&mut self, key: &str, b: &Board, camp: &mut Camp, a: Awake, now: &[Event]) {
-        let handed = camp.retire(&a, now, &b.tasks);
+        let (handed, stuck) = camp.retire(&a, now, b);
         self.record_wake(key, &a.id, Happened::slept(&a.id, "", false, handed));
         self.forget(&a.id);
+        self.ask_aims(key, b, stuck);
     }
 
     /// The app is going: each wake still awake is cut short, since the
@@ -313,6 +343,10 @@ impl App {
                     event: Some(e.clone()),
                     notes: t.map(|t| t.notes.clone()).unwrap_or_default(),
                     last_turn,
+                    aims: match e.kind {
+                        Kind::Dry => b.aims.clone(),
+                        _ => Vec::new(),
+                    },
                 }
             })
             .collect()
@@ -320,13 +354,18 @@ impl App {
 
     /// A fresh Warriv session in the project's main tree, with the events
     /// as its first prompt.
-    fn start_warriv(&mut self, key: &str, briefs: &[Brief], given: Vec<Event>) -> Option<Awake> {
+    fn start_warriv(
+        &mut self,
+        key: &str,
+        b: &Board,
+        briefs: &[Brief],
+        given: Vec<Event>,
+    ) -> Option<Awake> {
         let dir = self.project_dir(key)?;
         let id = self.unique_id(warriv::ID);
         self.tasks
             .prompts
             .insert(id.clone(), warriv::prompt(briefs));
-        let told_at = SystemTime::now();
         if let Err(e) = self.launch(
             &id,
             "Warriv",
@@ -341,13 +380,19 @@ impl App {
             return None;
         }
         self.record_wake(key, &id, woke(&id, &given));
-        Some(Awake {
-            id,
-            told_at,
-            told: HashSet::new(),
-            given,
-            settled: HashSet::new(),
-        })
+        Some(Awake::new(id, given, b))
+    }
+
+    /// Warriv woke for the aims three times in a row and filed nothing,
+    /// so the human is asked what comes next.
+    fn ask_aims(&mut self, key: &str, b: &Board, stuck: bool) {
+        if stuck && !self.quiet {
+            self.toasts.show(
+                Toast::Waiting,
+                &format!("Warriv asks: {}", project_name(key)),
+                &warriv::stuck(&b.aims),
+            );
+        }
     }
 
     /// The flags a Warriv session starts with: the one command it may run
@@ -620,7 +665,8 @@ impl App {
     }
 
     /// One project's drive ends: the switch goes off, its Warriv session
-    /// closes, and its runner starts nothing new.
+    /// and the errands running there stop, and its runner starts nothing
+    /// new.
     fn stop_drive(&mut self, key: &str) {
         if self.drives.remove(key).is_none() {
             return;
@@ -636,6 +682,6 @@ impl App {
             self.record_wake(key, &a.id, Happened::slept(&a.id, "", true, Vec::new()));
             self.forget(&a.id);
         }
-        // Errand sessions close here too, once errands are built.
+        self.halt_errands(key);
     }
 }

@@ -7,6 +7,7 @@
 
 pub mod accounts;
 pub mod agent;
+pub mod aim;
 pub mod background;
 pub mod chronicle;
 pub mod cube;

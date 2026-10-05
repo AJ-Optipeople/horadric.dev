@@ -537,6 +537,7 @@ fn wake_line(w: &WarrivWake) -> AwayLine {
         for e in &w.events {
             let s = match e.kind {
                 Kind::Stalled => "the log stalled".to_string(),
+                Kind::Dry => "the log ran dry".to_string(),
                 Kind::Blocked => format!("{} blocked", quoted(&e.quest)),
                 Kind::Asks => format!("{} stopped", quoted(&e.quest)),
                 Kind::Tangled => format!("{} tangled", quoted(&e.quest)),

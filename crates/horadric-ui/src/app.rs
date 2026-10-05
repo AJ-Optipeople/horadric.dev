@@ -3868,8 +3868,15 @@ impl App {
             })
             // Empty, so one this Horadric was started with, as a dev
             // instance from a quest's worktree is, never sends `horadric
-            // quest` to another project's list.
-            .unwrap_or_else(|| vec![(TASKS_ENV.into(), String::new())]);
+            // quest` to another project's list. Warriv works on its own
+            // project's list from wherever its shell has wandered.
+            .unwrap_or_else(|| {
+                let main = match horadric_core::warriv::is_warriv(id) {
+                    true => folder_key(&cwd.to_string_lossy()),
+                    false => String::new(),
+                };
+                vec![(TASKS_ENV.into(), main)]
+            });
         let serial = self.next_serial;
         self.next_serial += 1;
         let console = Console::spawn(
@@ -5655,6 +5662,7 @@ impl App {
             cast_without_asking: !self.tome.ask,
             stones_hidden: self.tome.hidden.clone(),
             stones_order: self.tome.order.clone(),
+            errands: self.tome.errands.clone(),
             update_told: self.update_told.clone(),
             drives: self.drives.clone(),
             stopped: {
