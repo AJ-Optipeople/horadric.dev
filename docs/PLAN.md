@@ -3784,7 +3784,21 @@ happened, the pane mid turn focused, staying at least 20 seconds on
 each. A Warriv session gets the stage first. It never takes the
 foreground from another program: it only moves when the stage was the
 foreground window when the human left. The first input gives the stage
-back exactly as the human left it.
+back exactly as the human left it. **Built on 2026-10-05**:
+`spectator::next` chooses, pure and tested: only driven projects, a
+Warriv mid turn first, else the session that did something last; in that
+project Warriv, else the pane mid turn, has the keyboard; a view stays
+20 seconds. The app (`spectating.rs`) begins as the absence does, when
+the stage is in front and something is driven, and moves only while the
+stage is still in front, so a program that took the foreground keeps it.
+It keeps the project, the active pane and the zoom as they were; a
+100 ms timer watches the input clock, and the first input puts them
+back without taking the foreground. Sessions shown while spectating are
+not marked read. A dev instance leaves at once with a `spectate-now`
+file in its state folder. Seen on a dev instance with cmd.exe sessions
+in two projects: with Chrome in front nothing moved; with the stage in
+front it went to the busy project, held 20 seconds, moved to the other's
+busy pane, and a key press gave back the project and pane as left.
 
 **8. A look back.** While it drives, once a day (at the first round
 after 04:00) Warriv reads the day's chronicle and its memory: repeated

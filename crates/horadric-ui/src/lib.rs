@@ -59,6 +59,7 @@ pub mod paths;
 pub mod rain;
 pub mod screens;
 pub mod shell;
+pub mod spectator;
 pub mod theme;
 pub mod viewer;
 pub mod viewport;
