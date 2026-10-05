@@ -3431,8 +3431,8 @@ not have. Built in this order: 1, 4, 5, 6, then 2 and 3.
 **Open questions.**
 
 - Whether Warriv may review `[?]` quests in review mode, as a first
-  reader before the human. It would make review mode run alone for
-  longer, and it is the first place a wrong judgment costs real work.
+  reader before the human. Decided on 2026-10-05: yes, as a mode of its
+  own. See "The caravan moves on its own".
 - Which model Warriv runs on. Its turns are short and many, which says a
   small one, but a wrong call costs more than the turn saves.
 
@@ -3478,6 +3478,136 @@ it after its session closes.
   its six wakes are spent, "Warriv rests until 21:40" in the dim colour.
   Nothing when it is off or asleep with wakes left. The words are pure
   and tested.
+
+### The caravan moves on its own
+
+Asked for on 2026-10-05. The human wants the app to feel like autonomy.
+Warriv today is a firefighter: it wakes only when something goes wrong,
+and it can only rearrange quests that already exist. When the log runs
+dry the caravan stops, in review mode every `[?]` waits for the human,
+and what happened while the human was away is spread over toasts and
+notes. Autonomy needs the work to move forward when nothing is wrong
+and nobody watches, and to show what it did when the human comes back.
+Six parts, each useful alone.
+
+**1. Aims.** The human writes where the work is going, not each quest.
+
+- **The form.** `Aim: <text>` lines at the top of `.horadric/tasks.md`,
+  above the first section, in order. An aim names what done looks like
+  and may point at a plan section ("Warriv in the quest log, all of
+  it"). `horadric quest aim "text"` adds one, `quest aim done "text"`
+  marks it `Aim reached: <text>` so it stays as a record.
+- **Warriv files the next quests.** The stalled event (auto mode,
+  nothing in hand or ready, nobody blocked on the human) already wakes
+  it. With an aim open, its prompt carries the aims and says: read what
+  they point at, file the next quests with `quest add` and `After:`
+  lines, at most eight a wake, or mark the aim reached. Each quest it
+  files gets a `Filed by Warriv for: <aim>` notes line. With no aim
+  open, stalled is handed to the human as today.
+- **Fuses.** It never files a quest whose title matches one already in
+  the log. An aim with three wakes in a row that filed nothing goes to
+  the human as a question.
+- Pure and tested: reading and writing aims, the prompt with aims, the
+  title match.
+
+**2. Warriv reads first in review mode.** A fourth mode beside manual,
+review and auto: "Warriv reviews". A quest going `[?]` wakes a reviewer
+session with the quest, its notes, and the branch's diff against `main`.
+It ends one of three ways:
+
+- `quest pass "title"`: merges as the human's click would, through the
+  same landing (rebase, checks, fast forward).
+- `quest fix "title" "what is wrong"`: tells the holding session if it
+  is alive, otherwise adds a fix-up quest below as a failed merge does.
+- `quest blocked "question" --quest "title"`: the human gets it, with
+  what the reviewer saw in a `Warriv:` note.
+
+Reviews have their own budget, not the six wakes: one reviewer a
+project at a time, the rest queued. The reviewer runs no checks, since
+landing runs them. The mode menu says what the mode does in one line.
+
+**3. While you were away.** When the human has given no input for 30
+minutes (`GetLastInputInfo`, already read in `app.rs`) and then comes
+back, one card opens on the stage if anything happened: quests landed,
+what Warriv decided and why (one line a wake), errands run and what
+they found, and last the questions only the human can answer, each
+with a one line answer field. Enter on an answer does what
+`quest tell` does for that quest. Esc closes it; it does not come back
+until the next absence. `chronicle::away(since)` builds it, pure and
+tested. Nothing happened, no card.
+
+**4. Errands: runewords on a clock.** A stone in the Runetome may carry
+`"every"`, and then Warriv casts it unattended:
+
+```json
+{ "runewords": {
+    "Feedback to quests": {
+      "every": "1h",
+      "steps": [ { "say": "Read Slack #horadric and the inbox since {since} for feedback on Horadric. File each new point as a quest with a From: line." } ] },
+    "Nightly ship": { "every": "day 03:00", "steps": [ { "say": "Ship local" } ] },
+    "Clean target": { "every": "sunday 12:00", "steps": [ { "run": "cargo clean" } ] } } }
+```
+
+- **When.** `"every"` reads `30m`, `1h`, `day 09:00`, `weekday 08:30`,
+  or a weekday name and a time. `runeword::every` parses it and
+  `runeword::due` says the next cast from the last one, pure and
+  tested. A cast missed while Horadric was off runs once at start, not
+  once per missed slot.
+- **How.** A stone of only `run` steps runs as a sessionless runeword
+  does today. A stone with `say` steps starts a fresh session named
+  after the stone, in Warriv's gold, in the main tree, and its steps
+  are cast on it turn by turn as any runeword. After the last step's
+  `Stop` it closes. Its system prompt (`warriv::errand_prompt`) says
+  what Horadric and the quest commands are, that what it finds becomes
+  quests, that each quest carries a `From: <link or id>` notes line,
+  and that it files nothing whose `From:` is already in the log. `{since}`
+  in a step is the time of the last cast that finished. The `test`,
+  `review` and `merge` runes need a quest's session, so a stone with
+  them and `"every"` shows cracked with that reason.
+- **What it can reach** is whatever the agent can: `gh` for pull
+  requests, MCP connectors for Slack and mail, any command. Horadric
+  adds no integration of its own.
+- **Arming.** An `"every"` stone does nothing until the human arms it
+  from the tome once: a click shows the steps, the schedule and the
+  permission mode, and asks "Run this unattended?". The arming keeps a
+  hash of the steps in `state.json`. A stone whose steps change is
+  disarmed and shows the mark, so a pull that changes an errand never
+  runs it unseen. Arming an errand that publishes (a push, a release, a
+  post) is the human's standing go ahead for it; that is the one way
+  "ship public" happens without the human saying it that day, and
+  CLAUDE.md says so.
+- **Permission mode.** The project's, so a prompt stops the errand as an
+  "asks you" like any session. `"mode": "bypass"` on the stone skips
+  prompts, and arming says so in red.
+- **Fuses.** One errand at a time a project, the rest wait their turn. A
+  due errand is skipped (not queued) while the fullest limit is at 90 %
+  or more. An errand running past `"for"` (default 30 minutes) is
+  stopped. A failure toasts once and the stone shows red until a cast
+  succeeds. Errands do not spend Warriv's six wakes. Count `claude.exe`
+  after any test, since this starts agents on a clock.
+- **In the tome** an errand stone has a thin ring that fills toward its
+  next cast; hover shows the last cast, how it ended and the next one.
+  Unarmed, the ring is dim. **In the chronicle** each cast is a dot on
+  Warriv's lane like a wake, with the quests it filed.
+- **The Runesmith** knows `"every"`, `{since}` and the `From:` rule, so
+  "check Slack every hour for feedback" is a sentence to it.
+
+Event triggers (`"on": "landed"`, `"on": "away"`) are the next step once
+the clock works, and are left out until an errand needs one.
+
+**5. Ships proposed.** When three or more quests have landed on `main`
+since the last ship local and the checks passed on `main`'s head, a
+toast says "5 quests landed. Ship local?" and its click casts the
+project's "Ship Local" stone. Once per landing count; ignored, it waits
+for the next landing. The rule is pure and tested.
+
+**6. A pulse.** While Warriv, a reviewer or an errand works, the quests
+tile's edge breathes slowly in Warriv's gold, so the camp is seen moving
+without reading anything. Still when nothing runs. Beside the live line
+already planned in "Warriv in the quest log".
+
+Already built and left alone: a session cut off by a usage limit is
+told to go on a minute after the reset (`tasks::go_on`).
 
 ### The agent's cursor
 
