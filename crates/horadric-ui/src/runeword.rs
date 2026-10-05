@@ -12,16 +12,18 @@ use std::process::{Child, Command, Stdio};
 use std::rc::Rc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use horadric_core::chronicle::{self, Happened};
 use horadric_core::runeword::{
     self, Act, OnProject, Ran, Rune, Runeword, Seen, Source, Step, Stone,
 };
 use horadric_core::saved::SavedState;
+use horadric_core::ship;
 use horadric_core::tasks::one_line;
 use horadric_core::Session;
 use windows::Win32::Foundation::POINT;
 
 use super::transmute::subject;
-use crate::app::{self, App, Input, Run};
+use crate::app::{self, unix_now, App, Input, Run};
 use crate::console;
 use crate::dialog::{Dialog, Tone};
 use crate::menu::{self, Item};
@@ -733,6 +735,12 @@ impl App {
         self.any_stone(key, label).filter(|s| s.steps.is_ok())
     }
 
+    /// Whether the project with this key has a stone of this label that
+    /// parses.
+    pub(in crate::app) fn has_stone(&self, key: &str, label: &str) -> bool {
+        self.stone(key, label).is_some()
+    }
+
     /// The stone of this label, cracked or not.
     fn any_stone(&self, key: &str, label: &str) -> Option<Stone> {
         self.stones_of(key).into_iter().find(|s| s.label == label)
@@ -928,6 +936,15 @@ impl App {
                 self.give_runeword(id, label, runes.clone());
             }
             None => self.cast_on_project(key, label, runes.clone()),
+        }
+        if label == ship::STONE {
+            store::chronicle(&chronicle::Record {
+                at: unix_now(),
+                project: key.to_string(),
+                quest: String::new(),
+                title: String::new(),
+                what: Happened::Shipped,
+            });
         }
         if stone.source == Source::Project {
             self.tome

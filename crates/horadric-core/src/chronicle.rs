@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::journal::{self, Commit};
 use crate::tasks::{Mark, Task};
+use crate::warriv::Kind;
 use crate::{tombs, Agent};
 
 /// The file, beside `state.json`.
@@ -81,8 +82,95 @@ pub enum Happened {
     },
     /// The commits made under the quest, newest first.
     Commits { commits: Vec<Commit> },
-    /// The quest's branch went into the main tree.
-    Merged { branch: String },
+    /// The quest's branch went into the main tree. `checked` is the
+    /// commit the main tree's branch was left at when the project's checks
+    /// passed on it, which a merge by hand, running none, leaves empty.
+    Merged {
+        branch: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        checked: String,
+    },
+    /// The project's "Ship Local" stone was cast. It names no quest.
+    Shipped,
+    /// Warriv woke, the session `wake`, and was given these events. Given
+    /// more while awake, it is another line with the same `wake`. None of
+    /// Warriv's lines name a quest holder: they are about the wake.
+    WarrivWoke {
+        wake: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        conversation: String,
+        events: Vec<Woken>,
+    },
+    /// Warriv ran a `quest` command about the quest `title`, from the
+    /// session `wake`.
+    WarrivRan {
+        wake: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        conversation: String,
+        command: Command,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        text: String,
+    },
+    /// The wake closed.
+    WarrivSlept {
+        wake: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        conversation: String,
+        end: WakeEnd,
+        /// The quests it handed to the human.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        handed: Vec<String>,
+    },
+}
+
+/// An event that woke Warriv: its kind and the quest it is about, empty
+/// for one about the whole log.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Woken {
+    pub kind: Kind,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub quest: String,
+}
+
+/// A `quest` command Warriv runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Command {
+    Tell,
+    Note,
+    Add,
+    /// `quest blocked --quest`, a quest handed to the human.
+    Blocked,
+}
+
+/// How a wake closed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WakeEnd {
+    /// Nothing it was given is left for the human.
+    Settled,
+    /// It left quests to the human.
+    HandedOn,
+    /// Its session was killed, or the app quit, before it was done.
+    CutShort,
+}
+
+impl Happened {
+    /// The line for a wake that closed: cut short, or else settled unless
+    /// it left quests to the human.
+    pub fn slept(wake: &str, conversation: &str, cut_short: bool, handed: Vec<String>) -> Self {
+        let end = match (cut_short, handed.is_empty()) {
+            (true, _) => WakeEnd::CutShort,
+            (false, true) => WakeEnd::Settled,
+            (false, false) => WakeEnd::HandedOn,
+        };
+        Self::WarrivSlept {
+            wake: wake.to_string(),
+            conversation: conversation.to_string(),
+            end,
+            handed,
+        }
+    }
 }
 
 /// Where a quest stands, or how it ended.
@@ -185,6 +273,86 @@ pub fn marks(project: &str, old: &[Task], new: &[Task], now: u64) -> Vec<Record>
                 mark: Outcome::of(t.mark),
                 reason: t.reason.clone().unwrap_or_default(),
             }));
+        }
+    }
+    out
+}
+
+/// One wake of Warriv, as the chronicle tells it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WarrivWake {
+    /// The Warriv session's id.
+    pub id: String,
+    /// Its conversation, from whichever line knew it.
+    pub conversation: String,
+    pub woke: u64,
+    /// When it closed, None while it is awake, or when the app that woke
+    /// it ended without a word.
+    pub slept: Option<u64>,
+    pub events: Vec<Woken>,
+    /// Each command it ran, in order: when, what, the quest and the text.
+    pub commands: Vec<(u64, Command, String, String)>,
+    pub end: Option<WakeEnd>,
+    pub handed: Vec<String>,
+}
+
+/// Every wake of Warriv in `project`, oldest first. A session id comes
+/// back each day, so a command or an end belongs to the latest wake of
+/// its id, and a wake line for an id whose wake closed starts a new one.
+pub fn wakes(records: &[Record], project: &str) -> Vec<WarrivWake> {
+    let mut out: Vec<WarrivWake> = Vec::new();
+    for r in records.iter().filter(|r| r.project == project) {
+        let (id, conversation) = match &r.what {
+            Happened::WarrivWoke {
+                wake, conversation, ..
+            }
+            | Happened::WarrivRan {
+                wake, conversation, ..
+            }
+            | Happened::WarrivSlept {
+                wake, conversation, ..
+            } => (wake, conversation),
+            _ => continue,
+        };
+        let open = out
+            .iter()
+            .rposition(|w| &w.id == id)
+            .filter(|&i| out[i].end.is_none());
+        let i = match (open, &r.what) {
+            (Some(i), _) => i,
+            (None, Happened::WarrivWoke { .. }) => {
+                out.push(WarrivWake {
+                    id: id.clone(),
+                    conversation: String::new(),
+                    woke: r.at,
+                    slept: None,
+                    events: Vec::new(),
+                    commands: Vec::new(),
+                    end: None,
+                    handed: Vec::new(),
+                });
+                out.len() - 1
+            }
+            // A command or an end with no wake open, from before the
+            // chronicle heard wakes, has nothing to join.
+            (None, _) => continue,
+        };
+        let w = &mut out[i];
+        if !conversation.is_empty() {
+            w.conversation = conversation.clone();
+        }
+        match &r.what {
+            Happened::WarrivWoke { events, .. } => w.events.extend(events.iter().cloned()),
+            Happened::WarrivRan { command, text, .. } => {
+                w.commands
+                    .push((r.at, *command, r.title.clone(), text.clone()));
+            }
+            Happened::WarrivSlept { end, handed, .. } => {
+                w.slept = Some(r.at);
+                w.end = Some(*end);
+                w.handed = handed.clone();
+            }
+            _ => {}
         }
     }
     out
@@ -294,7 +462,10 @@ pub fn quests(
             q.title = r.title.clone();
         }
         match &r.what {
-            Happened::Added { .. } => {}
+            Happened::Added { .. }
+            | Happened::WarrivWoke { .. }
+            | Happened::WarrivRan { .. }
+            | Happened::WarrivSlept { .. } => {}
             Happened::Accepted { notes } => {
                 q.accepted.get_or_insert(r.at);
                 q.notes = notes.clone();
@@ -328,7 +499,8 @@ pub fn quests(
                 }
             }
             Happened::Commits { commits } => q.commits = commits.clone(),
-            Happened::Merged { branch } => q.merged = Some(branch.clone()),
+            Happened::Merged { branch, .. } => q.merged = Some(branch.clone()),
+            Happened::Shipped => {}
         }
     }
     for t in list {
@@ -634,6 +806,74 @@ pub fn graph(quests: &[Quest]) -> (Vec<Row>, usize) {
     (rows, width)
 }
 
+/// One of Warriv's wakes on the diagram, a dot on a lane of its own beside
+/// the trunk.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WakeDot {
+    /// Index into the wakes.
+    pub wake: usize,
+    /// The band it sits in, an index into the rows: the newest quest
+    /// accepted before it woke, or the oldest row when none was.
+    pub row: usize,
+    /// How far down the band, 0 its top edge and 1 its bottom. Wakes
+    /// sharing a band spread over it, the oldest lowest, as time runs up.
+    pub at: f32,
+    /// The rows of the quests it touched, top first: those it woke for,
+    /// ran a command about, or handed on. Of two quests with one title,
+    /// the one nearer the wake.
+    pub touched: Vec<usize>,
+}
+
+/// Where each of `wakes`, as [`wakes`] gave them, sits beside `rows`, as
+/// [`graph`] gave them for `quests`. Nothing without a row to sit by.
+pub fn wake_dots(quests: &[Quest], rows: &[Row], wakes: &[WarrivWake]) -> Vec<WakeDot> {
+    if rows.is_empty() {
+        return Vec::new();
+    }
+    let accepted = |r: &Row| quests[r.quest].accepted.unwrap_or(0);
+    let mut out: Vec<WakeDot> = Vec::with_capacity(wakes.len());
+    for (i, w) in wakes.iter().enumerate() {
+        let row = rows
+            .iter()
+            .position(|r| accepted(r) <= w.woke)
+            .unwrap_or(rows.len() - 1);
+        let titles = w
+            .events
+            .iter()
+            .map(|e| &e.quest)
+            .chain(w.commands.iter().map(|(_, _, t, _)| t))
+            .chain(&w.handed)
+            .filter(|t| !t.is_empty());
+        let mut touched: Vec<usize> = titles
+            .filter_map(|t| {
+                rows.iter()
+                    .enumerate()
+                    .filter(|(_, r)| !quests[r.quest].main && &quests[r.quest].title == t)
+                    .min_by_key(|(k, _)| k.abs_diff(row))
+                    .map(|(k, _)| k)
+            })
+            .collect();
+        touched.sort_unstable();
+        touched.dedup();
+        out.push(WakeDot {
+            wake: i,
+            row,
+            at: 0.0,
+            touched,
+        });
+    }
+    // Spread each band's wakes, oldest at the bottom.
+    let mut order: Vec<(usize, usize)> = (0..out.len()).map(|d| (out[d].row, d)).collect();
+    order.sort_by_key(|&(row, d)| (row, wakes[out[d].wake].woke, d));
+    for band in order.chunk_by(|a, b| a.0 == b.0) {
+        let k = band.len() as f32;
+        for (j, &(_, d)) in band.iter().enumerate() {
+            out[d].at = 1.0 - (j as f32 + 1.0) / (k + 1.0);
+        }
+    }
+    out
+}
+
 /// A conversation's transcript, Claude Code's JSON lines, as text to read:
 /// each prompt and reply in full, each tool call on one line. Lines that
 /// are not a message, or not JSON, are left out.
@@ -758,6 +998,134 @@ mod tests {
             wait: None,
             notes: vec![],
         }
+    }
+
+    fn woke(at: u64, wake: &str, quest: &str) -> Record {
+        rec(
+            at,
+            "",
+            "",
+            Happened::WarrivWoke {
+                wake: wake.into(),
+                conversation: String::new(),
+                events: vec![Woken {
+                    kind: Kind::Blocked,
+                    quest: quest.into(),
+                }],
+            },
+        )
+    }
+
+    fn ran(at: u64, wake: &str, command: Command, title: &str, text: &str) -> Record {
+        rec(
+            at,
+            "",
+            title,
+            Happened::WarrivRan {
+                wake: wake.into(),
+                conversation: "c9".into(),
+                command,
+                text: text.into(),
+            },
+        )
+    }
+
+    #[test]
+    fn warriv_lines_read_as_written() {
+        let lines = [
+            woke(1, "warriv-5", "A"),
+            ran(2, "warriv-5", Command::Tell, "A", "Use the port."),
+            rec(3, "", "", Happened::slept("warriv-5", "", true, vec![])),
+        ];
+        let text: String = lines.iter().map(Record::line).collect();
+        assert_eq!(parse(&text), lines);
+        assert!(text.contains(r#""what":"warriv_woke""#));
+        assert!(text.contains(r#""kind":"blocked""#));
+        assert!(text.contains(r#""command":"tell""#));
+        assert!(text.contains(r#""end":"cut_short""#));
+    }
+
+    #[test]
+    fn an_old_chronicle_still_reads() {
+        let old = concat!(
+            r#"{"at":1,"project":"p","quest":"a-1","title":"A","what":"accepted"}"#,
+            "
+",
+            r#"{"at":2,"project":"p","quest":"a-1","what":"marked","mark":"done"}"#,
+            "
+",
+        );
+        let records = parse(old);
+        assert_eq!(records.len(), 2);
+        assert_eq!(quests(&records, &[], "p", &[])[0].outcome, Outcome::Done);
+        assert!(wakes(&records, "p").is_empty());
+    }
+
+    #[test]
+    fn a_wake_ends_settled_handed_on_or_cut_short() {
+        let end = |h: Happened| match h {
+            Happened::WarrivSlept { end, .. } => end,
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            end(Happened::slept("w", "", false, vec![])),
+            WakeEnd::Settled
+        );
+        assert_eq!(
+            end(Happened::slept("w", "", false, vec!["A".into()])),
+            WakeEnd::HandedOn
+        );
+        assert_eq!(
+            end(Happened::slept("w", "", true, vec!["A".into()])),
+            WakeEnd::CutShort
+        );
+    }
+
+    #[test]
+    fn a_wake_gathers_its_events_commands_and_end_and_is_no_quest() {
+        let records = [
+            ran(
+                1,
+                "warriv-5",
+                Command::Note,
+                "A",
+                "before the chronicle heard wakes",
+            ),
+            woke(10, "warriv-5", "A"),
+            accepted(11, "b-1", "B"),
+            ran(12, "warriv-5", Command::Tell, "A", "Use the port."),
+            woke(13, "warriv-5", "B"),
+            ran(14, "warriv-5", Command::Blocked, "B", "Which account?"),
+            rec(
+                15,
+                "",
+                "",
+                Happened::slept("warriv-5", "", false, vec!["B".into()]),
+            ),
+            woke(20, "warriv-5", "C"),
+        ];
+        let w = wakes(&records, "p");
+        assert_eq!(w.len(), 2, "the same id a day later is a new wake");
+        let first = &w[0];
+        assert_eq!((first.woke, first.slept), (10, Some(15)));
+        assert_eq!(first.conversation, "c9");
+        let quests_of: Vec<&str> = first.events.iter().map(|e| e.quest.as_str()).collect();
+        assert_eq!(quests_of, ["A", "B"]);
+        assert_eq!(
+            first.commands,
+            vec![
+                (12, Command::Tell, "A".into(), "Use the port.".into()),
+                (14, Command::Blocked, "B".into(), "Which account?".into()),
+            ]
+        );
+        assert_eq!(
+            (first.end, first.handed.clone()),
+            (Some(WakeEnd::HandedOn), vec!["B".to_string()])
+        );
+        assert_eq!((w[1].woke, w[1].end), (20, None));
+        let q = quests(&records, &[], "p", &[]);
+        assert_eq!(q.len(), 1, "Warriv's lines make no quest");
+        assert_eq!(q[0].id, "b-1");
     }
 
     #[test]
@@ -1085,5 +1453,57 @@ mod tests {
             transcript_text(&jsonl),
             "## You\n\nFix the clock\n\n## Agent\n\nLooking.\n> Bash: cargo test --all\nDone.\n"
         );
+    }
+
+    #[test]
+    fn a_wake_sits_by_the_newest_quest_before_it_and_reaches_the_quests_it_touched() {
+        let mut q = vec![
+            quest("a", 10, Some(50), Outcome::Done),
+            quest("b", 20, None, Outcome::Working),
+            quest("c", 40, None, Outcome::Blocked),
+        ];
+        q[0].title = "A".into();
+        q[1].title = "B".into();
+        q[2].title = "C".into();
+        let (rows, _) = graph(&q);
+        // Newest first: c, b, a.
+        let wake = |woke: u64, events: &[&str], ran: &[&str], handed: &[&str]| WarrivWake {
+            id: "warriv-5".into(),
+            conversation: String::new(),
+            woke,
+            slept: None,
+            events: events
+                .iter()
+                .map(|t| Woken {
+                    kind: Kind::Blocked,
+                    quest: t.to_string(),
+                })
+                .collect(),
+            commands: ran
+                .iter()
+                .map(|t| (woke, Command::Note, t.to_string(), String::new()))
+                .collect(),
+            end: None,
+            handed: handed.iter().map(|t| t.to_string()).collect(),
+        };
+        let wakes = [
+            wake(5, &["A"], &[], &[]),
+            wake(25, &["B"], &["A", "Gone"], &[]),
+            wake(30, &[""], &[], &["C"]),
+            wake(60, &["C"], &["C"], &[]),
+        ];
+        let dots = wake_dots(&q, &rows, &wakes);
+        let at: Vec<(usize, usize)> = dots.iter().map(|d| (d.wake, d.row)).collect();
+        // Older than every quest, it sits by the oldest row.
+        assert_eq!(at, [(0, 2), (1, 1), (2, 1), (3, 0)]);
+        assert_eq!(dots[1].touched, [1, 2], "B and A, the gone one left out");
+        assert_eq!(dots[2].touched, [0], "a quest handed on is touched");
+        assert_eq!(dots[3].touched, [0], "once, however often");
+        // Alone in a band it sits at the middle; two share one, the
+        // older lower.
+        assert_eq!(dots[0].at, 0.5);
+        assert!(dots[1].at > dots[2].at);
+        assert!((dots[1].at - 2.0 / 3.0).abs() < 1e-6);
+        assert!(wake_dots(&[], &[], &wakes).is_empty());
     }
 }

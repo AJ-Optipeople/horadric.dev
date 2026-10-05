@@ -3,7 +3,7 @@
 //! beside it. What each row and the section say is worked out by
 //! `crate::questlog`; this only draws it.
 
-use horadric_core::chronicle::{End, Outcome, Row};
+use horadric_core::chronicle::{End, Outcome, Row, WakeEnd};
 use windows::core::Result;
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D1_BEZIER_SEGMENT, D2D1_FIGURE_BEGIN_HOLLOW, D2D1_FIGURE_END_OPEN,
@@ -33,6 +33,23 @@ pub struct QuestRowLook {
     pub main: bool,
 }
 
+/// One of Warriv's wakes as it is drawn: where its dot sits, the rows of
+/// the quests it touched, and how it ended, `None` while awake.
+pub struct WakeLook {
+    pub row: usize,
+    pub at: f32,
+    pub touched: Vec<usize>,
+    pub end: Option<WakeEnd>,
+}
+
+/// A named list in the detail: each item a short lead in its colour and
+/// what follows it.
+pub struct DetailList {
+    pub name: &'static str,
+    pub lead: Color,
+    pub items: Vec<(String, String)>,
+}
+
 /// What the section beside the diagram says about the quest picked.
 pub struct QuestDetail {
     pub title: String,
@@ -46,6 +63,10 @@ pub struct QuestDetail {
     pub commits: Vec<(String, String)>,
     /// A conversation on the main line, and the quests it added.
     pub main: bool,
+    /// A wake of Warriv's, which says what it did in `lists` instead of
+    /// what came of it.
+    pub wake: bool,
+    pub lists: Vec<DetailList>,
     pub added: Vec<String>,
     /// Whether its keys do something: a conversation to write out and
     /// one to carry on.
@@ -64,8 +85,11 @@ pub struct QuestLogScene<'a> {
     pub occupants: &'a [Vec<Option<usize>>],
     /// Each quest's colour, by its index.
     pub colors: &'a [Color],
-    /// The row picked.
+    /// Warriv's wakes, on their lane beside the trunk.
+    pub wakes: &'a [WakeLook],
+    /// The row picked, or the wake.
     pub picked: Option<usize>,
+    pub picked_wake: Option<usize>,
     pub hot: QuestHit,
     pub pressed: Option<QuestHit>,
     pub scroll: f32,
@@ -78,6 +102,9 @@ pub struct QuestLogScene<'a> {
 /// How thick a lane is drawn.
 const LINE_W: f32 = 2.0;
 const DOT_R: f32 = 4.5;
+/// A wake's dot, and the line from it to a quest it touched.
+const WAKE_R: f32 = 3.5;
+const TOUCH_W: f32 = 1.0;
 /// A label's column in the detail's facts.
 const FACT_LABEL_W: f32 = 74.0;
 const FACT_H: f32 = 21.0;
@@ -215,6 +242,7 @@ impl Painter<'_> {
         let n = scene.rows.len();
         let last = l.row(n - 1, scene.scroll).bottom().min(l.rows.bottom());
         self.line(trunk_x, l.rows.y, trunk_x, last, trunk, caps);
+        self.warriv_lines(gpu, scene, last, caps);
         let lane_c = |row: usize, lane: usize| -> Color {
             scene
                 .occupants
@@ -336,6 +364,7 @@ impl Painter<'_> {
             };
             self.text(&gpu.small, theme::text_dim().fade(0.85), said, under);
         }
+        self.warriv_dots(scene);
         self.rt.PopAxisAlignedClip();
 
         // The main line's head, over where the lines meet it.
@@ -351,6 +380,93 @@ impl Painter<'_> {
             let y = l.rows.y + 4.0 + (track - thumb_h) * scene.scroll / most;
             let bar = Rect::new(l.rows.right() - 6.0, y, 3.0, thumb_h);
             self.fill_rounded(&bar, 1.5, theme::text_dim().with_alpha(0.5));
+        }
+    }
+
+    /// Warriv's lane, faint the length of the list, and a thin line from
+    /// each wake to each quest it touched, at the quest's dot. The wake
+    /// picked or under the cursor draws its lines brighter.
+    unsafe fn warriv_lines(
+        &self,
+        gpu: &Gpu,
+        scene: &QuestLogScene,
+        last: f32,
+        caps: Option<&ID2D1StrokeStyle>,
+    ) {
+        let l = scene.layout;
+        let Some(wx) = l.wake_x else {
+            return;
+        };
+        let gold = crate::questlog::warriv_color();
+        self.brush.SetColor(&color(gold.fade(0.3)));
+        self.rt.DrawLine(
+            Vector2 { X: wx, Y: l.rows.y },
+            Vector2 { X: wx, Y: last },
+            self.brush,
+            TOUCH_W,
+            caps,
+        );
+        for (i, w) in scene.wakes.iter().enumerate() {
+            let lit = scene.picked_wake == Some(i) || scene.hot == QuestHit::Wake(i);
+            let band = l.row(w.row, scene.scroll);
+            let y = band.y + band.h * w.at;
+            let (ink, width) = if lit {
+                (gold.fade(0.9), TOUCH_W + 0.6)
+            } else {
+                (gold.fade(0.4), TOUCH_W)
+            };
+            for &r in &w.touched {
+                let Some(row) = scene.rows.get(r) else {
+                    continue;
+                };
+                let q = l.row(r, scene.scroll);
+                let (qx, qy) = (l.lane_x(row.lane), q.y + q.h / 2.0);
+                let mid = (wx + qx) / 2.0;
+                self.curve_w(
+                    gpu,
+                    [(wx, y), (mid, y), (mid, qy), (qx, qy)],
+                    ink,
+                    width,
+                    caps,
+                );
+            }
+        }
+    }
+
+    /// Each wake's dot on Warriv's lane: filled in its gold, one cut short
+    /// only ringed, one awake glowing, the one picked ringed again.
+    unsafe fn warriv_dots(&self, scene: &QuestLogScene) {
+        let l = scene.layout;
+        let Some(x) = l.wake_x else {
+            return;
+        };
+        let gold = crate::questlog::warriv_color();
+        for (i, w) in scene.wakes.iter().enumerate() {
+            let band = l.row(w.row, scene.scroll);
+            let y = band.y + band.h * w.at;
+            let e = |r: f32| D2D1_ELLIPSE {
+                point: Vector2 { X: x, Y: y },
+                radiusX: r,
+                radiusY: r,
+            };
+            if scene.picked_wake == Some(i) {
+                self.brush.SetColor(&color(gold.with_alpha(0.6)));
+                self.rt.DrawEllipse(&e(WAKE_R + 3.0), self.brush, 1.2, None);
+            } else if scene.hot == QuestHit::Wake(i) {
+                self.brush.SetColor(&color(gold.with_alpha(0.35)));
+                self.rt.DrawEllipse(&e(WAKE_R + 3.0), self.brush, 1.0, None);
+            }
+            if w.end.is_none() {
+                self.glow_dot(x, y, 9.0, gold, 0.55);
+            }
+            self.brush.SetColor(&color(theme::screen()));
+            self.rt.FillEllipse(&e(WAKE_R + 1.0), self.brush);
+            self.brush.SetColor(&color(gold));
+            if w.end == Some(WakeEnd::CutShort) {
+                self.rt.DrawEllipse(&e(WAKE_R - 0.5), self.brush, 1.4, None);
+            } else {
+                self.rt.FillEllipse(&e(WAKE_R), self.brush);
+            }
         }
     }
 
@@ -489,6 +605,18 @@ impl Painter<'_> {
         ink: Color,
         caps: Option<&ID2D1StrokeStyle>,
     ) {
+        self.curve_w(gpu, [a, b, c, d], ink, LINE_W, caps);
+    }
+
+    /// [`Self::curve`] through `p`, `w` thick.
+    unsafe fn curve_w(
+        &self,
+        gpu: &Gpu,
+        [a, b, c, d]: [(f32, f32); 4],
+        ink: Color,
+        w: f32,
+        caps: Option<&ID2D1StrokeStyle>,
+    ) {
         let v = |(x, y): (f32, f32)| Vector2 { X: x, Y: y };
         let Ok(path) = gpu.d2d.CreatePathGeometry() else {
             return;
@@ -507,7 +635,7 @@ impl Painter<'_> {
             return;
         }
         self.brush.SetColor(&color(ink));
-        self.rt.DrawGeometry(&path, self.brush, LINE_W, caps);
+        self.rt.DrawGeometry(&path, self.brush, w, caps);
     }
 
     /// What came of the quest picked, top down in its section, scrolled.
@@ -559,8 +687,13 @@ impl Painter<'_> {
             y += 7.0;
         }
 
-        // A conversation is not a quest, so nothing came of it as such.
-        if !d.main {
+        for list in &d.lists {
+            y = self.detail_list(gpu, list, x, y, w);
+        }
+
+        // A conversation is not a quest, so nothing came of it as such,
+        // and a wake says what it did in its lists.
+        if !d.main && !d.wake {
             y = self.section(gpu, "WHAT CAME OF IT", x, y, w);
             if d.result.is_empty() {
                 let r = Rect::new(x, y, w, 20.0);
@@ -601,6 +734,30 @@ impl Painter<'_> {
             self.fill_rounded(&bar, 1.5, theme::text_dim().with_alpha(0.5));
         }
         total
+    }
+
+    /// A list of the detail under its name: each lead in a column as wide
+    /// as the widest, up to a third of the section, what follows wrapped
+    /// beside it. Returns where what is under it starts.
+    unsafe fn detail_list(&self, gpu: &Gpu, list: &DetailList, x: f32, y: f32, w: f32) -> f32 {
+        let mut y = self.section(gpu, list.name, x, y, w);
+        let widest = list
+            .items
+            .iter()
+            .map(|(lead, _)| self.measure(gpu, &gpu.small, lead).ceil())
+            .fold(0.0, f32::max);
+        let col = if widest > 0.0 {
+            (widest + 10.0).min(w / 3.0)
+        } else {
+            0.0
+        };
+        let ink = theme::text_dim().mix(theme::text(), 0.4);
+        for (lead, text) in &list.items {
+            self.text(&gpu.small, list.lead, lead, Rect::new(x, y, col, 19.0));
+            let h = self.wrapped_text(gpu, &gpu.small, ink, text, x + col, y, w - col);
+            y += h.max(17.0) + 3.0;
+        }
+        y + 7.0
     }
 
     /// A section's name engraved over it, and a groove after it. Returns

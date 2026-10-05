@@ -34,7 +34,7 @@ use horadric_core::journal::{self, Commit, Entry, What};
 use horadric_core::tasks::{self, Holder, Mark, Mode, Next, Task, Wait};
 use horadric_core::usage::{self, format_until};
 use horadric_core::worktree::{self, Worktree};
-use horadric_core::{fleet, merge, ssh, tombs, Phase, WaitReason};
+use horadric_core::{fleet, merge, ship, ssh, tombs, Agent, Phase, Setting, WaitReason};
 use horadric_hooks::tasks as file;
 
 use super::{post, push, unix_now, with_app, App, Input, WM_HORADRIC_KEPT, WM_HORADRIC_TASK_MENU};
@@ -103,6 +103,12 @@ pub(super) struct State {
     /// The finished branch the last notification offered to merge, which
     /// a click on it asks about.
     pub(super) merge_for: Option<Merge>,
+    /// The project the last notification proposed shipping, by key, whose
+    /// "Ship Local" stone a click on it casts.
+    pub(super) ship_for: Option<String>,
+    /// The landing count each project was last proposed a ship at, by
+    /// key, so a count is proposed once.
+    ship_proposed: HashMap<String, usize>,
     /// Auto mode merges that came out, back from the threads that ran them.
     landed: Arc<Mutex<Vec<Landed>>>,
     /// Held by the thread merging into a project, so two fast forwards of
@@ -162,6 +168,8 @@ pub(super) enum Menu {
     Add(String),
     /// Whether to merge a finished item's branch.
     Merge(Merge),
+    /// Casting the project's "Ship Local" stone, by project key.
+    Ship(String),
 }
 
 /// A finished quest's merge by itself, done on its thread.
@@ -441,6 +449,23 @@ impl App {
             .values()
             .flat_map(|b| &b.tasks)
             .any(|t| t.mark.held() && t.holder.as_deref().is_some_and(|h| tombs::holds(h, id)))
+    }
+
+    /// What a Claude Code session started with `args` is given for its
+    /// quest's `Model:` line, read as the line is now, so a resume takes a
+    /// model Warriv wrote since. Nothing when its own `args` chose one.
+    pub(super) fn quest_model_args(&self, id: &str, args: &[String]) -> Vec<String> {
+        if Agent::Claude.chosen(Setting::Model, args) {
+            return Vec::new();
+        }
+        self.shared
+            .boards
+            .borrow()
+            .values()
+            .flat_map(|b| &b.tasks)
+            .find(|t| t.mark.held() && t.holder.as_deref().is_some_and(|h| tombs::holds(h, id)))
+            .map(|t| t.model_args(Agent::Claude))
+            .unwrap_or_default()
     }
 
     /// Whether session `id` starts with permission prompts bypassed.
@@ -1393,6 +1418,7 @@ impl App {
                     &format!("Click to merge {branch} into {into}."),
                 );
             }
+            self.tasks.ship_for = None;
             self.tasks.merge_for = Some(Merge {
                 main,
                 branch,
@@ -1406,7 +1432,7 @@ impl App {
         let into = crate::worktree::checked_out(&m.main).unwrap_or_else(|| "main".into());
         match crate::worktree::merge(&m.main, &m.branch) {
             Ok(()) => {
-                self.merged(&m.main, &m.branch, &m.title, &into);
+                self.merged(&m.main, &m.branch, &m.title, &into, "");
                 true
             }
             Err(e) => {
@@ -1421,10 +1447,12 @@ impl App {
         }
     }
 
-    /// Journals and says that `branch`, the item `title`'s, is in `into`.
-    fn merged(&mut self, main: &Path, branch: &str, title: &str, into: &str) {
+    /// Journals and says that `branch`, the item `title`'s, is in `into`,
+    /// where the checks passed on the commit `checked`, if any ran.
+    fn merged(&mut self, main: &Path, branch: &str, title: &str, into: &str, checked: &str) {
         self.landed(main, branch);
         self.tasks.merge_for = None;
+        self.tasks.ship_for = None;
         let project = folder_key(&main.to_string_lossy());
         store::journal(&Entry {
             at: unix_now(),
@@ -1448,11 +1476,12 @@ impl App {
             .unwrap_or_default();
         store::chronicle(&chronicle::Record {
             at: unix_now(),
-            project,
+            project: project.clone(),
             quest,
             title: title.to_string(),
             what: Happened::Merged {
                 branch: branch.to_string(),
+                checked: checked.to_string(),
             },
         });
         self.toasts.show(
@@ -1460,6 +1489,36 @@ impl App {
             &format!("Merged {branch}"),
             &format!("{} is in {into}.", tasks::one_line(title)),
         );
+        self.propose_ship(&project, main);
+    }
+
+    /// Proposes shipping the project at `key` local once enough quests
+    /// landed since its last ship and the checks passed on its `main`, the
+    /// tree at `main`. Only a project with a "Ship Local" stone is asked.
+    fn propose_ship(&mut self, key: &str, main: &Path) {
+        if self.quiet || !self.has_stone(key, ship::STONE) {
+            return;
+        }
+        let records = store::chronicle_all();
+        let log = store::dir()
+            .and_then(|d| std::fs::read_to_string(d.join("reload.log")).ok())
+            .unwrap_or_default();
+        let landed = ship::landed_since(key, &records, ship::last(key, &log, &records));
+        let head = crate::worktree::head(main).unwrap_or_default();
+        let checked = ship::checked(key, &records, &head);
+        let proposed = self.tasks.ship_proposed.get(key).copied();
+        let Some(n) = ship::propose(landed, checked, proposed) else {
+            return;
+        };
+        self.tasks.ship_proposed.insert(key.to_string(), n);
+        self.alert_for = None;
+        self.update_click = false;
+        self.toasts.show(
+            Kind::Done,
+            &ship::title(n),
+            &format!("The checks passed on main. Click to cast {}.", ship::STONE),
+        );
+        self.tasks.ship_for = Some(key.to_string());
     }
 
     /// The project folder, the finished item's title and the branch to
@@ -1529,7 +1588,9 @@ impl App {
             let branch = l.w.branch.clone();
             crate::worktree::remove(l.w);
             match l.landing {
-                Landing::Merged => self.merged(&main, &branch, &l.title, &l.into),
+                Landing::Merged(checked) => {
+                    self.merged(&main, &branch, &l.title, &l.into, &checked)
+                }
                 Landing::Failed(why, out) if why.fixable() => {
                     eprintln!("horadric: cannot merge {branch}: {why:?}");
                     let fix = merge::fix_up(&l.title, &branch, &l.into, &why, &out);
@@ -1547,6 +1608,7 @@ impl App {
                         eprintln!("horadric: cannot add \"{}\": {e}", fix.title);
                     }
                     self.tasks.merge_for = None;
+                    self.tasks.ship_for = None;
                     self.toasts.show(
                         Kind::Failed,
                         &format!("Cannot merge {branch}"),
@@ -1568,6 +1630,7 @@ impl App {
                         &format!("Cannot merge {branch} by itself"),
                         &format!("{} Click to merge it by hand.", merge_failed(&out)),
                     );
+                    self.tasks.ship_for = None;
                     self.tasks.merge_for = Some(Merge {
                         main,
                         branch,
@@ -1648,6 +1711,10 @@ pub(super) fn show_menu(menu: Menu) {
             if let Some(a) = ask_quest(&key, &draft_for(&key, None), &question, "") {
                 with_app(|app| app.add_task(&key, &a.text, &a.notes));
             }
+        }
+        Menu::Ship(key) => {
+            with_app(|app| app.fill_stage(&key));
+            runeword::stone_clicked(&key, ship::STONE);
         }
         Menu::Merge(m) => {
             let into = crate::worktree::checked_out(&m.main).unwrap_or_else(|| "main".into());
