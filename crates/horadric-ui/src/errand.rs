@@ -1,7 +1,8 @@
 //! The app's side of errands: stones with `"every"`, cast on a clock once
-//! the human has armed them. When each is due, which one goes and when
-//! one has run too long is `horadric_core::runeword::tick`, pure and
-//! tested; this reads the clock, casts, stops and tells.
+//! the human has armed them, and with `"on"`, cast at an event. When each
+//! is due, which one goes and when one has run too long is
+//! `horadric_core::runeword::tick`, pure and tested; this reads the clock,
+//! hears the events, casts, stops and tells.
 //!
 //! An errand of only `run` steps is cast sessionless as any such stone.
 //! One with steps that need a session starts a fresh session of its own,
@@ -12,18 +13,23 @@ use std::collections::BTreeSet;
 use std::os::windows::process::CommandExt;
 use std::process::{Command, Stdio};
 
-use horadric_core::runeword::{self, Armed, Clocked, Rune, Runeword, Step, Stone, Tick};
-use horadric_core::{warriv, Agent};
+use horadric_core::runeword::{self, Armed, Clocked, Event, Rune, Runeword, Step, Stone, Tick};
+use horadric_core::{ship, warriv, Agent};
 
 use super::cast_key;
 use crate::app::{self, unix_now, App, Run};
 use crate::dialog::{Dialog, Tone};
+use crate::store;
 use crate::toast::Kind;
 use crate::window::project_name;
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-/// Whether the clock casts this stone: it says `"every"`.
+/// How long after a start from a reload the app watches `reload.log` for
+/// whether the new build came up, which the old one writes once it has.
+const SHIP_WATCH: u64 = 120;
+
+/// Whether the clock casts this stone: it says `"every"` or `"on"`.
 pub(in crate::app) fn clocked(stone: &Stone) -> bool {
     stone.errand.is_some()
 }
@@ -68,14 +74,90 @@ impl App {
         })
     }
 
-    /// Once a second: disarms the errands whose steps changed, then per
-    /// project casts the one that is due, skips the due ones while the
-    /// account is near its limit, and stops one that ran too long.
+    /// The event errands with `"on"` are cast at happened, in the project
+    /// with this key, or with None in every project. Each armed one that
+    /// hears it is due from now until it is cast.
+    pub(in crate::app) fn errand_event(&mut self, key: Option<&str>, event: Event) {
+        let now = unix_now();
+        let armed: Vec<String> = self
+            .tome
+            .errands
+            .keys()
+            .filter(|ck| key.is_none_or(|k| ck.split_once('\n').is_some_and(|(p, _)| p == k)))
+            .cloned()
+            .collect();
+        let mut heard = false;
+        for ck in armed {
+            let Some((project, label)) = ck.split_once('\n') else {
+                continue;
+            };
+            let Some(stone) = self.stone(project, label) else {
+                continue;
+            };
+            if !stone
+                .errand
+                .as_ref()
+                .is_some_and(|e| runeword::hears(e, event))
+            {
+                continue;
+            }
+            if let Some(a) = self.tome.errands.get_mut(&ck).filter(|a| a.fits(&stone)) {
+                a.fired.get_or_insert(now);
+                heard = true;
+            }
+        }
+        if heard {
+            self.save();
+        }
+    }
+
+    /// Hears the events no other part of the app tells: the human leaving
+    /// and coming back, and, after a start from a reload, whether it
+    /// shipped a project.
+    fn hear_events(&mut self, now: u64) {
+        let away = self.away.since().is_some();
+        if away != self.tome.away {
+            self.tome.away = away;
+            self.errand_event(None, if away { Event::Away } else { Event::Back });
+        }
+        let Some(from) = self.tome.ship_watch else {
+            return;
+        };
+        let log = store::dir()
+            .and_then(|d| std::fs::read_to_string(d.join("reload.log")).ok())
+            .unwrap_or_default();
+        match ship::came_up(&log) {
+            None if now < from.saturating_add(SHIP_WATCH) => {}
+            Some(true) => {
+                self.tome.ship_watch = None;
+                let keys: BTreeSet<String> = self
+                    .tome
+                    .errands
+                    .keys()
+                    .filter_map(|k| k.split_once('\n').map(|(key, _)| key.to_string()))
+                    .filter(|key| ship::shipped(key, &log))
+                    .collect();
+                for key in keys {
+                    self.errand_event(Some(&key), Event::Shipped);
+                }
+            }
+            _ => self.tome.ship_watch = None,
+        }
+    }
+
+    /// Once a second: hears the events errands wait for, disarms the
+    /// errands whose steps changed, then per project casts the one that
+    /// is due, skips the due ones while the account is near its limit, and
+    /// stops one that ran too long.
     pub(in crate::app) fn tick_errands(&mut self) {
-        if self.frozen || self.reload.is_some() || self.tome.errands.is_empty() {
+        if self.frozen || self.reload.is_some() {
             return;
         }
         let now = unix_now();
+        self.hear_events(now);
+        if self.tome.errands.is_empty() {
+            return;
+        }
         let offset = crate::questlog::utc_offset(now);
         let too_full = self.too_full(now).is_some();
         let keys: BTreeSet<String> = self
@@ -141,6 +223,7 @@ impl App {
                     Tick::Skip(label) => {
                         if let Some(a) = self.tome.errands.get_mut(&cast_key(&key, &label)) {
                             a.last = now;
+                            a.fired = None;
                         }
                         eprintln!(
                             "horadric: errand {label} skipped, the account is near its limit"
@@ -170,6 +253,7 @@ impl App {
         };
         let runes = runeword::since(&runes, a.since());
         a.last = now;
+        a.fired = None;
         a.running = true;
         a.session = None;
         if runeword::sessionless(&runes) {

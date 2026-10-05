@@ -1513,6 +1513,7 @@ impl App {
             &format!("Merged {branch}"),
             &format!("{} is in {into}.", tasks::one_line(title)),
         );
+        self.errand_event(Some(&project), horadric_core::runeword::Event::Landed);
         self.propose_ship(&project, main);
     }
 

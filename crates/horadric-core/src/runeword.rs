@@ -30,8 +30,8 @@ mod errand;
 mod stone;
 pub use edit::unwrite;
 pub use errand::{
-    arm_text, describe, due, every, is_errand, length, since, span, tick, Armed, Clocked, Errand,
-    Every, Tick, FOR_DEFAULT, ID as ERRAND_ID,
+    arm_text, describe, due, every, hears, is_errand, length, since, span, tick, Armed, Clocked,
+    Errand, Event, Every, Tick, FOR_DEFAULT, ID as ERRAND_ID,
 };
 pub use stone::{
     ask_text, carve, fingerprint, name, reforge_prompt, smith_prompt, tip, Carving, Stroke,
@@ -337,8 +337,8 @@ pub struct Stone {
     /// What it is for, in a sentence, when it says: `"about"` beside its
     /// `"steps"`. Empty when it does not.
     pub about: String,
-    /// Its clock, when it says `"every"`: an errand, cast unattended once
-    /// armed.
+    /// Its clock, when it says `"every"`, or its event, when it says
+    /// `"on"`: an errand, cast unattended once armed.
     pub errand: Option<Errand>,
 }
 
@@ -1444,6 +1444,7 @@ mod tests {
             "Ship": { "every": "day 03:00", "steps": [ "test", "merge" ] },
             "Soon": { "every": "now and then", "steps": [ { "run": "echo" } ] },
             "Long": { "every": "1h", "for": 30, "steps": [ { "run": "echo" } ] },
+            "Post": { "on": "landed", "steps": [ "Post what landed" ] },
             "Plain": [ { "run": "echo" } ] } }"#;
         let stones = stones(text, "");
         let get = |l: &str| stones.iter().find(|s| s.label == l).unwrap();
@@ -1474,6 +1475,10 @@ mod tests {
             .unwrap_err()
             .contains("now and then"));
         assert!(get("Long").steps.as_ref().unwrap_err().contains("\"for\""));
+        assert_eq!(
+            get("Post").errand.as_ref().map(|e| e.every),
+            Some(Every::On(Event::Landed))
+        );
         assert_eq!(get("Plain").errand, None);
         assert!(get("Clean").sessionless());
     }
