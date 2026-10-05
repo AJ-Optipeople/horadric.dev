@@ -235,7 +235,8 @@ pub fn reforge_prompt(
 /// What hovering a stone says: its runeword name, what it is for when it
 /// says, then its steps in order, so what a click does is never a guess. A cracked stone says why
 /// it does not parse instead, and one marked `changed` that its steps are
-/// not the ones last cast.
+/// not the ones last cast. An errand says when it runs, and `changed` that
+/// it is not armed for these steps.
 pub fn tip(stone: &Stone, changed: bool) -> String {
     let mut lines = vec![name(&stone.label)];
     if !stone.about.is_empty() {
@@ -250,8 +251,17 @@ pub fn tip(stone: &Stone, changed: bool) -> String {
         ),
         Err(why) => lines.push(format!("Cracked: {why}")),
     }
-    if changed {
-        lines.push("Not cast since these steps came in".into());
+    match &stone.errand {
+        Some(e) => {
+            let mut when = super::describe(e.every);
+            when[..1].make_ascii_uppercase();
+            lines.push(format!("{when}, for {} at most", super::length(e.most)));
+            if changed {
+                lines.push("Not armed: a click arms it".into());
+            }
+        }
+        None if changed => lines.push("Not cast since these steps came in".into()),
+        None => {}
     }
     lines.join("\n")
 }
@@ -450,6 +460,7 @@ mod tests {
             steps,
             source: super::super::Source::Project,
             about: String::new(),
+            errand: None,
         }
     }
 

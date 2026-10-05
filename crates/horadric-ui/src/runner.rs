@@ -964,6 +964,7 @@ impl App {
         self.refresh_boards(false);
         self.run_tasks();
         self.tick_runewords();
+        self.tick_errands();
         self.refresh_tomes();
     }
 
