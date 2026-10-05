@@ -22,13 +22,14 @@ const USAGE: &str = "\
 usage: horadric quest done [\"summary\"]  The quest this session works is completed,
                                         with one line on what it achieved
        horadric quest blocked \"why\"     It can not go on without the human
-             [--on-quest \"title\"]     or until another quest is done,
+             [--on \"title\"]           or until another quest is done,
              [--on-main <ref>]         a commit or branch is on main,
              [--on-file <path>]        a file exists,
              [--on-cmd \"command\"]     a command (cmd.exe) exits 0,
              [--until <+30m|UTC time>] or a time comes: then it goes on
        horadric quest add \"title\"       Add a quest to the end of the log
-             [--notes \"text\"]          with notes for the agent under it
+             [--notes \"text\"]          with notes for the agent under it,
+             [--after \"title\"]         to start once that quest is done
        horadric quest list              Show the log";
 
 /// What the errors call the list, which may still be the old file.
@@ -40,10 +41,10 @@ pub fn run(args: &[String]) -> Result<(), String> {
         Some("done") => report(&cwd, None, &args[1..].join(" ")),
         Some("blocked") => {
             let (why, wait) = why_and_wait(&args[1..], unix_now())?;
-            report(&cwd, Some((&why, wait.as_ref())), "")
+            report(&cwd, Some((&why, wait)), "")
         }
         Some("add") => {
-            let (title, notes) = title_and_notes(&args[1..]);
+            let (title, notes) = title_and_notes(&args[1..])?;
             if title.is_empty() {
                 return Err("say what: horadric quest add \"title\"".into());
             }
@@ -54,10 +55,18 @@ pub fn run(args: &[String]) -> Result<(), String> {
     }
 }
 
+/// What `quest blocked` waits on: a quest in the log, written as an
+/// `After:` line under it, or something else the runner checks.
+#[derive(Debug, PartialEq)]
+enum On {
+    Quest(String),
+    Check(Wait),
+}
+
 /// Why `quest blocked` is blocked, and what it waits on when a flag says:
 /// the words before the flag are the why, the word after it the wait. A
 /// wait is reason enough, so the why may be left out then.
-fn why_and_wait(args: &[String], now: u64) -> Result<(String, Option<Wait>), String> {
+fn why_and_wait(args: &[String], now: u64) -> Result<(String, Option<On>), String> {
     let flag = args.iter().position(|a| a.starts_with("--"));
     let (words, rest) = args.split_at(flag.unwrap_or(args.len()));
     let why = tasks::one_line(&words.join(" "));
@@ -68,15 +77,18 @@ fn why_and_wait(args: &[String], now: u64) -> Result<(String, Option<Wait>), Str
             if value.trim().is_empty() {
                 return Err(format!("say what {flag} waits on"));
             }
+            // `--on-quest` is the flag from before `After:` lines.
             Some(match flag.as_str() {
-                "--on-quest" => Wait::Quest(value),
-                "--on-main" => Wait::Main(value),
-                "--on-file" => Wait::File(value),
-                "--on-cmd" => Wait::Cmd(value),
-                "--until" => Wait::Until(tasks::parse_when(&value, now).ok_or(format!(
-                    "--until takes +30m (or s, h, d), Unix seconds or a UTC time like \
-                     2026-10-01T14:05Z, not {value}"
-                ))?),
+                "--on" | "--on-quest" => On::Quest(tasks::one_line(&value)),
+                "--on-main" => On::Check(Wait::Main(value)),
+                "--on-file" => On::Check(Wait::File(value)),
+                "--on-cmd" => On::Check(Wait::Cmd(value)),
+                "--until" => On::Check(Wait::Until(tasks::parse_when(&value, now).ok_or(
+                    format!(
+                        "--until takes +30m (or s, h, d), Unix seconds or a UTC time like \
+                         2026-10-01T14:05Z, not {value}"
+                    ),
+                )?)),
                 _ => return Err(USAGE.into()),
             })
         }
@@ -96,8 +108,8 @@ fn unix_now() -> u64 {
 
 /// The agent's item is done, or blocked with why and what it waits on,
 /// and what the agent says it achieved, for the chronicle.
-fn report(cwd: &Path, blocked: Option<(&str, Option<&Wait>)>, summary: &str) -> Result<(), String> {
-    let why = blocked.map(|(w, _)| w);
+fn report(cwd: &Path, blocked: Option<(&str, Option<On>)>, summary: &str) -> Result<(), String> {
+    let why = blocked.as_ref().map(|(w, _)| *w);
     let wait = blocked.and_then(|(_, w)| w);
     let id = session().ok_or("this is not a Horadric session, so there is no item to report on")?;
     if let Some((batch, _)) = tombs::of(&id) {
@@ -112,8 +124,12 @@ fn report(cwd: &Path, blocked: Option<(&str, Option<&Wait>)>, summary: &str) -> 
         Some(_) => Mark::Blocked,
         None => mode.finished(),
     };
-    let changed = file::update(&project, |text| tasks::set_held(text, &id, mark, why, wait))
-        .map_err(|e| format!("{}: {e}", file::file(&project).display()))?;
+    let changed = file::update(&project, |text| match &wait {
+        Some(On::Quest(title)) => tasks::block_after(text, &id, why, title),
+        Some(On::Check(w)) => tasks::set_held(text, &id, mark, why, Some(w)),
+        None => tasks::set_held(text, &id, mark, why, None),
+    })
+    .map_err(|e| format!("{}: {e}", file::file(&project).display()))?;
     if !changed {
         return Err(format!("the quest held by {id} is already completed"));
     }
@@ -152,14 +168,31 @@ fn report_tomb(project: &Path, id: &str, why: Option<&str>) -> Result<(), String
     Ok(())
 }
 
-/// The title and the notes of `quest add`: the words before `--notes`
-/// make the title, on one line, and the words after it the notes.
-fn title_and_notes(args: &[String]) -> (String, String) {
-    let (title, notes) = match args.iter().position(|a| a == "--notes") {
-        Some(i) => (&args[..i], &args[i + 1..]),
-        None => (args, &[][..]),
-    };
-    (tasks::one_line(&title.join(" ")), notes.join(" "))
+/// The title and the notes of `quest add`: the words before the first flag
+/// make the title, on one line, the words after `--notes` the notes, and
+/// each `--after` an `After:` line under them.
+fn title_and_notes(args: &[String]) -> Result<(String, String), String> {
+    let is_flag = |a: &String| a == "--notes" || a == "--after";
+    let first = args.iter().position(is_flag).unwrap_or(args.len());
+    let title = tasks::one_line(&args[..first].join(" "));
+    let mut notes = Vec::new();
+    let mut after = Vec::new();
+    let mut rest = &args[first..];
+    while let [flag, tail @ ..] = rest {
+        let end = tail.iter().position(is_flag).unwrap_or(tail.len());
+        let value = tail[..end].join(" ");
+        if flag == "--after" {
+            if value.trim().is_empty() {
+                return Err("say which quest: --after \"title\"".into());
+            }
+            after.push(tasks::after_note(&value));
+        } else {
+            notes.push(value);
+        }
+        rest = &tail[end..];
+    }
+    notes.extend(after);
+    Ok((title, notes.join("\n")))
 }
 
 fn add(cwd: &Path, title: &str, notes: &str) -> Result<(), String> {
@@ -285,29 +318,35 @@ mod tests {
     #[test]
     fn blocked_takes_why_then_what_it_waits_on() {
         let w = |a: &[&str]| why_and_wait(&words(a), 1000);
+        let check = |w: Wait| Some(On::Check(w));
         assert_eq!(w(&["needs", "a key"]), Ok(("needs a key".into(), None)));
         assert_eq!(
-            w(&["needs B", "--on-quest", "Build", "B"]),
-            Ok(("needs B".into(), Some(Wait::Quest("Build B".into()))))
+            w(&["needs B", "--on", "Build", "B"]),
+            Ok(("needs B".into(), Some(On::Quest("Build B".into()))))
+        );
+        // The flag from before After: lines still works, and writes one.
+        assert_eq!(
+            w(&["needs B", "--on-quest", "Build B"]),
+            Ok(("needs B".into(), Some(On::Quest("Build B".into()))))
         );
         assert_eq!(
             w(&["--on-file", "out/x"]),
-            Ok(("waits".into(), Some(Wait::File("out/x".into()))))
+            Ok(("waits".into(), check(Wait::File("out/x".into()))))
         );
         assert_eq!(
             w(&["later", "--until", "+1m"]),
-            Ok(("later".into(), Some(Wait::Until(1060))))
+            Ok(("later".into(), check(Wait::Until(1060))))
         );
         assert_eq!(
             w(&["x", "--on-cmd", "git diff --quiet"]),
-            Ok(("x".into(), Some(Wait::Cmd("git diff --quiet".into()))))
+            Ok(("x".into(), check(Wait::Cmd("git diff --quiet".into()))))
         );
         assert_eq!(
             w(&["x", "--on-main", "abc"]),
-            Ok(("x".into(), Some(Wait::Main("abc".into()))))
+            Ok(("x".into(), check(Wait::Main("abc".into()))))
         );
         assert!(w(&[]).is_err());
-        assert!(w(&["x", "--on-quest"]).is_err());
+        assert!(w(&["x", "--on"]).is_err());
         assert!(w(&["x", "--until", "soon"]).is_err());
         assert!(w(&["x", "--on-moon", "y"]).is_err());
     }
@@ -321,15 +360,33 @@ mod tests {
                 "--notes",
                 "Only after\nexpiry"
             ])),
-            ("Fix the login".into(), "Only after\nexpiry".into())
+            Ok(("Fix the login".into(), "Only after\nexpiry".into()))
         );
         assert_eq!(
             title_and_notes(&words(&["Fix", "the login"])),
-            ("Fix the login".into(), String::new())
+            Ok(("Fix the login".into(), String::new()))
         );
         assert_eq!(
             title_and_notes(&words(&["--notes", "why"])),
-            (String::new(), "why".into())
+            Ok((String::new(), "why".into()))
         );
+    }
+
+    #[test]
+    fn each_after_flag_becomes_an_after_line_under_the_notes() {
+        assert_eq!(
+            title_and_notes(&words(&[
+                "Wire it", "--after", "Build", "it", "--notes", "Why.", "--after", "Test it"
+            ])),
+            Ok((
+                "Wire it".into(),
+                "Why.\nAfter: Build it\nAfter: Test it".into()
+            ))
+        );
+        assert_eq!(
+            title_and_notes(&words(&["Wire it", "--after", "Build"])),
+            Ok(("Wire it".into(), "After: Build".into()))
+        );
+        assert!(title_and_notes(&words(&["Wire it", "--after"])).is_err());
     }
 }

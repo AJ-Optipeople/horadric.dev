@@ -14,14 +14,17 @@
 //!   Happens only after a session expires.
 //! - [?] Add dark mode to the settings page @add-dark-mode-51300
 //! - [!] Migrate to the new API @migrate-api-51400: needs a key I do not have
-//! - [!] Wire the new API in @wire-api-51500: needs it {on quest: Migrate to the new API}
+//! - [!] Wire the new API in @wire-api-51500: needs it
+//!   After: Migrate to the new API
 //! - [ ] Show the build time in the footer
+//!   After: Add dark mode
 //! ```
 //!
+//! A notes line `After: <title>` names a quest this one waits for, see
+//! [`readiness`]. The runner passes a quest whose `After:` quests are not
+//! all done, and starts it, or tells its session to go on, once they are.
 //! A blocked item that says in braces what it waits on is the runner's to
-//! wake, see [`Wait`]: it skips past it, and once the wait is over it tells
-//! the session to go on or starts the item again. One that says only why
-//! waits on the human.
+//! wake too, see [`Wait`]. One that says only why waits on the human.
 
 use serde_json::{Map, Value};
 
@@ -108,6 +111,174 @@ pub struct Task {
     pub notes: Vec<String>,
 }
 
+impl Task {
+    /// The quests this one waits for, as they are named: its `After:`
+    /// notes lines, and a blocked line's `{on quest: ...}` from before
+    /// those lines were the way to say it.
+    pub fn after(&self) -> Vec<&str> {
+        let mut out: Vec<&str> = self.notes.iter().filter_map(|n| after_line(n)).collect();
+        if let Some(Wait::Quest(t)) = &self.wait {
+            out.push(t);
+        }
+        out
+    }
+
+    /// What it waited on, for its session told to go on and the toast
+    /// that says so. Empty for an item that waits on nothing.
+    pub fn over(&self) -> String {
+        match &self.wait {
+            Some(Wait::After) => match self.after().as_slice() {
+                [one] => format!("The quest \"{one}\" is done"),
+                many => format!(
+                    "The quests {} are done",
+                    many.iter()
+                        .map(|t| format!("\"{t}\""))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            },
+            Some(w) => w.over(),
+            None => String::new(),
+        }
+    }
+}
+
+/// The title an `After: <title>` notes line names. The word is read in any
+/// case, since a human writes these too.
+pub fn after_line(note: &str) -> Option<&str> {
+    let head = note.get(..6)?;
+    let title = note[6..].trim();
+    (head.eq_ignore_ascii_case("after:") && !title.is_empty()).then_some(title)
+}
+
+/// The notes line that says a quest waits for `title`.
+pub fn after_note(title: &str) -> String {
+    format!("After: {}", one_line(title))
+}
+
+/// Whether a quest may start, from the quests it names in `After:` lines.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Ready {
+    /// It names none, or every one it names is done.
+    Yes,
+    /// The first quest it names that is not done, by title.
+    After(String),
+    /// A name that matches no quest, as written.
+    Unknown(String),
+    /// A name that matches several quests, as written.
+    Several(String),
+    /// It waits, by one name or a chain of them, on itself. Only a human
+    /// can break that.
+    Cycle,
+}
+
+impl Ready {
+    /// What the quest's row says, in a few words, since the title needs
+    /// the room. Nothing for a ready quest.
+    pub fn label(&self) -> Option<String> {
+        match self {
+            Ready::Yes => None,
+            Ready::After(t) => Some(format!("after {}", short(t))),
+            Ready::Unknown(n) => Some(format!("no quest {}", short(n))),
+            Ready::Several(n) => Some(format!("which {}?", short(n))),
+            Ready::Cycle => Some("waits on itself".into()),
+        }
+    }
+
+    /// What is wrong with a tangled quest's `After:` lines, in a sentence
+    /// for the human. Empty for any other.
+    pub fn why(&self) -> String {
+        match self {
+            Ready::Unknown(n) => format!("No quest is called \"{n}\"."),
+            Ready::Several(n) => format!("\"{n}\" matches more than one quest."),
+            Ready::Cycle => "Its After: lines come back round to itself.".into(),
+            Ready::Yes | Ready::After(_) => String::new(),
+        }
+    }
+
+    /// A name that matches nothing or several, or a cycle: no quest
+    /// finishing will make it ready, so it needs the human.
+    pub fn tangled(&self) -> bool {
+        matches!(self, Ready::Unknown(_) | Ready::Several(_) | Ready::Cycle)
+    }
+}
+
+/// Which quest `name` means: the one whose title it is, or failing that
+/// the one whose title starts with it, since titles are long. Case and
+/// runs of spaces do not count. Err with how many matched when not one.
+pub fn find(tasks: &[Task], name: &str) -> Result<usize, usize> {
+    let want = one_line(name).to_lowercase();
+    let titles: Vec<String> = tasks
+        .iter()
+        .map(|t| one_line(&t.title).to_lowercase())
+        .collect();
+    let exact: Vec<usize> = (0..tasks.len()).filter(|&i| titles[i] == want).collect();
+    let found: Vec<usize> = if exact.is_empty() && !want.is_empty() {
+        (0..tasks.len())
+            .filter(|&i| titles[i].starts_with(&want))
+            .collect()
+    } else {
+        exact
+    };
+    match found.as_slice() {
+        [one] => Ok(*one),
+        many => Err(many.len()),
+    }
+}
+
+/// Whether each quest of the list may start, by index. A quest in a cycle
+/// is `Cycle` before anything else, since nothing else will free it.
+pub fn readiness(tasks: &[Task]) -> Vec<Ready> {
+    let names: Vec<Vec<&str>> = tasks.iter().map(Task::after).collect();
+    let edges: Vec<Vec<usize>> = names
+        .iter()
+        .map(|n| n.iter().filter_map(|n| find(tasks, n).ok()).collect())
+        .collect();
+    (0..tasks.len())
+        .map(|i| {
+            if reaches(&edges, i, i) {
+                return Ready::Cycle;
+            }
+            for name in &names[i] {
+                match find(tasks, name) {
+                    Err(0) => return Ready::Unknown(name.to_string()),
+                    Err(_) => return Ready::Several(name.to_string()),
+                    Ok(j) if tasks[j].mark != Mark::Done => {
+                        return Ready::After(tasks[j].title.clone())
+                    }
+                    Ok(_) => {}
+                }
+            }
+            Ready::Yes
+        })
+        .collect()
+}
+
+/// Whether following `edges` from `from` comes to `to`, in one step or more.
+fn reaches(edges: &[Vec<usize>], from: usize, to: usize) -> bool {
+    let mut seen = vec![false; edges.len()];
+    let mut stack = edges[from].clone();
+    while let Some(i) = stack.pop() {
+        if i == to {
+            return true;
+        }
+        if !std::mem::replace(&mut seen[i], true) {
+            stack.extend(&edges[i]);
+        }
+    }
+    false
+}
+
+/// A name cut to a few words for the right end of a row.
+fn short(s: &str) -> String {
+    let s = one_line(s);
+    if s.chars().count() > 18 {
+        format!("{}\u{2026}", s.chars().take(17).collect::<String>())
+    } else {
+        s
+    }
+}
+
 /// Every item in the file, top to bottom. Only lines that start a list item
 /// at the left edge count; indented lines under one are its notes, and
 /// everything else (headings, prose, nested lists) is left out.
@@ -160,11 +331,16 @@ fn parse_item(raw: &str, line: usize) -> Option<Task> {
 }
 
 /// What a blocked item waits on before it can go on by itself. Written at
-/// the end of its line in braces, `{on quest: Title}`, so the file stays
-/// the state and a human can write one too.
+/// the end of its line in braces, `{on file: out/x.txt}`, so the file
+/// stays the state and a human can write one too.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Wait {
-    /// Another quest in the same log, by title, is done.
+    /// The quests its `After:` lines name are done. Written `{after}`, so a
+    /// quest blocked until then is told apart from one blocked on the
+    /// human that happens to have `After:` lines from before it started.
+    After,
+    /// Another quest in the same log, by title, is done. Read from lists
+    /// written before `After:` lines, never written any more.
     Quest(String),
     /// A commit or branch is in the main tree's checked out branch.
     Main(String),
@@ -180,6 +356,7 @@ impl Wait {
     /// How it is written on the item's line.
     pub fn spell(&self) -> String {
         match self {
+            Wait::After => "{after}".into(),
             Wait::Quest(t) => format!("{{on quest: {}}}", one_line(t)),
             Wait::Main(r) => format!("{{on main: {}}}", one_line(r)),
             Wait::File(f) => format!("{{on file: {}}}", one_line(f)),
@@ -191,6 +368,9 @@ impl Wait {
     /// Reads what `spell` wrote, braces included.
     pub fn read(s: &str) -> Option<Wait> {
         let inner = s.strip_prefix('{')?.strip_suffix('}')?;
+        if inner.trim() == "after" {
+            return Some(Wait::After);
+        }
         let (kind, value) = inner.split_once(':')?;
         let value = value.trim();
         if value.is_empty() {
@@ -207,18 +387,12 @@ impl Wait {
         }
     }
 
-    /// Whether it is over, for the kinds the list and the clock answer.
-    /// None for those that need a look at the disk or a command run.
-    pub fn met(&self, tasks: &[Task], now: u64) -> Option<bool> {
+    /// Whether it is over, for the kinds the clock answers. None for those
+    /// that need a look at the disk or a command run. A wait on quests is
+    /// over here, since [`readiness`] is what holds those back.
+    pub fn met(&self, now: u64) -> Option<bool> {
         match self {
-            Wait::Quest(title) => {
-                let want = one_line(title).to_lowercase();
-                Some(
-                    tasks
-                        .iter()
-                        .any(|t| t.mark == Mark::Done && one_line(&t.title).to_lowercase() == want),
-                )
-            }
+            Wait::After | Wait::Quest(_) => Some(true),
             Wait::Until(at) => Some(now >= *at),
             Wait::Main(_) | Wait::File(_) | Wait::Cmd(_) => None,
         }
@@ -227,15 +401,8 @@ impl Wait {
     /// What the row says it waits on: a few words, since the title needs
     /// the room.
     pub fn label(&self, now: u64) -> String {
-        let short = |s: &str| {
-            let s = one_line(s);
-            if s.chars().count() > 18 {
-                format!("{}\u{2026}", s.chars().take(17).collect::<String>())
-            } else {
-                s
-            }
-        };
         match self {
+            Wait::After => "after".into(),
             Wait::Quest(t) => format!("after {}", short(t)),
             Wait::Main(r) => format!("on main {}", short(r)),
             Wait::File(f) => format!("for {}", short(f)),
@@ -248,6 +415,7 @@ impl Wait {
     /// What it waited on, for the session told to go on.
     pub fn over(&self) -> String {
         match self {
+            Wait::After => "The quests this one waited for are done".into(),
             Wait::Quest(t) => format!("The quest \"{t}\" is done"),
             Wait::Main(r) => format!("{r} is on the main branch"),
             Wait::File(f) => format!("{f} exists"),
@@ -480,6 +648,33 @@ fn new_item(title: &str, notes: &str, ending: &str) -> String {
         out.push_str(ending);
     }
     out
+}
+
+/// Blocks the item held by `holder` until the quest named `after` is done:
+/// marked blocked with why and `{after}`, and an `After:` line under its
+/// notes unless it has one naming that quest already. None when no item
+/// is held by it.
+pub fn block_after(text: &str, holder: &str, reason: Option<&str>, after: &str) -> Option<String> {
+    let text = set_held(text, holder, Mark::Blocked, reason, Some(&Wait::After))?;
+    let task = parse(&text)
+        .into_iter()
+        .find(|t| t.holder.as_deref() == Some(holder) && t.mark == Mark::Blocked)?;
+    let want = one_line(after).to_lowercase();
+    if task
+        .after()
+        .iter()
+        .any(|a| one_line(a).to_lowercase() == want)
+    {
+        return Some(text);
+    }
+    let (mut lines, ending) = cut(&text);
+    let end = span(&lines, task.line).end;
+    // The last line may have had no ending: the note follows it now.
+    if let Some(prev) = lines.get_mut(end - 1).filter(|l| !l.ends_with('\n')) {
+        prev.push_str(ending);
+    }
+    lines.insert(end, format!("  {}{ending}", after_note(after)));
+    Some(join(lines, ending, text.ends_with('\n')))
 }
 
 /// Changes the item held by `holder` to `mark`, keeping the holder, with
@@ -832,9 +1027,10 @@ pub enum Holder {
 
 /// The runner's decision, given the list, the mode, how many items may be
 /// in hand at once, what became of each holder, and whether what a blocked
-/// item waits on is over. A blocked item that waits on something the
-/// runner can check is passed by until then; one that waits on the human
-/// stops the list.
+/// item waits on is over. It takes the first ready open item, passing
+/// those whose `After:` quests are not done. A blocked item that waits on
+/// something the runner can check is passed by until then; one that waits
+/// on the human stops the list, and so does a cycle.
 pub fn next(
     tasks: &[Task],
     mode: Mode,
@@ -857,18 +1053,23 @@ pub fn next(
     if in_hand.iter().any(|(h, _)| *h == Holder::Paused) || places >= parallel.max(1) {
         return Next::Wait;
     }
+    let ready = readiness(tasks);
     let mut waits = false;
     for (i, t) in tasks.iter().enumerate() {
-        match t.mark {
-            Mark::Done => {}
-            Mark::Open if t.title.trim().is_empty() => {}
-            Mark::Open => return Next::Start(i),
-            Mark::Working | Mark::Review if of(t) == Holder::Live => {}
-            Mark::Working | Mark::Review => return Next::Stuck(i),
-            Mark::Blocked if t.wait.is_none() => return Next::Stuck(i),
+        match (t.mark, &ready[i]) {
+            (Mark::Done, _) => {}
+            (Mark::Open, _) if t.title.trim().is_empty() => {}
+            (Mark::Working | Mark::Review, _) if of(t) == Holder::Live => {}
+            (Mark::Working | Mark::Review, _) => return Next::Stuck(i),
+            (Mark::Blocked, _) if t.wait.is_none() => return Next::Stuck(i),
+            // Only a human breaks a cycle, so the list stops there.
+            (Mark::Open | Mark::Blocked, Ready::Cycle) => return Next::Stuck(i),
+            (Mark::Open, Ready::Yes) => return Next::Start(i),
             // A paused session comes back only by a click.
-            Mark::Blocked if met(t) && of(t) != Holder::Paused => return Next::Resume(i),
-            Mark::Blocked => waits = true,
+            (Mark::Blocked, Ready::Yes) if met(t) && of(t) != Holder::Paused => {
+                return Next::Resume(i)
+            }
+            (Mark::Open | Mark::Blocked, _) => waits = true,
         }
     }
     if in_hand.is_empty() && !waits {
@@ -974,17 +1175,20 @@ pub fn system_prompt(horadric: &str, file: &str, list: Option<&str>) -> String {
          Bash tool; that line is kept as the quest's record. If you can not go on \
          without the human, run `{horadric} quest blocked \"<why>\"` instead and say \
          what you need. When what you wait on is something Horadric can check, say so and it \
-         wakes you itself once that holds: add `--on-quest \"<title>\"` for another \
+         wakes you itself once that holds: add `--on \"<title>\"` for another \
          quest in the log being done, `--on-main <commit or branch>` for one being on \
          the main branch, `--on-file <path>` for a file existing, `--on-cmd \
          \"<command>\"` for a command cmd.exe runs in the project folder exiting 0, \
          or `--until <+30m or 2026-10-01T14:05Z>` for a time. Use one whenever it \
          fits: the list goes on past a quest that waits on one, and stops at one that \
          waits on the human. If you find other work worth doing, add it to the list \
-         with `{horadric} quest add \"<title>\"` instead of doing it now. Quests in \
-         {file} are lines like `- [ ] Title`, in the order they should be \
-         done, with notes indented under them; when your item is to plan work, \
-         write the items you decide on into the file below your own line."
+         with `{horadric} quest add \"<title>\"` instead of doing it now, adding \
+         `--after \"<other title>\"` when it can only start once another quest is \
+         done. Quests in {file} are lines like `- [ ] Title`, in the order they \
+         should be done, with notes indented under them; a notes line `After: \
+         <title>` holds a quest back until that one is done. When your item is to \
+         plan work, write the items you decide on into the file below your own \
+         line, each with an `After:` line for every quest it needs first."
     );
     if let Some(list) = list {
         out.push_str(&format!(
@@ -1010,7 +1214,9 @@ pub fn giver_prompt(horadric: &str, file: &str) -> String {
          numbered. Change nothing while you look.\n\n\
          Ask me which to add. Add only the ones I pick, each with \
          `{horadric} quest add \"<title>\" --notes \"<notes>\"`, in the order they \
-         should be done, then stop."
+         should be done, then stop. When one can only start once another quest is \
+         done, one you add or one already on the log, add `--after \"<that title>\"` \
+         as well, once for each, so the runner does not start it early."
     )
 }
 
@@ -1034,12 +1240,12 @@ pub fn go_on(horadric: &str) -> String {
 }
 
 /// What a blocked session is told once what it waited on is over.
-pub fn waited(horadric: &str, wait: &Wait) -> String {
+pub fn waited(horadric: &str, task: &Task) -> String {
     format!(
         "{}, which this quest waited on. Go on with it where you left off, \
          and when it is finished, commit your work and run \
          `{horadric} quest done \"<one short line on what you achieved>\"`.",
-        wait.over()
+        task.over()
     )
 }
 
@@ -1080,6 +1286,10 @@ mod tests {
         assert!(p.contains("Add only the ones I pick"));
         assert!(p.contains("`horadric quest add \"<title>\" --notes \"<notes>\"`"));
         assert!(p.contains("Change nothing while you look."));
+        assert!(p.contains("`--after \"<that title>\"`"));
+        let p = system_prompt("hx", QUESTS_FILE, None);
+        assert!(p.contains("`--after \"<other title>\"`"));
+        assert!(p.contains("an `After:` line for every quest it needs first"));
     }
 
     #[test]
@@ -1338,6 +1548,7 @@ mod tests {
     #[test]
     fn every_kind_of_wait_round_trips() {
         for w in [
+            Wait::After,
             Wait::Quest("Build {it}".into()),
             Wait::Main("abc123".into()),
             Wait::File("C:/x y/z.txt".into()),
@@ -1380,20 +1591,138 @@ mod tests {
 
     #[test]
     fn a_quest_wait_is_over_when_that_quest_is_done() {
+        // The old form reads as an After: line, matched the same way.
         let list = parse("- [!] B @b-1 {on quest: the  first one}\n- [ ] The first one\n");
-        let w = list[0].wait.clone().unwrap();
-        assert_eq!(w.met(&list, 0), Some(false));
+        assert_eq!(list[0].after(), ["the  first one"]);
+        assert_eq!(readiness(&list)[0], Ready::After("The first one".into()));
         let list = parse("- [!] B @b-1 {on quest: the first one}\n- [x] The first one\n");
-        assert_eq!(w.met(&list, 0), Some(true));
-        assert_eq!(Wait::Quest("Missing".into()).met(&list, 0), Some(false));
-        assert_eq!(Wait::Until(100).met(&list, 99), Some(false));
-        assert_eq!(Wait::Until(100).met(&list, 100), Some(true));
-        assert_eq!(Wait::File("x".into()).met(&list, 0), None);
+        assert_eq!(readiness(&list)[0], Ready::Yes);
+        let list = parse("- [!] B @b-1 {on quest: Missing}\n- [x] The first one\n");
+        assert_eq!(readiness(&list)[0], Ready::Unknown("Missing".into()));
+        assert_eq!(Wait::Quest("x".into()).met(0), Some(true));
+        assert_eq!(Wait::Until(100).met(99), Some(false));
+        assert_eq!(Wait::Until(100).met(100), Some(true));
+        assert_eq!(Wait::File("x".into()).met(0), None);
+    }
+
+    #[test]
+    fn after_lines_are_read_from_the_notes() {
+        let t = &parse(
+            "- [ ] C\n  Some note.\n  After: Build the engine\n  after:   Wire it  \n  After:\n  Afterwards, more.\n",
+        )[0];
+        assert_eq!(t.after(), ["Build the engine", "Wire it"]);
+        assert_eq!(t.notes.len(), 5);
+        assert_eq!(after_line("AFTER: x"), Some("x"));
+        assert_eq!(after_line("Aft"), None);
+        assert_eq!(after_line("æøå: x"), None);
+    }
+
+    #[test]
+    fn a_name_matches_a_title_exactly_or_by_a_unique_start() {
+        let list = parse(
+            "- [ ] Build the engine\n- [ ] Build the engine: part two\n- [ ] Wire it\n- [ ] Wire it in\n",
+        );
+        assert_eq!(find(&list, "build the  engine"), Ok(0));
+        assert_eq!(find(&list, "Build the engine: part"), Ok(1));
+        assert_eq!(find(&list, "Wire"), Err(2));
+        assert_eq!(find(&list, "Wire it"), Ok(2));
+        assert_eq!(find(&list, "Nothing"), Err(0));
+        assert_eq!(find(&list, ""), Err(0));
+        let list = parse("- [ ] Same\n- [x] Same\n");
+        assert_eq!(find(&list, "Same"), Err(2));
+    }
+
+    #[test]
+    fn a_quest_is_ready_when_every_quest_it_names_is_done() {
+        let list = parse(
+            "- [x] A\n- [?] B\n- [ ] C\n  After: A\n- [ ] D\n  After: A\n  After: B\n- [ ] E\n  After: Nope\n- [ ] F\n  After: \n",
+        );
+        let r = readiness(&list);
+        assert_eq!(r[2], Ready::Yes);
+        // In review is not done: the work may not be on main yet.
+        assert_eq!(r[3], Ready::After("B".into()));
+        assert_eq!(r[4], Ready::Unknown("Nope".into()));
+        assert_eq!(r[5], Ready::Yes);
+        assert_eq!(r[3].label().as_deref(), Some("after B"));
+        assert_eq!(r[4].label().as_deref(), Some("no quest Nope"));
+        assert!(r[4].tangled() && !r[3].tangled() && !r[2].tangled());
+        assert_eq!(r[4].why(), "No quest is called \"Nope\".");
+        assert_eq!(r[3].why(), "");
+        let list = parse("- [ ] Fix one\n- [ ] Fix two\n- [ ] C\n  After: Fix\n");
+        assert_eq!(readiness(&list)[2], Ready::Several("Fix".into()));
+        assert_eq!(readiness(&list)[2].label().as_deref(), Some("which Fix?"));
+    }
+
+    #[test]
+    fn a_cycle_is_never_ready_and_says_so() {
+        let list = parse(
+            "- [ ] A\n  After: C\n- [ ] B\n  After: A\n- [ ] C\n  After: B\n- [ ] D\n  After: A\n- [ ] E\n  After: E\n",
+        );
+        let r = readiness(&list);
+        assert_eq!(&r[..3], [Ready::Cycle, Ready::Cycle, Ready::Cycle]);
+        // Waiting on a cycle is waiting, not being in one.
+        assert_eq!(r[3], Ready::After("A".into()));
+        assert_eq!(r[4], Ready::Cycle);
+        assert_eq!(r[4].label().as_deref(), Some("waits on itself"));
+    }
+
+    #[test]
+    fn the_runner_passes_quests_that_wait_and_takes_the_first_ready() {
+        let t = parse("- [ ] B\n  After: A\n- [ ] A\n- [ ] C\n");
+        assert_eq!(next(&t, Mode::Auto, 1, live, unmet), Next::Start(1));
+        // A chain of three on three places: one runs, the others wait.
+        let t = parse("- [/] A @a-1\n- [ ] B\n  After: A\n- [ ] C\n  After: B\n");
+        assert_eq!(next(&t, Mode::Auto, 3, live, unmet), Next::Wait);
+        let t = parse("- [/] A @a-1\n- [ ] B\n  After: A\n- [ ] D\n");
+        assert_eq!(next(&t, Mode::Auto, 3, live, unmet), Next::Start(2));
+        // Once A is done, B goes.
+        let t = parse("- [x] A @a-1\n- [ ] B\n  After: A\n");
+        assert_eq!(next(&t, Mode::Auto, 1, live, unmet), Next::Start(1));
+        // A typo is passed over, not started early and not the end.
+        let t = parse("- [x] A\n- [ ] B\n  After: Typo\n");
+        assert_eq!(next(&t, Mode::Auto, 1, live, unmet), Next::Wait);
+        // A cycle stops the list there.
+        let t = parse("- [ ] A\n  After: B\n- [ ] B\n  After: A\n- [ ] C\n");
+        assert_eq!(next(&t, Mode::Auto, 1, live, unmet), Next::Stuck(0));
+    }
+
+    #[test]
+    fn blocked_on_a_quest_writes_an_after_line_and_resumes_once_it_is_done() {
+        let text = "- [/] B @b-1\n  A note.\n- [ ] A\n";
+        let out = block_after(text, "b-1", Some("needs A"), "A").unwrap();
+        assert_eq!(
+            out,
+            "- [!] B @b-1: needs A {after}\n  A note.\n  After: A\n- [ ] A\n"
+        );
+        let t = parse(&out);
+        assert_eq!(t[0].wait, Some(Wait::After));
+        assert_eq!(next(&t, Mode::Auto, 1, live, met), Next::Start(1));
+        let done = set_mark(&out, 3, "A", Mark::Done).unwrap();
+        let t = parse(&done);
+        assert_eq!(next(&t, Mode::Auto, 1, live, met), Next::Resume(0));
+        assert!(waited("hx", &t[0]).starts_with("The quest \"A\" is done"));
+        // The same name twice is one line.
+        assert_eq!(
+            block_after(&out, "b-1", Some("needs A"), "a"),
+            Some(out.clone())
+        );
+        // A file without a last ending keeps none, and CRLF stays CRLF.
+        assert_eq!(
+            block_after("- [ ] A\r\n- [/] B @b-1", "b-1", None, "A").unwrap(),
+            "- [ ] A\r\n- [!] B @b-1 {after}\r\n  After: A"
+        );
+        assert_eq!(block_after(text, "nobody", None, "A"), None);
+    }
+
+    #[test]
+    fn a_plain_block_with_after_lines_still_waits_on_the_human() {
+        let t = parse("- [x] A\n- [!] B @b-1: why\n  After: A\n- [ ] C\n");
+        assert_eq!(next(&t, Mode::Auto, 1, live, met), Next::Stuck(1));
     }
 
     #[test]
     fn the_runner_passes_a_quest_that_waits_on_something_it_can_check() {
-        let t = parse("- [!] A @a-1: later {on quest: B}\n- [ ] B\n");
+        let t = parse("- [!] A @a-1: later {on file: b.txt}\n- [ ] B\n");
         assert_eq!(next(&t, Mode::Auto, 1, live, unmet), Next::Start(1));
         assert_eq!(next(&t, Mode::Auto, 1, live, met), Next::Resume(0));
         assert_eq!(
@@ -1406,17 +1735,17 @@ mod tests {
             Next::Start(1)
         );
         // A wait that is not over is not the end of the list.
-        let t = parse("- [!] A @a-1 {on quest: B}\n- [x] C\n");
+        let t = parse("- [!] A @a-1 {on file: b.txt}\n- [x] C\n");
         assert_eq!(next(&t, Mode::Auto, 1, live, unmet), Next::Wait);
         // A plain why still stops it.
-        let t = parse("- [!] A @a-1 {on quest: B}\n- [!] C @c-1: why\n- [ ] D\n");
+        let t = parse("- [!] A @a-1 {on file: b.txt}\n- [!] C @c-1: why\n- [ ] D\n");
         assert_eq!(next(&t, Mode::Auto, 1, live, unmet), Next::Stuck(1));
         assert_eq!(next(&t, Mode::Manual, 1, live, met), Next::Off);
     }
 
     #[test]
     fn going_on_takes_a_free_place_like_a_start() {
-        let t = parse("- [/] A @a-1\n- [!] B @b-1 {on quest: X}\n- [ ] C\n");
+        let t = parse("- [/] A @a-1\n- [!] B @b-1 {on file: x.txt}\n- [ ] C\n");
         assert_eq!(next(&t, Mode::Auto, 1, live, met), Next::Wait);
         assert_eq!(next(&t, Mode::Auto, 2, live, met), Next::Resume(1));
     }
@@ -1461,20 +1790,16 @@ mod tests {
         );
         assert_eq!(Wait::Until(4000).label(400), "in 1 h 00 min");
         assert_eq!(Wait::Until(4000).label(5000), "due");
-        assert!(waited("hx", &Wait::Quest("B".into())).starts_with("The quest \"B\" is done"));
-        assert!(waited("hx", &Wait::File("x".into())).contains("`hx quest done \""));
+        let t = &parse("- [!] A @a-1 {on quest: B}\n")[0];
+        assert!(waited("hx", t).starts_with("The quest \"B\" is done"));
+        let t = &parse("- [!] A @a-1 {on file: x}\n")[0];
+        assert!(waited("hx", t).contains("`hx quest done \""));
     }
 
     #[test]
     fn the_system_prompt_offers_the_checkable_waits() {
         let p = system_prompt("hx", QUESTS_FILE, None);
-        for flag in [
-            "--on-quest",
-            "--on-main",
-            "--on-file",
-            "--on-cmd",
-            "--until",
-        ] {
+        for flag in ["--on ", "--on-main", "--on-file", "--on-cmd", "--until"] {
             assert!(p.contains(flag), "{flag}");
         }
         assert!(!p.contains("  "));
