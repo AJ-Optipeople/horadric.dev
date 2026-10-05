@@ -3601,6 +3601,18 @@ toast says "5 quests landed. Ship local?" and its click casts the
 project's "Ship Local" stone. Once per landing count; ignored, it waits
 for the next landing. The rule is pure and tested.
 
+Built 2026-10-05. `ship.rs` in `horadric-core` holds the rule. A landing
+now records `checked`, the commit its checks passed on, in its `merged`
+chronicle line, and "checks passed on `main`'s head" means `main` is still
+at the newest landing's `checked`: a commit made on `main` since was
+checked by nobody, so the proposal waits for the next landing. The last
+ship is `reload.log` when it names the project (written as the binaries
+go in, so surer), else the newest `shipped` chronicle line, which casting
+the "Ship Local" stone writes. Only a project with that stone is asked.
+The click puts the project on the stage and casts the stone as a click
+on it would, asking first. Seen on screen with a dev instance, two fake
+landings in its chronicle and real ones of a scratch repository.
+
 **6. A pulse.** While Warriv, a reviewer or an errand works, the quests
 tile's edge breathes slowly in Warriv's gold, so the camp is seen moving
 without reading anything. Still when nothing runs. Beside the live line

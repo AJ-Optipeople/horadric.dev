@@ -3418,6 +3418,7 @@ impl App {
                     };
                     self.alert_for = None;
                     self.tasks.merge_for = None;
+                    self.tasks.ship_for = None;
                     self.update_click = true;
                     self.toasts
                         .show(Kind::Done, &format!("Horadric {} is out", m.version), &text);
@@ -4984,6 +4985,7 @@ impl App {
         if let Some(a) = alert {
             self.alert_for = about;
             self.tasks.merge_for = None;
+            self.tasks.ship_for = None;
             self.update_click = false;
             self.toasts.show(Kind::Waiting, &a.title, &a.text);
         }
@@ -5009,6 +5011,7 @@ impl App {
         let file = o.file.rsplit(['/', '\\']).next().unwrap_or(&o.file);
         self.alert_for = Some(o.session.clone());
         self.tasks.merge_for = None;
+        self.tasks.ship_for = None;
         self.update_click = false;
         self.toasts.show(
             Kind::Waiting,
@@ -5034,6 +5037,10 @@ impl App {
     fn open_alert(&mut self) {
         if let Some(m) = self.tasks.merge_for.take() {
             runner::ask_for(self, runner::Menu::Merge(m));
+            return;
+        }
+        if let Some(key) = self.tasks.ship_for.take() {
+            runner::ask_for(self, runner::Menu::Ship(key));
             return;
         }
         match self.alert_for.take() {
