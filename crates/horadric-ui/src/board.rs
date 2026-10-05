@@ -2,7 +2,7 @@
 //! how each item reads on a row, given how the session holding it is doing.
 
 use horadric_core::registry::Registry;
-use horadric_core::tasks::{Mark, Mode, Task};
+use horadric_core::tasks::{Mark, Mode, Ready, Task};
 use horadric_core::{tombs, Phase};
 
 use crate::theme::{self, Color};
@@ -55,12 +55,30 @@ impl Board {
 }
 
 /// What the right end of `task`'s row says when its state's word is not
-/// enough: what a blocked item waits on.
-pub fn note(task: &Task, now: u64) -> Option<String> {
+/// enough: the quest it waits for, or what a blocked item waits on.
+/// `ready` is what [`horadric_core::tasks::readiness`] made of it.
+pub fn note(task: &Task, ready: &Ready, now: u64) -> Option<String> {
+    if matches!(task.mark, Mark::Open | Mark::Blocked) {
+        if let Some(label) = ready.label() {
+            return Some(label);
+        }
+    }
     task.wait
         .as_ref()
         .filter(|_| task.mark == Mark::Blocked)
         .map(|w| w.label(now))
+}
+
+/// How a row reads once what the quest waits for in the log is known: an
+/// open or blocked one that waits for another quest reads `After`, one
+/// that names a quest nobody can finish reads `Tangled`.
+pub fn gated(state: RowState, ready: &Ready) -> RowState {
+    match (state, ready) {
+        (RowState::Open | RowState::Waits, Ready::Yes) => state,
+        (RowState::Open | RowState::Waits, r) if r.tangled() => RowState::Tangled,
+        (RowState::Open | RowState::Waits, _) => RowState::After,
+        _ => state,
+    }
 }
 
 /// How an item reads on its row.
@@ -82,6 +100,12 @@ pub enum RowState {
     /// Blocked on something the runner checks, and goes on by itself once
     /// that holds.
     Waits,
+    /// Waits for another quest in the log to be done, and starts, or goes
+    /// on, by itself then.
+    After,
+    /// Names a quest that is not there, several that are, or itself by a
+    /// chain: no quest finishing frees it, so it needs the human.
+    Tangled,
     /// Its tombs are at it.
     Tombs,
     /// Every tomb still there says it is done: the human picks one.
@@ -162,6 +186,8 @@ impl RowState {
             RowState::Review => "review",
             RowState::Blocked => "blocked",
             RowState::Waits => "waits",
+            RowState::After => "after",
+            RowState::Tangled => "tangled",
             RowState::Tombs => "tombs",
             RowState::Pick => "pick one",
         }
@@ -177,7 +203,8 @@ impl RowState {
             RowState::Gone => '\u{E711}',
             RowState::Review => '\u{E73E}',
             RowState::Blocked => '\u{E7BA}',
-            RowState::Waits => '\u{E823}',
+            RowState::Waits | RowState::After => '\u{E823}',
+            RowState::Tangled => '\u{E7BA}',
             RowState::Tombs => '\u{E716}',
             RowState::Pick => '\u{E734}',
         }
@@ -187,10 +214,10 @@ impl RowState {
     /// lamp burns in, so a row and its session's tile agree.
     pub fn color(self) -> Color {
         match self {
-            RowState::Open => theme::text_dim(),
+            RowState::Open | RowState::After => theme::text_dim(),
             RowState::Working | RowState::Tombs => theme::working(),
             RowState::Asks | RowState::Review | RowState::Pick => theme::waiting(),
-            RowState::Blocked => theme::error(),
+            RowState::Blocked | RowState::Tangled => theme::error(),
             RowState::Paused | RowState::Gone | RowState::Waits => theme::idle(),
         }
     }
@@ -199,7 +226,12 @@ impl RowState {
     pub fn needs_you(self) -> bool {
         matches!(
             self,
-            RowState::Asks | RowState::Review | RowState::Blocked | RowState::Gone | RowState::Pick
+            RowState::Asks
+                | RowState::Review
+                | RowState::Blocked
+                | RowState::Gone
+                | RowState::Pick
+                | RowState::Tangled
         )
     }
 }
@@ -258,10 +290,42 @@ mod tests {
         let t = &parse("- [!] A @a-1: later {on quest: Build it}\n")[0];
         assert_eq!(row_state(t, Some(&Phase::Done)), RowState::Waits);
         assert!(!RowState::Waits.needs_you());
-        assert_eq!(note(t, 0).as_deref(), Some("after Build it"));
+        let ready = horadric_core::tasks::readiness(std::slice::from_ref(t));
+        assert_eq!(note(t, &ready[0], 0).as_deref(), Some("no quest Build it"));
+        assert_eq!(note(t, &Ready::Yes, 0).as_deref(), Some("after Build it"));
         let t = &parse("- [!] A @a-1: why\n")[0];
         assert_eq!(row_state(t, None), RowState::Blocked);
-        assert_eq!(note(t, 0), None);
+        assert_eq!(note(t, &Ready::Yes, 0), None);
+    }
+
+    #[test]
+    fn a_quest_that_waits_for_another_reads_after_it_dim_and_calls_nobody() {
+        let t = parse(
+            "- [ ] A\n- [ ] B\n  After: A\n- [!] C @c-1: needs A {after}\n  After: A\n- [ ] D\n  After: Typo\n",
+        );
+        let r = horadric_core::tasks::readiness(&t);
+        let rows: Vec<RowState> = (0..4)
+            .map(|i| gated(row_state(&t[i], None), &r[i]))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                RowState::Open,
+                RowState::After,
+                RowState::After,
+                RowState::Tangled
+            ]
+        );
+        assert_eq!(note(&t[1], &r[1], 0).as_deref(), Some("after A"));
+        assert_eq!(note(&t[2], &r[2], 0).as_deref(), Some("after A"));
+        assert_eq!(note(&t[3], &r[3], 0).as_deref(), Some("no quest Typo"));
+        assert!(!RowState::After.needs_you() && RowState::Tangled.needs_you());
+        assert_eq!(RowState::After.color(), RowState::Open.color());
+        // Work in hand reads as it is doing, whatever its After: lines say.
+        assert_eq!(
+            gated(RowState::Working, &Ready::After("A".into())),
+            RowState::Working
+        );
     }
 
     #[test]

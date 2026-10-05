@@ -3060,7 +3060,7 @@ on, unless the ten minute gap passed meanwhile.
 ### Orchestration
 
 Asked for on 2026-10-01, decided on 2026-10-05 (see the end of this
-section), not built yet. The goal is development
+section). Step 1 is built (2026-10-05); the rest is not yet. The goal is development
 that runs itself across many sessions, with the human hearing only
 about what needs a human. Today the human is the orchestrator: with
 several sessions in a project, a quest that cannot go on because it
@@ -3081,7 +3081,21 @@ in this order.
 **1. Dependencies in the quest log, declared before work starts.**
 
 This reopens "No dependencies" in The task list. The human said yes on
-2026-10-05.
+2026-10-05. **Built on 2026-10-05**, as below, with three things the
+plan did not say:
+
+- `quest blocked "why" --on "title"` writes `{after}` at the end of the
+  blocked line beside the `After:` line. Without it a quest blocked on
+  the human that has `After:` lines from planning, all done, reads the
+  same as one blocked until its quest is done, and would be resumed.
+  `{on quest: ...}` and `--on-quest` still read as before and mean the
+  same as `--on`.
+- The waits on a file, a command, `main` and a time stay: they were
+  built and work, and dropping them would break lists that use them.
+- A name that matches nothing or several, and a cycle, read "tangled"
+  in red on the row with the name, and a toast says what is wrong,
+  since no quest finishing frees them. A click on a quest that waits
+  still briefs and starts it: the human may overrule the order.
 
 - **The form.** A notes line `After: <title>` names a quest this one
   waits for, one line each. The title is matched exactly or by a unique

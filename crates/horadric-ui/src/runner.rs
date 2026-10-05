@@ -610,11 +610,11 @@ impl App {
     /// list and the clock answer at once, a file by a look at the disk;
     /// git and a command run on a thread at most every `CHECK_GAP`, and
     /// until one has answered the wait is not over.
-    fn wait_met(&self, key: &str, tasks: &[Task], t: &Task, now: u64) -> bool {
+    fn wait_met(&self, key: &str, t: &Task, now: u64) -> bool {
         let Some(wait) = &t.wait else {
             return false;
         };
-        if let Some(met) = wait.met(tasks, now) {
+        if let Some(met) = wait.met(now) {
             return met;
         }
         let Some(dir) = self.project_dir(key) else {
@@ -632,7 +632,7 @@ impl App {
                 ],
             ),
             Wait::Cmd(c) => ("cmd.exe", vec![c.clone()]),
-            Wait::Quest(_) | Wait::Until(_) => return false,
+            Wait::After | Wait::Quest(_) | Wait::Until(_) => return false,
         };
         let id = (key.to_string(), wait.spell());
         let Ok(mut checks) = self.tasks.checks.lock() else {
@@ -674,9 +674,9 @@ impl App {
     /// go on, typed into its terminal between turns, and an item whose
     /// session is gone starts again.
     fn resume_blocked(&mut self, key: &str, t: &Task) {
-        let Some(wait) = t.wait.clone() else {
+        if t.wait.is_none() {
             return;
-        };
+        }
         // A session that ended, or whose terminal exited, is as gone as one
         // the registry no longer has.
         let h = t.holder.clone().filter(|h| {
@@ -707,7 +707,7 @@ impl App {
                 let Some(c) = self.consoles.get(&h) else {
                     return;
                 };
-                c.write(tasks::waited(&horadric_command(), &wait).into_bytes());
+                c.write(tasks::waited(&horadric_command(), t).into_bytes());
                 self.tasks.enters.push((h.clone(), Instant::now()));
                 self.tasks.nudged.remove(&h);
             }
@@ -717,7 +717,7 @@ impl App {
             self.toasts.show(
                 Kind::Info,
                 &format!("Quest goes on: {}", t.title),
-                &wait.over(),
+                &t.over(),
             );
         }
     }
@@ -901,7 +901,7 @@ impl App {
                         b.mode,
                         b.parallel,
                         |id| self.holder(id),
-                        |t| self.wait_met(key, &b.tasks, t, now),
+                        |t| self.wait_met(key, t, now),
                     ),
                     Next::Start(_) | Next::Resume(_)
                 ) || b.tasks.iter().any(|t| {
@@ -1098,6 +1098,17 @@ impl App {
     /// same while it holds, each with its title and text.
     fn worth_saying(&self, key: &str, b: &Board) -> Vec<(String, String, String)> {
         let mut out = Vec::new();
+        // An After: line no quest finishing can free waits forever unless
+        // somebody hears of it.
+        for (t, r) in b.tasks.iter().zip(tasks::readiness(&b.tasks)) {
+            if matches!(t.mark, Mark::Open | Mark::Blocked) && r.tangled() {
+                out.push((
+                    format!("tangled:{key}:{}", t.title),
+                    format!("Cannot start: {}", t.title),
+                    r.why(),
+                ));
+            }
+        }
         for t in &b.tasks {
             let Some(h) = t.holder.as_deref() else {
                 continue;
@@ -1182,7 +1193,7 @@ impl App {
             b.mode,
             b.parallel,
             |id| self.holder(id),
-            |t| self.wait_met(key, &b.tasks, t, now),
+            |t| self.wait_met(key, t, now),
         );
         let (Next::Start(i) | Next::Resume(i)) = next else {
             return;

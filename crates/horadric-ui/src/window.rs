@@ -608,6 +608,7 @@ impl Cluster {
             None => board::row_state(t, None),
         };
         let now = crate::app::unix_now();
+        let ready = horadric_core::tasks::readiness(&b.tasks);
         let mut items: Vec<Item> = b
             .shown()
             .into_iter()
@@ -616,8 +617,8 @@ impl Cluster {
                 Item {
                     line: t.line,
                     title: t.title.clone(),
-                    state: state(t),
-                    note: board::note(t, now),
+                    state: board::gated(state(t), &ready[i]),
+                    note: board::note(t, &ready[i], now),
                     finish: None,
                     holder: t.holder.clone(),
                 }
