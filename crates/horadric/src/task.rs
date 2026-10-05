@@ -396,10 +396,15 @@ fn record(project: &Path, quest: String, title: &str, what: Happened) {
     });
 }
 
-/// The project whose list has the session's item: above `cwd`, or, for a
-/// session in a worktree of its own, in the main working tree.
+/// The project whose list has the session's item: for a session in a
+/// worktree of its own, in the main working tree, or else above `cwd`. The
+/// main tree goes first because a worktree can hold a committed copy of the
+/// log with the same holder line, and marking that copy leaves the real
+/// quest unfinished.
 fn held(cwd: &Path, id: &str) -> Option<PathBuf> {
-    file::find_held(cwd, id).or_else(|| file::find_held(&main_tree()?, id))
+    main_tree()
+        .and_then(|main| file::find_held(&main, id))
+        .or_else(|| file::find_held(cwd, id))
 }
 
 /// The list in the main working tree, for a session in a worktree, which
