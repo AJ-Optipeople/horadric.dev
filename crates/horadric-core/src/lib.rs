@@ -30,6 +30,7 @@ pub mod tasks;
 pub mod title;
 pub mod tombs;
 pub mod usage;
+pub mod warriv;
 pub mod worktree;
 
 pub use agent::Agent;

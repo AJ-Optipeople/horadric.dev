@@ -87,6 +87,16 @@ work. Worktrees are next.
   `--on-quest "title"`, `--on-main ref`, `--on-file path`, `--on-cmd
   "command"` or `--until +30m` goes on by itself once that holds, and the
   list works on past it meanwhile.
+- Warriv, an orchestrator per project, off unless `"orchestrator": true`
+  is in `.horadric/config.json`. When a quest blocks on a question, a
+  session stops without reporting, an `After:` line names nothing, a
+  merge fails or the log in auto mode has nothing left to start, a fresh
+  Warriv session wakes with what happened. It answers the quest's session
+  with `horadric quest tell "title" "message"`, adds or splits quests,
+  writes what it decided as a `Warriv:` note under the quest, and hands
+  the rest to you with `horadric quest blocked "question" --quest
+  "title"`. It changes no code, starts no session, and wakes at most six
+  times an hour per project.
 - A Runetome per project: rune stones under the quest log, each a button
   that casts a runeword, a list of steps done in order. A step says
   something to the session and waits for its turn to end, types keys into

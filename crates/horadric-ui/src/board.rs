@@ -18,6 +18,8 @@ pub struct Board {
     /// The project is a repository's main tree, so an item can get a
     /// worktree of its own, to run beside others or in tombs.
     pub own_trees: bool,
+    /// Warriv is on: what needs judgment wakes it before the human.
+    pub orchestrator: bool,
 }
 
 impl Board {
@@ -248,6 +250,7 @@ mod tests {
             tasks: parse(text),
             parallel: 1,
             own_trees: false,
+            orchestrator: false,
         }
     }
 

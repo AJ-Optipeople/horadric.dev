@@ -2816,6 +2816,9 @@ impl App {
                             if let Some(tomb) = &t.tomb {
                                 self.tomb_reported(tomb, t.why.as_deref());
                             }
+                            if let (Some(quest), Some(tell)) = (&t.quest, &t.tell) {
+                                self.hear_tell(&t.dir, quest, tell, t.by.as_deref());
+                            }
                             self.refresh_boards(true);
                             self.run_tasks();
                         }
@@ -3784,7 +3787,10 @@ impl App {
                 env.push((TASKS_ENV.into(), folder_key(&cwd.to_string_lossy())));
                 env
             })
-            .unwrap_or_default();
+            // Empty, so one this Horadric was started with, as a dev
+            // instance from a quest's worktree is, never sends `horadric
+            // quest` to another project's list.
+            .unwrap_or_else(|| vec![(TASKS_ENV.into(), String::new())]);
         let serial = self.next_serial;
         self.next_serial += 1;
         let console = Console::spawn(

@@ -3162,7 +3162,8 @@ several sessions in a project, a quest that cannot go on because it
 waits on another sits `[!]` until the human notices, works out what it
 waits on and starts it again. "Blocked quests resume by themselves" in
 the quest log fixes part of that. It is not the whole answer, and this
-section says what is.
+section says what is. Step 2, Warriv, is built too (2026-10-05); step 3
+is not yet.
 
 **Why a blocked quest is the wrong place to start.** When quest B waits
 on quest A, the dependency was there before either started. B finds out
@@ -3272,6 +3273,52 @@ and the file.
   prompt, the queue of events. On screen with a dev instance: a fake
   quest blocked with a question its notes answer, Warriv wakes, tells the
   session, the quest goes on. Count `claude.exe` after.
+
+Built on 2026-10-05. `horadric_core::warriv` decides: `events` reads
+what the log holds now (a quest `[!]` with no wait and a reason Warriv
+did not write, a quest whose session stopped after the nudge, a tangled
+`After:` line, and a log in auto mode with nothing in hand or ready and
+nobody blocked on the human), a `Desk` per project hears each event once
+by its key, queues the new ones and spends the budget of six wakes an
+hour, and `prompt`, `more`, `told` and `system_prompt` are what Warriv
+and the told session read. A failed merge is pushed onto the desk by
+`after_landing`, since the log does not hold it. The UI's `warriv.rs`
+starts a fresh session named Warriv in the main tree when events wait
+and none is awake, types the queued ones in as one line at its next
+`Stop`, and closes it at a `Stop` with nothing left. What the plan did
+not say:
+
+- **Never woken by itself** is by kind. Warriv can only cause a tangled
+  `After:` line or a stalled log, so one of those that first shows up
+  while it is awake is taken as its own and not queued. A quest it hands
+  on is blocked with a reason that starts `Warriv asks: `, which wakes
+  nobody and tells step 3 which quests are the human's.
+- **Its commands.** Besides `quest tell` and `quest add --after`:
+  `quest note "title" "text"` (marked `Warriv: ` when Warriv runs it),
+  `quest add --below "title"`, and `quest blocked "question" --quest
+  "title"` to hand a held quest to the human. It starts with
+  `--allowedTools "Bash(<horadric> quest:*)"`, so in the project's mode
+  these never prompt, and its system prompt says to change the log only
+  through them. A tell goes once per quest a wake; the app types it,
+  with how to report done, once the holder is at `Stop`, and a blocked
+  quest goes `[/]`. A tell for a quest whose session is gone becomes a
+  `Warriv:` note and the quest starts again.
+- **The last turn** is the `Stop` hook's whole `last_assistant_message`,
+  kept on the session (not saved) and cut to its last 2000 characters.
+- **Found on screen:** a session in the main tree inherited
+  `HORADRIC_TASKS` from the Horadric that started it, so a dev instance
+  started from a quest's worktree pointed `horadric quest` at that quest's
+  own log. Warriv read the real horadric.dev log that way. Sessions
+  without a worktree now get it empty.
+- Seen on a dev instance with a scratch repository and a real Claude: the
+  quest blocked on "Which port should the server listen on?", Warriv woke,
+  ran `quest tell` and `quest note` without a prompt, the session got the
+  answer, wrote the port, committed and ran `quest done`, and Warriv
+  closed. No `claude.exe` left under the dev hosts after. A folder Claude
+  has not been told to trust stops every session, Warriv's too, at the
+  trust check before any hook, which nothing in Horadric sees yet.
+- Not done: a Warriv session restored after a restart is paused like any
+  other, and a new event starts a fresh one beside it.
 
 **3. The human hears only what Warriv could not settle.**
 

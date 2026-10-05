@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use horadric_core::chronicle::{self, Happened, Record};
 use horadric_core::tasks::{self, Mark, Wait};
-use horadric_core::tombs;
+use horadric_core::{tombs, warriv};
 use horadric_hooks::listener::TasksChanged;
 use horadric_hooks::{
     client, tasks as file, COMMAND_HEADER, OWNER_ENV, SESSION_ENV, TASKS_ENV, TASKS_PATH,
@@ -29,7 +29,12 @@ usage: horadric quest done [\"summary\"]  The quest this session works is comple
              [--until <+30m|UTC time>] or a time comes: then it goes on
        horadric quest add \"title\"       Add a quest to the end of the log
              [--notes \"text\"]          with notes for the agent under it,
-             [--after \"title\"]         to start once that quest is done
+             [--after \"title\"]         to start once that quest is done,
+             [--below \"title\"]         right under that quest
+       horadric quest note \"title\" \"text\"  Add a notes line under a quest
+       horadric quest tell \"title\" \"text\"  Tell the session on a quest, between turns
+       horadric quest blocked \"question\" --quest \"title\"
+                                        Hand a quest a session holds to the human
        horadric quest list              Show the log";
 
 /// What the errors call the list, which may still be the old file.
@@ -40,19 +45,69 @@ pub fn run(args: &[String]) -> Result<(), String> {
     match args.first().map(String::as_str) {
         Some("done") => report(&cwd, None, &args[1..].join(" ")),
         Some("blocked") => {
-            let (why, wait) = why_and_wait(&args[1..], unix_now())?;
-            report(&cwd, Some((&why, wait)), "")
+            let (quest, rest) = quest_flag(&args[1..])?;
+            let (why, wait) = why_and_wait(&rest, unix_now())?;
+            match quest {
+                Some(title) => hand_on(&cwd, &title, &why),
+                None => report(&cwd, Some((&why, wait)), ""),
+            }
         }
         Some("add") => {
-            let (title, notes) = title_and_notes(&args[1..])?;
+            let (title, notes, below) = title_and_notes(&args[1..])?;
             if title.is_empty() {
                 return Err("say what: horadric quest add \"title\"".into());
             }
-            add(&cwd, &title, &notes)
+            add(&cwd, &title, &notes, below.as_deref())
+        }
+        Some("note") => {
+            let (title, text) = title_and_text(&args[1..], "note")?;
+            note(&cwd, &title, &text)
+        }
+        Some("tell") => {
+            let (title, text) = title_and_text(&args[1..], "tell")?;
+            tell(&cwd, &title, &text)
         }
         Some("list") => list(&cwd),
         _ => Err(USAGE.into()),
     }
+}
+
+/// `--quest "title"` taken out of `quest blocked`'s words: the quest to
+/// hand to the human, rather than the session's own.
+fn quest_flag(args: &[String]) -> Result<(Option<String>, Vec<String>), String> {
+    let Some(at) = args.iter().position(|a| a == "--quest") else {
+        return Ok((None, args.to_vec()));
+    };
+    let tail = &args[at + 1..];
+    let end = tail
+        .iter()
+        .position(|a| a.starts_with("--"))
+        .unwrap_or(tail.len());
+    let title = tasks::one_line(&tail[..end].join(" "));
+    if title.is_empty() {
+        return Err("say which quest: --quest \"title\"".into());
+    }
+    let mut rest = args[..at].to_vec();
+    rest.extend_from_slice(&tail[end..]);
+    if rest.iter().any(|a| a.starts_with("--")) {
+        return Err(
+            "a quest handed to the human waits on the human, so --quest takes no --on".into(),
+        );
+    }
+    Ok((Some(title), rest))
+}
+
+/// The quest and the words of `quest note` and `quest tell`.
+fn title_and_text(args: &[String], verb: &str) -> Result<(String, String), String> {
+    let usage = || format!("usage: horadric quest {verb} \"title\" \"text\"");
+    let [title, text @ ..] = args else {
+        return Err(usage());
+    };
+    let text = tasks::one_line(&text.join(" "));
+    if text.is_empty() {
+        return Err(usage());
+    }
+    Ok((tasks::one_line(title), text))
 }
 
 /// What `quest blocked` waits on: a quest in the log, written as an
@@ -157,6 +212,7 @@ fn report_tomb(project: &Path, id: &str, why: Option<&str>) -> Result<(), String
         dir: project.to_string_lossy().into_owned(),
         tomb: Some(id.to_string()),
         why: why.map(str::to_string),
+        ..TasksChanged::default()
     });
     if heard != Some(200) {
         return Err("Horadric did not hear the report. Tell the human you are finished.".into());
@@ -170,13 +226,15 @@ fn report_tomb(project: &Path, id: &str, why: Option<&str>) -> Result<(), String
 
 /// The title and the notes of `quest add`: the words before the first flag
 /// make the title, on one line, the words after `--notes` the notes, and
-/// each `--after` an `After:` line under them.
-fn title_and_notes(args: &[String]) -> Result<(String, String), String> {
-    let is_flag = |a: &String| a == "--notes" || a == "--after";
+/// each `--after` an `After:` line under them. Last, the quest it goes
+/// right under, from `--below`.
+fn title_and_notes(args: &[String]) -> Result<(String, String, Option<String>), String> {
+    let is_flag = |a: &String| a == "--notes" || a == "--after" || a == "--below";
     let first = args.iter().position(is_flag).unwrap_or(args.len());
     let title = tasks::one_line(&args[..first].join(" "));
     let mut notes = Vec::new();
     let mut after = Vec::new();
+    let mut below = None;
     let mut rest = &args[first..];
     while let [flag, tail @ ..] = rest {
         let end = tail.iter().position(is_flag).unwrap_or(tail.len());
@@ -186,25 +244,30 @@ fn title_and_notes(args: &[String]) -> Result<(String, String), String> {
                 return Err("say which quest: --after \"title\"".into());
             }
             after.push(tasks::after_note(&value));
+        } else if flag == "--below" {
+            if value.trim().is_empty() {
+                return Err("say which quest: --below \"title\"".into());
+            }
+            below = Some(tasks::one_line(&value));
         } else {
             notes.push(value);
         }
         rest = &tail[end..];
     }
     notes.extend(after);
-    Ok((title, notes.join("\n")))
+    Ok((title, notes.join("\n"), below))
 }
 
-fn add(cwd: &Path, title: &str, notes: &str) -> Result<(), String> {
+fn add(cwd: &Path, title: &str, notes: &str, below: Option<&str>) -> Result<(), String> {
     let project = session()
         .and_then(|id| held(cwd, &id))
         .or_else(main_list)
         .or_else(|| file::find_list(cwd))
         .unwrap_or_else(|| cwd.to_path_buf());
-    file::update(&project, |text| {
-        Some(tasks::append_with_notes(text, title, notes))
-    })
-    .map_err(|e| format!("{}: {e}", file::file(&project).display()))?;
+    write(&project, |text| match below {
+        None => Ok(tasks::append_with_notes(text, title, notes)),
+        Some(b) => warriv::add_below(text, b, title, notes),
+    })?;
     // Inside a session the new quest grows out of whatever that session
     // works, which the quest log draws as a branch: its quest, or else its
     // conversation, which Claude Code names to the commands it runs.
@@ -219,6 +282,79 @@ fn add(cwd: &Path, title: &str, notes: &str) -> Result<(), String> {
     }
     tell_app(&project);
     println!("Added to {}", file::file(&project).display());
+    Ok(())
+}
+
+/// Changes the log with `change`, which says what is wrong when it can
+/// not.
+fn write(
+    project: &Path,
+    change: impl FnOnce(&str) -> Result<String, String>,
+) -> Result<(), String> {
+    let mut wrong = None;
+    file::update(project, |text| {
+        change(text).map_err(|e| wrong = Some(e)).ok()
+    })
+    .map_err(|e| format!("{}: {e}", file::file(project).display()))?;
+    wrong.map_or(Ok(()), Err)
+}
+
+/// The project whose log a command about any quest works on.
+fn log_of(cwd: &Path) -> Result<PathBuf, String> {
+    main_list()
+        .or_else(|| file::find_list(cwd))
+        .ok_or_else(|| NO_LOG.to_string())
+}
+
+/// A notes line under a quest, marked as Warriv's when Warriv wrote it.
+fn note(cwd: &Path, title: &str, text: &str) -> Result<(), String> {
+    let project = log_of(cwd)?;
+    let line = match session() {
+        Some(id) if warriv::is_warriv(&id) => warriv::note(text),
+        _ => text.to_string(),
+    };
+    write(&project, |log| warriv::add_note(log, title, &line))?;
+    tell_app(&project);
+    println!("Noted under the quest.");
+    Ok(())
+}
+
+/// Hands a quest a session holds to the human, with the question.
+fn hand_on(cwd: &Path, title: &str, question: &str) -> Result<(), String> {
+    let project = log_of(cwd)?;
+    write(&project, |log| warriv::hand_on(log, title, question))?;
+    tell_app(&project);
+    println!("Handed to the human. The quest waits for their answer.");
+    Ok(())
+}
+
+/// Has the app type `text` into the session holding a quest, once it is
+/// between turns. A quest nobody holds has no session to hear it.
+fn tell(cwd: &Path, title: &str, text: &str) -> Result<(), String> {
+    let project = log_of(cwd)?;
+    let list = tasks::parse(&file::read(&project));
+    let t = match tasks::find(&list, title) {
+        Ok(i) => &list[i],
+        Err(0) => return Err(format!("no quest is called \"{title}\"")),
+        Err(_) => return Err(format!("\"{title}\" matches more than one quest")),
+    };
+    if t.holder.is_none() || !t.mark.held() {
+        return Err(format!(
+            "no session holds \"{}\"; add a note to it instead",
+            t.title
+        ));
+    }
+    let heard = post_app(&TasksChanged {
+        dir: project.to_string_lossy().into_owned(),
+        quest: Some(t.title.clone()),
+        tell: Some(text.to_string()),
+        by: session(),
+        ..TasksChanged::default()
+    });
+    if heard != Some(200) {
+        return Err("Horadric did not hear it. Add a note to the quest instead.".into());
+    }
+    println!("Horadric types it into the quest's session once that is between turns.");
     Ok(())
 }
 
@@ -288,6 +424,7 @@ fn session() -> Option<String> {
 fn tell_app(project: &Path) {
     post_app(&TasksChanged {
         dir: PathBuf::from(project).to_string_lossy().into_owned(),
+        by: session(),
         ..TasksChanged::default()
     });
 }
@@ -360,15 +497,15 @@ mod tests {
                 "--notes",
                 "Only after\nexpiry"
             ])),
-            Ok(("Fix the login".into(), "Only after\nexpiry".into()))
+            Ok(("Fix the login".into(), "Only after\nexpiry".into(), None))
         );
         assert_eq!(
             title_and_notes(&words(&["Fix", "the login"])),
-            Ok(("Fix the login".into(), String::new()))
+            Ok(("Fix the login".into(), String::new(), None))
         );
         assert_eq!(
             title_and_notes(&words(&["--notes", "why"])),
-            Ok((String::new(), "why".into()))
+            Ok((String::new(), "why".into(), None))
         );
     }
 
@@ -380,13 +517,54 @@ mod tests {
             ])),
             Ok((
                 "Wire it".into(),
-                "Why.\nAfter: Build it\nAfter: Test it".into()
+                "Why.\nAfter: Build it\nAfter: Test it".into(),
+                None
             ))
         );
         assert_eq!(
             title_and_notes(&words(&["Wire it", "--after", "Build"])),
-            Ok(("Wire it".into(), "After: Build".into()))
+            Ok(("Wire it".into(), "After: Build".into(), None))
         );
         assert!(title_and_notes(&words(&["Wire it", "--after"])).is_err());
+    }
+
+    #[test]
+    fn below_names_the_quest_it_goes_under() {
+        assert_eq!(
+            title_and_notes(&words(&[
+                "Half", "--below", "Big", "one", "--after", "Big one"
+            ])),
+            Ok((
+                "Half".into(),
+                "After: Big one".into(),
+                Some("Big one".into())
+            ))
+        );
+        assert!(title_and_notes(&words(&["Half", "--below"])).is_err());
+    }
+
+    #[test]
+    fn blocked_with_quest_hands_that_quest_on() {
+        assert_eq!(
+            quest_flag(&words(&["Which", "card?", "--quest", "Pay", "for it"])),
+            Ok((Some("Pay for it".into()), words(&["Which", "card?"])))
+        );
+        assert_eq!(
+            quest_flag(&words(&["needs", "--on", "B"])),
+            Ok((None, words(&["needs", "--on", "B"])))
+        );
+        assert!(quest_flag(&words(&["x", "--quest"])).is_err());
+        assert!(quest_flag(&words(&["x", "--quest", "A", "--on", "B"])).is_err());
+    }
+
+    #[test]
+    fn note_and_tell_take_a_quest_then_the_words() {
+        assert_eq!(
+            title_and_text(&words(&["Serve the API", "Use", "port 4100."]), "tell"),
+            Ok(("Serve the API".into(), "Use port 4100.".into()))
+        );
+        assert!(title_and_text(&words(&["Serve the API"]), "tell").is_err());
+        assert!(title_and_text(&words(&["Serve", " "]), "note").is_err());
+        assert!(title_and_text(&[], "note").is_err());
     }
 }
