@@ -332,8 +332,11 @@ pub struct TomeStone {
     pub cracked: bool,
     /// Where it is while it is cast: "2/4".
     pub progress: Option<String>,
-    /// A project's stone whose steps are not the ones last cast.
+    /// A project's stone whose steps are not the ones last cast, or an
+    /// errand not armed for its steps.
     pub marked: bool,
+    /// An errand whose last cast failed: its dot is red.
+    pub failed: bool,
 }
 
 /// How a stone of the tome draws.
@@ -1094,7 +1097,7 @@ impl Painter<'_> {
             } else {
                 self.stone(gpu, r, &look(s, hot));
             }
-            if s.marked && !lifted {
+            if (s.marked || s.failed) && !lifted {
                 let e = D2D1_ELLIPSE {
                     point: Vector2 {
                         X: r.right() - 3.0,
@@ -1103,7 +1106,12 @@ impl Painter<'_> {
                     radiusX: 3.0,
                     radiusY: 3.0,
                 };
-                self.brush.SetColor(&color(theme::waiting()));
+                let dot = if s.failed {
+                    theme::error()
+                } else {
+                    theme::waiting()
+                };
+                self.brush.SetColor(&color(dot));
                 self.rt.FillEllipse(&e, self.brush);
             }
             let (text, ink) = match (&s.progress, &s.label) {

@@ -1,0 +1,494 @@
+//! Errands: stones cast on a clock. A stone with `"every"` is cast
+//! unattended once the human has armed it, at most one a project at a
+//! time, and stopped when it runs past `"for"`. When each is due and
+//! which one goes now is decided here, from Unix seconds and the local
+//! clock's offset, so the app only reads the clock and carries it out.
+
+use serde::{Deserialize, Serialize};
+
+use super::{Rune, Stone};
+
+/// How often an errand is cast.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Every {
+    /// So many seconds after the last cast began.
+    Span(u64),
+    /// Each day at this minute of the local day.
+    Day(u32),
+    /// Monday to Friday at this minute.
+    Weekday(u32),
+    /// One day a week, 0 for Monday, at this minute.
+    Week(u8, u32),
+}
+
+/// A stone's clock: how often, and how long a cast may run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Errand {
+    pub every: Every,
+    /// Seconds a cast may run before it is stopped.
+    pub most: u64,
+}
+
+/// How long a cast may run when the stone does not say `"for"`.
+pub const FOR_DEFAULT: u64 = 30 * 60;
+
+/// The shortest span an errand may be cast at, so a slip of the pen does
+/// not start something every second.
+const SHORTEST: u64 = 60;
+
+const DAYS: [&str; 7] = [
+    "monday",
+    "tuesday",
+    "wednesday",
+    "thursday",
+    "friday",
+    "saturday",
+    "sunday",
+];
+
+/// A length of time as a stone writes it: a number and `s`, `m` or `h`,
+/// one or several (`1h30m`). In seconds.
+pub fn span(text: &str) -> Result<u64, String> {
+    let t = text.trim().to_lowercase();
+    let wrong = || format!("\"{text}\" is not a time like 30m, 1h or 1h30m");
+    let mut total = 0u64;
+    let mut number = String::new();
+    for c in t.chars() {
+        if c.is_ascii_digit() {
+            number.push(c);
+            continue;
+        }
+        let unit = match c {
+            's' => 1,
+            'm' => 60,
+            'h' => 3600,
+            _ => return Err(wrong()),
+        };
+        let n: u64 = number.parse().map_err(|_| wrong())?;
+        total = total.saturating_add(n.saturating_mul(unit));
+        number.clear();
+    }
+    if !number.is_empty() || total == 0 {
+        return Err(wrong());
+    }
+    Ok(total)
+}
+
+/// What `"every"` says: a span (`30m`, `1h`), or `day`, `weekday` or a
+/// day's name (`sunday`, `sun`) and a time on the 24 hour clock.
+pub fn every(text: &str) -> Result<Every, String> {
+    let words: Vec<String> = text.split_whitespace().map(str::to_lowercase).collect();
+    match words.as_slice() {
+        [one] => {
+            let s = span(one)?;
+            if s < SHORTEST {
+                return Err(format!("\"{text}\" is too often: once a minute at most"));
+            }
+            Ok(Every::Span(s))
+        }
+        [day, time] => {
+            let at = clock(time)?;
+            Ok(match day.as_str() {
+                "day" | "daily" => Every::Day(at),
+                "weekday" | "weekdays" => Every::Weekday(at),
+                d => {
+                    let d = d
+                        .strip_suffix('s')
+                        .filter(|d| d.ends_with("day"))
+                        .unwrap_or(d);
+                    let n = DAYS
+                        .iter()
+                        .position(|name| *name == d || (d.len() == 3 && name.starts_with(d)))
+                        .ok_or_else(|| {
+                            format!("\"{day}\" is not day, weekday or the name of a day")
+                        })?;
+                    Every::Week(n as u8, at)
+                }
+            })
+        }
+        _ => Err(format!(
+            "\"{text}\" is not like 30m, 1h, day 09:00, weekday 08:30 or sunday 12:00"
+        )),
+    }
+}
+
+/// A time of day, `9:00` or `09:00`, as minutes since midnight.
+fn clock(text: &str) -> Result<u32, String> {
+    let wrong = || format!("\"{text}\" is not a time of day like 09:00");
+    let (h, m) = text.split_once(':').ok_or_else(wrong)?;
+    let (h, m): (u32, u32) = (
+        h.parse().map_err(|_| wrong())?,
+        m.parse().map_err(|_| wrong())?,
+    );
+    if h > 23 || m > 59 || text.len() > 5 {
+        return Err(wrong());
+    }
+    Ok(h * 60 + m)
+}
+
+/// When an errand cast last at `last` (Unix seconds) is due again, the
+/// local clock being `offset` seconds ahead of UTC. A clock time is the
+/// first such moment after `last`, so a cast missed while the app was off
+/// is due at once, and only once.
+pub fn due(every: Every, last: u64, offset: i64) -> u64 {
+    let (minute, on): (u32, Box<dyn Fn(u8) -> bool>) = match every {
+        Every::Span(s) => return last.saturating_add(s),
+        Every::Day(m) => (m, Box::new(|_| true)),
+        Every::Weekday(m) => (m, Box::new(|day| day < 5)),
+        Every::Week(d, m) => (m, Box::new(move |day| day == d)),
+    };
+    let today = (last as i64 + offset).div_euclid(86_400);
+    // A week and a day always holds the next one.
+    (today..today + 9)
+        .filter(|&day| on(weekday(day)))
+        .map(|day| day * 86_400 + i64::from(minute) * 60 - offset)
+        .find(|&t| t > last as i64)
+        .unwrap_or(last as i64 + 86_400) as u64
+}
+
+/// The day of the week of a day counted from 1 January 1970, a Thursday,
+/// 0 for Monday.
+fn weekday(day: i64) -> u8 {
+    (day + 3).rem_euclid(7) as u8
+}
+
+/// How a schedule reads to the human: "every 1h", "every day at 09:00".
+pub fn describe(every: Every) -> String {
+    let at = |m: u32| format!("{:02}:{:02}", m / 60, m % 60);
+    match every {
+        Every::Span(s) => format!("every {}", length(s)),
+        Every::Day(m) => format!("every day at {}", at(m)),
+        Every::Weekday(m) => format!("every weekday at {}", at(m)),
+        Every::Week(d, m) => {
+            let name = DAYS[usize::from(d.min(6))];
+            let mut name = name.to_string();
+            name[..1].make_ascii_uppercase();
+            format!("every {name} at {}", at(m))
+        }
+    }
+}
+
+/// A span in the fewest words: "90s", "30m", "1h", "1h30m".
+pub fn length(secs: u64) -> String {
+    let (h, m, s) = (secs / 3600, secs % 3600 / 60, secs % 60);
+    let mut out = String::new();
+    if h > 0 {
+        out.push_str(&format!("{h}h"));
+    }
+    if m > 0 {
+        out.push_str(&format!("{m}m"));
+    }
+    if s > 0 || out.is_empty() {
+        out.push_str(&format!("{s}s"));
+    }
+    out
+}
+
+/// A stone's `"every"` and `"for"`, when it has `"every"`. A stone with
+/// it whose steps need a quest's session (test, review, merge) cannot be
+/// an errand, which has no quest.
+pub(super) fn errand_of(
+    value: &serde_json::Value,
+    runes: &[Rune],
+) -> Result<Option<Errand>, String> {
+    let Some(every_text) = value.get("every") else {
+        return Ok(None);
+    };
+    let every_text = every_text
+        .as_str()
+        .ok_or("\"every\" is text like \"1h\" or \"day 09:00\"")?;
+    let every = every(every_text)?;
+    let most = match value.get("for") {
+        None => FOR_DEFAULT,
+        Some(v) => span(v.as_str().ok_or("\"for\" is text like \"30m\"")?)?,
+    };
+    if runes
+        .iter()
+        .any(|r| matches!(r, Rune::Test | Rune::Review | Rune::Merge))
+    {
+        return Err(
+            "test, review and merge need a quest's session, which an errand has none of".into(),
+        );
+    }
+    Ok(Some(Errand { every, most }))
+}
+
+/// What the app keeps of an armed errand, by project and label.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Armed {
+    /// The steps it was armed with, as `runeword::fingerprint`. Steps
+    /// that are not these disarm it.
+    pub steps: u64,
+    /// When its last cast began, or it was armed, in Unix seconds: when
+    /// it is next due is counted from this.
+    pub last: u64,
+    /// When its last cast finished well, for `{since}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished: Option<u64>,
+    /// Its last cast failed: the stone shows red until one succeeds, and
+    /// a failure again is not told again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub failed: bool,
+    /// The clock cast it and it has not ended yet.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub running: bool,
+}
+
+impl Armed {
+    /// Armed at `now` with these steps.
+    pub fn new(runes: &[Rune], now: u64) -> Armed {
+        Armed {
+            steps: super::fingerprint(runes),
+            last: now,
+            finished: None,
+            failed: false,
+            running: false,
+        }
+    }
+
+    /// Whether it is armed for these steps.
+    pub fn fits(&self, runes: &[Rune]) -> bool {
+        self.steps == super::fingerprint(runes)
+    }
+}
+
+/// One of a project's armed errands as the clock looks at it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Clocked {
+    pub label: String,
+    pub errand: Errand,
+    pub armed: Armed,
+}
+
+/// What the clock does with an errand now.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Tick {
+    /// Cast it.
+    Cast(String),
+    /// It is due while the account is too near its limit: it is passed
+    /// over until its next time, not held to run later.
+    Skip(String),
+    /// It ran past its `"for"`: stop it.
+    Overdue(String),
+}
+
+/// What the clock does with one project's armed errands at `now`. One
+/// runs at a time: while one does, the others wait, and it is stopped
+/// once it runs past its `"for"`. Otherwise the one due longest is cast,
+/// unless `full` (the account's fullest limit is at 90 % or more), when
+/// every due one is skipped.
+pub fn tick(errands: &[Clocked], now: u64, offset: i64, full: bool) -> Vec<Tick> {
+    let running: Vec<&Clocked> = errands.iter().filter(|e| e.armed.running).collect();
+    if !running.is_empty() {
+        return running
+            .into_iter()
+            .filter(|e| now >= e.armed.last.saturating_add(e.errand.most))
+            .map(|e| Tick::Overdue(e.label.clone()))
+            .collect();
+    }
+    let mut due: Vec<(u64, &Clocked)> = errands
+        .iter()
+        .map(|e| (due(e.errand.every, e.armed.last, offset), e))
+        .filter(|(at, _)| *at <= now)
+        .collect();
+    due.sort_by_key(|(at, _)| *at);
+    if full {
+        return due
+            .into_iter()
+            .map(|(_, e)| Tick::Skip(e.label.clone()))
+            .collect();
+    }
+    due.first()
+        .map(|(_, e)| Tick::Cast(e.label.clone()))
+        .into_iter()
+        .collect()
+}
+
+/// What the human reads before arming an errand: what it is for, when it
+/// runs and for how long at most, on what, and every step.
+pub fn arm_text(stone: &Stone, on: &str) -> String {
+    let mut out = String::new();
+    if !stone.about.is_empty() {
+        out.push_str(&stone.about);
+        out.push_str("\n\n");
+    }
+    if let Some(e) = &stone.errand {
+        out.push_str(&format!(
+            "Runs {} without asking, stopped after {}. A cast it misses while Horadric is off runs once when it starts.\n\n",
+            describe(e.every),
+            length(e.most)
+        ));
+    }
+    out.push_str(&super::stone::ask_text(stone, on, false));
+    out.push_str("\n\nIf its steps change it is disarmed until you arm it again.");
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 2026-10-05 00:00 UTC, a Monday.
+    const MONDAY: u64 = 1_791_158_400;
+    const HOUR: u64 = 3600;
+
+    #[test]
+    fn a_span_reads_seconds_minutes_and_hours() {
+        assert_eq!(span("30m"), Ok(1800));
+        assert_eq!(span("1h"), Ok(3600));
+        assert_eq!(span("1h30m"), Ok(5400));
+        assert_eq!(span(" 90S "), Ok(90));
+        for bad in ["", "m", "30", "1x", "0m", "1.5h"] {
+            assert!(span(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn every_reads_a_span_a_day_a_weekday_and_a_day_name() {
+        assert_eq!(every("30m"), Ok(Every::Span(1800)));
+        assert_eq!(every("1h"), Ok(Every::Span(3600)));
+        assert_eq!(every("day 09:00"), Ok(Every::Day(540)));
+        assert_eq!(every("Weekday 8:30"), Ok(Every::Weekday(510)));
+        assert_eq!(every("sunday 12:00"), Ok(Every::Week(6, 720)));
+        assert_eq!(every("Sundays 12:00"), Ok(Every::Week(6, 720)));
+        assert_eq!(every("tue 07:05"), Ok(Every::Week(1, 425)));
+        assert!(every("30s").unwrap_err().contains("once a minute"));
+        assert!(every("someday 09:00").is_err());
+        assert!(every("day 24:00").is_err());
+        assert!(every("day 9").is_err());
+        assert!(every("day 09:00 sharp").is_err());
+    }
+
+    #[test]
+    fn a_span_is_due_that_long_after_the_last_cast() {
+        assert_eq!(due(Every::Span(3600), 1000, 7200), 4600);
+    }
+
+    #[test]
+    fn a_day_is_due_at_the_next_local_time_after_the_last_cast() {
+        // Two hours ahead of UTC: 09:00 local is 07:00 UTC.
+        let nine = MONDAY + 7 * HOUR;
+        assert_eq!(due(Every::Day(540), MONDAY, 2 * HOUR as i64), nine);
+        // Cast at nine, the next is tomorrow at nine.
+        assert_eq!(
+            due(Every::Day(540), nine, 2 * HOUR as i64),
+            nine + 24 * HOUR
+        );
+        // Behind UTC the local day starts later.
+        assert_eq!(
+            due(Every::Day(540), MONDAY, -5 * HOUR as i64),
+            MONDAY + 14 * HOUR
+        );
+    }
+
+    #[test]
+    fn a_weekday_skips_the_weekend_and_a_day_name_waits_for_its_day() {
+        let friday_ten = MONDAY + 4 * 24 * HOUR + 10 * HOUR;
+        let monday_next = MONDAY + 7 * 24 * HOUR + 8 * HOUR;
+        assert_eq!(due(Every::Weekday(480), friday_ten, 0), monday_next);
+        assert_eq!(
+            due(Every::Week(6, 720), MONDAY, 0),
+            MONDAY + 6 * 24 * HOUR + 12 * HOUR
+        );
+        let sunday_noon = MONDAY + 6 * 24 * HOUR + 12 * HOUR;
+        assert_eq!(
+            due(Every::Week(6, 720), sunday_noon, 0),
+            sunday_noon + 7 * 24 * HOUR
+        );
+    }
+
+    #[test]
+    fn a_cast_missed_for_days_is_due_once_and_then_from_now() {
+        let last = MONDAY + 9 * HOUR;
+        let now = last + 3 * 24 * HOUR;
+        let e = clocked("Nightly", Every::Day(540), last);
+        assert_eq!(
+            tick(std::slice::from_ref(&e), now, 0, false),
+            [Tick::Cast("Nightly".into())]
+        );
+        // Cast now, it is due tomorrow at nine, not three more times.
+        assert_eq!(due(Every::Day(540), now + 60, 0), now + 24 * HOUR);
+    }
+
+    fn clocked(label: &str, every: Every, last: u64) -> Clocked {
+        Clocked {
+            label: label.into(),
+            errand: Errand {
+                every,
+                most: FOR_DEFAULT,
+            },
+            armed: Armed {
+                steps: 0,
+                last,
+                finished: None,
+                failed: false,
+                running: false,
+            },
+        }
+    }
+
+    #[test]
+    fn one_runs_at_a_time_the_one_due_longest_first() {
+        let a = clocked("A", Every::Span(600), 1000);
+        let b = clocked("B", Every::Span(600), 500);
+        let c = clocked("C", Every::Span(6000), 1000);
+        assert_eq!(
+            tick(&[a.clone(), b.clone(), c.clone()], 2000, 0, false),
+            [Tick::Cast("B".into())]
+        );
+        assert_eq!(tick(&[a.clone(), c.clone()], 1500, 0, false), []);
+        let mut running = b;
+        running.armed.running = true;
+        running.armed.last = 1900;
+        assert_eq!(tick(&[a, running, c], 2000, 0, false), []);
+    }
+
+    #[test]
+    fn near_the_limit_every_due_errand_is_skipped() {
+        let a = clocked("A", Every::Span(600), 1000);
+        let b = clocked("B", Every::Span(600), 500);
+        let c = clocked("C", Every::Span(6000), 1000);
+        assert_eq!(
+            tick(&[a, b, c], 2000, 0, true),
+            [Tick::Skip("B".into()), Tick::Skip("A".into())]
+        );
+    }
+
+    #[test]
+    fn a_cast_running_past_its_for_is_overdue() {
+        let mut e = clocked("A", Every::Span(600), 1000);
+        e.armed.running = true;
+        assert_eq!(
+            tick(std::slice::from_ref(&e), 1000 + FOR_DEFAULT - 1, 0, false),
+            []
+        );
+        assert_eq!(
+            tick(&[e], 1000 + FOR_DEFAULT, 0, true),
+            [Tick::Overdue("A".into())]
+        );
+    }
+
+    #[test]
+    fn a_schedule_reads_in_words() {
+        assert_eq!(describe(Every::Span(3600)), "every 1h");
+        assert_eq!(describe(Every::Span(5400)), "every 1h30m");
+        assert_eq!(describe(Every::Day(540)), "every day at 09:00");
+        assert_eq!(describe(Every::Weekday(510)), "every weekday at 08:30");
+        assert_eq!(describe(Every::Week(6, 720)), "every Sunday at 12:00");
+        assert_eq!(length(90), "1m30s");
+    }
+
+    #[test]
+    fn arming_follows_the_steps() {
+        let steps = vec![Rune::Run {
+            command: "cargo clean".into(),
+            show: false,
+        }];
+        let armed = Armed::new(&steps, 10);
+        assert!(armed.fits(&steps));
+        assert!(!armed.fits(&[Rune::Run {
+            command: "cargo clean --doc".into(),
+            show: false,
+        }]));
+    }
+}

@@ -5552,6 +5552,7 @@ impl App {
             cast_without_asking: !self.tome.ask,
             stones_hidden: self.tome.hidden.clone(),
             stones_order: self.tome.order.clone(),
+            errands: self.tome.errands.clone(),
             update_told: self.update_told.clone(),
             ..Default::default()
         }

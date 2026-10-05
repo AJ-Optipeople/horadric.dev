@@ -3583,6 +3583,40 @@ tested. Nothing happened, no card.
 Event triggers (`"on": "landed"`, `"on": "away"`) are the next step once
 the clock works, and are left out until an errand needs one.
 
+The engine is built (2026-10-05), with errands of `run` steps.
+`runeword::every` reads `"every"` (a span of `s`, `m` and `h` pieces,
+once a minute at most, or `day`, `weekday`, a day's name or its first
+three letters, and `H:MM`), `runeword::span` reads `"for"`, and a stone
+with either wrong, or with test, review or merge, is cracked with the
+reason. `runeword::due` is the first slot after the last cast, from the
+local clock's offset, so a slot missed while the app was off is due at
+once and the next one counts from then. `runeword::tick` decides per
+project: while one runs the others wait and it is `Overdue` past its
+`"for"`; otherwise the one due longest is cast, or every due one is
+skipped (its clock moved on to now) while the fullest limit is at 90 %.
+Armed errands are `errands` in `state.json` (`Armed`: the steps'
+fingerprint, the last cast, the last good finish for `{since}`, failed,
+running), and a stone whose steps no longer fit is taken out of it. The
+tome marks an errand that is not armed with the amber dot and one whose
+last cast failed with a red one; a click on an unarmed errand asks "Run
+<label> unattended?" with the schedule and every step, and the right
+click menu offers Arm or Disarm, and Cast to run it once by hand. An
+errand's cast is a sessionless runeword as any: success says nothing,
+a failure toasts once until a cast succeeds, and an overdue one is
+stopped with its command's tree (`taskkill /T`). The tooltip and
+`horadric runeword list` say when it runs. An errand with `say` or
+`keys` steps parses and can be armed, but the clock leaves it for the
+session half (`errand::clocked`).
+
+Checked on a dev instance of its own (port 4170, scratch `APPDATA`) with
+a stone `"every": "1m"` writing the time to a file, armed through
+`state.json` ten minutes back: it ran at once, then each minute; with the
+app off four minutes it ran once at the next start; a status posting 92 %
+held it two minutes, "skipped" in the log, and 10 % let it run at the
+next minute; changing its command disarmed it within the second, no cast
+after, and the stone showed the amber dot. The arming dialog itself was
+not clicked on screen, since the human was using the desktop.
+
 **5. Ships proposed.** When three or more quests have landed on `main`
 since the last ship local and the checks passed on `main`'s head, a
 toast says "5 quests landed. Ship local?" and its click casts the
