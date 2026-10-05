@@ -19,7 +19,7 @@ use crate::merge::{add_fix_up, FixUp};
 use crate::runeword::{describe, due, Armed, Every};
 use crate::session::made_from;
 use crate::tasks::{
-    end_of, find, insert_note, insert_with_notes, item_line, one_line, parse, readiness,
+    end_of, find, insert_note, insert_with_notes, item_line, move_item, one_line, parse, readiness,
     replace_line, set_mark, Mark, Mode, Ready, Task, ASSUMED,
 };
 
@@ -639,8 +639,11 @@ pub fn driven_prompt(horadric: &str) -> String {
          the whole picture it gives you and your memory, then do what moves the project \
          on. That may be anything a wake does, and also casting one of the project's \
          stones, which runs its steps in a session of its own: `{horadric} runeword cast \
-         \"<stone>\"`. Cast a stone only when the picture calls for it. When a round finds \
-         nothing to do, write one line to Lately in your memory and stop."
+         \"<stone>\"`. Cast a stone only when the picture calls for it. A round may also \
+         reorder the log when its order no longer fits the picture: `{horadric} quest move \
+         \"<title>\" --below \"<title>\"`, or `--above`, moves a quest and its notes, and its \
+         `After:` lines still hold it back wherever it stands. When a round finds nothing \
+         to do, write one line to Lately in your memory and stop."
     )
 }
 
@@ -1013,6 +1016,16 @@ pub fn hand_on(text: &str, name: &str, question: &str) -> Result<String, String>
 pub fn add_below(text: &str, name: &str, title: &str, notes: &str) -> Result<String, String> {
     let t = quest(text, name)?;
     Ok(insert_with_notes(text, end_of(text, t.line), title, notes))
+}
+
+/// `text` with the quest `name` and its notes moved right under the
+/// quest `to`, or right above it when `above`, for `quest move`.
+pub fn move_quest(text: &str, name: &str, to: &str, above: bool) -> Result<String, String> {
+    let (t, other) = (quest(text, name)?, quest(text, to)?);
+    if t.line == other.line {
+        return Err(format!("\"{}\" can not move next to itself", t.title));
+    }
+    move_item(text, t.line, other.line, above).ok_or_else(|| "the log changed".to_string())
 }
 
 /// What a reviewer session's id starts with. It is a Warriv too, so its
@@ -1786,6 +1799,7 @@ mod tests {
         assert!(p.contains("`hx runeword cast \"<stone>\"`"));
         assert!(p.contains("every hour, after a quest lands and when the human leaves"));
         assert!(p.contains("write one line to Lately"));
+        assert!(p.contains("`hx quest move \"<title>\" --below \"<title>\"`"));
         assert_eq!(
             cast_tools("\"C:/h.exe\""),
             vec![
@@ -2403,6 +2417,34 @@ not green."
         // Handed on, it no longer wakes Warriv.
         let handed = hand_on(text, "Pay", "Which card?").unwrap();
         assert!(events(&parse(&handed), Mode::Manual, &[], &[]).is_empty());
+    }
+
+    #[test]
+    fn a_quest_moves_by_name_under_or_above_another() {
+        let text = "- [ ] One
+  n
+- [ ] Two
+- [ ] Three
+";
+        assert_eq!(
+            move_quest(text, "One", "Three", false).unwrap(),
+            "- [ ] Two
+- [ ] Three
+- [ ] One
+  n
+"
+        );
+        assert_eq!(
+            move_quest(text, "three", "One", true).unwrap(),
+            "- [ ] Three
+- [ ] One
+  n
+- [ ] Two
+"
+        );
+        assert!(move_quest(text, "Two", "Two", false).is_err());
+        assert!(move_quest(text, "Four", "One", false).is_err());
+        assert!(move_quest(text, "T", "One", false).is_err());
     }
 
     #[test]

@@ -160,6 +160,8 @@ pub enum Command {
     Add,
     /// `quest blocked --quest`, a quest handed to the human.
     Blocked,
+    /// `quest move`, a quest put elsewhere in the log.
+    Move,
 }
 
 /// How a wake closed.
@@ -632,6 +634,7 @@ fn wake_line(w: &WarrivWake) -> AwayLine {
                 Command::Note => format!("noted on {t}"),
                 Command::Add => format!("added {t}"),
                 Command::Blocked => format!("handed {t} to you"),
+                Command::Move => format!("moved {t}"),
             }
         })
         .collect();

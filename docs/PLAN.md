@@ -3928,7 +3928,11 @@ has the app cast a stone: sessionless on the project, else in a fresh
 session named after it with its first `say` as the prompt. A Warriv
 casts only while it drives, and "Ship Public" only with "and ships
 public" on (`warriv::may_cast`); a driving Warriv may run the command
-without asking. Reordering the log is not built. On the way:
+without asking. Reordering the log came after (2026-10-05): `horadric
+quest move "title" --below "title"` (or `--above`) moves a quest and
+its notes, leaving headings where they are (`tasks::move_item`, by name
+`warriv::move_quest`). It is a quest command, so a Warriv runs it
+without asking, and `warriv::driven_prompt` names it for rounds. On the way:
 `is_warriv` read this quest's own session, `warriv-s-rounds-...`, as a
 Warriv, so it was started with Warriv's prompt; session ids made from a
 base are now matched as the base and a number (`session::made_from`).
