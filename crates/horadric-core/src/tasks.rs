@@ -920,6 +920,30 @@ pub fn shift(text: &str, line: usize, title: &str, up: bool) -> Option<String> {
     Some(join(out, ending, text.ends_with('\n')))
 }
 
+/// The item on `line` and its notes moved to right under the item on
+/// `to` and its notes, or right above it when `above`. Whatever lay
+/// around either, a heading say, stays where it is. None when either line
+/// holds no item or both are the same.
+pub fn move_item(text: &str, line: usize, to: usize, above: bool) -> Option<String> {
+    let list = parse(text);
+    if line == to || !list.iter().any(|t| t.line == line) || !list.iter().any(|t| t.line == to) {
+        return None;
+    }
+    let (mut lines, ending) = cut(text);
+    // A moved last line may lack its ending, which it needs once anything
+    // follows it.
+    if let Some(last) = lines.last_mut().filter(|l| !l.ends_with('\n')) {
+        last.push_str(ending);
+    }
+    let from = span(&lines, line);
+    let target = span(&lines, to);
+    let at = if above { target.start } else { target.end };
+    let moved: Vec<String> = lines.drain(from.clone()).collect();
+    let at = if at > from.start { at - from.len() } else { at };
+    lines.splice(at..at, moved);
+    Some(join(lines, ending, text.ends_with('\n')))
+}
+
 /// How a project's list gets worked through.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Mode {
@@ -2342,6 +2366,40 @@ mod tests {
         assert_eq!(
             shift(text, 0, "One", false).unwrap(),
             "- [ ] Two\r\n- [ ] One"
+        );
+    }
+
+    #[test]
+    fn moving_puts_an_item_and_its_notes_under_or_above_another() {
+        assert_eq!(
+            move_item(LOG, 1, 8, false).unwrap(),
+            "# Quests\n\n## Later\n- [/] Second @second-1\n- [ ] Third\n- [ ] First\n  a note\n\n  after a blank\n"
+        );
+        assert_eq!(
+            move_item(LOG, 8, 1, true).unwrap(),
+            "# Quests\n- [ ] Third\n- [ ] First\n  a note\n\n  after a blank\n\n## Later\n- [/] Second @second-1\n"
+        );
+        // Under the first quest, past its notes and the blank among them.
+        assert_eq!(
+            move_item(LOG, 8, 1, false).unwrap(),
+            "# Quests\n- [ ] First\n  a note\n\n  after a blank\n- [ ] Third\n\n## Later\n- [/] Second @second-1\n"
+        );
+        assert_eq!(move_item(LOG, 7, 8, true).unwrap(), LOG);
+        assert_eq!(move_item(LOG, 7, 7, false), None);
+        assert_eq!(move_item(LOG, 0, 7, false), None);
+        assert_eq!(move_item(LOG, 7, 2, false), None);
+    }
+
+    #[test]
+    fn moving_the_last_line_of_a_file_without_an_ending() {
+        let text = "- [ ] One\r\n- [ ] Two\r\n- [ ] Three";
+        assert_eq!(
+            move_item(text, 2, 0, true).unwrap(),
+            "- [ ] Three\r\n- [ ] One\r\n- [ ] Two"
+        );
+        assert_eq!(
+            move_item(text, 0, 2, false).unwrap(),
+            "- [ ] Two\r\n- [ ] Three\r\n- [ ] One"
         );
     }
 }
