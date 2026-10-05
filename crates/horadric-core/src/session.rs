@@ -164,6 +164,10 @@ pub struct Session {
     /// after it may still sit in the prompt box as a draft.
     #[serde(skip)]
     pub prompted_at: Option<SystemTime>,
+    /// The whole of the last prompt, for Warriv to hear the human's
+    /// answer to a question it handed on. Gone with the process.
+    #[serde(skip)]
+    pub last_prompt: Option<String>,
 }
 
 /// A subagent not heard from this long has finished.
@@ -204,6 +208,7 @@ impl Session {
             activity: Vec::new(),
             agents: Vec::new(),
             prompted_at: None,
+            last_prompt: None,
         }
     }
 
@@ -353,6 +358,7 @@ impl Session {
                 if let Some(p) = &event.user_prompt {
                     self.last_line = first_line(p);
                 }
+                self.last_prompt = event.user_prompt.clone();
                 Some(Phase::Working)
             }
             "PreToolUse" | "PostToolUse" | "PostToolUseFailure" => {
@@ -719,6 +725,26 @@ mod tests {
         assert_eq!(s.phase, Phase::Done);
         assert_eq!(s.last_line, "All green.");
         assert_eq!(s.last_turn.as_deref(), Some("All green.\nDetails..."));
+    }
+
+    #[test]
+    fn the_whole_last_prompt_is_kept() {
+        let mut s = Session::new("g1", "fix-login", "C:/repo");
+        let mut p = ev("UserPromptSubmit");
+        p.user_prompt = Some(
+            "Use 4210.
+Always."
+                .into(),
+        );
+        s.apply(&p, now());
+        assert_eq!(s.last_line, "Use 4210.");
+        assert_eq!(
+            s.last_prompt.as_deref(),
+            Some(
+                "Use 4210.
+Always."
+            )
+        );
     }
 
     #[test]

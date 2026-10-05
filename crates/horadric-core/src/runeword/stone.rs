@@ -207,7 +207,9 @@ fn smith(horadric: &str, config: &str, global: &str, ask: &str) -> String {
          }} }}\n\n\
          A stone can also be an errand, cast on a clock with nobody clicking, when it \
          has \"every\": \"30m\", \"1h\", \"day 09:00\", \"weekday 08:30\" or a day's \
-         name and a time such as \"sunday 12:00\", once a minute at most. \"for\": \"1h\" \
+         name and a time such as \"sunday 12:00\", once a minute at most, or instead \
+         \"on\": \"landed\", \"shipped\", \"away\" or \"back\" to be cast each time a \
+         quest lands, the project ships, or I leave or come back. \"for\": \"1h\" \
          stops a cast that runs longer (30m when left out), and \"mode\": \"bypass\" lets \
          its session skip every permission prompt; add that only when I ask for it. An \
          errand has say, keys and run steps only, since test, review and merge need a \
@@ -465,6 +467,7 @@ mod tests {
             "\"day 09:00\"",
             "\"weekday 08:30\"",
             "\"sunday 12:00\"",
+            "\"on\": \"landed\"",
             "\"for\"",
             "\"mode\": \"bypass\"",
             "{since} in a step",

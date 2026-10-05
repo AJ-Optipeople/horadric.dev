@@ -11,13 +11,14 @@
 //! wake, what it is told, and the events that wait while it works. The UI
 //! starts the session and types into terminals.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
 
 use serde_json::Value;
 
+use crate::merge::{add_fix_up, FixUp};
 use crate::tasks::{
     end_of, find, insert_note, insert_with_notes, item_line, one_line, parse, readiness,
-    replace_line, Mark, Mode, Ready, Task, ASSUMED,
+    replace_line, set_mark, Mark, Mode, Ready, Task, ASSUMED,
 };
 
 /// What a blocked quest's reason starts with when Warriv handed it to the
@@ -779,6 +780,378 @@ pub fn hand_on(text: &str, name: &str, question: &str) -> Result<String, String>
 pub fn add_below(text: &str, name: &str, title: &str, notes: &str) -> Result<String, String> {
     let t = quest(text, name)?;
     Ok(insert_with_notes(text, end_of(text, t.line), title, notes))
+}
+
+/// What a reviewer session's id starts with. It is a Warriv too, so its
+/// notes are marked as Warriv's and it may hand a quest to the human.
+pub const REVIEWER: &str = "warriv-review";
+
+/// Whether the session `id` is a reviewer, which reads a finished quest
+/// in "Warriv reviews" mode before it lands.
+pub fn is_reviewer(id: &str) -> bool {
+    id.strip_prefix(REVIEWER)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with('-'))
+}
+
+/// The longest diff put in a reviewer's prompt, in characters. Its start
+/// is kept, and the reviewer is told how to read the rest. The prompt goes
+/// on a command line, which Windows ends at 32767.
+const DIFF: usize = 20_000;
+
+/// The quests waiting for a review: completed by their session, `[?]`,
+/// in list order. A quest in tombs is the human's pick, not a review.
+pub fn to_review(tasks: &[Task]) -> Vec<String> {
+    tasks
+        .iter()
+        .filter(|t| t.mark == Mark::Review && !t.title.trim().is_empty())
+        .filter(|t| {
+            t.holder
+                .as_deref()
+                .is_none_or(|h| crate::tombs::count(h).is_none())
+        })
+        .map(|t| t.title.clone())
+        .collect()
+}
+
+/// A project's reviews: the one being read, the ones queued behind it, and
+/// every quest already taken while it stays `[?]`, so a reviewer that ends
+/// without a verdict leaves it to the human rather than starting again.
+#[derive(Debug, Default, Clone)]
+pub struct Reviews {
+    seen: BTreeSet<String>,
+    queue: VecDeque<String>,
+    current: Option<String>,
+}
+
+impl Reviews {
+    /// Takes the quests `[?]` now. A new one queues; one that is no longer
+    /// `[?]` is forgotten, so it is read again should it come back.
+    pub fn hear(&mut self, now: &[String]) {
+        self.seen.retain(|t| now.contains(t));
+        self.queue.retain(|t| now.contains(t));
+        for t in now {
+            if self.seen.insert(t.clone()) {
+                self.queue.push_back(t.clone());
+            }
+        }
+    }
+
+    /// The quest to read next, when no review is under way: one reviewer a
+    /// project at a time.
+    pub fn take(&mut self) -> Option<String> {
+        if self.current.is_some() {
+            return None;
+        }
+        self.current = self.queue.pop_front();
+        self.current.clone()
+    }
+
+    /// The review under way ended, however it ended.
+    pub fn done(&mut self) {
+        self.current = None;
+    }
+
+    /// Whether `title` is being read or waits to be, so nobody else needs
+    /// to hear of it.
+    pub fn pending(&self, title: &str) -> bool {
+        self.current.as_deref() == Some(title) || self.queue.iter().any(|t| t == title)
+    }
+
+    /// The mode is not "Warriv reviews" any more: nothing waits. The review
+    /// under way ends at its stop.
+    pub fn stop(&mut self) {
+        self.queue.clear();
+        self.seen.clear();
+    }
+}
+
+/// What a reviewer reads: the quest, its notes, where its work is and the
+/// diff of that work against what it lands on.
+#[derive(Debug, Clone, Default)]
+pub struct Review {
+    pub title: String,
+    pub notes: Vec<String>,
+    /// The quest's branch, none when it worked in the main tree.
+    pub branch: Option<String>,
+    /// What the main tree has checked out, where it lands.
+    pub into: String,
+    pub diff: String,
+}
+
+/// What a reviewer is told beside its first prompt: who it is and the
+/// three ways a review ends.
+pub fn review_system_prompt(horadric: &str, file: &str) -> String {
+    format!(
+        "You are Warriv, the caravan master of this project, reviewing a quest from the \
+         quest log, {file}. An agent session finished it and Horadric woke you to read its \
+         work before it lands, so the human hears only what needs a human. You review; you \
+         do not build. Change no code, run no checks (landing runs the project's checks \
+         itself), and never edit {file} directly.\n\n\
+         Read the quest, its notes and its diff, and as much of the code around it as you \
+         need. Then end the review one of three ways:\n\
+         - It does what the quest asks and nothing is wrong with it: `{horadric} quest pass \
+         \"<title>\"`. It lands on main as the human's approval would.\n\
+         - Something is wrong or missing that its session can fix: `{horadric} quest fix \
+         \"<title>\" \"<what is wrong, concretely: the file, the case, what it should do>\"`. \
+         Horadric tells its session, or files a fix-up quest when the session is gone.\n\
+         - Only the human can say: first `{horadric} quest note \"<title>\" \"<what you \
+         saw>\"`, then `{horadric} quest blocked \"<question>\" --quest \"<title>\"`, worded \
+         so it can be answered in one line.\n\n\
+         Judge what the quest asked for, not your own taste: style the project does not ask \
+         for is no reason to send it back. Run exactly one of the three, then stop. {AS_WRITTEN} Do not ask \
+         questions in this chat: nobody reads it, and the session closes when your turn ends."
+    )
+}
+
+/// The first prompt of a review: the quest, its notes, and its diff.
+pub fn review_prompt(r: &Review) -> String {
+    let mut out = format!("Review the quest \"{}\".\n", one_line(&r.title));
+    if !r.notes.is_empty() {
+        out.push_str("\nIts notes:\n");
+        for n in &r.notes {
+            out.push_str(&format!("  {n}\n"));
+        }
+    }
+    let Some(branch) = &r.branch else {
+        out.push_str(&format!(
+            "\nIt worked in the main tree, on {}, so its work is in the commits there; \
+             read `git log` to find them.\n",
+            r.into
+        ));
+        return out;
+    };
+    let range = format!("{}...{branch}", r.into);
+    if r.diff.trim().is_empty() {
+        out.push_str(&format!(
+            "\nIts branch {branch} has no changes against {}: `git diff {range}` is empty.\n",
+            r.into
+        ));
+        return out;
+    }
+    out.push_str(&format!(
+        "\nIts work is on the branch {branch}. `git diff {range}` says:\n\n```diff\n{}\n```\n",
+        head(r.diff.trim_end(), DIFF)
+    ));
+    if r.diff.trim_end().chars().count() > DIFF {
+        out.push_str(&format!(
+            "\nThe diff is cut there. Run `git diff {range}` for the rest.\n"
+        ));
+    }
+    out
+}
+
+/// The first `n` characters of `s`, marked as cut when they are.
+fn head(s: &str, n: usize) -> String {
+    if s.chars().count() <= n {
+        return s.to_string();
+    }
+    let kept: String = s.chars().take(n).collect();
+    format!("{kept}\u{2026}")
+}
+
+/// `text` with the quest `name` passed: completed, its holder kept, so it
+/// lands as the human's approval would. Only a quest waiting for review
+/// can pass.
+pub fn pass(text: &str, name: &str) -> Result<String, String> {
+    let t = reviewed(text, name)?;
+    set_mark(text, t.line, &t.title, Mark::Done).ok_or_else(|| "the log changed".to_string())
+}
+
+/// The quest `name` means, when it waits for review.
+pub fn reviewed(text: &str, name: &str) -> Result<Task, String> {
+    let t = quest(text, name)?;
+    if t.mark != Mark::Review {
+        return Err(format!("\"{}\" is not waiting for review", t.title));
+    }
+    Ok(t)
+}
+
+/// What a quest's session is told when its review sends it back, typed
+/// into its terminal, so on one line.
+pub fn sent_back(horadric: &str, what: &str) -> String {
+    format!(
+        "Warriv reviewed this quest and sends it back: {} Fix that, commit your work, and \
+         run `{horadric} quest done \"<one short line on what you achieved>\"` again.",
+        one_line(what)
+    )
+}
+
+/// The quest that fixes what a review of `title` found, for when its
+/// session is gone: its work is on `branch`, or in the main tree.
+pub fn fix_up(title: &str, branch: Option<&str>, into: &str, what: &str) -> FixUp {
+    let mut notes = vec![format!(
+        "Warriv reviewed \"{}\" and sent it back: {}",
+        one_line(title),
+        one_line(what)
+    )];
+    match branch {
+        Some(b) => notes.push(format!(
+            "Its work is on the branch `{b}`, not in `{into}`. Take its commits onto your \
+             branch with `git cherry-pick {into}..{b}`, fix what the review found, make every \
+             check in `.horadric/config.json` pass, and commit. Then delete it with `git \
+             branch -D {b}`. Your branch lands like any finished quest and carries its work."
+        )),
+        None => notes.push(format!("Its work is already in `{into}`; fix it there.")),
+    }
+    notes.push("The quests after the reviewed one wait for this one too.".to_string());
+    FixUp {
+        title: format!("Fix what review found in {}", branch.unwrap_or(title)),
+        notes: notes.join("\n"),
+    }
+}
+
+/// `text` with the quest `name`, whose session is gone, sent back: it is
+/// completed, as a failed merge leaves its quest, and `fix` goes right
+/// below it, the quests after it waiting for that too.
+pub fn send_back(text: &str, name: &str, fix: &FixUp) -> Result<String, String> {
+    let t = reviewed(text, name)?;
+    let done = set_mark(text, t.line, &t.title, Mark::Done)
+        .ok_or_else(|| "the log changed".to_string())?;
+    Ok(add_fix_up(&done, &t.title, fix).unwrap_or(done))
+}
+
+/// Warriv's memory, from the project folder: what one session leaves the
+/// next, committed with the project so it travels with the repository.
+pub const MEMORY: &str = ".horadric/warriv.md";
+
+/// Past this many lines the memory is compacted, so it stays something a
+/// session reads whole before it starts.
+pub const MEMORY_LINES: usize = 200;
+
+/// What a line in the memory's Open part starts with when it holds the
+/// human's answer to a question Warriv handed on.
+pub const ANSWERED: &str = "- Answered: ";
+
+const RULES: &str = "## Rules";
+const LATELY: &str = "## Lately";
+const OPEN: &str = "## Open";
+
+/// A memory with nothing in it yet.
+pub fn blank_memory() -> String {
+    format!("# Warriv's memory\n\n{RULES}\n\n{LATELY}\n\n{OPEN}\n")
+}
+
+/// Whether the memory has grown past [`MEMORY_LINES`].
+pub fn compact_due(memory: &str) -> bool {
+    memory.lines().count() > MEMORY_LINES
+}
+
+/// How many answers from the human wait in the memory to become rules.
+fn answers(memory: &str) -> usize {
+    memory
+        .lines()
+        .filter(|l| l.trim_start().starts_with(ANSWERED))
+        .count()
+}
+
+/// What every Warriv session is told about its memory, `file` from the
+/// project folder, given what the memory holds now, or `None` when there
+/// is none yet. Read and written by the session itself, so the prompt
+/// says how rather than carrying it.
+pub fn memory_prompt(file: &str, memory: Option<&str>) -> String {
+    let mut out = format!(
+        "Your memory is {file}, kept between your sessions. Read it before anything \
+         else and follow its rules. Write to it last, before you stop, with your file \
+         tools; it is the one file you edit that way. Horadric commits it when you stop, \
+         so do not commit it yourself. It has three parts:\n\
+         - {RULES}: how this project wants things done, one line each. Add one when the \
+         human settles a kind of question, or when you learn what every later session \
+         should know.\n\
+         - {LATELY}: what you did and why, newest first, one line each that starts with \
+         the date, like `- 2026-10-05 Told \"Port\" to use 4210, as the plan says.` Add a \
+         line for this session even when it changed nothing.\n\
+         - {OPEN}: what you wait to see, one line each: the questions you handed to the \
+         human and what to check next time. Remove a line once it is settled."
+    );
+    let Some(memory) = memory.filter(|m| !m.trim().is_empty()) else {
+        out.push_str(
+            "\nIt does not exist yet: create it with a `# Warriv's memory` title and \
+             those three headings.",
+        );
+        return out;
+    };
+    match answers(memory) {
+        0 => {}
+        n => out.push_str(&format!(
+            "\n{OPEN} holds {} starting `{}`: the human's answer to a question you \
+             handed on. Write each as a rule under {RULES}, worded so the same kind of \
+             question never has to be asked again, then remove the line.",
+            if n == 1 { "a line" } else { "lines" },
+            ANSWERED.trim_start_matches("- ").trim_end()
+        )),
+    }
+    if compact_due(memory) {
+        out.push_str(&format!(
+            "\nIt is {} lines, past {MEMORY_LINES}: compact it before you stop. Keep every \
+             rule, merging those that say the same, and keep {OPEN}. Keep the newest twenty \
+             lines of {LATELY} as they are and fold the older ones into a line a day or a \
+             week, until the file is under {} lines.",
+            memory.lines().count(),
+            MEMORY_LINES * 3 / 4
+        ));
+    }
+    out
+}
+
+/// `memory` with the human's answer to the question Warriv handed on
+/// about `title` added to its Open part, for the next wake to make a rule
+/// of. `None` when the quest went on without words Horadric heard.
+pub fn with_answer(memory: &str, title: &str, question: &str, answer: Option<&str>) -> String {
+    let line = match answer.map(one_line).filter(|a| !a.is_empty()) {
+        Some(a) => format!(
+            "{ANSWERED}on \"{}\" you asked \"{}\". The human said: {a}",
+            one_line(title),
+            one_line(question)
+        ),
+        None => format!(
+            "{ANSWERED}on \"{}\" you asked \"{}\". The human settled it without words \
+             Horadric heard: read the quest and its notes for how.",
+            one_line(title),
+            one_line(question)
+        ),
+    };
+    let memory = if memory.trim().is_empty() {
+        blank_memory()
+    } else {
+        memory.to_string()
+    };
+    let mut lines: Vec<&str> = memory.lines().collect();
+    let at = match lines.iter().position(|l| l.trim_end() == OPEN) {
+        Some(head) => {
+            // After the part's last line, before the next heading.
+            let end = lines[head + 1..]
+                .iter()
+                .position(|l| l.starts_with("## "))
+                .map_or(lines.len(), |i| head + 1 + i);
+            let last = lines[head + 1..end]
+                .iter()
+                .rposition(|l| !l.trim().is_empty())
+                .map_or(head, |i| head + 1 + i);
+            if last > head {
+                last + 1
+            } else {
+                if !lines.get(head + 1).is_some_and(|l| l.trim().is_empty()) {
+                    lines.insert(head + 1, "");
+                }
+                head + 2
+            }
+        }
+        None => {
+            if lines.last().is_some_and(|l| !l.trim().is_empty()) {
+                lines.push("");
+            }
+            lines.push(OPEN);
+            lines.push("");
+            lines.len()
+        }
+    };
+    lines.insert(at, &line);
+    if lines.get(at + 1).is_some_and(|l| l.starts_with("## ")) {
+        lines.insert(at + 1, "");
+    }
+    let mut out = lines.join("\n");
+    out.push('\n');
+    out
 }
 
 /// The flags that let a session run `horadric quest` without asking,
@@ -1589,5 +1962,252 @@ not green."
 - [ ] Two
 "
         );
+    }
+    #[test]
+    fn reviewers_are_known_by_their_id_and_are_warrivs() {
+        assert!(is_reviewer("warriv-review-4100"));
+        assert!(is_warriv("warriv-review-4100"));
+        assert!(!is_reviewer("warriv-4100"));
+        assert!(!is_reviewer("warriv-reviews-a-mode"));
+    }
+
+    #[test]
+    fn a_quest_going_to_review_is_one_to_read_but_tombs_are_not() {
+        let t = list("- [?] A @a-1\n- [/] B @b-1\n- [?] C @c-1.x3\n- [x] D @d-1\n- [?] E @e-1\n");
+        assert_eq!(to_review(&t), ["A", "E"]);
+    }
+
+    fn titles(t: &[&str]) -> Vec<String> {
+        t.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn one_review_at_a_time_and_the_rest_queue() {
+        let mut r = Reviews::default();
+        r.hear(&titles(&["A", "B"]));
+        assert_eq!(r.take().as_deref(), Some("A"));
+        // Under way, nothing else starts.
+        r.hear(&titles(&["A", "B", "C"]));
+        assert_eq!(r.take(), None);
+        assert!(r.pending("A") && r.pending("C"));
+        r.done();
+        assert_eq!(r.take().as_deref(), Some("B"));
+        r.done();
+        assert_eq!(r.take().as_deref(), Some("C"));
+        r.done();
+        assert_eq!(r.take(), None);
+    }
+
+    #[test]
+    fn a_quest_is_read_once_while_it_waits_and_again_when_it_comes_back() {
+        let mut r = Reviews::default();
+        r.hear(&titles(&["A"]));
+        assert_eq!(r.take().as_deref(), Some("A"));
+        // The reviewer ended without a verdict: the human's now.
+        r.done();
+        r.hear(&titles(&["A"]));
+        assert_eq!(r.take(), None);
+        assert!(!r.pending("A"));
+        // Sent back, worked on, finished again: a new review.
+        r.hear(&[]);
+        r.hear(&titles(&["A"]));
+        assert_eq!(r.take().as_deref(), Some("A"));
+    }
+
+    #[test]
+    fn a_quest_approved_while_it_queued_is_not_read() {
+        let mut r = Reviews::default();
+        r.hear(&titles(&["A", "B"]));
+        assert_eq!(r.take().as_deref(), Some("A"));
+        r.hear(&titles(&["A"]));
+        r.done();
+        assert_eq!(r.take(), None);
+        // Out of the mode, nothing waits, and back in it reads again.
+        r.hear(&titles(&["C"]));
+        r.stop();
+        assert_eq!(r.take(), None);
+        r.hear(&titles(&["C"]));
+        assert_eq!(r.take().as_deref(), Some("C"));
+    }
+
+    fn review(diff: &str) -> Review {
+        Review {
+            title: "Serve the API".into(),
+            notes: vec!["Port 4100.".into()],
+            branch: Some("serve-the-api".into()),
+            into: "main".into(),
+            diff: diff.into(),
+        }
+    }
+
+    #[test]
+    fn the_review_prompt_gives_the_quest_its_notes_and_its_diff() {
+        let p = review_prompt(&review("+fn serve() {}\n"));
+        assert_eq!(
+            p,
+            "Review the quest \"Serve the API\".\n\n\
+             Its notes:\n\
+             \x20 Port 4100.\n\n\
+             Its work is on the branch serve-the-api. `git diff main...serve-the-api` says:\n\n\
+             ```diff\n+fn serve() {}\n```\n"
+        );
+        let empty = review_prompt(&review(""));
+        assert!(empty.contains("has no changes against main"));
+        let trunk = review_prompt(&Review {
+            branch: None,
+            ..review("")
+        });
+        assert!(trunk.contains("It worked in the main tree, on main"));
+    }
+
+    #[test]
+    fn a_long_diff_keeps_its_start_and_says_how_to_read_the_rest() {
+        let long = format!("+start\n{}", "x".repeat(2 * DIFF));
+        let p = review_prompt(&review(&long));
+        assert!(p.contains("+start"));
+        assert!(p.contains("x\u{2026}\n```"));
+        assert!(p
+            .trim_end()
+            .ends_with("Run `git diff main...serve-the-api` for the rest."));
+        assert!(p.chars().count() < DIFF + 500);
+    }
+
+    #[test]
+    fn the_review_system_prompt_names_the_three_endings() {
+        let p = review_system_prompt("hx", ".horadric/tasks.md");
+        for c in [
+            "hx quest pass \"<title>\"",
+            "hx quest fix \"<title>\" \"<what is wrong",
+            "hx quest note \"<title>\"",
+            "hx quest blocked \"<question>\" --quest \"<title>\"",
+        ] {
+            assert!(p.contains(c), "{c}");
+        }
+        assert!(p.contains("run no checks"));
+    }
+
+    #[test]
+    fn a_pass_completes_a_quest_waiting_for_review_and_keeps_its_holder() {
+        let text = "- [?] Serve the API @serve-1\n  n\n- [/] Work @w-1\n";
+        assert_eq!(
+            pass(text, "Serve").unwrap(),
+            "- [x] Serve the API @serve-1\n  n\n- [/] Work @w-1\n"
+        );
+        assert!(pass(text, "Work")
+            .unwrap_err()
+            .contains("is not waiting for review"));
+        assert!(pass(text, "Nothing").is_err());
+    }
+
+    #[test]
+    fn a_session_sent_back_hears_why_on_one_line_and_how_to_report() {
+        let t = sent_back("hx", "The port is\n4100, not 80.");
+        assert!(t.starts_with(
+            "Warriv reviewed this quest and sends it back: The port is 4100, not 80."
+        ));
+        assert!(t.contains("`hx quest done"));
+        assert!(!t.contains('\n'));
+    }
+
+    #[test]
+    fn sent_back_with_its_session_gone_files_a_fix_up_below() {
+        let text = "- [?] Serve the API @serve-1\n  n\n- [ ] Next\n  After: Serve the API\n";
+        let fix = fix_up("Serve the API", Some("serve-the-api"), "main", "No tests.");
+        assert_eq!(fix.title, "Fix what review found in serve-the-api");
+        assert!(fix.notes.contains("sent it back: No tests."));
+        assert!(fix.notes.contains("git cherry-pick main..serve-the-api"));
+        let out = send_back(text, "Serve the API", &fix).unwrap();
+        let t = parse(&out);
+        assert_eq!(t[0].mark, Mark::Done);
+        assert_eq!(t[1].title, fix.title);
+        assert_eq!(t[1].mark, Mark::Open);
+        assert_eq!(
+            t[2].after(),
+            ["Fix what review found in serve-the-api", "Serve the API"]
+        );
+        assert!(send_back(&out, "Serve the API", &fix).is_err());
+        let trunk = fix_up("Serve", None, "main", "x");
+        assert_eq!(trunk.title, "Fix what review found in Serve");
+        assert!(trunk.notes.contains("already in `main`"));
+    }
+
+    #[test]
+    fn the_memory_prompt_says_how_to_read_and_write_it() {
+        let p = memory_prompt(MEMORY, Some(&blank_memory()));
+        assert!(p.starts_with("Your memory is .horadric/warriv.md,"));
+        for part in ["## Rules", "## Lately", "## Open"] {
+            assert!(p.contains(part), "{part}");
+        }
+        assert!(p.contains("Read it before anything else"));
+        assert!(p.contains("Write to it last"));
+        assert!(p.contains("do not commit it yourself"));
+        assert!(!p.contains("does not exist"));
+        assert!(!p.contains("compact"));
+        assert!(!p.contains("Answered"));
+    }
+
+    #[test]
+    fn with_no_memory_it_is_told_to_make_one() {
+        for m in [None, Some(""), Some("  \n")] {
+            assert!(memory_prompt(MEMORY, m).contains("It does not exist yet"));
+        }
+    }
+
+    #[test]
+    fn a_memory_past_two_hundred_lines_is_compacted() {
+        let mut m = blank_memory();
+        while m.lines().count() < MEMORY_LINES {
+            m.push_str("- 2026-10-05 Did a thing.\n");
+        }
+        assert!(!compact_due(&m));
+        assert!(!memory_prompt(MEMORY, Some(&m)).contains("compact it"));
+        m.push_str("- 2026-10-05 One more.\n");
+        assert!(compact_due(&m));
+        let p = memory_prompt(MEMORY, Some(&m));
+        assert!(p.contains("It is 201 lines, past 200: compact it before you stop."));
+        assert!(p.contains("under 150 lines"));
+    }
+
+    #[test]
+    fn an_answer_goes_under_open_and_the_prompt_makes_it_a_rule() {
+        let m = with_answer(
+            &blank_memory(),
+            "Port",
+            "Which\nport?",
+            Some("4210,\nalways"),
+        );
+        assert_eq!(
+            m,
+            "# Warriv's memory\n\n## Rules\n\n## Lately\n\n## Open\n\n\
+             - Answered: on \"Port\" you asked \"Which port?\". The human said: 4210, always\n"
+        );
+        let p = memory_prompt(MEMORY, Some(&m));
+        assert!(p.contains("## Open holds a line starting `Answered:`"));
+        assert!(p.contains("Write each as a rule under ## Rules"));
+        let two = with_answer(&m, "Pay", "Which account?", None);
+        assert!(memory_prompt(MEMORY, Some(&two)).contains("holds lines starting"));
+        assert!(two.ends_with("Horadric heard: read the quest and its notes for how.\n"));
+    }
+
+    #[test]
+    fn an_answer_goes_after_what_open_holds_and_before_the_next_part() {
+        let m = "# M\n\n## Open\n\n- Watch CI.\n\n## Rules\n\n- Be brief.\n";
+        assert_eq!(
+            with_answer(m, "A", "Q?", Some("Yes")),
+            "# M\n\n## Open\n\n- Watch CI.\n\
+             - Answered: on \"A\" you asked \"Q?\". The human said: Yes\n\n\
+             ## Rules\n\n- Be brief.\n"
+        );
+        assert_eq!(
+            with_answer("# M\n\n## Open\n## Rules\n", "A", "Q?", Some("Yes")),
+            "# M\n\n## Open\n\n- Answered: on \"A\" you asked \"Q?\". The human said: Yes\n\n\
+             ## Rules\n"
+        );
+        assert_eq!(
+            with_answer("# M\n\n## Rules\n- Be brief.\n", "A", "Q?", Some("Yes")),
+            "# M\n\n## Rules\n- Be brief.\n\n## Open\n\n\
+             - Answered: on \"A\" you asked \"Q?\". The human said: Yes\n"
+        );
+        assert!(with_answer("", "A", "Q?", None).starts_with(&blank_memory()));
     }
 }

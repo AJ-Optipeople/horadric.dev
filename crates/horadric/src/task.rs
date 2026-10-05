@@ -33,6 +33,8 @@ usage: horadric quest done [\"summary\"]  The quest this session works is comple
              [--below \"title\"]         right under that quest
        horadric quest note \"title\" \"text\"  Add a notes line under a quest
        horadric quest tell \"title\" \"text\"  Tell the session on a quest, between turns
+       horadric quest pass \"title\"      A quest waiting for review is good: it lands
+       horadric quest fix \"title\" \"what\"  Send a quest waiting for review back
        horadric quest blocked \"question\" --quest \"title\"
                                         Hand a quest a session holds to the human
        horadric quest aim \"text\"        Say where the work is going: Warriv files
@@ -69,6 +71,17 @@ pub fn run(args: &[String]) -> Result<(), String> {
         Some("tell") => {
             let (title, text) = title_and_text(&args[1..], "tell")?;
             tell(&cwd, &title, &text)
+        }
+        Some("pass") => {
+            let title = tasks::one_line(&args[1..].join(" "));
+            if title.trim().is_empty() {
+                return Err("say which: horadric quest pass \"title\"".into());
+            }
+            pass(&cwd, &title)
+        }
+        Some("fix") => {
+            let (title, what) = title_and_text(&args[1..], "fix")?;
+            fix(&cwd, &title, &what)
         }
         Some("aim") => match args.get(1).map(String::as_str) {
             Some("done") => aim(&cwd, &args[2..], true),
@@ -388,6 +401,36 @@ fn tell(cwd: &Path, title: &str, text: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// A quest waiting for review is good: completed, so it lands on main as
+/// the human's approval would.
+fn pass(cwd: &Path, title: &str) -> Result<(), String> {
+    let project = log_of(cwd)?;
+    write(&project, |log| warriv::pass(log, title))?;
+    tell_app(&project);
+    println!("Passed. It lands on main as an approval would; stop here.");
+    Ok(())
+}
+
+/// Sends a quest waiting for review back: the app tells its session what
+/// is wrong, or files a fix-up quest when that session is gone, which only
+/// the app knows.
+fn fix(cwd: &Path, title: &str, what: &str) -> Result<(), String> {
+    let project = log_of(cwd)?;
+    let t = warriv::reviewed(&file::read(&project), title)?;
+    let heard = post_app(&TasksChanged {
+        dir: project.to_string_lossy().into_owned(),
+        quest: Some(t.title),
+        fix: Some(what.to_string()),
+        by: session(),
+        ..TasksChanged::default()
+    });
+    if heard != Some(200) {
+        return Err("Horadric did not hear it. Add a note to the quest instead.".into());
+    }
+    println!("Sent back. Horadric tells its session, or files a fix-up quest; stop here.");
+    Ok(())
+}
+
 /// Adds an aim to the top of the log, or marks one reached.
 fn aim(cwd: &Path, words: &[String], done: bool) -> Result<(), String> {
     let text = tasks::one_line(&words.join(" "));
@@ -651,5 +694,9 @@ mod tests {
         assert!(title_and_text(&words(&["Serve the API"]), "tell").is_err());
         assert!(title_and_text(&words(&["Serve", " "]), "note").is_err());
         assert!(title_and_text(&[], "note").is_err());
+        assert_eq!(
+            title_and_text(&words(&["Serve", "No", "tests."]), "fix"),
+            Ok(("Serve".into(), "No tests.".into()))
+        );
     }
 }

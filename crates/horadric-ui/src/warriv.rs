@@ -13,8 +13,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime};
 
 use horadric_core::chronicle::{self, Happened, Woken};
-use horadric_core::tasks::{self, Mark, Task};
-use horadric_core::warriv::{self, Brief, Desk, Dried, Drive, Event, Kind, Wake};
+use horadric_core::tasks::{self, Mark, Mode, Task};
+use horadric_core::warriv::{self, Brief, Desk, Dried, Drive, Event, Kind, Review, Reviews, Wake};
 use horadric_core::{tombs, Agent, Phase};
 use horadric_hooks::tasks as file;
 
@@ -30,7 +30,25 @@ use crate::window::{folder_key, project_name};
 pub(in crate::app) struct Camp {
     desk: Desk,
     awake: Option<Awake>,
+    /// The questions Warriv handed to the human, by quest, until the
+    /// human answers.
+    asked: HashMap<String, Asked>,
+    /// The questions answered while their quest still reads as blocked
+    /// on them, by quest and question, so each answer is kept once.
+    answered: HashSet<(String, String)>,
 }
+
+/// A question Warriv handed on, and since when Horadric knows of it, so
+/// only a prompt after that is the human's answer.
+struct Asked {
+    question: String,
+    holder: String,
+    since: SystemTime,
+}
+
+/// The commit message the memory is kept with.
+const MEMORY_COMMIT: &str = "Warriv's memory after a wake\n\n\
+    What Warriv did and learned, kept with the project so the next wake reads it.";
 
 /// A Warriv session at work.
 struct Awake {
@@ -131,15 +149,33 @@ pub(in crate::app) struct Tell {
     key: String,
     title: String,
     text: String,
+    /// A review sent the quest back, rather than Warriv answering it.
+    fix: bool,
     /// The human answered, from the away card, not Warriv.
     human: bool,
 }
 
-/// Camps by project, and the tells not typed yet.
+/// A project's reviews in "Warriv reviews" mode, and the reviewer reading
+/// one now.
+#[derive(Default)]
+struct Reviewing {
+    reviews: Reviews,
+    reviewer: Option<Reviewer>,
+}
+
+/// A reviewer session at work.
+struct Reviewer {
+    id: String,
+    /// When it started, so a stop before that is not the end of its turn.
+    started: SystemTime,
+}
+
+/// Camps by project, the tells not typed yet, and reviews by project.
 #[derive(Default)]
 pub(in crate::app) struct State {
     camps: HashMap<String, Camp>,
     tells: Vec<Tell>,
+    reviewing: HashMap<String, Reviewing>,
 }
 
 impl App {
@@ -165,9 +201,11 @@ impl App {
             .collect();
         let now = warriv::events(&b.tasks, b.mode, &asks, &b.aims);
         let mut camp = self.tasks.warriv.camps.remove(key).unwrap_or_default();
+        self.hear_answers(key, b, &mut camp);
         if let Some(a) = camp.awake.take_if(|a| !self.live(&a.id)) {
             let (handed, stuck) = camp.retire(&a, &now, b);
             self.record_wake(key, &a.id, Happened::slept(&a.id, "", true, handed));
+            self.keep_memory(key);
             self.ask_aims(key, b, stuck);
         }
         camp.desk.drive(drive.is_some());
@@ -287,7 +325,93 @@ impl App {
         let (handed, stuck) = camp.retire(&a, now, b);
         self.record_wake(key, &a.id, Happened::slept(&a.id, "", false, handed));
         self.forget(&a.id);
+        self.keep_memory(key);
         self.ask_aims(key, b, stuck);
+    }
+
+    /// Commits what a Warriv session wrote to its memory, off the UI
+    /// thread.
+    pub(in crate::app) fn keep_memory(&self, key: &str) {
+        let Some(dir) = self.project_dir(key) else {
+            return;
+        };
+        std::thread::spawn(move || {
+            if let Err(e) = crate::worktree::commit_file(&dir, warriv::MEMORY, MEMORY_COMMIT) {
+                eprintln!("horadric: cannot commit Warriv's memory: {e}");
+            }
+        });
+    }
+
+    /// Notes each question Warriv handed on, and once the human answers
+    /// one, by a prompt into its quest's session or by the quest going on
+    /// some other way, puts the answer in Warriv's memory, where the next
+    /// wake makes a rule of it.
+    fn hear_answers(&self, key: &str, b: &Board, camp: &mut Camp) {
+        let asking: Vec<(&str, &str, &str)> = b
+            .tasks
+            .iter()
+            .filter(|t| t.mark == Mark::Blocked)
+            .filter_map(|t| {
+                let q = warriv::question(t.reason.as_deref()?)?;
+                Some((t.title.as_str(), q, t.holder.as_deref()?))
+            })
+            .collect();
+        camp.answered
+            .retain(|(t, q)| asking.iter().any(|&(at, aq, _)| at == t && aq == q));
+        for &(title, question, holder) in &asking {
+            let done = camp
+                .answered
+                .contains(&(title.to_string(), question.to_string()));
+            if !done && camp.asked.get(title).is_none_or(|a| a.question != question) {
+                camp.asked.insert(
+                    title.to_string(),
+                    Asked {
+                        question: question.to_string(),
+                        holder: holder.to_string(),
+                        since: SystemTime::now(),
+                    },
+                );
+            }
+        }
+        let mut heard = Vec::new();
+        if let Ok(r) = self.shared.registry.lock() {
+            camp.asked.retain(|title, a| {
+                let said = r
+                    .get(&a.holder)
+                    .filter(|s| s.prompted_at.is_some_and(|p| p > a.since))
+                    .and_then(|s| s.last_prompt.clone());
+                let still = asking
+                    .iter()
+                    .any(|&(t, q, _)| t == title && q == a.question);
+                if said.is_none() && still {
+                    return true;
+                }
+                heard.push((title.clone(), a.question.clone(), said));
+                false
+            });
+        }
+        camp.answered
+            .extend(heard.iter().map(|(t, q, _)| (t.clone(), q.clone())));
+        for (title, question, said) in heard {
+            self.remember_answer(key, &title, &question, said.as_deref());
+        }
+    }
+
+    /// The human's answer to `question` about `title`, in Warriv's memory.
+    fn remember_answer(&self, key: &str, title: &str, question: &str, said: Option<&str>) {
+        let Some(dir) = self.project_dir(key) else {
+            return;
+        };
+        let path = dir.join(warriv::MEMORY);
+        let old = std::fs::read_to_string(&path).unwrap_or_default();
+        let new = warriv::with_answer(&old, title, question, said);
+        let written = path
+            .parent()
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|()| std::fs::write(&path, new));
+        if let Err(e) = written {
+            eprintln!("horadric: cannot keep the answer in Warriv's memory: {e}");
+        }
     }
 
     /// The app is going: each wake still awake is cut short, since the
@@ -402,14 +526,12 @@ impl App {
         let key = folder_key(&cwd.to_string_lossy());
         let mut prompt = warriv::system_prompt(&horadric, file::rel(Path::new(&key)));
         if self.drives.contains_key(&key) {
-            prompt.push_str(
-                "
-
-",
-            );
+            prompt.push_str("\n\n");
             prompt.push_str(&warriv::driven_prompt(&horadric));
         }
-        (warriv::quest_tools(&horadric), prompt)
+        prompt.push_str("\n\n");
+        prompt.push_str(&memory_prompt(cwd));
+        (memory_tools(&horadric), prompt)
     }
 
     /// The flags an errand's session starts with: the quest commands it may
@@ -421,14 +543,15 @@ impl App {
         let label = self
             .errand_of_session(id)
             .map_or_else(|| "errand".to_string(), |(_, label)| label);
+        let prompt = warriv::errand_prompt(
+            &horadric,
+            file::rel(&main),
+            &label,
+            &warriv::froms(&file::read(&main)),
+        );
         (
-            warriv::quest_tools(&horadric),
-            warriv::errand_prompt(
-                &horadric,
-                file::rel(&main),
-                &label,
-                &warriv::froms(&file::read(&main)),
-            ),
+            memory_tools(&horadric),
+            format!("{prompt}\n\n{}", memory_prompt(cwd)),
         )
     }
 
@@ -442,6 +565,16 @@ impl App {
         by: Option<&str>,
     ) {
         let key = folder_key(dir);
+        // A tell from the human to a quest Warriv handed on is the answer;
+        // Warriv's own is not.
+        let asked = self.tasks.warriv.camps.get_mut(&key).and_then(|c| {
+            let a = c.asked.remove(title)?;
+            c.answered.insert((title.to_string(), a.question.clone()));
+            Some(a)
+        });
+        if let Some(a) = asked.filter(|_| !by.is_some_and(warriv::is_warriv)) {
+            self.remember_answer(&key, title, &a.question, Some(text));
+        }
         if let Some(by) = by.filter(|b| warriv::is_warriv(b)) {
             let awake = self
                 .tasks
@@ -466,6 +599,7 @@ impl App {
             key,
             title: title.to_string(),
             text: text.to_string(),
+            fix: false,
             human: false,
         });
     }
@@ -482,6 +616,7 @@ impl App {
             key,
             title: title.to_string(),
             text: text.to_string(),
+            fix: false,
             human: true,
         });
     }
@@ -539,30 +674,45 @@ impl App {
             return true;
         };
         if !self.live(&h) {
-            self.note_tell(tell, t);
+            match tell.fix {
+                true => self.file_fix_up(&tell.key, t, &tell.text),
+                false => self.note_tell(tell, t),
+            }
             return true;
         }
         if self.phase_of(&h) != Some(Phase::Done) {
             return false;
         }
-        if t.mark == Mark::Blocked {
+        // Sent back, it is in hand again, so no reviewer reads it meanwhile.
+        if t.mark == Mark::Blocked || (tell.fix && t.mark == Mark::Review) {
             self.set_task(&tell.key, t.line, &t.title, Mark::Working);
         }
         let Some(c) = self.consoles.get(&h) else {
             return true;
         };
-        let told = if tell.human {
-            warriv::answered(&horadric_command(), &tell.text)
+        let (text, said) = if tell.fix {
+            (
+                warriv::sent_back(&horadric_command(), &tell.text),
+                "Warriv sent back",
+            )
+        } else if tell.human {
+            (
+                warriv::answered(&horadric_command(), &tell.text),
+                "You answered",
+            )
         } else {
-            warriv::told(&horadric_command(), &tell.text)
+            (
+                warriv::told(&horadric_command(), &tell.text),
+                "Warriv answered",
+            )
         };
-        c.write(told.into_bytes());
+        c.write(text.into_bytes());
         self.tasks.enters.push((h.clone(), Instant::now()));
         self.tasks.nudged.remove(&h);
         if !self.quiet && !tell.human {
             self.toasts.show(
                 Toast::Info,
-                &format!("Warriv answered: {}", tasks::one_line(&t.title)),
+                &format!("{said}: {}", tasks::one_line(&t.title)),
                 &tell.text,
             );
         }
@@ -614,6 +764,185 @@ impl App {
                 title: title.to_string(),
                 detail,
             });
+    }
+    /// One look at a project's reviews. In "Warriv reviews" mode a quest
+    /// going `[?]` queues, and one reviewer a project reads them in turn,
+    /// a fresh session each, which closes once its turn ends. True when a
+    /// reviewer closed, which the clusters have to hear.
+    pub(super) fn warriv_reviews(&mut self, key: &str, b: &Board) -> bool {
+        let mut r = self.tasks.warriv.reviewing.remove(key).unwrap_or_default();
+        let mut closed = false;
+        if let Some(rv) = r.reviewer.take() {
+            let stopped = self.shared.registry.lock().is_ok_and(|reg| {
+                reg.get(&rv.id)
+                    .is_some_and(|s| s.phase == Phase::Done && s.since > rv.started)
+            });
+            if !self.live(&rv.id) || stopped {
+                self.forget(&rv.id);
+                self.keep_memory(key);
+                r.reviews.done();
+                closed = true;
+            } else {
+                r.reviewer = Some(rv);
+            }
+        }
+        if b.mode == Mode::Warriv {
+            r.reviews.hear(&warriv::to_review(&b.tasks));
+            if r.reviewer.is_none() {
+                if let Some(title) = r.reviews.take() {
+                    r.reviewer = self.start_warriv_reviewer(key, b, &title);
+                    // It could not start: the human reads it.
+                    if r.reviewer.is_none() {
+                        r.reviews.done();
+                    }
+                }
+            }
+        } else {
+            r.reviews.stop();
+        }
+        self.tasks.warriv.reviewing.insert(key.to_string(), r);
+        closed
+    }
+
+    /// Whether the quest `title` is being reviewed or waits to be, so the
+    /// human need not hear it is ready.
+    pub(super) fn reviewing(&self, key: &str, title: &str) -> bool {
+        self.tasks
+            .warriv
+            .reviewing
+            .get(key)
+            .is_some_and(|r| r.reviews.pending(title))
+    }
+
+    /// A fresh reviewer in the project's main tree, with the quest and its
+    /// diff as its first prompt.
+    fn start_warriv_reviewer(&mut self, key: &str, b: &Board, title: &str) -> Option<Reviewer> {
+        let dir = self.project_dir(key)?;
+        let t = b.tasks.iter().find(|t| t.title == title)?;
+        let into = crate::worktree::checked_out(&dir).unwrap_or_else(|| "main".into());
+        let branch = self.branch_of(&dir, t);
+        let diff = branch
+            .as_deref()
+            .map(|br| crate::worktree::diff(&dir, &into, br))
+            .unwrap_or_default();
+        let prompt = warriv::review_prompt(&Review {
+            title: t.title.clone(),
+            notes: t.notes.clone(),
+            branch,
+            into,
+            diff,
+        });
+        let id = self.unique_id(warriv::REVIEWER);
+        self.tasks.prompts.insert(id.clone(), prompt);
+        let started = SystemTime::now();
+        if let Err(e) = self.launch(
+            &id,
+            "Warriv reviews",
+            dir,
+            Vec::new(),
+            Run::Agent(Agent::Claude),
+            false,
+        ) {
+            self.tasks.prompts.remove(&id);
+            eprintln!("horadric: cannot start a reviewer: {e}");
+            self.toasts
+                .show(Toast::Failed, "Cannot start a reviewer", &e);
+            return None;
+        }
+        Some(Reviewer { id, started })
+    }
+
+    /// The flags a reviewer starts with: the quest commands and the git
+    /// that reads, before its system prompt, which ends that list.
+    pub(super) fn reviewer_args(&self, cwd: &Path) -> (Vec<String>, String) {
+        let horadric = horadric_command();
+        let mut allowed = memory_tools(&horadric);
+        for git in ["git diff", "git log", "git show"] {
+            allowed.push(format!("Bash({git}:*)"));
+        }
+        let prompt = warriv::review_system_prompt(
+            &horadric,
+            file::rel(Path::new(&folder_key(&cwd.to_string_lossy()))),
+        );
+        (allowed, format!("{prompt}\n\n{}", memory_prompt(cwd)))
+    }
+
+    /// The branch a quest's work is on: its live session's, or else the
+    /// unmerged branch named after it. None when it worked in the main
+    /// tree.
+    fn branch_of(&self, main: &Path, t: &Task) -> Option<String> {
+        let h = t.holder.as_deref()?;
+        let live = self
+            .shared
+            .registry
+            .lock()
+            .ok()
+            .and_then(|r| Some(r.get(h)?.worktree.as_ref()?.branch.clone()));
+        if live.is_some() {
+            return live;
+        }
+        let mut done = t.clone();
+        done.mark = Mark::Done;
+        let unmerged = crate::worktree::unmerged(main);
+        horadric_core::worktree::finished(&[done], &unmerged)
+            .pop()
+            .map(|(b, _)| b)
+    }
+
+    /// `quest fix` heard: the quest's session hears what is wrong once it
+    /// is between turns, or, gone, a fix-up quest is filed below it.
+    pub(in crate::app) fn hear_fix(&mut self, dir: &str, title: &str, what: &str) {
+        let key = folder_key(dir);
+        let t = self
+            .shared
+            .boards
+            .borrow()
+            .get(&key)
+            .and_then(|b| b.tasks.iter().find(|t| t.title == title).cloned());
+        let Some(t) = t.filter(|t| t.mark == Mark::Review) else {
+            return;
+        };
+        let live = t
+            .holder
+            .as_deref()
+            .is_some_and(|h| tombs::count(h).is_none() && self.live(h));
+        if !live {
+            self.file_fix_up(&key, &t, what);
+            return;
+        }
+        self.tasks
+            .warriv
+            .tells
+            .retain(|x| !(x.key == key && x.title == title));
+        self.tasks.warriv.tells.push(Tell {
+            key,
+            title: title.to_string(),
+            text: what.to_string(),
+            fix: true,
+            human: false,
+        });
+    }
+
+    /// A quest sent back whose session is gone: completed, as a failed
+    /// merge leaves it, with a fix-up quest right below it.
+    fn file_fix_up(&mut self, key: &str, t: &Task, what: &str) {
+        let Some(main) = self.project_dir(key) else {
+            return;
+        };
+        let into = crate::worktree::checked_out(&main).unwrap_or_else(|| "main".into());
+        let fix = warriv::fix_up(&t.title, self.branch_of(&main, t).as_deref(), &into, what);
+        if let Err(e) = file::update(&main, |text| warriv::send_back(text, &t.title, &fix).ok()) {
+            eprintln!("horadric: cannot add \"{}\": {e}", fix.title);
+            return;
+        }
+        if !self.quiet {
+            self.toasts.show(
+                Toast::Info,
+                &format!("Warriv sent back: {}", tasks::one_line(&t.title)),
+                &format!("Added the quest \"{}\" below it.", fix.title),
+            );
+        }
+        self.refresh_boards(true);
     }
 
     /// The projects the tray's "Warriv drives" lists: each with a quest
@@ -730,4 +1059,27 @@ impl App {
         }
         self.halt_errands(key);
     }
+}
+
+/// The quest commands Warriv's sessions may run without asking, and its
+/// memory, the one file they may edit. An Edit rule covers every tool
+/// that writes files; Claude Code refuses a Write rule.
+fn memory_tools(horadric: &str) -> Vec<String> {
+    let mut tools = warriv::quest_tools(horadric);
+    tools.push(format!("Edit(./{})", warriv::MEMORY));
+    tools
+}
+
+/// What a Warriv session started in `cwd` is told about its memory, by
+/// its whole path, since a relative one was read against the wrong folder.
+fn memory_prompt(cwd: &Path) -> String {
+    let memory = std::fs::read_to_string(cwd.join(warriv::MEMORY)).ok();
+    let at = format!(
+        "{}/{}",
+        cwd.to_string_lossy()
+            .replace('\\', "/")
+            .trim_end_matches('/'),
+        warriv::MEMORY
+    );
+    warriv::memory_prompt(&at, memory.as_deref())
 }

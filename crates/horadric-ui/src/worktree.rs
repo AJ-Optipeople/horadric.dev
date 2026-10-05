@@ -208,12 +208,37 @@ pub fn unmerged(main: &Path) -> Vec<String> {
     .unwrap_or_default()
 }
 
+/// What `branch` changed since it left `into`, as `git diff` says it. Empty
+/// when git can not say.
+pub fn diff(main: &Path, into: &str, branch: &str) -> String {
+    git(main, &["diff", &format!("{into}...{branch}")]).unwrap_or_default()
+}
+
 /// What the main tree has checked out, for saying where a merge goes.
 pub fn checked_out(main: &Path) -> Option<String> {
     git(main, &["rev-parse", "--abbrev-ref", "HEAD"])
         .ok()
         .map(|b| b.trim().to_string())
         .filter(|b| !b.is_empty() && b != "HEAD")
+}
+
+/// Commits the file `rel` in the main tree `main` by itself, leaving
+/// whatever else is staged there to the sessions that staged it. True when
+/// there was something to commit. Nothing on a detached head, or where git
+/// ignores the file.
+pub fn commit_file(main: &Path, rel: &str, message: &str) -> Result<bool, String> {
+    if git(main, &["status", "--porcelain", "--", rel])?
+        .trim()
+        .is_empty()
+    {
+        return Ok(false);
+    }
+    if checked_out(main).is_none() {
+        return Err("the main tree is not on a branch".to_string());
+    }
+    git(main, &["add", "--", rel])?;
+    git(main, &["commit", "--only", "-m", message, "--", rel])?;
+    Ok(true)
 }
 
 /// Merges `branch` into what the main tree has checked out, always with a

@@ -62,6 +62,11 @@ pub(in crate::app) struct Tome {
     /// When a quiet cast of each errand was last told to the chronicle,
     /// by project key and label.
     quiet: HashMap<String, u64>,
+    /// Whether errands last heard the human leave rather than come back.
+    away: bool,
+    /// When the app started from a reload, while it watches whether the
+    /// reload shipped a project.
+    ship_watch: Option<u64>,
     /// Keystrokes still to be written, by session, each when it is due.
     typing: Vec<(String, Vec<u8>, Instant)>,
     /// The hidden commands this run of the app started, by file, to tell
@@ -80,7 +85,7 @@ struct Read {
 }
 
 impl Tome {
-    pub(in crate::app) fn new(saved: &SavedState) -> Tome {
+    pub(in crate::app) fn new(saved: &SavedState, reload: bool) -> Tome {
         Tome {
             projects: saved.runewords.clone(),
             cast: saved.stones_cast.clone(),
@@ -88,6 +93,7 @@ impl Tome {
             hidden: saved.stones_hidden.clone(),
             order: saved.stones_order.clone(),
             errands: saved.errands.clone(),
+            ship_watch: reload.then(crate::app::unix_now),
             ..Tome::default()
         }
     }

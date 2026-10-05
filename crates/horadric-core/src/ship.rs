@@ -26,6 +26,25 @@ pub fn last(key: &str, log: &str, records: &[Record]) -> Option<u64> {
         .max()
 }
 
+/// Whether the reload `reload.log` tells of is over: None while it is
+/// still under way, else whether the new build came up.
+pub fn came_up(log: &str) -> Option<bool> {
+    let last = log.lines().rev().find(|l| !l.trim().is_empty())?;
+    let (_, text) = last.split_once(' ')?;
+    match text {
+        "reloaded" => Some(true),
+        "rolled back" => Some(false),
+        t if t.starts_with("failed") => Some(false),
+        _ => None,
+    }
+}
+
+/// Whether the reload `reload.log` tells of shipped the project at `key`:
+/// it put in a build from the project's folder, and that build came up.
+pub fn shipped(key: &str, log: &str) -> bool {
+    matches!(reloaded(key, log), Some(Some(_)))
+}
+
 /// What `reload.log` says of the project at `key`: None when it is about
 /// another build, else when the reload came up, or None inside when it
 /// did not, so nothing is known of the ship before it.
@@ -133,6 +152,29 @@ mod tests {
     fn a_reload_of_the_project_is_its_last_ship() {
         let cast = [rec(200, KEY, Happened::Shipped)];
         assert_eq!(last(KEY, LOG, &cast), Some(107));
+    }
+
+    #[test]
+    fn a_reload_is_over_once_it_came_up_rolled_back_or_failed() {
+        assert_eq!(came_up(LOG), Some(true));
+        assert_eq!(
+            came_up(&LOG.replace("107 reloaded", "109 rolled back")),
+            Some(false)
+        );
+        assert_eq!(came_up("100 waiting\n101 failed: no exe\n"), Some(false));
+        assert_eq!(came_up(&LOG.replace("107 reloaded\n", "")), None);
+        assert_eq!(came_up(""), None);
+    }
+
+    #[test]
+    fn a_reload_ships_the_project_its_build_came_from_once_it_is_up() {
+        assert!(shipped(KEY, LOG));
+        assert!(!shipped("c:/users/me/code/other", LOG));
+        assert!(!shipped(
+            KEY,
+            &LOG.replace("107 reloaded", "109 rolled back")
+        ));
+        assert!(!shipped(KEY, &LOG.replace("107 reloaded\n", "")));
     }
 
     #[test]

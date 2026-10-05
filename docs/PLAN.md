@@ -3577,6 +3577,13 @@ It ends one of three ways:
 Reviews have their own budget, not the six wakes: one reviewer a
 project at a time, the rest queued. The reviewer runs no checks, since
 landing runs them. The mode menu says what the mode does in one line.
+Built on 2026-10-05: `Mode::Warriv` (`"mode": "warriv"`) finishes a
+quest as review does and lands it as auto does. `warriv::Reviews` keeps
+the queue, `warriv::review_prompt` puts the diff in (cut at 20 000
+characters, since the prompt goes on a command line), and a reviewer is
+a session `warriv-review-*`, so it counts as a Warriv for notes and for
+handing on. A reviewer that ends without a verdict leaves the quest to
+the human, who hears "Ready for review" then and not before.
 
 **3. While you were away.** When the human has given no input for 30
 minutes (`GetLastInputInfo`, already read in `app.rs`) and then comes
@@ -3748,7 +3755,7 @@ with Warriv's wakes, with the errand's label, so `wake_dots` puts each
 cast on the lane with lines to the quests it filed. A cast is a small
 square there, not a dot, red when it failed; its detail says when, what
 it filed, what else it did and how it ended. The Runesmith's prompt
-explains `"every"`, `"for"`, `"mode"`, `{since}`, the `From:` rule, and
+explains `"every"`, `"on"`, `"for"`, `"mode"`, `{since}`, the `From:` rule, and
 that only the human arms a stone. What the plan did not say:
 
 - **Not every cast is a dot.** An errand cast each minute would be a
@@ -3865,6 +3872,31 @@ answer as a rule, so the same kind of question never comes twice.
 Committed with the project, so it travels with the repository and its
 history shows how Warriv's judgment grew. `warriv::memory_prompt` and
 the compaction rule are pure and tested.
+**Built on 2026-10-05**, for wakes, reviewers and errand sessions, the
+Warriv sessions there are yet (`memory_tools` and `memory_prompt` in
+the UI's `warriv.rs`); rounds add the same two when they land. The
+session reads and writes the file itself, so the prompt says how instead of carrying it; it is the one
+file Warriv may edit (`Edit(./.horadric/warriv.md)` is in its allowed
+tools, and covers writing it too; Claude Code refuses a `Write(...)`
+rule). Past `MEMORY_LINES` (200) the prompt asks for a compaction to
+under 150: every rule and Open kept, the newest twenty Lately lines as
+they are, older ones folded a line a day or week. The app commits the
+file alone (`git commit --only`) when a wake, a review or an errand
+closes. A handed on
+question is noted with when Horadric first saw it; the next prompt into
+its quest's session, or a `quest tell` from the human, is the answer,
+and Horadric writes it into Open as an `- Answered:` line
+(`warriv::with_answer`). The next wake's prompt says to make each such
+line a rule and remove it. A quest that goes on without words Horadric
+heard leaves a line that says to read the quest's notes. An answer is
+kept once, though the quest still reads as blocked on it a moment after.
+Seen on a dev instance with Haiku in a scratch repository: the first
+wake created the memory with a Lately line and the question in Open,
+and the app committed it alone; a `quest tell` from the human became an
+`Answered:` line; the next wake made it the rule "anything under 50 EUR
+a year goes on the company Visa" and settled a new quest by it without
+asking. The prompt names the memory by its whole path, since Haiku read
+a relative one against a parent folder, and says not to commit it.
 
 **2. Rounds.** While Warriv drives, a round every hour, after each
 landing and when the human leaves: a Warriv session that looks at the
@@ -3951,7 +3983,24 @@ read Haiku 4.5.
 **6. Event triggers for errands.** `"on": "landed"`, `"shipped"`,
 `"away"` or `"back"` on a stone casts it at that event instead of on a
 clock, so "post what shipped to me on Slack" is a stone. Armed like a
-clock errand.
+clock errand. **Built on 2026-10-05**: `runeword::parse` reads `"on"`
+as `Every::On(Event)`, pure and tested; a stone with both `"every"` and
+`"on"`, or another event, is cracked with the reason. The app marks an
+armed errand that hears the event `fired` (saved in `Armed`), and
+`runeword::tick` treats it as due since then, so one at a time, the
+90 % hold and `"for"` work as for a clock errand; an event while it runs
+casts it once more after. Landed is heard as a quest merges by itself
+(`merged`), away and back as the absence begins and ends (locking the
+screen too), and shipped by a build started from a reload once
+`reload.log` says it came up (`ship::came_up`) and was built from the
+project's folder (`ship::shipped`), watched for two minutes. The arm
+question and the tooltip say "on each landing", "after each ship",
+"when you leave" or "when you come back", without the line about a
+missed cast. Seen on a dev instance (port 4110, scratch `APPDATA`,
+`cmd.exe` for the agent): a quest in an auto log with two at a time
+finished, landed on `main`, and an armed `"on": "landed"` run stone
+appended to a file once within the second. Not tried on screen:
+shipped, away and back.
 
 **7. Spectator mode.** While Warriv drives and the human is away, the
 stage follows the work: it shows the project where something last

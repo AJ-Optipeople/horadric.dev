@@ -1,8 +1,9 @@
-//! Errands: stones cast on a clock. A stone with `"every"` is cast
-//! unattended once the human has armed it, at most one a project at a
-//! time, and stopped when it runs past `"for"`. When each is due and
-//! which one goes now is decided here, from Unix seconds and the local
-//! clock's offset, so the app only reads the clock and carries it out.
+//! Errands: stones cast on a clock, or at an event. A stone with
+//! `"every"`, or `"on"` and an event, is cast unattended once the human
+//! has armed it, at most one a project at a time, and stopped when it
+//! runs past `"for"`. When each is due and which one goes now is decided
+//! here, from Unix seconds and the local clock's offset, so the app only
+//! reads the clock, hears the events and carries it out.
 
 use serde::{Deserialize, Serialize};
 
@@ -20,6 +21,39 @@ pub enum Every {
     Weekday(u32),
     /// One day a week, 0 for Monday, at this minute.
     Week(u8, u32),
+    /// Not on a clock: each time this happens.
+    On(Event),
+}
+
+/// What an errand with `"on"` is cast at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Event {
+    /// A quest of the project landed on its main branch.
+    Landed,
+    /// A build of the project came up as the installed Horadric.
+    Shipped,
+    /// The human left the machine.
+    Away,
+    /// The human came back to it.
+    Back,
+}
+
+impl Event {
+    /// What `"on"` says: `landed`, `shipped`, `away` or `back`.
+    pub fn parse(text: &str) -> Result<Event, String> {
+        Ok(match text.trim().to_lowercase().as_str() {
+            "landed" => Event::Landed,
+            "shipped" => Event::Shipped,
+            "away" => Event::Away,
+            "back" => Event::Back,
+            _ => return Err(format!("\"{text}\" is not landed, shipped, away or back")),
+        })
+    }
+}
+
+/// Whether an errand is cast at `event`.
+pub fn hears(errand: &Errand, event: Event) -> bool {
+    errand.every == Every::On(event)
 }
 
 /// A stone's clock: how often, and how long a cast may run.
@@ -161,10 +195,12 @@ fn clock(text: &str) -> Result<u32, String> {
 /// When an errand cast last at `last` (Unix seconds) is due again, the
 /// local clock being `offset` seconds ahead of UTC. A clock time is the
 /// first such moment after `last`, so a cast missed while the app was off
-/// is due at once, and only once.
+/// is due at once, and only once. One cast at an event is never due by
+/// the clock.
 pub fn due(every: Every, last: u64, offset: i64) -> u64 {
     let (minute, on): (u32, Box<dyn Fn(u8) -> bool>) = match every {
         Every::Span(s) => return last.saturating_add(s),
+        Every::On(_) => return u64::MAX,
         Every::Day(m) => (m, Box::new(|_| true)),
         Every::Weekday(m) => (m, Box::new(|day| day < 5)),
         Every::Week(d, m) => (m, Box::new(move |day| day == d)),
@@ -197,6 +233,10 @@ pub fn describe(every: Every) -> String {
             name[..1].make_ascii_uppercase();
             format!("every {name} at {}", at(m))
         }
+        Every::On(Event::Landed) => "on each landing".into(),
+        Every::On(Event::Shipped) => "after each ship".into(),
+        Every::On(Event::Away) => "when you leave".into(),
+        Every::On(Event::Back) => "when you come back".into(),
     }
 }
 
@@ -216,20 +256,27 @@ pub fn length(secs: u64) -> String {
     out
 }
 
-/// A stone's `"every"` and `"for"`, when it has `"every"`. A stone with
-/// it whose steps need a quest's session (test, review, merge) cannot be
-/// an errand, which has no quest.
+/// A stone's `"every"` or `"on"`, and its `"for"`, when it has one of
+/// the two. A stone with it whose steps need a quest's session (test,
+/// review, merge) cannot be an errand, which has no quest.
 pub(super) fn errand_of(
     value: &serde_json::Value,
     runes: &[Rune],
 ) -> Result<Option<Errand>, String> {
-    let Some(every_text) = value.get("every") else {
-        return Ok(None);
+    let every = match (value.get("every"), value.get("on")) {
+        (None, None) => return Ok(None),
+        (Some(_), Some(_)) => {
+            return Err("a stone says \"every\" or \"on\", not both".into());
+        }
+        (Some(e), None) => every(
+            e.as_str()
+                .ok_or("\"every\" is text like \"1h\" or \"day 09:00\"")?,
+        )?,
+        (None, Some(on)) => Every::On(Event::parse(
+            on.as_str()
+                .ok_or("\"on\" is landed, shipped, away or back")?,
+        )?),
     };
-    let every_text = every_text
-        .as_str()
-        .ok_or("\"every\" is text like \"1h\" or \"day 09:00\"")?;
-    let every = every(every_text)?;
     let most = match value.get("for") {
         None => FOR_DEFAULT,
         Some(v) => span(v.as_str().ok_or("\"for\" is text like \"30m\"")?)?,
@@ -264,6 +311,10 @@ pub struct Armed {
     /// When its last cast began, or it was armed, in Unix seconds: when
     /// it is next due is counted from this.
     pub last: u64,
+    /// When the event it is cast at last happened, while it waits for
+    /// its cast: the clock treats it as due since then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fired: Option<u64>,
     /// When its last cast finished well, for `{since}`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finished: Option<u64>,
@@ -292,6 +343,7 @@ impl Armed {
         Armed {
             steps: Armed::print(stone),
             last: now,
+            fired: None,
             finished: None,
             failed: false,
             running: false,
@@ -347,7 +399,9 @@ pub enum Tick {
 
 /// What the clock does with one project's armed errands at `now`. One
 /// runs at a time: while one does, the others wait, and it is stopped
-/// once it runs past its `"for"`. Otherwise the one due longest is cast,
+/// once it runs past its `"for"`. One cast at an event is due from when
+/// it last happened until it is cast or skipped, so an event while it
+/// runs casts it once more after. Otherwise the one due longest is cast,
 /// unless `full` says the account's fullest limit is at 90 % or more:
 /// then every due one is skipped, or with `Full::Wait` they all stay due
 /// and the one due longest is cast once the limit has reset.
@@ -362,7 +416,10 @@ pub fn tick(errands: &[Clocked], now: u64, offset: i64, full: Option<Full>) -> V
     }
     let mut due: Vec<(u64, &Clocked)> = errands
         .iter()
-        .map(|e| (due(e.errand.every, e.armed.last, offset), e))
+        .filter_map(|e| match e.errand.every {
+            Every::On(_) => e.armed.fired.map(|at| (at, e)),
+            every => Some((due(every, e.armed.last, offset), e)),
+        })
         .filter(|(at, _)| *at <= now)
         .collect();
     due.sort_by_key(|(at, _)| *at);
@@ -411,6 +468,8 @@ pub fn cast_lines(armed: &Armed, every: Every, now: u64, offset: i64) -> Vec<Str
     let next = due(every, armed.last, offset);
     let next = if armed.running {
         "Next once this one ends".to_string()
+    } else if let Every::On(_) = every {
+        format!("Next {}", describe(every))
     } else if next <= now {
         "Next now".to_string()
     } else {
@@ -455,8 +514,12 @@ pub fn arm_text(stone: &Stone, on: &str) -> String {
         out.push_str("\n\n");
     }
     if let Some(e) = &stone.errand {
+        let missed = match e.every {
+            Every::On(_) => "",
+            _ => " A cast it misses while Horadric is off runs once when it starts.",
+        };
         out.push_str(&format!(
-            "Runs {} without asking, stopped after {}. A cast it misses while Horadric is off runs once when it starts.\n\n",
+            "Runs {} without asking, stopped after {}.{missed}\n\n",
             describe(e.every),
             length(e.most)
         ));
@@ -568,6 +631,7 @@ mod tests {
             armed: Armed {
                 steps: 0,
                 last,
+                fired: None,
                 finished: None,
                 failed: false,
                 running: false,
@@ -629,6 +693,52 @@ mod tests {
     }
 
     #[test]
+    fn on_reads_the_four_events_and_nothing_else() {
+        assert_eq!(Event::parse("landed"), Ok(Event::Landed));
+        assert_eq!(Event::parse(" Shipped "), Ok(Event::Shipped));
+        assert_eq!(Event::parse("AWAY"), Ok(Event::Away));
+        assert_eq!(Event::parse("back"), Ok(Event::Back));
+        assert!(Event::parse("merged")
+            .unwrap_err()
+            .contains("landed, shipped"));
+        let steps = [Rune::Say("Look".into())];
+        let of = |v: &str| errand_of(&serde_json::from_str(v).unwrap(), &steps);
+        let e = of(r#"{"on":"landed","for":"5m"}"#).unwrap().unwrap();
+        assert_eq!(e.every, Every::On(Event::Landed));
+        assert_eq!(e.most, 300);
+        assert!(hears(&e, Event::Landed));
+        assert!(!hears(&e, Event::Shipped));
+        assert!(of(r#"{"on":"landed","every":"1h"}"#)
+            .unwrap_err()
+            .contains("not both"));
+        assert!(of(r#"{"on":3}"#).is_err());
+        assert!(of(r#"{"on":"sometimes"}"#).is_err());
+    }
+
+    #[test]
+    fn an_event_errand_waits_for_its_event_and_goes_once() {
+        let mut e = clocked("Post", Every::On(Event::Landed), 1000);
+        // No clock makes it due, however long it waits.
+        assert_eq!(tick(std::slice::from_ref(&e), u64::MAX - 1, 0, None), []);
+        e.armed.fired = Some(5000);
+        let span = clocked("Span", Every::Span(600), 1000);
+        // Due since the event, so a clock errand due longer goes first.
+        assert_eq!(
+            tick(&[e.clone(), span], 5000, 0, None),
+            [Tick::Cast("Span".into())]
+        );
+        assert_eq!(
+            tick(std::slice::from_ref(&e), 5000, 0, None),
+            [Tick::Cast("Post".into())]
+        );
+        assert_eq!(
+            tick(std::slice::from_ref(&e), 5000, 0, Some(Full::Skip)),
+            [Tick::Skip("Post".into())]
+        );
+        assert_eq!(tick(&[e], 5000, 0, Some(Full::Wait)), []);
+    }
+
+    #[test]
     fn a_schedule_reads_in_words() {
         assert_eq!(describe(Every::Span(3600)), "every 1h");
         assert_eq!(describe(Every::Span(5400)), "every 1h30m");
@@ -636,6 +746,10 @@ mod tests {
         assert_eq!(describe(Every::Weekday(510)), "every weekday at 08:30");
         assert_eq!(describe(Every::Week(6, 720)), "every Sunday at 12:00");
         assert_eq!(length(90), "1m30s");
+        assert_eq!(describe(Every::On(Event::Landed)), "on each landing");
+        assert_eq!(describe(Every::On(Event::Shipped)), "after each ship");
+        assert_eq!(describe(Every::On(Event::Away)), "when you leave");
+        assert_eq!(describe(Every::On(Event::Back)), "when you come back");
     }
 
     fn stone(steps: Vec<Rune>, bypass: bool) -> Stone {
@@ -688,6 +802,18 @@ mod tests {
         assert!(of(r#"{"every":"1h","mode":"auto"}"#)
             .unwrap_err()
             .contains("bypass"));
+    }
+
+    #[test]
+    fn arming_an_event_errand_says_when_without_a_missed_cast() {
+        let mut s = stone(vec![Rune::Say("Post it".into())], false);
+        s.errand.as_mut().unwrap().every = Every::On(Event::Shipped);
+        let text = arm_text(&s, "x");
+        assert!(
+            text.starts_with("Runs after each ship without asking, stopped after 30m.\n"),
+            "{text}"
+        );
+        assert!(!text.contains("misses"));
     }
 
     #[test]
@@ -769,6 +895,10 @@ mod tests {
         a.running = false;
         a.last = now - 2 * HOUR;
         assert_eq!(lines(&a)[1], "Next now");
+        assert_eq!(
+            cast_lines(&a, Every::On(Event::Landed), now, 0)[1],
+            "Next on each landing"
+        );
     }
 
     #[test]

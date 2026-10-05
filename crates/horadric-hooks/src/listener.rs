@@ -116,6 +116,8 @@ pub struct TasksChanged {
     pub quest: Option<String>,
     /// What Warriv tells that quest's session, typed in between turns.
     pub tell: Option<String>,
+    /// What a review found wrong with that quest, which sends it back.
+    pub fix: Option<String>,
     /// The session that ran the command, so the app knows Warriv's own.
     pub by: Option<String>,
 }
@@ -128,6 +130,7 @@ impl TasksChanged {
             "why": self.why,
             "quest": self.quest,
             "tell": self.tell,
+            "fix": self.fix,
             "by": self.by,
         })
         .to_string()
@@ -142,6 +145,7 @@ impl TasksChanged {
             why: text("why"),
             quest: text("quest"),
             tell: text("tell"),
+            fix: text("fix"),
             by: text("by"),
         })
     }
@@ -701,6 +705,7 @@ X-Horadric-Port: {dev}
             why: None,
             quest: Some("Serve the API".into()),
             tell: Some("Use port 4100.".into()),
+            fix: Some("No tests.".into()),
             by: Some("warriv-5".into()),
         };
         let json = want.to_json();
