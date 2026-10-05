@@ -208,6 +208,12 @@ pub fn unmerged(main: &Path) -> Vec<String> {
     .unwrap_or_default()
 }
 
+/// What `branch` changed since it left `into`, as `git diff` says it. Empty
+/// when git can not say.
+pub fn diff(main: &Path, into: &str, branch: &str) -> String {
+    git(main, &["diff", &format!("{into}...{branch}")]).unwrap_or_default()
+}
+
 /// What the main tree has checked out, for saying where a merge goes.
 pub fn checked_out(main: &Path) -> Option<String> {
     git(main, &["rev-parse", "--abbrev-ref", "HEAD"])

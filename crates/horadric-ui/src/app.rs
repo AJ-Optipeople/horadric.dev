@@ -2820,6 +2820,9 @@ impl App {
                             if let (Some(quest), Some(tell)) = (&t.quest, &t.tell) {
                                 self.hear_tell(&t.dir, quest, tell, t.by.as_deref());
                             }
+                            if let (Some(quest), Some(fix)) = (&t.quest, &t.fix) {
+                                self.hear_fix(&t.dir, quest, fix);
+                            }
                             self.refresh_boards(true);
                             self.run_tasks();
                         }

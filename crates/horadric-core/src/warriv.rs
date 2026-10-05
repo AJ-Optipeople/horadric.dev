@@ -11,13 +11,14 @@
 //! wake, what it is told, and the events that wait while it works. The UI
 //! starts the session and types into terminals.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
 
 use serde_json::Value;
 
+use crate::merge::{add_fix_up, FixUp};
 use crate::tasks::{
     end_of, find, insert_note, insert_with_notes, item_line, one_line, parse, readiness,
-    replace_line, Mark, Mode, Ready, Task,
+    replace_line, set_mark, Mark, Mode, Ready, Task,
 };
 
 /// What a blocked quest's reason starts with when Warriv handed it to the
@@ -480,6 +481,234 @@ pub fn add_below(text: &str, name: &str, title: &str, notes: &str) -> Result<Str
     Ok(insert_with_notes(text, end_of(text, t.line), title, notes))
 }
 
+/// What a reviewer session's id starts with. It is a Warriv too, so its
+/// notes are marked as Warriv's and it may hand a quest to the human.
+pub const REVIEWER: &str = "warriv-review";
+
+/// Whether the session `id` is a reviewer, which reads a finished quest
+/// in "Warriv reviews" mode before it lands.
+pub fn is_reviewer(id: &str) -> bool {
+    id.strip_prefix(REVIEWER)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with('-'))
+}
+
+/// The longest diff put in a reviewer's prompt, in characters. Its start
+/// is kept, and the reviewer is told how to read the rest. The prompt goes
+/// on a command line, which Windows ends at 32767.
+const DIFF: usize = 20_000;
+
+/// The quests waiting for a review: completed by their session, `[?]`,
+/// in list order. A quest in tombs is the human's pick, not a review.
+pub fn to_review(tasks: &[Task]) -> Vec<String> {
+    tasks
+        .iter()
+        .filter(|t| t.mark == Mark::Review && !t.title.trim().is_empty())
+        .filter(|t| {
+            t.holder
+                .as_deref()
+                .is_none_or(|h| crate::tombs::count(h).is_none())
+        })
+        .map(|t| t.title.clone())
+        .collect()
+}
+
+/// A project's reviews: the one being read, the ones queued behind it, and
+/// every quest already taken while it stays `[?]`, so a reviewer that ends
+/// without a verdict leaves it to the human rather than starting again.
+#[derive(Debug, Default, Clone)]
+pub struct Reviews {
+    seen: BTreeSet<String>,
+    queue: VecDeque<String>,
+    current: Option<String>,
+}
+
+impl Reviews {
+    /// Takes the quests `[?]` now. A new one queues; one that is no longer
+    /// `[?]` is forgotten, so it is read again should it come back.
+    pub fn hear(&mut self, now: &[String]) {
+        self.seen.retain(|t| now.contains(t));
+        self.queue.retain(|t| now.contains(t));
+        for t in now {
+            if self.seen.insert(t.clone()) {
+                self.queue.push_back(t.clone());
+            }
+        }
+    }
+
+    /// The quest to read next, when no review is under way: one reviewer a
+    /// project at a time.
+    pub fn take(&mut self) -> Option<String> {
+        if self.current.is_some() {
+            return None;
+        }
+        self.current = self.queue.pop_front();
+        self.current.clone()
+    }
+
+    /// The review under way ended, however it ended.
+    pub fn done(&mut self) {
+        self.current = None;
+    }
+
+    /// Whether `title` is being read or waits to be, so nobody else needs
+    /// to hear of it.
+    pub fn pending(&self, title: &str) -> bool {
+        self.current.as_deref() == Some(title) || self.queue.iter().any(|t| t == title)
+    }
+
+    /// The mode is not "Warriv reviews" any more: nothing waits. The review
+    /// under way ends at its stop.
+    pub fn stop(&mut self) {
+        self.queue.clear();
+        self.seen.clear();
+    }
+}
+
+/// What a reviewer reads: the quest, its notes, where its work is and the
+/// diff of that work against what it lands on.
+#[derive(Debug, Clone, Default)]
+pub struct Review {
+    pub title: String,
+    pub notes: Vec<String>,
+    /// The quest's branch, none when it worked in the main tree.
+    pub branch: Option<String>,
+    /// What the main tree has checked out, where it lands.
+    pub into: String,
+    pub diff: String,
+}
+
+/// What a reviewer is told beside its first prompt: who it is and the
+/// three ways a review ends.
+pub fn review_system_prompt(horadric: &str, file: &str) -> String {
+    format!(
+        "You are Warriv, the caravan master of this project, reviewing a quest from the \
+         quest log, {file}. An agent session finished it and Horadric woke you to read its \
+         work before it lands, so the human hears only what needs a human. You review; you \
+         do not build. Change no code, run no checks (landing runs the project's checks \
+         itself), and never edit {file} directly.\n\n\
+         Read the quest, its notes and its diff, and as much of the code around it as you \
+         need. Then end the review one of three ways:\n\
+         - It does what the quest asks and nothing is wrong with it: `{horadric} quest pass \
+         \"<title>\"`. It lands on main as the human's approval would.\n\
+         - Something is wrong or missing that its session can fix: `{horadric} quest fix \
+         \"<title>\" \"<what is wrong, concretely: the file, the case, what it should do>\"`. \
+         Horadric tells its session, or files a fix-up quest when the session is gone.\n\
+         - Only the human can say: first `{horadric} quest note \"<title>\" \"<what you \
+         saw>\"`, then `{horadric} quest blocked \"<question>\" --quest \"<title>\"`, worded \
+         so it can be answered in one line.\n\n\
+         Judge what the quest asked for, not your own taste: style the project does not ask \
+         for is no reason to send it back. Run exactly one of the three, then stop. Do not ask \
+         questions in this chat: nobody reads it, and the session closes when your turn ends."
+    )
+}
+
+/// The first prompt of a review: the quest, its notes, and its diff.
+pub fn review_prompt(r: &Review) -> String {
+    let mut out = format!("Review the quest \"{}\".\n", one_line(&r.title));
+    if !r.notes.is_empty() {
+        out.push_str("\nIts notes:\n");
+        for n in &r.notes {
+            out.push_str(&format!("  {n}\n"));
+        }
+    }
+    let Some(branch) = &r.branch else {
+        out.push_str(&format!(
+            "\nIt worked in the main tree, on {}, so its work is in the commits there; \
+             read `git log` to find them.\n",
+            r.into
+        ));
+        return out;
+    };
+    let range = format!("{}...{branch}", r.into);
+    if r.diff.trim().is_empty() {
+        out.push_str(&format!(
+            "\nIts branch {branch} has no changes against {}: `git diff {range}` is empty.\n",
+            r.into
+        ));
+        return out;
+    }
+    out.push_str(&format!(
+        "\nIts work is on the branch {branch}. `git diff {range}` says:\n\n```diff\n{}\n```\n",
+        head(r.diff.trim_end(), DIFF)
+    ));
+    if r.diff.trim_end().chars().count() > DIFF {
+        out.push_str(&format!(
+            "\nThe diff is cut there. Run `git diff {range}` for the rest.\n"
+        ));
+    }
+    out
+}
+
+/// The first `n` characters of `s`, marked as cut when they are.
+fn head(s: &str, n: usize) -> String {
+    if s.chars().count() <= n {
+        return s.to_string();
+    }
+    let kept: String = s.chars().take(n).collect();
+    format!("{kept}\u{2026}")
+}
+
+/// `text` with the quest `name` passed: completed, its holder kept, so it
+/// lands as the human's approval would. Only a quest waiting for review
+/// can pass.
+pub fn pass(text: &str, name: &str) -> Result<String, String> {
+    let t = reviewed(text, name)?;
+    set_mark(text, t.line, &t.title, Mark::Done).ok_or_else(|| "the log changed".to_string())
+}
+
+/// The quest `name` means, when it waits for review.
+pub fn reviewed(text: &str, name: &str) -> Result<Task, String> {
+    let t = quest(text, name)?;
+    if t.mark != Mark::Review {
+        return Err(format!("\"{}\" is not waiting for review", t.title));
+    }
+    Ok(t)
+}
+
+/// What a quest's session is told when its review sends it back, typed
+/// into its terminal, so on one line.
+pub fn sent_back(horadric: &str, what: &str) -> String {
+    format!(
+        "Warriv reviewed this quest and sends it back: {} Fix that, commit your work, and \
+         run `{horadric} quest done \"<one short line on what you achieved>\"` again.",
+        one_line(what)
+    )
+}
+
+/// The quest that fixes what a review of `title` found, for when its
+/// session is gone: its work is on `branch`, or in the main tree.
+pub fn fix_up(title: &str, branch: Option<&str>, into: &str, what: &str) -> FixUp {
+    let mut notes = vec![format!(
+        "Warriv reviewed \"{}\" and sent it back: {}",
+        one_line(title),
+        one_line(what)
+    )];
+    match branch {
+        Some(b) => notes.push(format!(
+            "Its work is on the branch `{b}`, not in `{into}`. Take its commits onto your \
+             branch with `git cherry-pick {into}..{b}`, fix what the review found, make every \
+             check in `.horadric/config.json` pass, and commit. Then delete it with `git \
+             branch -D {b}`. Your branch lands like any finished quest and carries its work."
+        )),
+        None => notes.push(format!("Its work is already in `{into}`; fix it there.")),
+    }
+    notes.push("The quests after the reviewed one wait for this one too.".to_string());
+    FixUp {
+        title: format!("Fix what review found in {}", branch.unwrap_or(title)),
+        notes: notes.join("\n"),
+    }
+}
+
+/// `text` with the quest `name`, whose session is gone, sent back: it is
+/// completed, as a failed merge leaves its quest, and `fix` goes right
+/// below it, the quests after it waiting for that too.
+pub fn send_back(text: &str, name: &str, fix: &FixUp) -> Result<String, String> {
+    let t = reviewed(text, name)?;
+    let done = set_mark(text, t.line, &t.title, Mark::Done)
+        .ok_or_else(|| "the log changed".to_string())?;
+    Ok(add_fix_up(&done, &t.title, fix).unwrap_or(done))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -901,5 +1130,172 @@ mod tests {
 - [ ] Two
 "
         );
+    }
+    #[test]
+    fn reviewers_are_known_by_their_id_and_are_warrivs() {
+        assert!(is_reviewer("warriv-review-4100"));
+        assert!(is_warriv("warriv-review-4100"));
+        assert!(!is_reviewer("warriv-4100"));
+        assert!(!is_reviewer("warriv-reviews-a-mode"));
+    }
+
+    #[test]
+    fn a_quest_going_to_review_is_one_to_read_but_tombs_are_not() {
+        let t = list("- [?] A @a-1\n- [/] B @b-1\n- [?] C @c-1.x3\n- [x] D @d-1\n- [?] E @e-1\n");
+        assert_eq!(to_review(&t), ["A", "E"]);
+    }
+
+    fn titles(t: &[&str]) -> Vec<String> {
+        t.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn one_review_at_a_time_and_the_rest_queue() {
+        let mut r = Reviews::default();
+        r.hear(&titles(&["A", "B"]));
+        assert_eq!(r.take().as_deref(), Some("A"));
+        // Under way, nothing else starts.
+        r.hear(&titles(&["A", "B", "C"]));
+        assert_eq!(r.take(), None);
+        assert!(r.pending("A") && r.pending("C"));
+        r.done();
+        assert_eq!(r.take().as_deref(), Some("B"));
+        r.done();
+        assert_eq!(r.take().as_deref(), Some("C"));
+        r.done();
+        assert_eq!(r.take(), None);
+    }
+
+    #[test]
+    fn a_quest_is_read_once_while_it_waits_and_again_when_it_comes_back() {
+        let mut r = Reviews::default();
+        r.hear(&titles(&["A"]));
+        assert_eq!(r.take().as_deref(), Some("A"));
+        // The reviewer ended without a verdict: the human's now.
+        r.done();
+        r.hear(&titles(&["A"]));
+        assert_eq!(r.take(), None);
+        assert!(!r.pending("A"));
+        // Sent back, worked on, finished again: a new review.
+        r.hear(&[]);
+        r.hear(&titles(&["A"]));
+        assert_eq!(r.take().as_deref(), Some("A"));
+    }
+
+    #[test]
+    fn a_quest_approved_while_it_queued_is_not_read() {
+        let mut r = Reviews::default();
+        r.hear(&titles(&["A", "B"]));
+        assert_eq!(r.take().as_deref(), Some("A"));
+        r.hear(&titles(&["A"]));
+        r.done();
+        assert_eq!(r.take(), None);
+        // Out of the mode, nothing waits, and back in it reads again.
+        r.hear(&titles(&["C"]));
+        r.stop();
+        assert_eq!(r.take(), None);
+        r.hear(&titles(&["C"]));
+        assert_eq!(r.take().as_deref(), Some("C"));
+    }
+
+    fn review(diff: &str) -> Review {
+        Review {
+            title: "Serve the API".into(),
+            notes: vec!["Port 4100.".into()],
+            branch: Some("serve-the-api".into()),
+            into: "main".into(),
+            diff: diff.into(),
+        }
+    }
+
+    #[test]
+    fn the_review_prompt_gives_the_quest_its_notes_and_its_diff() {
+        let p = review_prompt(&review("+fn serve() {}\n"));
+        assert_eq!(
+            p,
+            "Review the quest \"Serve the API\".\n\n\
+             Its notes:\n\
+             \x20 Port 4100.\n\n\
+             Its work is on the branch serve-the-api. `git diff main...serve-the-api` says:\n\n\
+             ```diff\n+fn serve() {}\n```\n"
+        );
+        let empty = review_prompt(&review(""));
+        assert!(empty.contains("has no changes against main"));
+        let trunk = review_prompt(&Review {
+            branch: None,
+            ..review("")
+        });
+        assert!(trunk.contains("It worked in the main tree, on main"));
+    }
+
+    #[test]
+    fn a_long_diff_keeps_its_start_and_says_how_to_read_the_rest() {
+        let long = format!("+start\n{}", "x".repeat(2 * DIFF));
+        let p = review_prompt(&review(&long));
+        assert!(p.contains("+start"));
+        assert!(p.contains("x\u{2026}\n```"));
+        assert!(p
+            .trim_end()
+            .ends_with("Run `git diff main...serve-the-api` for the rest."));
+        assert!(p.chars().count() < DIFF + 500);
+    }
+
+    #[test]
+    fn the_review_system_prompt_names_the_three_endings() {
+        let p = review_system_prompt("hx", ".horadric/tasks.md");
+        for c in [
+            "hx quest pass \"<title>\"",
+            "hx quest fix \"<title>\" \"<what is wrong",
+            "hx quest note \"<title>\"",
+            "hx quest blocked \"<question>\" --quest \"<title>\"",
+        ] {
+            assert!(p.contains(c), "{c}");
+        }
+        assert!(p.contains("run no checks"));
+    }
+
+    #[test]
+    fn a_pass_completes_a_quest_waiting_for_review_and_keeps_its_holder() {
+        let text = "- [?] Serve the API @serve-1\n  n\n- [/] Work @w-1\n";
+        assert_eq!(
+            pass(text, "Serve").unwrap(),
+            "- [x] Serve the API @serve-1\n  n\n- [/] Work @w-1\n"
+        );
+        assert!(pass(text, "Work")
+            .unwrap_err()
+            .contains("is not waiting for review"));
+        assert!(pass(text, "Nothing").is_err());
+    }
+
+    #[test]
+    fn a_session_sent_back_hears_why_on_one_line_and_how_to_report() {
+        let t = sent_back("hx", "The port is\n4100, not 80.");
+        assert!(t.starts_with(
+            "Warriv reviewed this quest and sends it back: The port is 4100, not 80."
+        ));
+        assert!(t.contains("`hx quest done"));
+        assert!(!t.contains('\n'));
+    }
+
+    #[test]
+    fn sent_back_with_its_session_gone_files_a_fix_up_below() {
+        let text = "- [?] Serve the API @serve-1\n  n\n- [ ] Next\n  After: Serve the API\n";
+        let fix = fix_up("Serve the API", Some("serve-the-api"), "main", "No tests.");
+        assert_eq!(fix.title, "Fix what review found in serve-the-api");
+        assert!(fix.notes.contains("sent it back: No tests."));
+        assert!(fix.notes.contains("git cherry-pick main..serve-the-api"));
+        let out = send_back(text, "Serve the API", &fix).unwrap();
+        let t = parse(&out);
+        assert_eq!(t[0].mark, Mark::Done);
+        assert_eq!(t[1].title, fix.title);
+        assert_eq!(t[1].mark, Mark::Open);
+        assert_eq!(
+            t[2].after(),
+            ["Fix what review found in serve-the-api", "Serve the API"]
+        );
+        assert!(send_back(&out, "Serve the API", &fix).is_err());
+        let trunk = fix_up("Serve", None, "main", "x");
+        assert_eq!(trunk.title, "Fix what review found in Serve");
+        assert!(trunk.notes.contains("already in `main`"));
     }
 }

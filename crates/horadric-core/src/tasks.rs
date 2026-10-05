@@ -891,16 +891,20 @@ pub enum Mode {
     Review,
     /// The next item starts as soon as the last one is done.
     Auto,
+    /// As review, but Warriv reads each finished item first and lands it
+    /// or sends it back, so the human hears only what it can not settle.
+    Warriv,
 }
 
 impl Mode {
-    pub const ALL: [Mode; 3] = [Mode::Manual, Mode::Review, Mode::Auto];
+    pub const ALL: [Mode; 4] = [Mode::Manual, Mode::Review, Mode::Warriv, Mode::Auto];
 
     pub fn name(self) -> &'static str {
         match self {
             Mode::Manual => "manual",
             Mode::Review => "review",
             Mode::Auto => "auto",
+            Mode::Warriv => "warriv",
         }
     }
 
@@ -909,6 +913,7 @@ impl Mode {
             Mode::Manual => "Manual",
             Mode::Review => "Review",
             Mode::Auto => "Auto",
+            Mode::Warriv => "Warriv reviews",
         }
     }
 
@@ -918,6 +923,9 @@ impl Mode {
             Mode::Manual => "Manual: click an item to start it",
             Mode::Review => "Review: the next item starts when you approve the last",
             Mode::Auto => "Auto: work down the list until it is done",
+            Mode::Warriv => {
+                "Warriv reviews: Warriv reads each finished item, lands it or sends it back"
+            }
         }
     }
 
@@ -934,8 +942,14 @@ impl Mode {
     pub fn finished(self) -> Mark {
         match self {
             Mode::Auto => Mark::Done,
-            Mode::Manual | Mode::Review => Mark::Review,
+            Mode::Manual | Mode::Review | Mode::Warriv => Mark::Review,
         }
+    }
+
+    /// A completed item's branch lands by itself: rebased, checked and
+    /// fast forwarded, rather than offered to the human's click.
+    pub fn lands(self) -> bool {
+        matches!(self, Mode::Auto | Mode::Warriv)
     }
 }
 
@@ -1520,6 +1534,15 @@ mod tests {
         assert!(out.contains("\"vps\""));
         assert_eq!(mode(&with_mode("not json", Mode::Auto)), Mode::Auto);
         assert_eq!(mode(&with_mode("{\"tasks\":3}", Mode::Auto)), Mode::Auto);
+        assert_eq!(mode(&with_mode("{}", Mode::Warriv)), Mode::Warriv);
+    }
+
+    #[test]
+    fn warriv_reviews_runs_like_review_and_lands_like_auto() {
+        assert!(Mode::Warriv.runs());
+        assert_eq!(Mode::Warriv.finished(), Mark::Review);
+        assert!(Mode::Warriv.lands() && Mode::Auto.lands());
+        assert!(!Mode::Review.lands() && !Mode::Manual.lands());
     }
 
     fn live(_: &str) -> Holder {
