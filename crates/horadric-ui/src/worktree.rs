@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 use horadric_core::diff::{self, Diff};
 use horadric_core::experience;
 use horadric_core::journal::{self, Commit};
+use horadric_core::merge;
 use horadric_core::worktree::{self, Place, Ports, Worktree};
 use horadric_hooks::tasks as file;
 
@@ -411,5 +412,110 @@ fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
             .filter(|s| !s.is_empty())
             .collect::<Vec<_>>()
             .join("\n"))
+    }
+}
+
+/// How long one check may run before it counts as failed, so a test that
+/// hangs does not hold every later merge of its project.
+const CHECK_LONGEST: Duration = Duration::from_secs(30 * 60);
+
+/// How a finished quest's merge into the main tree came out.
+pub enum Landing {
+    /// `main` holds the branch now. Or held it already.
+    Merged,
+    /// A step failed with this output. The branch stayed.
+    Failed(merge::Failure, String),
+}
+
+/// Merges the finished quest in worktree `w` into `into`, what the main
+/// tree has checked out: rebased on it in the worktree, `checks` run
+/// there, and `into` fast forwarded to it. Starts over when `into` moved
+/// meanwhile. Blocks for as long as the checks take, so it runs on a
+/// thread of its own.
+pub fn land(w: &Worktree, into: &str, checks: &[String]) -> Landing {
+    let main = Path::new(&w.main);
+    let tree = Path::new(&w.path);
+    // The agent was just ended, and may hold its files for a moment.
+    std::thread::sleep(Duration::from_secs(1));
+    if git(main, &["merge-base", "--is-ancestor", &w.branch, into]).is_ok() {
+        return Landing::Merged;
+    }
+    let mut last = (merge::Failure::Moved, String::new());
+    for _ in 0..merge::TRIES {
+        let mut moved = false;
+        for step in merge::plan(checks) {
+            let done = match &step {
+                merge::Step::Rebase => git(tree, &["rebase", into]),
+                merge::Step::Check(c) => shell(tree, c),
+                merge::Step::FastForward => git(main, &["merge", "--ff-only", &w.branch]),
+            };
+            let Err(out) = done else { continue };
+            let why = merge::failed(&step, &out);
+            if step == merge::Step::Rebase {
+                let _ = git(tree, &["rebase", "--abort"]);
+            }
+            if why == merge::Failure::Moved {
+                last = (why, out);
+                moved = true;
+                break;
+            }
+            return Landing::Failed(why, out);
+        }
+        if !moved {
+            return Landing::Merged;
+        }
+    }
+    Landing::Failed(last.0, last.1)
+}
+
+/// Runs `command` with `cmd /c` in `dir`, with no window: what it printed
+/// when it exits 0, else what it printed, stdout and stderr as they came.
+fn shell(dir: &Path, command: &str) -> Result<String, String> {
+    let (mut read, write) = std::io::pipe().map_err(|e| format!("cannot run {command}: {e}"))?;
+    let err = write
+        .try_clone()
+        .map_err(|e| format!("cannot run {command}: {e}"))?;
+    let mut cmd = Command::new("cmd.exe");
+    cmd.arg("/d").arg("/c").raw_arg(command);
+    let child = cmd
+        .current_dir(dir)
+        .stdin(Stdio::null())
+        .stdout(write)
+        .stderr(err)
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn();
+    // The pipe ends only once every writer is gone, ours included.
+    drop(cmd);
+    let mut child = child.map_err(|e| format!("cannot run {command}: {e}"))?;
+    let reader = std::thread::spawn(move || {
+        let mut out = Vec::new();
+        let _ = std::io::Read::read_to_end(&mut read, &mut out);
+        String::from_utf8_lossy(&out).into_owned()
+    });
+    let start = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if start.elapsed() < CHECK_LONGEST => {
+                std::thread::sleep(Duration::from_millis(200))
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+        }
+    };
+    let Some(status) = status else {
+        // What it started may still hold the pipe, so its output is not
+        // waited for.
+        let minutes = CHECK_LONGEST.as_secs() / 60;
+        return Err(format!("{command} ran longer than {minutes} minutes"));
+    };
+    let out = reader.join().unwrap_or_default();
+    if status.success() {
+        Ok(out)
+    } else {
+        Err(out)
     }
 }

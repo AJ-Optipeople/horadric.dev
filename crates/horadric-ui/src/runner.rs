@@ -31,7 +31,7 @@ use horadric_core::journal::{self, Commit, Entry, What};
 use horadric_core::tasks::{self, Holder, Mark, Mode, Next, Task, Wait};
 use horadric_core::usage::format_until;
 use horadric_core::worktree::{self, Worktree};
-use horadric_core::{fleet, ssh, tombs, Phase, WaitReason};
+use horadric_core::{fleet, merge, ssh, tombs, Phase, WaitReason};
 use horadric_hooks::tasks as file;
 
 use super::{post, unix_now, with_app, App, WM_HORADRIC_KEPT, WM_HORADRIC_TASK_MENU};
@@ -40,6 +40,7 @@ use crate::board::{self, Board, RowState};
 use crate::menu::{self, Item};
 use crate::toast::Kind;
 use crate::window::{folder_key, project_key, project_name};
+use crate::worktree::Landing;
 use crate::{ask, store, watch};
 
 #[path = "runeword.rs"]
@@ -93,6 +94,11 @@ pub(super) struct State {
     /// The finished branch the last notification offered to merge, which
     /// a click on it asks about.
     pub(super) merge_for: Option<Merge>,
+    /// Auto mode merges that came out, back from the threads that ran them.
+    landed: Arc<Mutex<Vec<Landed>>>,
+    /// Held by the thread merging into a project, so two fast forwards of
+    /// one `main` never race.
+    merging: HashMap<String, Arc<Mutex<()>>>,
     /// The limit last journaled, by when it resets, so each is written once.
     limit_journaled: Option<u64>,
     /// What the waits that need git or a command last came to, by project
@@ -142,6 +148,17 @@ pub(super) enum Menu {
     Add(String),
     /// Whether to merge a finished item's branch.
     Merge(Merge),
+}
+
+/// A finished quest's merge by itself, done on its thread.
+struct Landed {
+    /// The project's folder, where its list is.
+    dir: PathBuf,
+    w: Worktree,
+    title: String,
+    /// What the main tree has checked out, merged into.
+    into: String,
+    landing: crate::worktree::Landing,
 }
 
 /// A finished item's branch, still to merge into the main tree.
@@ -1210,8 +1227,13 @@ impl App {
     }
 
     /// Removes a session's worktree, and has the app hear of a branch that
-    /// stayed, so a finished item's branch can be offered for merging.
-    pub(super) fn remove_tree(&self, key: String, w: Worktree) {
+    /// stayed, so a finished item's branch can be offered for merging. In
+    /// auto mode a finished item's branch merges by itself first.
+    pub(super) fn remove_tree(&mut self, key: String, w: Worktree) {
+        if let Some((dir, title, into)) = self.to_land(&key, &w) {
+            self.land(key, dir, w, title, into);
+            return;
+        }
         let kept = Arc::clone(&self.tasks.kept);
         let notify = self.notify.0 as isize;
         crate::worktree::remove_then(w, move |w| {
@@ -1225,6 +1247,7 @@ impl App {
     /// The branches that stayed as their sessions ended: one whose item is
     /// done is offered for merging, in a notification a click answers.
     pub(super) fn offer_merges(&mut self) {
+        self.after_landing();
         let kept = self
             .tasks
             .kept
@@ -1263,22 +1286,7 @@ impl App {
         let into = crate::worktree::checked_out(&m.main).unwrap_or_else(|| "main".into());
         match crate::worktree::merge(&m.main, &m.branch) {
             Ok(()) => {
-                self.landed(&m.main, &m.branch);
-                store::journal(&Entry {
-                    at: unix_now(),
-                    session: String::new(),
-                    name: String::new(),
-                    project: folder_key(&m.main.to_string_lossy()),
-                    what: What::Merged {
-                        branch: m.branch.clone(),
-                        title: m.title.clone(),
-                    },
-                });
-                self.toasts.show(
-                    Kind::Done,
-                    &format!("Merged {}", m.branch),
-                    &format!("{} is in {into}.", tasks::one_line(&m.title)),
-                );
+                self.merged(&m.main, &m.branch, &m.title, &into);
                 true
             }
             Err(e) => {
@@ -1289,6 +1297,127 @@ impl App {
                     &merge_failed(&e),
                 );
                 false
+            }
+        }
+    }
+
+    /// Journals and says that `branch`, the item `title`'s, is in `into`.
+    fn merged(&mut self, main: &Path, branch: &str, title: &str, into: &str) {
+        self.landed(main, branch);
+        self.tasks.merge_for = None;
+        store::journal(&Entry {
+            at: unix_now(),
+            session: String::new(),
+            name: String::new(),
+            project: folder_key(&main.to_string_lossy()),
+            what: What::Merged {
+                branch: branch.to_string(),
+                title: title.to_string(),
+            },
+        });
+        self.toasts.show(
+            Kind::Done,
+            &format!("Merged {branch}"),
+            &format!("{} is in {into}.", tasks::one_line(title)),
+        );
+    }
+
+    /// The project folder, the finished item's title and the branch to
+    /// merge into, when `w` holds an item finished in auto mode.
+    fn to_land(&self, key: &str, w: &Worktree) -> Option<(PathBuf, String, String)> {
+        let dir = self.project_dir(key)?;
+        if file::mode(&dir) != Mode::Auto {
+            return None;
+        }
+        let list = tasks::parse(&file::read(&dir));
+        let (_, title) = worktree::finished(&list, std::slice::from_ref(&w.branch)).pop()?;
+        let into = crate::worktree::checked_out(Path::new(&w.main))?;
+        Some((dir, title, into))
+    }
+
+    /// Merges a finished item's branch on a thread of its own, one at a
+    /// time per project, and has the app hear how it came out.
+    fn land(&mut self, key: String, dir: PathBuf, w: Worktree, title: String, into: String) {
+        let one = Arc::clone(self.tasks.merging.entry(key).or_default());
+        let landed = Arc::clone(&self.tasks.landed);
+        let notify = self.notify.0 as isize;
+        let checks = file::checks(&dir);
+        std::thread::spawn(move || {
+            let landing = {
+                let _one = one.lock();
+                crate::worktree::land(&w, &into, &checks)
+            };
+            if let Ok(mut l) = landed.lock() {
+                l.push(Landed {
+                    dir,
+                    w,
+                    title,
+                    into,
+                    landing,
+                });
+            }
+            post(notify, WM_HORADRIC_KEPT, 0);
+        });
+    }
+
+    /// What came of the merges by themselves: a merged branch goes with its
+    /// worktree, one a worker can fix gets a fix-up quest first in the
+    /// list, and anything else is left to the human's click.
+    fn after_landing(&mut self) {
+        let landed = self
+            .tasks
+            .landed
+            .lock()
+            .map(|mut l| std::mem::take(&mut *l))
+            .unwrap_or_default();
+        for l in landed {
+            let main = PathBuf::from(&l.w.main);
+            let branch = l.w.branch.clone();
+            crate::worktree::remove(l.w);
+            match l.landing {
+                Landing::Merged => self.merged(&main, &branch, &l.title, &l.into),
+                Landing::Failed(why, out) if why.fixable() => {
+                    eprintln!("horadric: cannot merge {branch}: {why:?}");
+                    let fix = merge::fix_up(&l.title, &branch, &l.into, &why, &out);
+                    let added = file::update(&l.dir, |text| {
+                        let list = tasks::parse(text);
+                        if list
+                            .iter()
+                            .any(|t| t.title == fix.title && t.mark != Mark::Done)
+                        {
+                            return None;
+                        }
+                        Some(match merge::place(&list) {
+                            Some(at) => tasks::insert_with_notes(text, at, &fix.title, &fix.notes),
+                            None => tasks::append_with_notes(text, &fix.title, &fix.notes),
+                        })
+                    });
+                    if let Err(e) = added {
+                        eprintln!("horadric: cannot add \"{}\": {e}", fix.title);
+                    }
+                    self.tasks.merge_for = None;
+                    self.toasts.show(
+                        Kind::Failed,
+                        &format!("Cannot merge {branch}"),
+                        &format!("Added the quest \"{}\" first in the list.", fix.title),
+                    );
+                    self.refresh_boards(false);
+                }
+                Landing::Failed(_, out) => {
+                    eprintln!("horadric: cannot merge {branch} by itself: {out}");
+                    self.alert_for = None;
+                    self.update_click = false;
+                    self.toasts.show(
+                        Kind::Failed,
+                        &format!("Cannot merge {branch} by itself"),
+                        &format!("{} Click to merge it by hand.", merge_failed(&out)),
+                    );
+                    self.tasks.merge_for = Some(Merge {
+                        main,
+                        branch,
+                        title: l.title,
+                    });
+                }
             }
         }
     }

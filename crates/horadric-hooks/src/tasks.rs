@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use horadric_core::fleet::{self, Device};
 use horadric_core::runeword::{self, Stone};
 use horadric_core::tasks::{self, Mode, CONFIG_FILE, OLD_FILE, QUESTS_FILE};
-use horadric_core::{ssh, worktree};
+use horadric_core::{merge, ssh, worktree};
 
 /// The list's path in a project.
 pub fn file(project: &Path) -> PathBuf {
@@ -44,6 +44,11 @@ pub fn mode(project: &Path) -> Mode {
 /// How many items the project's runner holds at once.
 pub fn parallel(project: &Path) -> usize {
     tasks::parallel(&read_text(&config_file(project)))
+}
+
+/// The commands a finished quest must pass before it merges by itself.
+pub fn checks(project: &Path) -> Vec<String> {
+    merge::checks(&read_text(&config_file(project)))
 }
 
 /// The project's SSH hosts, none without a config.

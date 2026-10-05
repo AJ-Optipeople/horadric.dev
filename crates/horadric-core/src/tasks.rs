@@ -455,7 +455,24 @@ pub fn append_with_notes(text: &str, title: &str, notes: &str) -> String {
     if !out.is_empty() && !out.ends_with('\n') {
         out.push_str(ending);
     }
-    out.push_str(&item_line(Mark::Open, &one_line(title), None, None, None));
+    out.push_str(&new_item(title, notes, ending));
+    out
+}
+
+/// `text` with a new open item and its notes put in front of line
+/// `line`, or at the end when there is no such line.
+pub fn insert_with_notes(text: &str, line: usize, title: &str, notes: &str) -> String {
+    let (mut lines, ending) = cut(text);
+    if line >= lines.len() {
+        return append_with_notes(text, title, notes);
+    }
+    lines.insert(line, new_item(title, notes, ending));
+    lines.concat()
+}
+
+/// A new open item's line and its notes, each line ended.
+fn new_item(title: &str, notes: &str, ending: &str) -> String {
+    let mut out = item_line(Mark::Open, &one_line(title), None, None, None);
     out.push_str(ending);
     for line in notes.lines().map(str::trim).filter(|l| !l.is_empty()) {
         out.push_str("  ");
@@ -1222,6 +1239,24 @@ mod tests {
         let t = parse(&text);
         assert_eq!(t[1].notes, ["First line.", "Second one."]);
         assert_eq!(append_with_notes("", "C", "  "), "- [ ] C\n");
+    }
+
+    #[test]
+    fn an_inserted_item_goes_in_front_of_its_line_with_its_notes() {
+        let text = "# List\r\n- [x] A\r\n  a note\r\n- [ ] B\r\n";
+        let out = insert_with_notes(text, 3, "Fix\nA", "Why.\n\nHow.");
+        assert_eq!(
+            out,
+            "# List\r\n- [x] A\r\n  a note\r\n- [ ] Fix A\r\n  Why.\r\n  How.\r\n- [ ] B\r\n"
+        );
+        let t = parse(&out);
+        assert_eq!(t[1].title, "Fix A");
+        assert_eq!(t[1].notes, ["Why.", "How."]);
+        assert_eq!(t[0].notes, ["a note"]);
+        assert_eq!(
+            insert_with_notes("- [ ] A", 9, "B", ""),
+            "- [ ] A\n- [ ] B\n"
+        );
     }
 
     #[test]
