@@ -45,7 +45,7 @@ Usage:
                                Code unless --agent says another
   horadric run [--name NAME] [--cwd DIR] [-- claude args...]
                                Start a tagged `claude` in this terminal instead
-  horadric quest done|blocked WHY|add TITLE|list
+  horadric quest done [SUMMARY]|blocked WHY|add TITLE|list
                                Report on the quest this session works, or add to
                                the project's quest log (.horadric/quests.md).
                                `horadric task` is the same, from before the rename

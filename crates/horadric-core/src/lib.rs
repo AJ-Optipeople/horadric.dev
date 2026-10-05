@@ -8,6 +8,7 @@
 pub mod accounts;
 pub mod agent;
 pub mod background;
+pub mod chronicle;
 pub mod cube;
 pub mod diff;
 pub mod discord;

@@ -19,7 +19,9 @@
 //! - review, blocked and unanswered items are announced once each;
 //! - with nothing in hand, the next open item starts;
 //! - while a usage limit is used up nothing starts, and a session the
-//!   limit stopped is told to go on once it has reset.
+//!   limit stopped is told to go on once it has reset;
+//! - while one is 90 % used nothing starts either, so the sessions
+//!   running have what is left to finish their turns.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -27,17 +29,19 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
+use horadric_core::chronicle::{self, Happened};
 use horadric_core::journal::{self, Commit, Entry, What};
 use horadric_core::tasks::{self, Holder, Mark, Mode, Next, Task, Wait};
-use horadric_core::usage::format_until;
+use horadric_core::usage::{self, format_until};
 use horadric_core::worktree::{self, Worktree};
 use horadric_core::{fleet, merge, ssh, tombs, Phase, WaitReason};
 use horadric_hooks::tasks as file;
 
-use super::{post, unix_now, with_app, App, WM_HORADRIC_KEPT, WM_HORADRIC_TASK_MENU};
+use super::{post, push, unix_now, with_app, App, Input, WM_HORADRIC_KEPT, WM_HORADRIC_TASK_MENU};
 use crate::app::Run;
 use crate::board::{self, Board, RowState};
 use crate::menu::{self, Item};
+use crate::questlog::Ask;
 use crate::toast::Kind;
 use crate::window::{folder_key, project_key, project_name};
 use crate::worktree::Landing;
@@ -88,6 +92,9 @@ pub(super) struct State {
     refused: HashMap<String, Refused>,
     /// Menus and dialogs waiting for the app's window to show them.
     pub(super) menu: Option<Menu>,
+    /// What was typed for a new or edited quest before the input was
+    /// clicked away from, by [`draft_for`], filled back in next time.
+    drafts: HashMap<String, ask::Draft>,
     /// Worktrees whose branch stayed when their session ended, with the
     /// session's project, back from the thread that removed them.
     pub(super) kept: Arc<Mutex<Vec<(String, Worktree)>>>,
@@ -324,13 +331,30 @@ impl App {
             let fresh = read_board(dir);
             let mut boards = self.shared.boards.borrow_mut();
             if boards.get(key) != Some(&fresh) {
+                let at = unix_now();
+                if let Some(old) = boards.get(key) {
+                    for r in chronicle::marks(key, &old.tasks, &fresh.tasks, at) {
+                        store::chronicle(&r);
+                    }
+                }
                 let mut lines = boards
                     .get(key)
-                    .map(|old| journal::marks(key, &old.tasks, &fresh.tasks, unix_now()))
+                    .map(|old| journal::marks(key, &old.tasks, &fresh.tasks, at))
                     .unwrap_or_default();
                 for e in &mut lines {
                     if let What::Finished { title, commits } = &mut e.what {
                         *commits = self.commits_under(key, dir, &e.session, title);
+                        if !commits.is_empty() {
+                            store::chronicle(&chronicle::Record {
+                                at,
+                                project: key.clone(),
+                                quest: e.session.clone(),
+                                title: title.clone(),
+                                what: Happened::Commits {
+                                    commits: commits.clone(),
+                                },
+                            });
+                        }
                     }
                     store::journal(e);
                 }
@@ -397,6 +421,26 @@ impl App {
             .is_some_and(|c| c.exit_code().is_none())
     }
 
+    /// Whether session `id` holds an item of a list, alone or in a tomb.
+    pub(super) fn holds_quest(&self, id: &str) -> bool {
+        self.shared
+            .boards
+            .borrow()
+            .values()
+            .flat_map(|b| &b.tasks)
+            .any(|t| t.mark.held() && t.holder.as_deref().is_some_and(|h| tombs::holds(h, id)))
+    }
+
+    /// Whether session `id` starts with permission prompts bypassed.
+    pub(super) fn bypasses_prompts(&self, id: &str) -> bool {
+        let own_tree = self
+            .shared
+            .registry
+            .lock()
+            .is_ok_and(|r| r.get(id).is_some_and(|s| s.worktree.is_some()));
+        tasks::bypasses_prompts(self.holds_quest(id), own_tree)
+    }
+
     /// What to add to a session's command line started in `cwd`: what it
     /// is told about the task list when it holds an item, about its own
     /// worktree when it has one and about the project's hosts when it has
@@ -405,13 +449,7 @@ impl App {
     /// prompt. Last, since the prompt is positional. Both are read as they
     /// are now, so a resume sees the hosts of today.
     pub(super) fn task_args(&mut self, id: &str, program: &Path, cwd: &Path) -> Vec<String> {
-        let holds = self
-            .shared
-            .boards
-            .borrow()
-            .values()
-            .flat_map(|b| &b.tasks)
-            .any(|t| t.mark.held() && t.holder.as_deref().is_some_and(|h| tombs::holds(h, id)));
+        let holds = self.holds_quest(id);
         let batch = horadric_pty::is_batch(program);
         let mut system = Vec::new();
         let own_tree = self
@@ -895,6 +933,7 @@ impl App {
         let now = unix_now();
         self.watch_refusals(&boards, now);
         let held = self.held_until(now);
+        let paced = self.too_full(now);
         let mut closed = false;
         let mut said = Vec::new();
         let mut waiting = false;
@@ -907,7 +946,7 @@ impl App {
             }
             self.nudge(b);
             said.extend(self.worth_saying(key, b));
-            if held.is_none() {
+            if held.is_none() && paced.is_none() {
                 if !self.start_tombs(key, b) {
                     self.start_next(key, b);
                 }
@@ -944,6 +983,19 @@ impl App {
                 format!(
                     "The quest log goes on in {}, once it resets.",
                     format_until(at.saturating_sub(now))
+                ),
+            ));
+        }
+        if let (None, Some((name, used)), true) = (held, paced, waiting) {
+            // One key while it holds, so it is said once however the
+            // percent moves.
+            said.push((
+                "pace".to_string(),
+                "Quests wait on usage".to_string(),
+                format!(
+                    "The {} limit is at {used:.0} %. No quest starts until it is under {:.0} %.",
+                    name.to_lowercase(),
+                    usage::PACE_AT
                 ),
             ));
         }
@@ -1036,6 +1088,18 @@ impl App {
             .map(|t| t + AFTER_RESET);
         let refused = self.tasks.refused.values().filter_map(|r| r.at);
         heard.into_iter().chain(refused).filter(|&t| t > now).max()
+    }
+
+    /// The limit too full for the runner to start anything, as the status
+    /// line last reported it.
+    fn too_full(&self, now: u64) -> Option<(&'static str, f32)> {
+        self.shared
+            .usage
+            .lock()
+            .ok()?
+            .as_ref()?
+            .limits
+            .too_full(now)
     }
 
     /// Ends the sessions whose items are done, once they are not mid turn:
@@ -1305,14 +1369,34 @@ impl App {
     fn merged(&mut self, main: &Path, branch: &str, title: &str, into: &str) {
         self.landed(main, branch);
         self.tasks.merge_for = None;
+        let project = folder_key(&main.to_string_lossy());
         store::journal(&Entry {
             at: unix_now(),
             session: String::new(),
             name: String::new(),
-            project: folder_key(&main.to_string_lossy()),
+            project: project.clone(),
             what: What::Merged {
                 branch: branch.to_string(),
                 title: title.to_string(),
+            },
+        });
+        // The list still holds the finished item, and its holder is the
+        // quest the chronicle knows it by.
+        let quest = self
+            .shared
+            .boards
+            .borrow()
+            .get(&project)
+            .and_then(|b| b.tasks.iter().find(|t| t.title == title))
+            .and_then(|t| t.holder.clone())
+            .unwrap_or_default();
+        store::chronicle(&chronicle::Record {
+            at: unix_now(),
+            project,
+            quest,
+            title: title.to_string(),
+            what: Happened::Merged {
+                branch: branch.to_string(),
             },
         });
         self.toasts.show(
@@ -1489,7 +1573,7 @@ pub(super) fn show_menu(menu: Menu) {
                 notes: true,
                 pick: None,
             };
-            if let Some(a) = super::ask_beside(Some(&key), &question) {
+            if let Some(a) = ask_quest(&key, &draft_for(&key, None), &question, "") {
                 with_app(|app| app.add_task(&key, &a.text, &a.notes));
             }
         }
@@ -1547,6 +1631,7 @@ fn item_menu(key: &str, line: usize, title: &str) {
     const UP: usize = 8;
     const DOWN: usize = 9;
     const DELETE: usize = 10;
+    const LOG: usize = 11;
     // Beyond the ids of `tombs::MOST` tombs.
     const TOMBS: usize = 100;
     const PICK: usize = 200;
@@ -1612,6 +1697,7 @@ fn item_menu(key: &str, line: usize, title: &str) {
         items.push(Item::action(DELETE, "Delete quest"));
     }
     items.push(Item::action(EDIT, "Edit the quest log"));
+    items.push(Item::action(LOG, "Quest log..."));
     // Outside the app's borrow: the menu's loop dispatches its messages.
     let picked = menu::popup(&items);
     if let Some(i) = picked.filter(|i| *i >= PICK) {
@@ -1622,6 +1708,7 @@ fn item_menu(key: &str, line: usize, title: &str) {
     }
     match picked {
         Some(REWRITE) => return rewrite(key, &t),
+        Some(LOG) => return push(Input::QuestLog(Ask::Open(key.to_string()))),
         Some(DELETE) if !confirm_delete(title) => return,
         _ => {}
     }
@@ -1712,21 +1799,12 @@ fn rewrite(key: &str, t: &Task) {
         notes: true,
         pick: None,
     };
-    let Some((shared, beside)) = with_app(|app| {
-        let beside = app.clusters.iter().find(|c| c.key == key).map(|c| c.hwnd);
-        (Rc::clone(&app.shared), beside)
-    }) else {
-        return;
-    };
-    let Some(a) = ask::ask_with_notes(
-        shared,
-        beside,
-        &question,
-        &t.notes.join(
-            "
+    let notes = t.notes.join(
+        "
 ",
-        ),
-    ) else {
+    );
+    let draft = draft_for(key, Some((t.line, &t.title)));
+    let Some(a) = ask_quest(key, &draft, &question, &notes) else {
         return;
     };
     with_app(|app| {
@@ -1734,6 +1812,54 @@ fn rewrite(key: &str, t: &Task) {
             tasks::edit(text, t.line, &t.title, &a.text, &a.notes)
         })
     });
+}
+
+/// Where a quest's draft is kept: by project for a new one, and for an
+/// edit by its line and title too, so a draft for a quest that has since
+/// changed is not filled into another.
+fn draft_for(key: &str, edit: Option<(usize, &str)>) -> String {
+    match edit {
+        None => format!(
+            "{key}
+new"
+        ),
+        Some((line, title)) => format!(
+            "{key}
+edit
+{line}
+{title}"
+        ),
+    }
+}
+
+/// Whether a draft says more than the input started with, and so is worth
+/// filling back in.
+fn worth_keeping(d: &ask::Draft, initial: &str, notes: &str) -> bool {
+    d.text != initial || d.notes != notes
+}
+
+/// Asks for a quest's title and notes beside the project's cluster, filling
+/// in the draft kept under `draft`, and keeps what was typed when the
+/// input is clicked away from. Answering or Esc drops the draft.
+fn ask_quest(key: &str, draft: &str, question: &ask::Ask, notes: &str) -> Option<ask::Answer> {
+    let (shared, beside, kept) = with_app(|app| {
+        let beside = app.clusters.iter().find(|c| c.key == key).map(|c| c.hwnd);
+        let kept = app.tasks.drafts.get(draft).cloned();
+        (Rc::clone(&app.shared), beside, kept)
+    })?;
+    let reply = ask::ask_or_leave(shared, beside, question, notes, kept.as_ref());
+    with_app(|app| match &reply {
+        ask::Reply::Left(d) if worth_keeping(d, question.initial, notes) => {
+            app.tasks.drafts.insert(draft.to_string(), d.clone());
+        }
+        _ => {
+            app.tasks.drafts.remove(draft);
+        }
+    });
+    match reply {
+        ask::Reply::Answered(a) => Some(a),
+        ask::Reply::Cancelled | ask::Reply::Left(_) => None,
+    }
 }
 
 /// Whether the human really means to delete a quest. Its notes go with
@@ -1755,10 +1881,11 @@ fn confirm_delete(title: &str) -> bool {
 
 /// How many at once the mode menu offers. The config takes up to
 /// `tasks::MOST_PARALLEL`.
-const AT_ONCE: [usize; 4] = [1, 2, 3, 4];
+const AT_ONCE: [usize; 5] = [1, 2, 4, 8, 16];
 
 fn mode_menu(key: &str) {
     const EDIT: usize = 10;
+    const LOG: usize = 11;
     // Plus how many, so each choice of `AT_ONCE` has an id of its own.
     const PARALLEL: usize = 20;
     let Some(board) = with_app(|app| app.shared.boards.borrow().get(key).cloned()) else {
@@ -1788,7 +1915,11 @@ fn mode_menu(key: &str) {
     }
     items.push(Item::Separator);
     items.push(Item::action(EDIT, "Edit the quest log"));
+    items.push(Item::action(LOG, "Quest log..."));
     let picked = menu::popup(&items);
+    if picked == Some(LOG) {
+        return push(Input::QuestLog(Ask::Open(key.to_string())));
+    }
     with_app(|app| match picked {
         Some(EDIT) => app.edit_list(key),
         Some(i) if i > PARALLEL => app.set_parallel(key, i - PARALLEL),
@@ -1829,6 +1960,33 @@ pub(super) fn merges(dir: &Path) -> Vec<Merge> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_draft_is_kept_by_project_and_by_the_quest_edited() {
+        assert_ne!(draft_for("a", None), draft_for("b", None));
+        assert_ne!(draft_for("a", None), draft_for("a", Some((3, "Fix"))));
+        assert_ne!(
+            draft_for("a", Some((3, "Fix"))),
+            draft_for("a", Some((3, "Fix it")))
+        );
+        assert_ne!(
+            draft_for("a", Some((3, "Fix"))),
+            draft_for("a", Some((4, "Fix")))
+        );
+    }
+
+    #[test]
+    fn only_a_draft_that_changed_something_is_kept() {
+        let d = |text: &str, notes: &str| ask::Draft {
+            text: text.into(),
+            notes: notes.into(),
+        };
+        assert!(!worth_keeping(&d("", ""), "", ""));
+        assert!(worth_keeping(&d("Fix", ""), "", ""));
+        assert!(worth_keeping(&d("", "why"), "", ""));
+        assert!(!worth_keeping(&d("Fix", "why"), "Fix", "why"));
+        assert!(worth_keeping(&d("Fix", "why not"), "Fix", "why"));
+    }
 
     #[test]
     fn the_agent_runs_this_build_by_its_full_path() {

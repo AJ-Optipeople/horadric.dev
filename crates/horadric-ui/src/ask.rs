@@ -3,7 +3,9 @@
 //!
 //! Drawn like the rest of the app, on a plate of its own beside the
 //! cluster it was asked from, rather than as a Windows dialog. Enter
-//! answers, Esc and a click anywhere else cancel. Like the menus it runs a
+//! answers, Esc and a click anywhere else close it. Esc throws the text
+//! away, while a click elsewhere hands it back as a draft, so the caller
+//! can keep it for next time. Like the menus it runs a
 //! modal loop until it is answered, so the caller must not hold anything
 //! the message handlers need. It holds the mouse while open, as the
 //! setting lists do, so it hears the click outside that cancels it.
@@ -130,6 +132,23 @@ pub fn register_class() -> Result<()> {
     }
 }
 
+/// What was typed when the input was left rather than answered.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Draft {
+    pub text: String,
+    pub notes: String,
+}
+
+/// How the input closed.
+pub enum Reply {
+    Answered(Answer),
+    /// Esc: the text is thrown away.
+    Cancelled,
+    /// A click elsewhere or another window took it away, with what was
+    /// typed so far.
+    Left(Draft),
+}
+
 /// Asks beside `beside`, the cluster it was asked from, at the height of
 /// the mouse. With no cluster on screen it goes by the mouse alone. None
 /// when cancelled.
@@ -145,9 +164,28 @@ pub fn ask_with_notes(
     a: &Ask,
     notes: &str,
 ) -> Option<Answer> {
-    let popup = Popup::open(shared, beside, a, notes)
+    match ask_or_leave(shared, beside, a, notes, None) {
+        Reply::Answered(answer) => Some(answer),
+        Reply::Cancelled | Reply::Left(_) => None,
+    }
+}
+
+/// [`ask_with_notes`] that hands back what was typed when the input is
+/// left without an answer. A `draft` from before is filled in instead of
+/// `a.initial` and `notes`, with the caret at its end, since it is gone on
+/// from rather than replaced.
+pub fn ask_or_leave(
+    shared: Rc<Shared>,
+    beside: Option<HWND>,
+    a: &Ask,
+    notes: &str,
+    draft: Option<&Draft>,
+) -> Reply {
+    let Ok(popup) = Popup::open(shared, beside, a, notes, draft)
         .map_err(|e| eprintln!("horadric: cannot ask {}: {e}", a.title))
-        .ok()?;
+    else {
+        return Reply::Cancelled;
+    };
     let mut msg = MSG::default();
     while popup.outcome.get().is_none() {
         let got = unsafe { GetMessageW(&mut msg, None, 0, 0) };
@@ -173,11 +211,18 @@ pub fn ask_with_notes(
     let chosen = popup.chosen.take();
     let mut fields = popup.fields.take().into_iter();
     let typed = fields.next().map(|f| f.text).unwrap_or_default();
-    answered.then(|| Answer {
-        text: chosen.unwrap_or(typed),
-        notes: fields.next().map(|f| f.text).unwrap_or_default(),
-        browse,
-    })
+    let notes = fields.next().map(|f| f.text).unwrap_or_default();
+    if answered {
+        Reply::Answered(Answer {
+            text: chosen.unwrap_or(typed),
+            notes,
+            browse,
+        })
+    } else if popup.left.get() {
+        Reply::Left(Draft { text: typed, notes })
+    } else {
+        Reply::Cancelled
+    }
 }
 
 struct Popup<'a> {
@@ -204,6 +249,8 @@ struct Popup<'a> {
     before: HWND,
     /// Some once closed, true when answered.
     outcome: Cell<Option<bool>>,
+    /// Closed by going elsewhere rather than by Esc.
+    left: Cell<bool>,
     pick: Option<&'a Pick<'a>>,
     /// What the field could be, as last suggested.
     list: RefCell<Vec<Suggestion>>,
@@ -224,6 +271,7 @@ impl<'a> Popup<'a> {
         beside: Option<HWND>,
         a: &Ask<'a>,
         notes: &str,
+        draft: Option<&Draft>,
     ) -> Result<Box<Self>> {
         let beside = beside.filter(|h| unsafe { IsWindowVisible(*h) }.as_bool());
         let dpi = match beside {
@@ -237,8 +285,12 @@ impl<'a> Popup<'a> {
         let browse = a.pick.is_some_and(|p| p.browse);
         let prompt = render::wrapped(gpu, &gpu.small, a.prompt, layout::ask_text_w(rows))?;
         let layout = layout::ask(render::text_size(&prompt).1.ceil(), a.notes, rows, browse);
-        let mut first = Field::new(a.initial, false, MAX_LEN);
-        if a.pick.is_some() {
+        let (initial, notes) = match draft {
+            Some(d) => (d.text.as_str(), d.notes.as_str()),
+            None => (a.initial, notes),
+        };
+        let mut first = Field::new(initial, false, MAX_LEN);
+        if a.pick.is_some() || draft.is_some() {
             first.end(true, false);
         }
         let mut fields = vec![first];
@@ -306,6 +358,7 @@ impl<'a> Popup<'a> {
             high: Cell::new(None),
             before: unsafe { GetForegroundWindow() },
             outcome: Cell::new(None),
+            left: Cell::new(false),
             pick: a.pick,
             list: RefCell::new(Vec::new()),
             picked: Cell::new(None),
@@ -697,6 +750,15 @@ impl<'a> Popup<'a> {
         self.edit(|f| f.insert(&s));
     }
 
+    /// Closes without an answer but keeps what was typed, for a click
+    /// elsewhere: looking something up should not cost the text.
+    fn leave(&self) {
+        if self.outcome.get().is_none() {
+            self.left.set(true);
+        }
+        self.close(false);
+    }
+
     /// Hands the focus back and ends the loop. `answer` is whether Enter
     /// closed it.
     fn close(&self, answer: bool) {
@@ -765,7 +827,7 @@ impl<'a> Popup<'a> {
             WM_LBUTTONDOWN | WM_LBUTTONDBLCLK => {
                 let p = self.point(lparam);
                 if !self.inside(p) {
-                    self.close(false);
+                    self.leave();
                     return Some(LRESULT(0));
                 }
                 if self.layout.browse.is_some_and(|b| b.contains(p.0, p.1)) {
@@ -809,7 +871,7 @@ impl<'a> Popup<'a> {
             }
             WM_RBUTTONDOWN | WM_MBUTTONDOWN => {
                 if !self.inside(self.point(lparam)) {
-                    self.close(false);
+                    self.leave();
                 }
                 Some(LRESULT(0))
             }
@@ -822,12 +884,12 @@ impl<'a> Popup<'a> {
                 Some(LRESULT(0))
             }
             WM_CLOSE => {
-                self.close(false);
+                self.leave();
                 Some(LRESULT(0))
             }
             WM_ACTIVATE => {
                 if (wparam.0 & 0xffff) as u32 == WA_INACTIVE {
-                    self.close(false);
+                    self.leave();
                 }
                 None
             }
@@ -835,7 +897,7 @@ impl<'a> Popup<'a> {
                 // Someone else took the mouse: the input would no longer
                 // hear the click that cancels it.
                 if HWND(lparam.0 as *mut c_void) != self.hwnd.get() {
-                    self.close(false);
+                    self.leave();
                 }
                 None
             }
