@@ -3322,7 +3322,12 @@ not have. Built in this order: 1, 4, 5, 6, then 2 and 3.
   below the finished quest and gives every quest whose `After:` names
   the finished one an `After:` line for the fix-up as well, so nothing
   built on the work starts before it is on `main`. A line of output
-  that reads as an `After:` line is quoted with `>`. Manual and review
+  that reads as an `After:` line is quoted with `>`. The notes tell the
+  worker to cherry-pick the branch's commits rather than merge it,
+  since the auto merge rebases, which drops a merge commit and meets
+  the same conflict again (seen on screen). While a merge runs, the
+  runner sees its quest as still in hand (`while_landing`), so a quest
+  after it does not start on a `main` without the work. Manual and review
   mode keep the click. This repository's checks are fmt, clippy and
   test.
 - **5. Up to 16 at once, paced by usage.** `MOST_PARALLEL` goes from 8

@@ -106,6 +106,9 @@ pub(super) struct State {
     /// Held by the thread merging into a project, so two fast forwards of
     /// one `main` never race.
     merging: HashMap<String, Arc<Mutex<()>>>,
+    /// The done quests whose merge has not come out yet, by project, each
+    /// with the session that held it.
+    landing: HashMap<String, Vec<(String, String)>>,
     /// The limit last journaled, by when it resets, so each is written once.
     limit_journaled: Option<u64>,
     /// What the waits that need git or a command last came to, by project
@@ -159,6 +162,7 @@ pub(super) enum Menu {
 
 /// A finished quest's merge by itself, done on its thread.
 struct Landed {
+    key: String,
     /// The project's folder, where its list is.
     dir: PathBuf,
     w: Worktree,
@@ -403,6 +407,9 @@ impl App {
     /// A stashed session holds its item as a paused one does: kept for
     /// later, and only a click brings it back.
     fn holder(&self, id: &str) -> Holder {
+        if self.tasks.landing.values().flatten().any(|(_, h)| h == id) {
+            return Holder::Live;
+        }
         if tombs::count(id).is_some() {
             return self.batch_holder(id);
         }
@@ -928,7 +935,14 @@ impl App {
             .borrow()
             .iter()
             .filter(|(k, _)| !self.closed.contains(*k))
-            .map(|(k, b)| (k.clone(), b.clone()))
+            .map(|(k, b)| {
+                let mut b = b.clone();
+                if let Some(l) = self.tasks.landing.get(k) {
+                    let titles: Vec<String> = l.iter().map(|(t, _)| t.clone()).collect();
+                    b.tasks = merge::while_landing(&b.tasks, &titles);
+                }
+                (k.clone(), b)
+            })
             .collect();
         let now = unix_now();
         self.watch_refusals(&boards, now);
@@ -938,7 +952,11 @@ impl App {
         let mut said = Vec::new();
         let mut waiting = false;
         for (key, b) in &boards {
-            if self.close_finished(b) {
+            // Closing a quest may start its merge, which this pass's copy
+            // of the list does not know of yet, so nothing starts beside it
+            // until the next pass.
+            let just_closed = self.close_finished(b);
+            if just_closed {
                 closed = true;
                 if b.mode.runs() {
                     self.tasks.ran.insert(key.clone());
@@ -946,6 +964,9 @@ impl App {
             }
             self.nudge(b);
             said.extend(self.worth_saying(key, b));
+            if just_closed {
+                continue;
+            }
             if held.is_none() && paced.is_none() {
                 if !self.start_tombs(key, b) {
                     self.start_next(key, b);
@@ -1305,8 +1326,8 @@ impl App {
     /// stayed, so a finished item's branch can be offered for merging. In
     /// auto mode a finished item's branch merges by itself first.
     pub(super) fn remove_tree(&mut self, key: String, w: Worktree) {
-        if let Some((dir, title, into)) = self.to_land(&key, &w) {
-            self.land(key, dir, w, title, into);
+        if let Some((dir, quest, into)) = self.to_land(&key, &w) {
+            self.land(key, dir, w, quest, into);
             return;
         }
         let kept = Arc::clone(&self.tasks.kept);
@@ -1419,21 +1440,30 @@ impl App {
 
     /// The project folder, the finished item's title and the branch to
     /// merge into, when `w` holds an item finished in auto mode.
-    fn to_land(&self, key: &str, w: &Worktree) -> Option<(PathBuf, String, String)> {
+    fn to_land(&self, key: &str, w: &Worktree) -> Option<(PathBuf, Task, String)> {
         let dir = self.project_dir(key)?;
         if file::mode(&dir) != Mode::Auto {
             return None;
         }
         let list = tasks::parse(&file::read(&dir));
         let (_, title) = worktree::finished(&list, std::slice::from_ref(&w.branch)).pop()?;
+        let quest = list
+            .into_iter()
+            .find(|t| t.title == title && t.mark == Mark::Done)?;
         let into = crate::worktree::checked_out(Path::new(&w.main))?;
-        Some((dir, title, into))
+        Some((dir, quest, into))
     }
 
     /// Merges a finished item's branch on a thread of its own, one at a
     /// time per project, and has the app hear how it came out.
-    fn land(&mut self, key: String, dir: PathBuf, w: Worktree, title: String, into: String) {
-        let one = Arc::clone(self.tasks.merging.entry(key).or_default());
+    fn land(&mut self, key: String, dir: PathBuf, w: Worktree, quest: Task, into: String) {
+        let title = quest.title;
+        self.tasks
+            .landing
+            .entry(key.clone())
+            .or_default()
+            .push((title.clone(), quest.holder.unwrap_or_default()));
+        let one = Arc::clone(self.tasks.merging.entry(key.clone()).or_default());
         let landed = Arc::clone(&self.tasks.landed);
         let notify = self.notify.0 as isize;
         let checks = file::checks(&dir);
@@ -1444,6 +1474,7 @@ impl App {
             };
             if let Ok(mut l) = landed.lock() {
                 l.push(Landed {
+                    key,
                     dir,
                     w,
                     title,
@@ -1467,6 +1498,9 @@ impl App {
             .map(|mut l| std::mem::take(&mut *l))
             .unwrap_or_default();
         for l in landed {
+            if let Some(titles) = self.tasks.landing.get_mut(&l.key) {
+                titles.retain(|(t, _)| *t != l.title);
+            }
             let main = PathBuf::from(&l.w.main);
             let branch = l.w.branch.clone();
             crate::worktree::remove(l.w);

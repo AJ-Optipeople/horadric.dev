@@ -8,7 +8,7 @@ use serde_json::Value;
 
 use crate::tasks::{
     after_line, after_note, append_with_notes, end_of, find, insert_note, insert_with_notes,
-    one_line, parse, Mark,
+    one_line, parse, Mark, Task,
 };
 
 /// The project's checks, from `"checks": ["cargo test", ...]` in its
@@ -113,11 +113,13 @@ pub fn fix_up(title: &str, branch: &str, into: &str, why: &Failure, output: &str
             "\"{}\" is done on the branch `{branch}` but did not merge into `{into}`: {what}.",
             one_line(title)
         ),
+        // Not a merge: the auto merge rebases, which drops a merge commit
+        // and meets the same conflict again.
         format!(
-            "Merge `{branch}` into your branch (`git merge {branch}`), resolve what conflicts, \
-             make every check in `.horadric/config.json` pass, and commit. Then delete it with \
-             `git branch -d {branch}`. Your branch merges like any finished quest and takes \
-             its work along."
+            "Take its commits onto your branch with `git cherry-pick {into}..{branch}`, \
+             resolve each conflict and `git cherry-pick --continue`, make every check in \
+             `.horadric/config.json` pass, and commit. Then delete it with `git branch -D \
+             {branch}`. Your branch merges like any finished quest and carries its work."
         ),
         "The quests after the finished one wait for this one too.".to_string(),
     ];
@@ -158,6 +160,23 @@ fn tail(output: &str) -> Vec<String> {
             } else {
                 l.to_string()
             }
+        })
+        .collect()
+}
+
+/// The list as the runner sees it while the done quests titled in
+/// `landing` merge: still in hand, so a quest after one of them waits
+/// until its work is on `main` or its fix-up is filed. The runner takes
+/// their holders as live, since the merge is what works on them now.
+pub fn while_landing(tasks: &[Task], landing: &[String]) -> Vec<Task> {
+    tasks
+        .iter()
+        .cloned()
+        .map(|mut t| {
+            if t.mark == Mark::Done && landing.contains(&t.title) {
+                t.mark = Mark::Working;
+            }
+            t
         })
         .collect()
 }
@@ -276,7 +295,9 @@ mod tests {
             "\"Add the login\" is done on the branch `add-the-login` but did not merge into \
              `main`: the check `cargo test` fails after rebasing it on `main`."
         );
-        assert!(lines[1].starts_with("Merge `add-the-login` into your branch"));
+        assert!(lines[1].starts_with(
+            "Take its commits onto your branch with `git cherry-pick main..add-the-login`"
+        ));
         assert_eq!(
             lines[2],
             "The quests after the finished one wait for this one too."
@@ -388,5 +409,23 @@ mod tests {
             add_fix_up("- [x] A @a\n  n", "A", &fix()).unwrap(),
             "- [x] A @a\n  n\n- [ ] Fix the merge of a\n  Why.\n"
         );
+    }
+
+    #[test]
+    fn a_quest_still_merging_holds_back_the_quests_after_it() {
+        use crate::tasks::{next, Holder, Mode, Next};
+        let list = parse(
+            "- [x] A @a
+- [ ] B
+  After: A
+- [ ] C
+",
+        );
+        let pick = |l: &[Task]| next(l, Mode::Auto, 2, |_| Holder::Live, |_| true);
+        assert_eq!(pick(&list), Next::Start(1));
+        let landing = while_landing(&list, &["A".to_string()]);
+        assert_eq!(landing[0].mark, Mark::Working);
+        assert_eq!(pick(&landing), Next::Start(2));
+        assert_eq!(while_landing(&list, &[]), list);
     }
 }
