@@ -113,10 +113,8 @@ pub struct Palette {
     /// The gold of the mark over a quest giver's head in the games, so the
     /// button that asks an agent for quests reads as one at a glance.
     pub quest: Color,
-    /// Warriv's own gold, an old brass that is neither a lamp nor the
-    /// quest giver's yellow nor the magic blue, so what Warriv does reads
-    /// as Warriv's wherever it shows: its lane in the quest log, the
-    /// quests tile breathing while it works.
+    /// Warriv's own, on the quest log: an old gold, apart from the quest
+    /// giver's, every lamp and the magic blue.
     pub warriv: Color,
     /// Git change colours, VS Code's ones for a plate this light, so a file
     /// looks the same in the tile as in the editor.
@@ -169,7 +167,7 @@ const SKEUOMORPH: Palette = Palette {
     done: Color::rgb(0x3DD68C),
     idle: Color::rgb(0x6E6882),
     quest: Color::rgb(0xFFD100),
-    warriv: Color::rgb(0xE6C25C),
+    warriv: Color::rgb(0xD4B26A),
     git_modified: Color::rgb(0xE2C08D),
     git_added: Color::rgb(0x81B88B),
     git_untracked: Color::rgb(0x73C991),
@@ -213,7 +211,7 @@ const FLAT: Palette = Palette {
     done: Color::rgb(0x0E9F5A),
     idle: Color::rgb(0x8A8F9C),
     quest: Color::rgb(0xD9A400),
-    warriv: Color::rgb(0xB8860B),
+    warriv: Color::rgb(0xA8801C),
     git_modified: Color::rgb(0x895503),
     git_added: Color::rgb(0x587C0C),
     git_untracked: Color::rgb(0x007100),
@@ -258,7 +256,7 @@ const NEUMORPH: Palette = Palette {
     done: Color::rgb(0x23A876),
     idle: Color::rgb(0x9AA2B1),
     quest: Color::rgb(0xC99A00),
-    warriv: Color::rgb(0xB08A1E),
+    warriv: Color::rgb(0xA07A1E),
     git_modified: Color::rgb(0x895503),
     git_added: Color::rgb(0x587C0C),
     git_untracked: Color::rgb(0x007100),
@@ -302,7 +300,7 @@ const BRUTAL: Palette = Palette {
     done: Color::rgb(0x00FF66),
     idle: Color::rgb(0x8C8C8C),
     quest: Color::rgb(0xFF9900),
-    warriv: Color::rgb(0xE8B830),
+    warriv: Color::rgb(0xC8A050),
     git_modified: Color::rgb(0xE2C08D),
     git_added: Color::rgb(0x81B88B),
     git_untracked: Color::rgb(0x73C991),
@@ -346,7 +344,7 @@ const GLASS: Palette = Palette {
     done: Color::rgb(0x4CE6A8),
     idle: Color::rgb(0x8890B5),
     quest: Color::rgb(0xFFD84D),
-    warriv: Color::rgb(0xF0C866),
+    warriv: Color::rgb(0xD8B870),
     git_modified: Color::rgb(0xE2C08D),
     git_added: Color::rgb(0x81B88B),
     git_untracked: Color::rgb(0x73C991),
@@ -391,7 +389,7 @@ const WINAMP: Palette = Palette {
     done: Color::rgb(0x00C8A0),
     idle: Color::rgb(0x7878A0),
     quest: Color::rgb(0xFFE14D),
-    warriv: Color::rgb(0xE8C060),
+    warriv: Color::rgb(0xD8B060),
     git_modified: Color::rgb(0xE2C08D),
     git_added: Color::rgb(0x81B88B),
     git_untracked: Color::rgb(0x73C991),
@@ -436,7 +434,7 @@ const MATRIX: Palette = Palette {
     done: Color::rgb(0x7CFFB0),
     idle: Color::rgb(0x2F6B40),
     quest: Color::rgb(0xE8FFE8),
-    warriv: Color::rgb(0xE0C870),
+    warriv: Color::rgb(0xCFAE72),
     git_modified: Color::rgb(0xE2C08D),
     git_added: Color::rgb(0x81B88B),
     git_untracked: Color::rgb(0x73C991),
@@ -926,6 +924,19 @@ mod tests {
                 for l in &lamps[..4] {
                     assert!(distance(*a, *l) > 0.2, "{t:?}: {a:?} {l:?}");
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn warriv_burns_apart_from_the_quest_gold_the_lamps_and_the_magic_blue() {
+        for t in Theme::ALL {
+            let p = t.palette();
+            let others = [
+                p.quest, p.working, p.waiting, p.error, p.done, p.idle, p.magic,
+            ];
+            for o in others {
+                assert!(distance(p.warriv, o) > 0.12, "{t:?}: {o:?}");
             }
         }
     }

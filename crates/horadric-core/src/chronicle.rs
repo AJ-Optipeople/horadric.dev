@@ -82,8 +82,16 @@ pub enum Happened {
     },
     /// The commits made under the quest, newest first.
     Commits { commits: Vec<Commit> },
-    /// The quest's branch went into the main tree.
-    Merged { branch: String },
+    /// The quest's branch went into the main tree. `checked` is the
+    /// commit the main tree's branch was left at when the project's checks
+    /// passed on it, which a merge by hand, running none, leaves empty.
+    Merged {
+        branch: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        checked: String,
+    },
+    /// The project's "Ship Local" stone was cast. It names no quest.
+    Shipped,
     /// Warriv woke, the session `wake`, and was given these events. Given
     /// more while awake, it is another line with the same `wake`. None of
     /// Warriv's lines name a quest holder: they are about the wake.
@@ -491,7 +499,8 @@ pub fn quests(
                 }
             }
             Happened::Commits { commits } => q.commits = commits.clone(),
-            Happened::Merged { branch } => q.merged = Some(branch.clone()),
+            Happened::Merged { branch, .. } => q.merged = Some(branch.clone()),
+            Happened::Shipped => {}
         }
     }
     for t in list {
@@ -795,6 +804,74 @@ pub fn graph(quests: &[Quest]) -> (Vec<Row>, usize) {
     }
     rows.reverse();
     (rows, width)
+}
+
+/// One of Warriv's wakes on the diagram, a dot on a lane of its own beside
+/// the trunk.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WakeDot {
+    /// Index into the wakes.
+    pub wake: usize,
+    /// The band it sits in, an index into the rows: the newest quest
+    /// accepted before it woke, or the oldest row when none was.
+    pub row: usize,
+    /// How far down the band, 0 its top edge and 1 its bottom. Wakes
+    /// sharing a band spread over it, the oldest lowest, as time runs up.
+    pub at: f32,
+    /// The rows of the quests it touched, top first: those it woke for,
+    /// ran a command about, or handed on. Of two quests with one title,
+    /// the one nearer the wake.
+    pub touched: Vec<usize>,
+}
+
+/// Where each of `wakes`, as [`wakes`] gave them, sits beside `rows`, as
+/// [`graph`] gave them for `quests`. Nothing without a row to sit by.
+pub fn wake_dots(quests: &[Quest], rows: &[Row], wakes: &[WarrivWake]) -> Vec<WakeDot> {
+    if rows.is_empty() {
+        return Vec::new();
+    }
+    let accepted = |r: &Row| quests[r.quest].accepted.unwrap_or(0);
+    let mut out: Vec<WakeDot> = Vec::with_capacity(wakes.len());
+    for (i, w) in wakes.iter().enumerate() {
+        let row = rows
+            .iter()
+            .position(|r| accepted(r) <= w.woke)
+            .unwrap_or(rows.len() - 1);
+        let titles = w
+            .events
+            .iter()
+            .map(|e| &e.quest)
+            .chain(w.commands.iter().map(|(_, _, t, _)| t))
+            .chain(&w.handed)
+            .filter(|t| !t.is_empty());
+        let mut touched: Vec<usize> = titles
+            .filter_map(|t| {
+                rows.iter()
+                    .enumerate()
+                    .filter(|(_, r)| !quests[r.quest].main && &quests[r.quest].title == t)
+                    .min_by_key(|(k, _)| k.abs_diff(row))
+                    .map(|(k, _)| k)
+            })
+            .collect();
+        touched.sort_unstable();
+        touched.dedup();
+        out.push(WakeDot {
+            wake: i,
+            row,
+            at: 0.0,
+            touched,
+        });
+    }
+    // Spread each band's wakes, oldest at the bottom.
+    let mut order: Vec<(usize, usize)> = (0..out.len()).map(|d| (out[d].row, d)).collect();
+    order.sort_by_key(|&(row, d)| (row, wakes[out[d].wake].woke, d));
+    for band in order.chunk_by(|a, b| a.0 == b.0) {
+        let k = band.len() as f32;
+        for (j, &(_, d)) in band.iter().enumerate() {
+            out[d].at = 1.0 - (j as f32 + 1.0) / (k + 1.0);
+        }
+    }
+    out
 }
 
 /// A conversation's transcript, Claude Code's JSON lines, as text to read:
@@ -1376,5 +1453,57 @@ mod tests {
             transcript_text(&jsonl),
             "## You\n\nFix the clock\n\n## Agent\n\nLooking.\n> Bash: cargo test --all\nDone.\n"
         );
+    }
+
+    #[test]
+    fn a_wake_sits_by_the_newest_quest_before_it_and_reaches_the_quests_it_touched() {
+        let mut q = vec![
+            quest("a", 10, Some(50), Outcome::Done),
+            quest("b", 20, None, Outcome::Working),
+            quest("c", 40, None, Outcome::Blocked),
+        ];
+        q[0].title = "A".into();
+        q[1].title = "B".into();
+        q[2].title = "C".into();
+        let (rows, _) = graph(&q);
+        // Newest first: c, b, a.
+        let wake = |woke: u64, events: &[&str], ran: &[&str], handed: &[&str]| WarrivWake {
+            id: "warriv-5".into(),
+            conversation: String::new(),
+            woke,
+            slept: None,
+            events: events
+                .iter()
+                .map(|t| Woken {
+                    kind: Kind::Blocked,
+                    quest: t.to_string(),
+                })
+                .collect(),
+            commands: ran
+                .iter()
+                .map(|t| (woke, Command::Note, t.to_string(), String::new()))
+                .collect(),
+            end: None,
+            handed: handed.iter().map(|t| t.to_string()).collect(),
+        };
+        let wakes = [
+            wake(5, &["A"], &[], &[]),
+            wake(25, &["B"], &["A", "Gone"], &[]),
+            wake(30, &[""], &[], &["C"]),
+            wake(60, &["C"], &["C"], &[]),
+        ];
+        let dots = wake_dots(&q, &rows, &wakes);
+        let at: Vec<(usize, usize)> = dots.iter().map(|d| (d.wake, d.row)).collect();
+        // Older than every quest, it sits by the oldest row.
+        assert_eq!(at, [(0, 2), (1, 1), (2, 1), (3, 0)]);
+        assert_eq!(dots[1].touched, [1, 2], "B and A, the gone one left out");
+        assert_eq!(dots[2].touched, [0], "a quest handed on is touched");
+        assert_eq!(dots[3].touched, [0], "once, however often");
+        // Alone in a band it sits at the middle; two share one, the
+        // older lower.
+        assert_eq!(dots[0].at, 0.5);
+        assert!(dots[1].at > dots[2].at);
+        assert!((dots[1].at - 2.0 / 3.0).abs() < 1e-6);
+        assert!(wake_dots(&[], &[], &wakes).is_empty());
     }
 }

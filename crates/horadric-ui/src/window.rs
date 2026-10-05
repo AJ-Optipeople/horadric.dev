@@ -119,6 +119,9 @@ pub struct Shared {
     /// The projects where Warriv, a reviewer or an errand is at work, by
     /// key: their quests tile breathes in Warriv's gold.
     pub astir: RefCell<HashSet<String>>,
+    /// What the quests tile says of Warriv, by project key, and whether it
+    /// reads in the working colour. None while it sleeps with wakes left.
+    pub warriv_line: RefCell<HashMap<String, (String, bool)>>,
 }
 
 impl Shared {
@@ -683,6 +686,12 @@ impl Cluster {
         )
     }
 
+    /// What the quests tile says of Warriv, and whether in the working
+    /// colour.
+    fn warriv_line(&self) -> Option<(String, bool)> {
+        self.shared.warriv_line.borrow().get(&self.key).cloned()
+    }
+
     /// The item on the `i`th row showing, counted from the top.
     fn item_at(&self, i: usize) -> Option<Item> {
         let scroll = self.tasks.borrow().scroll;
@@ -700,7 +709,7 @@ impl Cluster {
             &self.shared.metrics,
             n,
             self.collapsed,
-            tasks.as_deref(),
+            tasks.as_deref().map(|a| (a, self.warriv_line().is_some())),
             tome,
             folded,
         )
@@ -734,7 +743,7 @@ impl Cluster {
             m,
             self.sessions().len(),
             self.collapsed,
-            tasks.as_deref(),
+            tasks.as_deref().map(|a| (a, self.warriv_line().is_some())),
             tome,
             body,
         )
@@ -840,7 +849,14 @@ impl Cluster {
         let wanted = self.files.borrow().wanted();
         let tasks = self.task_rows(items.as_deref());
         let tome = self.stone_count(self.stones().as_deref());
-        let mut l = layout::cluster(m, n, self.collapsed, tasks.as_deref(), tome, wanted);
+        let mut l = layout::cluster(
+            m,
+            n,
+            self.collapsed,
+            tasks.as_deref().map(|a| (a, self.warriv_line().is_some())),
+            tome,
+            wanted,
+        );
         let marked: Vec<bool> = {
             let browsing = self.shared.browsing.borrow();
             sessions.iter().map(|s| browsing.contains(&s.id)).collect()
@@ -944,6 +960,7 @@ impl Cluster {
                 scroll: t.scroll,
                 summary: b.map_or_else(String::new, Board::summary),
                 mode: b.map_or_else(|| Mode::default().label().into(), Board::mode_key),
+                warriv: self.warriv_line(),
                 collapsed: t.collapsed,
                 astir: self.shared.astir.borrow().contains(&self.key),
             }
