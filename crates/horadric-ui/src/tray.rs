@@ -320,7 +320,10 @@ pub fn menu(
             .enumerate()
             .map(|(i, d)| Item::Action {
                 id: DRIVE + i,
-                label: d.name.clone(),
+                label: match d.drive.as_ref().and_then(|d| d.held.as_ref()) {
+                    Some(_) => format!("{}, shipping held", d.name),
+                    None => d.name.clone(),
+                },
                 checked: d.drive.is_some(),
             })
             .collect();
@@ -331,7 +334,7 @@ pub fn menu(
                 Some(Item::Action {
                     id: PUBLIC + i,
                     label: d.name.clone(),
-                    checked: d.drive?.ships_public,
+                    checked: d.drive.as_ref()?.ships_public,
                 })
             })
             .collect();
@@ -448,9 +451,12 @@ pub fn menu(
         UPDATE => Some(Choice::Update),
         END_ALL => Some(Choice::EndAll),
         STOP => Some(Choice::StopWarriv),
-        i if i >= PUBLIC => driven
-            .get(i - PUBLIC)
-            .map(|d| Choice::ShipsPublic(d.key.clone(), !d.drive.is_some_and(|d| d.ships_public))),
+        i if i >= PUBLIC => driven.get(i - PUBLIC).map(|d| {
+            Choice::ShipsPublic(
+                d.key.clone(),
+                !d.drive.as_ref().is_some_and(|d| d.ships_public),
+            )
+        }),
         i if i >= DRIVE => driven
             .get(i - DRIVE)
             .map(|d| Choice::Drive(d.key.clone(), d.drive.is_none())),

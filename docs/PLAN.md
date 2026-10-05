@@ -3998,6 +3998,37 @@ rails:
 - CLAUDE.md says the switch is the human's go ahead to ship, the one
   way besides their words.
 
+**Built on 2026-10-05**: a round's picture says what to do about
+shipping (`ship::brief`, pure and tested), in a project with a "Ship
+Local" stone. `ship::due` ships when any quest landed since the last
+ship, the checks passed on `main` and nothing holds it; then the round
+is told to cast "Ship Local", or with "and ships public" on to cast
+"Ship Public" when the work is worth a release and "Ship Local" else.
+The cast is a session of its own, as any stone's. The rails are kept
+on the drive in `state.json` (`held`, `red`, `judged`), so a reload
+keeps them. As a round is told, the app reads `reload.log`: a reload
+of the project's build that rolled back since the last round read it
+(`ship::rolled_back`, `ship::holds`) holds shipping and files "Fix the
+build that rolled back" at the end of the log with the log in its
+notes. Turning the drive on reads the log as judged, so an old
+rollback holds nothing. "Red twice" is read as two landings in a row
+whose checks failed (`ship::red_after`), since a landing runs the
+checks before `main` moves; a conflict counts neither way. The second
+holds shipping on the fix-up quest that landing filed. `ship::resumes`
+lifts the hold once that quest has a `Merged` record after the hold
+began and the checks passed on `main`. While held, `warriv::may_cast`
+refuses both ship stones to a Warriv, the tile reads "Warriv drives,
+shipping held", the mode menu has a line "Shipping held until "<quest>"
+lands" and the tray names the project with ", shipping held". Toasts
+say when it holds and when it goes on. Seen on a dev instance (port
+4100, scratch `APPDATA` and `LOCALAPPDATA`, `cmd.exe` for the agent),
+with the drive on in `state.json` and a faked `reload.log` whose build
+of the scratch project rolled back: a `round-now` brought a round,
+`held` went into `state.json`, the fix-up quest came into the log with
+the four log lines, and the tile read "Warriv drives, shipping held,
+settling". Not tried on screen: a real ship, the red count, and the
+hold lifting, which the tests cover.
+
 **5. A model per quest.** Warriv writes a `Model: haiku|sonnet|opus`
 notes line on quests it files or meets without one, by how hard the
 work is, and the runner starts the quest with that `--model` (Claude
