@@ -3606,6 +3606,17 @@ tile's edge breathes slowly in Warriv's gold, so the camp is seen moving
 without reading anything. Still when nothing runs. Beside the live line
 already planned in "Warriv in the quest log".
 
+Built on 2026-10-05. Warriv's gold is `theme::warriv`, one per theme, for
+its lane in the quest log to use too. `Shared::astir` holds the projects
+where something of Warriv's works; Warriv's camp sets it while a session
+is awake, and the reviewer and errands set it the same way once they
+exist. The breath is drawn in the light pass, over the kept layer, at the
+waiting tile's frame rate, and asks for no frames when nothing breathes;
+with Windows' animations off the edge holds still at half a breath. On
+the way, `motion::cycle` took the wall clock as an f32, which at today's
+seconds since 1970 has no fractions left, so the busy wash never breathed
+either; it counts whole nanoseconds now.
+
 Already built and left alone: a session cut off by a usage limit is
 told to go on a minute after the reset (`tasks::go_on`).
 

@@ -109,7 +109,8 @@ impl App {
     /// session closed, which the clusters have to hear.
     pub(super) fn orchestrate(&mut self, key: &str, b: &Board) -> bool {
         if !b.orchestrator {
-            return self.shared.warriv.borrow_mut().remove(key).is_some();
+            let astir = self.shared.astir.borrow_mut().remove(key);
+            return self.shared.warriv.borrow_mut().remove(key).is_some() | astir;
         }
         let asks: Vec<String> = b
             .tasks
@@ -131,7 +132,16 @@ impl App {
         camp.desk.hear(now.clone(), camp.awake.is_some());
         let mut closed = self.wake(key, b, &mut camp, &now);
         let holding = camp.desk.holding(&now);
+        let awake = camp.awake.is_some();
         self.tasks.warriv.camps.insert(key.to_string(), camp);
+        // The quests tile starts or stops breathing.
+        let mut astir = self.shared.astir.borrow_mut();
+        closed |= if awake {
+            astir.insert(key.to_string())
+        } else {
+            astir.remove(key)
+        };
+        drop(astir);
         // The rows of what changed hands read anew.
         let mut shown = self.shared.warriv.borrow_mut();
         if shown.get(key) != Some(&holding) {
