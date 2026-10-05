@@ -455,10 +455,23 @@ fn tail(s: &str, n: usize) -> String {
 /// What a quest's session is told when Warriv answers it, typed into its
 /// terminal, so on one line.
 pub fn told(horadric: &str, message: &str) -> String {
+    answer(
+        "Warriv, who plans this project's quests, answers",
+        horadric,
+        message,
+    )
+}
+
+/// What a quest's session is told when the human answers it from the card
+/// that greets them back.
+pub fn answered(horadric: &str, message: &str) -> String {
+    answer("The human answers", horadric, message)
+}
+
+fn answer(who: &str, horadric: &str, message: &str) -> String {
     format!(
-        "Warriv, who plans this project's quests, answers: {} Go on with this quest, and \
-         when it is finished, commit your work and run `{horadric} quest done \"<one short \
-         line on what you achieved>\"`.",
+        "{who}: {} Go on with this quest, and when it is finished, commit your work and run \
+         `{horadric} quest done \"<one short line on what you achieved>\"`.",
         one_line(message)
     )
 }
@@ -474,6 +487,12 @@ pub fn tired(project: &str) -> String {
 /// The notes line that keeps what Warriv decided.
 pub fn note(text: &str) -> String {
     format!("{NOTE}{}", one_line(text))
+}
+
+/// The notes line for the human's answer to a quest whose session is gone,
+/// which its next session reads.
+pub fn human_note(text: &str) -> String {
+    format!("The human answers: {}", one_line(text))
 }
 
 /// The reason a quest Warriv hands to the human is blocked with.
@@ -906,6 +925,16 @@ mod tests {
         assert!(t.starts_with("Warriv, who plans this project's quests, answers: Use port 4100."));
         assert!(t.contains("`hx quest done"));
         assert!(!t.contains('\n'));
+        assert_eq!(
+            human_note(
+                "Blue,
+not green."
+            ),
+            "The human answers: Blue, not green."
+        );
+        let a = answered("hx", "Blue.");
+        assert!(a.starts_with("The human answers: Blue. Go on with this quest"));
+        assert!(a.contains("`hx quest done"));
     }
 
     #[test]

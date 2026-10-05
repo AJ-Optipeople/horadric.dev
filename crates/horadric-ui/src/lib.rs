@@ -76,6 +76,8 @@ mod ask;
 #[cfg(windows)]
 pub mod autostart;
 #[cfg(windows)]
+mod away;
+#[cfg(windows)]
 mod backdrop;
 #[cfg(windows)]
 mod browsers;

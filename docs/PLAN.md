@@ -3553,6 +3553,42 @@ with a one line answer field. Enter on an answer does what
 until the next absence. `chronicle::away(since)` builds it, pure and
 tested. Nothing happened, no card.
 
+Built on 2026-10-05. `chronicle::away(records, project, list,
+warriv_has, since)` gives a project's quests marked done since then
+(with the agent's summary), a line a wake (what Warriv did, then its
+own words for why, or what woke it when it ran nothing), and the
+quests blocked on the human: no wait Horadric checks, a session that
+holds them, and not among those Warriv has. Only news opens the card:
+a question asked before the human left is asked again but opens
+nothing. The UI's `away.rs` draws it with the catch-up's layout and
+plate, which learned a field row and a width. What the plan did not
+say:
+
+- **It takes the catch-up's place.** Away 30 minutes or more with news
+  in any quest log, the card opens and the catch-up does not, so coming
+  back is one card. Shorter, or no news, the catch-up opens as before.
+- **It stands over the stage,** owned by it and centred on it, at most
+  520 DIPs wide and narrower over a narrow stage; with the stage hidden,
+  in the middle of the primary screen. It does not close when the focus
+  goes elsewhere, since answering often means reading a session first.
+- **An answer is the human's, not Warriv's.** The session is told "The
+  human answers: ...", no "Warriv answered" toast is shown, and a quest
+  whose session is gone gets a `The human answers:` notes line, not a
+  `Warriv:` one, and starts again. Enter moves the keyboard to the next
+  question not yet told, and the one told reads "told" with its lamp
+  out. Tab and the arrows move between questions.
+- **Errands** have no chronicle line yet, so the card has no errands
+  part; part 4 adds both.
+- A dev instance treats a file `away-now` in its state folder as coming
+  back from an hour away, since an absence can not be tried while
+  anyone uses the machine.
+- Seen on a dev instance with a seeded chronicle and `cmd.exe` for the
+  agent, in Skeuomorphism (dark), Flat (light) and over a 420 pixel
+  stage: an answer typed and Entered wrote the note, started the quest
+  again, and moved to the next question; Esc closed the card. Not tried
+  on screen: typing into a live session between turns, which is the
+  path Warriv's tells already take.
+
 **4. Errands: runewords on a clock.** A stone in the Runetome may carry
 `"every"`, and then Warriv casts it unattended:
 
