@@ -103,6 +103,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use crate::accounts;
 use crate::agents;
 use crate::appear;
+use crate::away::{self, AwayCard};
 use crate::caption;
 use crate::catchup::{self, Away, Catchup};
 use crate::columns::{self, Columns};
@@ -366,6 +367,15 @@ pub(crate) enum Input {
     /// The catch-up closed, with the session of the line clicked, if one
     /// was.
     Listened(Option<String>),
+    /// An answer typed on the away card, for the quest `title` in the
+    /// project at `dir`.
+    Answered {
+        dir: String,
+        title: String,
+        text: String,
+    },
+    /// The away card closed.
+    AwayClosed,
     /// The start window's tile clicked: pick a folder for the first
     /// project.
     Pick,
@@ -489,6 +499,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
     dialog::register_class()?;
     toast::register_class()?;
     catchup::register_class()?;
+    away::register_class()?;
     questlog::register_class()?;
     start::register_class()?;
     terminal::register_class()?;
@@ -705,6 +716,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             listen_key,
             away: Away::default(),
             catchup: None,
+            away_card: None,
             quest_log: None,
             journaled: HashMap::new(),
             next_serial: 1,
@@ -2560,6 +2572,8 @@ struct App {
     away: Away,
     /// The catch-up, while it is open.
     catchup: Option<Box<Catchup>>,
+    /// What happened while you were away, while it is open.
+    away_card: Option<Box<AwayCard>>,
     /// The quest log, while it is open.
     quest_log: Option<Box<QuestLog>>,
     /// Each session's phase as last journaled, with its project and name,
@@ -5426,6 +5440,13 @@ impl App {
         if let Some(since) = self.away.idle(idle_secs(), unix_now()) {
             self.welcome_back(since);
         }
+        // A dev instance comes back from an hour away when told to, since
+        // an absence can not be tried while anyone uses the machine.
+        let back = store::dir().map(|d| d.join("away-now"));
+        if let Some(back) = back.filter(|b| horadric_hooks::dev() && b.exists()) {
+            let _ = std::fs::remove_file(back);
+            self.welcome_back(unix_now().saturating_sub(3600));
+        }
         // A run of work ends after a quiet spell no event marks.
         self.sync_discord();
         self.refresh_quest_log(false);
@@ -5894,7 +5915,56 @@ impl App {
     /// You came back after being away since `since`: say what happened, if
     /// anything did.
     fn welcome_back(&mut self, since: u64) {
+        if unix_now().saturating_sub(since) >= away::AWAY_FOR && self.tell_away(since) {
+            return;
+        }
         self.listen(since, Some(since), false);
+    }
+
+    /// Opens the away card if anything happened in a quest log since
+    /// `since`, in place of the catch-up. True when it opened.
+    fn tell_away(&mut self, since: u64) -> bool {
+        let state = unsafe { SHQueryUserNotificationState() }.map_or(5, |s| s.0);
+        if toast::hold_back(state) {
+            return false;
+        }
+        let records = store::chronicle_all();
+        let news: Vec<(String, String, chronicle::Away)> = {
+            let boards = self.shared.boards.borrow();
+            let warriv = self.shared.warriv.borrow();
+            let mut keys: Vec<&String> = boards.keys().collect();
+            keys.sort();
+            keys.into_iter()
+                .filter_map(|key| {
+                    let b = &boards[key];
+                    let has = warriv.get(key).cloned().unwrap_or_default();
+                    let a = chronicle::away(&records, key, &b.tasks, &has, since);
+                    let dir = self.project_dir(key)?;
+                    a.happened()
+                        .then(|| (project_name(key), dir.to_string_lossy().into_owned(), a))
+                })
+                .collect()
+        };
+        if news.is_empty() {
+            return false;
+        }
+        if let Some(c) = self.away_card.take() {
+            c.destroy();
+        }
+        let now = unix_now();
+        let (rows, answers) = away::rows(&news, now);
+        let sub = away::gone(now.saturating_sub(since));
+        let stage = self.stage.as_ref().map(|s| s.hwnd);
+        match AwayCard::open(Rc::clone(&self.shared), stage, sub, rows, answers) {
+            Ok(c) => {
+                self.away_card = Some(c);
+                true
+            }
+            Err(e) => {
+                eprintln!("horadric: cannot open the away card: {e}");
+                false
+            }
+        }
     }
 
     /// The catch-up from the tray or its hotkey: since this morning.
@@ -6131,6 +6201,15 @@ impl App {
                     }
                 }
                 Input::SetDefault(agent, setting, value) => self.set_default(agent, setting, value),
+                Input::Answered { dir, title, text } => {
+                    self.human_tell(&dir, &title, &text);
+                    self.run_tasks();
+                }
+                Input::AwayClosed => {
+                    if let Some(c) = self.away_card.take() {
+                        c.destroy();
+                    }
+                }
                 Input::Listened(session) => {
                     if let Some(c) = self.catchup.take() {
                         c.destroy();

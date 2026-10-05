@@ -475,6 +475,8 @@ pub struct CatchupScene<'a> {
     pub more: &'a str,
     pub hot: Option<usize>,
     pub close_hot: bool,
+    /// The fields of the rows that are fields, in order.
+    pub fields: Vec<FieldLook<'a>>,
 }
 
 /// A row of the catch-up as it is drawn. A heading uses only the text.
@@ -1876,7 +1878,11 @@ impl Painter<'_> {
                     }
                     self.text(&gpu.small_right, theme::legend(), look.age, age);
                 }
+                CatchupRow::Field(_) => {}
             }
+        }
+        for f in &scene.fields {
+            self.input(gpu, f);
         }
         if let Some(r) = l.more {
             self.text(&gpu.small, theme::legend(), scene.more, r);
