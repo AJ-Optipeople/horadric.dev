@@ -229,7 +229,9 @@ pub struct Filled {
 /// Lays out one column from `top`, `height` tall, with `gap` between
 /// windows. Files tiles share the height left over equally, at least
 /// `min_files` each, folding the ones [`Stacked`] says fold first until the
-/// rest have that. The last open one takes the pixels that do not divide.
+/// rest have that. The one a click opened last never folds: it gets
+/// `min_files` and the column scrolls. The last open one takes the pixels
+/// that do not divide.
 /// Returns where each window goes, scrolled up by `scroll`, and how far the
 /// column can scroll, zero when it fits.
 pub fn fill(
@@ -248,13 +250,19 @@ pub fn fill(
         .collect();
     // Kept longest first, so folding is popping off the end.
     open.sort_by_key(|&i| (std::cmp::Reverse(items[i].files), i));
+    // One a click opened stays open in a column with no room even for it,
+    // and the column scrolls instead, or the click could never open it.
+    let clicked = open.first().copied().filter(|&i| items[i].files > Some(0));
     while !open.is_empty() && left < open.len() as i32 * min_files {
         open.pop();
     }
+    if open.is_empty() {
+        open.extend(clicked);
+    }
     let mut bodies = vec![None; items.len()];
     if !open.is_empty() {
-        let share = left / open.len() as i32;
-        let spare = left - share * open.len() as i32;
+        let share = (left / open.len() as i32).max(min_files);
+        let spare = (left - share * open.len() as i32).max(0);
         let last = *open.iter().max().unwrap_or(&0);
         for &i in &open {
             bodies[i] = Some(share + if i == last { spare } else { 0 });
@@ -590,6 +598,25 @@ mod tests {
         let (out, _) = fill(&items, 0, 420, 0, 60, 0);
         let files: Vec<_> = out.iter().map(|f| f.files).collect();
         assert_eq!(files, vec![Some(60), Some(60), None]);
+    }
+
+    #[test]
+    fn fill_keeps_the_tile_a_click_opened_when_there_is_no_room() {
+        let items = [
+            Stacked {
+                fixed: 300,
+                files: Some(0),
+            },
+            Stacked {
+                fixed: 300,
+                files: Some(3),
+            },
+        ];
+        // 500 less 610 leaves nothing, yet the clicked one opens at 60.
+        let (out, room) = fill(&items, 0, 500, 10, 60, 0);
+        let files: Vec<_> = out.iter().map(|f| f.files).collect();
+        assert_eq!(files, vec![None, Some(60)]);
+        assert_eq!(room, 170);
     }
 
     #[test]
