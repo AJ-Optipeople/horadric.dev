@@ -335,7 +335,10 @@ pub fn quests(
         let (Some(holder), true) = (&t.holder, t.mark != Mark::Open) else {
             continue;
         };
-        let known = index.contains_key(holder.as_str());
+        // A picked tomb's winner holds the item, but its records are
+        // under the batch.
+        let holder = quest_of(holder);
+        let known = index.contains_key(holder);
         let i = find(&mut out, &mut index, holder, &t.title);
         let q = &mut out[i];
         if q.notes.is_empty() {
@@ -925,6 +928,18 @@ mod tests {
         assert_eq!((q[0].outcome, q[0].result()), (Outcome::Done, "A is in."));
         assert_eq!(q[0].name, "Tile A");
         assert_eq!((q[1].outcome, q[1].result()), (Outcome::Blocked, "no key"));
+    }
+
+    #[test]
+    fn a_picked_tomb_is_one_quest_under_its_batch() {
+        let records = [
+            accepted(1, "c-1.x3", "C"),
+            marked(5, "c-1.x3", Outcome::Done),
+        ];
+        let list = [task(0, Mark::Done, "C", Some("c-1.x3.2"))];
+        let q = quests(&records, &[], "p", &list);
+        assert_eq!(q.len(), 1);
+        assert_eq!((q[0].accepted, q[0].outcome), (Some(1), Outcome::Done));
     }
 
     fn quest(id: &str, accepted: u64, ended: Option<u64>, outcome: Outcome) -> Quest {
