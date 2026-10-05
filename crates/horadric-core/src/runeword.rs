@@ -30,8 +30,8 @@ mod errand;
 mod stone;
 pub use edit::unwrite;
 pub use errand::{
-    arm_text, describe, due, every, length, span, tick, Armed, Clocked, Errand, Every, Tick,
-    FOR_DEFAULT,
+    arm_text, describe, due, every, is_errand, length, since, span, tick, Armed, Clocked, Errand,
+    Every, Tick, FOR_DEFAULT, ID as ERRAND_ID,
 };
 pub use stone::{
     ask_text, carve, fingerprint, name, reforge_prompt, smith_prompt, tip, Carving, Stroke,
@@ -1440,7 +1440,7 @@ mod tests {
     fn a_stone_with_every_is_an_errand_and_a_quests_rune_cracks_it() {
         let text = r#"{ "runewords": {
             "Clean": { "every": "sunday 12:00", "for": "10m", "steps": [ { "run": "cargo clean" } ] },
-            "Hourly": { "every": "1h", "steps": [ "Read the inbox" ] },
+            "Hourly": { "every": "1h", "mode": "bypass", "steps": [ "Read the inbox" ] },
             "Ship": { "every": "day 03:00", "steps": [ "test", "merge" ] },
             "Soon": { "every": "now and then", "steps": [ { "run": "echo" } ] },
             "Long": { "every": "1h", "for": 30, "steps": [ { "run": "echo" } ] },
@@ -1451,14 +1451,16 @@ mod tests {
             get("Clean").errand,
             Some(Errand {
                 every: Every::Week(6, 720),
-                most: 600
+                most: 600,
+                bypass: false,
             })
         );
         assert_eq!(
             get("Hourly").errand,
             Some(Errand {
                 every: Every::Span(3600),
-                most: FOR_DEFAULT
+                most: FOR_DEFAULT,
+                bypass: true,
             })
         );
         assert!(get("Ship")

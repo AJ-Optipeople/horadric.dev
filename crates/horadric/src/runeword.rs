@@ -138,9 +138,14 @@ fn show(s: &Stone) -> String {
     }
     if let Some(e) = &s.errand {
         out.push_str(&format!(
-            "  an errand: {}, for {} at most, once armed in the tome\n",
+            "  an errand: {}, for {} at most{}, once armed in the tome\n",
             runeword::describe(e.every),
-            runeword::length(e.most)
+            runeword::length(e.most),
+            if e.bypass && !s.sessionless() {
+                ", skipping permission prompts"
+            } else {
+                ""
+            }
         ));
     }
     out

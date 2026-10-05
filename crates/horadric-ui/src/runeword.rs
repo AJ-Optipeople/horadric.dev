@@ -354,10 +354,12 @@ impl App {
                 Act::Complete => {
                     self.set_on(&on, &w.name, None);
                     // An errand that did its work says nothing.
-                    if let On::Project(key) = &on {
-                        if self.errand_ended(key, &w.name, None) {
-                            continue;
-                        }
+                    let errand = match &on {
+                        On::Project(key) => self.errand_ended(key, &w.name, None),
+                        On::Session(id) => self.errand_session_ended(id, None),
+                    };
+                    if errand {
+                        continue;
                     }
                     self.toasts.show(
                         Kind::Done,
@@ -371,12 +373,13 @@ impl App {
                         forget_files(file);
                     }
                     self.set_on(&on, &w.name, None);
-                    if let On::Project(key) = &on {
-                        if self.errand_ended(key, &w.name, Some(&why)) {
-                            continue;
-                        }
+                    let errand = match &on {
+                        On::Project(key) => self.errand_ended(key, &w.name, Some(&why)),
+                        On::Session(id) => self.errand_session_ended(id, Some(&why)),
+                    };
+                    if !errand {
+                        self.stopped(&on, s.as_ref(), &w, &why);
                     }
-                    self.stopped(&on, s.as_ref(), &w, &why);
                 }
             }
         }

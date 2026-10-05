@@ -9,7 +9,7 @@
 //! `go_on` types.
 
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime};
 
 use horadric_core::chronicle::{self, Happened, Woken};
@@ -354,15 +354,31 @@ impl App {
     /// without asking, before its system prompt, which ends that list.
     pub(super) fn warriv_args(&self, cwd: &Path) -> (Vec<String>, String) {
         let horadric = horadric_command();
-        let allowed = vec![
-            "--allowedTools".to_string(),
-            format!("Bash({} quest:*)", horadric.trim_matches('"')),
-        ];
         (
-            allowed,
+            warriv::quest_tools(&horadric),
             warriv::system_prompt(
                 &horadric,
                 file::rel(Path::new(&folder_key(&cwd.to_string_lossy()))),
+            ),
+        )
+    }
+
+    /// The flags an errand's session starts with: the quest commands it may
+    /// run without asking, as Warriv may, and its system prompt with the
+    /// `From:` lines the log holds as it starts.
+    pub(super) fn errand_args(&self, id: &str, cwd: &Path) -> (Vec<String>, String) {
+        let horadric = horadric_command();
+        let main = PathBuf::from(folder_key(&cwd.to_string_lossy()));
+        let label = self
+            .errand_of_session(id)
+            .map_or_else(|| "errand".to_string(), |(_, label)| label);
+        (
+            warriv::quest_tools(&horadric),
+            warriv::errand_prompt(
+                &horadric,
+                file::rel(&main),
+                &label,
+                &warriv::froms(&file::read(&main)),
             ),
         )
     }

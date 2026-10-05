@@ -3669,9 +3669,47 @@ click menu offers Arm or Disarm, and Cast to run it once by hand. An
 errand's cast is a sessionless runeword as any: success says nothing,
 a failure toasts once until a cast succeeds, and an overdue one is
 stopped with its command's tree (`taskkill /T`). The tooltip and
-`horadric runeword list` say when it runs. An errand with `say` or
-`keys` steps parses and can be armed, but the clock leaves it for the
-session half (`errand::clocked`).
+`horadric runeword list` say when it runs.
+
+The session half is built (2026-10-05). A due errand with a step that
+needs a session starts a fresh one, `errand-<n>` named after the stone,
+in the main tree, its name on the tile in Warriv's gold (Warriv's own
+sessions too). Its first `say` step is its first prompt, so nothing is
+typed into an agent still starting; the rest are cast turn by turn as
+any runeword, and after the last turn's `Stop` the session closes. A
+step that stops it leaves the session open for the human to read why,
+and an agent that quits mid cast fails it at once. `Armed.session`
+keeps which session is the cast's, in `state.json`, so a reload goes
+on. It starts in the project's permission mode with the quest commands
+allowed, as Warriv is; `"mode": "bypass"` on the stone skips prompts,
+and arming such a stone asks in red and says so. The arming covers the
+mode too: a stone turned to bypass after it was armed is disarmed (a
+stone without a mode keeps the fingerprint it had). Its system prompt,
+`warriv::errand_prompt`, says what Horadric and the quest commands are,
+that findings become quests with a `From:` notes line naming that one
+finding, and lists the `From:` lines in the log as the cast began
+(`warriv::froms`, the newest 200) so nothing is filed twice.
+`runeword::since` puts the last good finish in UTC where a step says
+`{since}` (when none finished yet, the arming or the last cast).
+CLAUDE.md says arming a publishing errand is the human's standing go
+ahead. Closing errand sessions on the stop key, the tome's ring and the
+chronicle's dots are their own quests.
+
+Checked on a dev instance of its own (port 4180, scratch `APPDATA`), a
+scratch repository with Haiku and a stone `"every": "2m"` of two `say`
+steps (file each line of `feedback.txt` as a quest, then reply "done"),
+armed through `state.json` ten minutes back. The first cast filed one
+quest with `From: fb-17`, cast both turns and closed in 26 seconds; the
+next, two minutes later, filed nothing and closed. No `claude.exe` of
+the scratch repository was left after either. On the way: Claude Code
+on Windows runs commands with its PowerShell tool as often as Bash, so
+Warriv and errands now get the quest commands allowed for both
+(`warriv::quest_tools`), and their prompts say to run the command as
+written, since `& "..."` matches no rule. Before that every errand and
+every Warriv wake on this machine stopped at "needs permission" on its
+first `quest` command. A cast whose agent sat on Claude's folder trust
+question was stopped at its `"for"` as it should be. The red arming
+dialog was not clicked on screen.
 
 Checked on a dev instance of its own (port 4170, scratch `APPDATA`) with
 a stone `"every": "1m"` writing the time to a file, armed through

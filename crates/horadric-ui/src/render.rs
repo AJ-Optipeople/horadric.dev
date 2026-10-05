@@ -3119,7 +3119,15 @@ impl Painter<'_> {
             }
         }
         // Its name says how it ended, in item colours, apart from the lamp.
-        let ink = theme::rarity_color(s.rarity()).fade(presence);
+        // Warriv's own sessions and its errands' are in its gold instead.
+        let ink = if horadric_core::warriv::is_warriv(&s.id)
+            || horadric_core::runeword::is_errand(&s.id)
+        {
+            theme::warriv()
+        } else {
+            theme::rarity_color(s.rarity())
+        };
+        let ink = ink.fade(presence);
         self.text(&gpu.name, ink, s.label(), name_rect);
         let age_c = match phase {
             Phase::Waiting(_) => c,

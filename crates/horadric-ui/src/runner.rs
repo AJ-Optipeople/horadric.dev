@@ -475,7 +475,7 @@ impl App {
             .registry
             .lock()
             .is_ok_and(|r| r.get(id).is_some_and(|s| s.worktree.is_some()));
-        tasks::bypasses_prompts(self.holds_quest(id), own_tree)
+        tasks::bypasses_prompts(self.holds_quest(id), own_tree) || self.errand_bypasses(id)
     }
 
     /// What to add to a session's command line started in `cwd`: what it
@@ -498,6 +498,10 @@ impl App {
         let mut allowed = Vec::new();
         if horadric_core::warriv::is_warriv(id) {
             let (flags, prompt) = self.warriv_args(cwd);
+            allowed = flags;
+            system.push(prompt);
+        } else if horadric_core::runeword::is_errand(id) {
+            let (flags, prompt) = self.errand_args(id, cwd);
             allowed = flags;
             system.push(prompt);
         }

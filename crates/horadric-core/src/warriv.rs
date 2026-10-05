@@ -419,7 +419,7 @@ pub fn system_prompt(horadric: &str, file: &str) -> String {
          one of them can not go on, so the human hears only what needs a human. You plan; \
          you do not build. Change no code, start no session, and never edit {file} \
          directly: every change goes through `{horadric} quest`, which is the one command \
-         you may run without asking.\n\n\
+         you may run without asking. {AS_WRITTEN}\n\n\
          What you may do:\n\
          - Answer a quest's session: `{horadric} quest tell \"<title>\" \"<message>\"`. \
          Horadric types it into the session once it is between turns, and a blocked quest \
@@ -627,10 +627,133 @@ pub fn add_below(text: &str, name: &str, title: &str, notes: &str) -> Result<Str
     Ok(insert_with_notes(text, end_of(text, t.line), title, notes))
 }
 
+/// The flags that let a session run `horadric quest` without asking,
+/// through either shell tool Claude Code has on Windows. Only the
+/// command as written matches: `& "..."` or a `cd` before it asks.
+pub fn quest_tools(horadric: &str) -> Vec<String> {
+    let h = horadric.trim_matches('"');
+    vec![
+        "--allowedTools".to_string(),
+        format!("Bash({h} quest:*)"),
+        format!("PowerShell({h} quest:*)"),
+    ]
+}
+
+/// What a prompt says so the quest commands run without asking.
+const AS_WRITTEN: &str = "Run it exactly as written here, the path first, never behind \
+     `&` or a `cd`: only that form runs without asking.";
+
+/// What a quest's notes line starts with when it says where the quest
+/// came from: a link, a message's id, a pull request.
+pub const FROM: &str = "From: ";
+
+/// Every `From:` a quest log's notes hold, in the log's order, once each,
+/// so an errand knows what it filed before.
+pub fn froms(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for t in parse(text) {
+        for n in &t.notes {
+            let from = n.trim().strip_prefix(FROM.trim_end()).map(str::trim);
+            if let Some(f) = from.filter(|f| !f.is_empty()) {
+                if !out.iter().any(|o| o == f) {
+                    out.push(f.to_string());
+                }
+            }
+        }
+    }
+    out
+}
+
+/// How many `From:` lines an errand's system prompt lists, the newest
+/// ones, so a long log does not make a long prompt.
+const FROMS_LISTED: usize = 200;
+
+/// The system prompt of an errand's session: a stone named `label` cast
+/// unattended on a clock, in a project whose quest log is `file`, which
+/// holds the `From:` lines `froms` already. What it finds becomes
+/// quests, each saying where it came from, and nothing is filed twice.
+pub fn errand_prompt(horadric: &str, file: &str, label: &str, froms: &[String]) -> String {
+    let mut out = format!(
+        "You run the errand \"{label}\" for Horadric, which casts it on a clock while \
+         nobody watches. Horadric shows the human's coding agent sessions and runs the \
+         project's quest log, {file}: the work agent sessions take on one quest at a time. \
+         Your steps come as prompts, one turn each; do what each says, and the session \
+         closes after the last. Do not ask questions in this chat: nobody reads it.\n\n\
+         What you find that needs doing becomes a quest, not work you do here:\n\
+         - Add one with `{horadric} quest add \"<title>\" --notes \"{FROM}<where it came \
+         from>\"`, the title a short line of what to do. Where it came from is a link, a \
+         message's id, an issue or a pull request: something that names that one finding \
+         and no other. Add `--after \"<title>\"` for a quest it needs done first.\n\
+         - Say more under it with `{horadric} quest note \"<title>\" \"<line>\"`.\n\
+         - Read the log with `{horadric} quest list`, or the file itself. Never edit the \
+         file directly.\n\
+         - File nothing whose `{FROM}` line is in the log already, done or not: that one \
+         was filed by an earlier cast. One finding is one quest.\n\
+         {AS_WRITTEN}"
+    );
+    let listed = &froms[froms.len().saturating_sub(FROMS_LISTED)..];
+    if listed.is_empty() {
+        out.push_str("\n\nThe log has no `From:` lines yet.");
+    } else {
+        out.push_str("\n\nThe `From:` lines in the log when this cast began:");
+        for f in listed {
+            out.push_str("\n- ");
+            out.push_str(f);
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::tasks::parse;
+
+    #[test]
+    fn the_quest_commands_are_allowed_in_both_shells() {
+        assert_eq!(
+            quest_tools("\"C:/h/horadric.exe\""),
+            [
+                "--allowedTools",
+                "Bash(C:/h/horadric.exe quest:*)",
+                "PowerShell(C:/h/horadric.exe quest:*)"
+            ]
+        );
+        assert!(system_prompt("h", "f").contains("never behind `&`"));
+        assert!(errand_prompt("h", "f", "l", &[]).contains("never behind `&`"));
+    }
+
+    #[test]
+    fn froms_are_read_from_every_quest_once_each() {
+        let log = "- [ ] Fix the login\n  From: https://x/issues/4\n  Model: haiku\n\
+                   - [x] Typo on the page\n  From:   slack 1234  \n\
+                   - [ ] Again\n  From: https://x/issues/4\n  From:\n\
+                   - [ ] Mine\n  Comes from: nothing\n";
+        assert_eq!(froms(log), ["https://x/issues/4", "slack 1234"]);
+        assert!(froms("").is_empty());
+    }
+
+    #[test]
+    fn an_errand_is_told_the_quest_commands_the_from_rule_and_what_is_filed() {
+        let froms = vec!["https://x/issues/4".to_string()];
+        let p = errand_prompt("horadric", ".horadric/tasks.md", "Feedback", &froms);
+        assert!(p.contains("\"Feedback\""));
+        assert!(p.contains("horadric quest add \"<title>\" --notes \"From: "));
+        assert!(p.contains("horadric quest note"));
+        assert!(p.contains(".horadric/tasks.md"));
+        assert!(p.contains("File nothing whose `From: ` line is in the log already"));
+        assert!(p.ends_with("began:\n- https://x/issues/4"));
+        assert!(errand_prompt("h", "f", "l", &[]).ends_with("no `From:` lines yet."));
+    }
+
+    #[test]
+    fn an_errand_lists_only_the_newest_froms() {
+        let froms: Vec<String> = (0..FROMS_LISTED + 5).map(|i| format!("id {i}")).collect();
+        let p = errand_prompt("h", "f", "l", &froms);
+        assert!(!p.contains("- id 4\n"));
+        assert!(p.contains("- id 5\n"));
+        assert!(p.ends_with(&format!("- id {}", FROMS_LISTED + 4)));
+    }
 
     #[test]
     fn it_is_off_unless_the_config_says_so() {

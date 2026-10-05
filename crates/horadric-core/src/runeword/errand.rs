@@ -27,6 +27,37 @@ pub struct Errand {
     pub every: Every,
     /// Seconds a cast may run before it is stopped.
     pub most: u64,
+    /// `"mode": "bypass"`: its session skips every permission prompt
+    /// rather than stop at one as the project's sessions do.
+    pub bypass: bool,
+}
+
+/// What an errand session's id starts with.
+pub const ID: &str = "errand";
+
+/// Whether the session `id` is one an errand started for itself.
+pub fn is_errand(id: &str) -> bool {
+    id.strip_prefix(ID)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with('-'))
+}
+
+/// The steps of a cast with `{since}` put as `at`, the last cast that
+/// finished, in UTC, so an errand reads only what came after it.
+pub fn since(runes: &[Rune], at: u64) -> Vec<Rune> {
+    let when = crate::tasks::utc(at);
+    let put = |t: &str| t.replace("{since}", &when);
+    runes
+        .iter()
+        .map(|r| match r {
+            Rune::Say(t) => Rune::Say(put(t)),
+            Rune::Keys(t) => Rune::Keys(put(t)),
+            Rune::Run { command, show } => Rune::Run {
+                command: put(command),
+                show: *show,
+            },
+            other => other.clone(),
+        })
+        .collect()
 }
 
 /// How long a cast may run when the stone does not say `"for"`.
@@ -202,6 +233,11 @@ pub(super) fn errand_of(
         None => FOR_DEFAULT,
         Some(v) => span(v.as_str().ok_or("\"for\" is text like \"30m\"")?)?,
     };
+    let bypass = match value.get("mode").map(|m| m.as_str()) {
+        None => false,
+        Some(Some("bypass")) => true,
+        Some(_) => return Err("\"mode\" is \"bypass\", or left out for the project's".into()),
+    };
     if runes
         .iter()
         .any(|r| matches!(r, Rune::Test | Rune::Review | Rune::Merge))
@@ -210,14 +246,19 @@ pub(super) fn errand_of(
             "test, review and merge need a quest's session, which an errand has none of".into(),
         );
     }
-    Ok(Some(Errand { every, most }))
+    Ok(Some(Errand {
+        every,
+        most,
+        bypass,
+    }))
 }
 
 /// What the app keeps of an armed errand, by project and label.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Armed {
-    /// The steps it was armed with, as `runeword::fingerprint`. Steps
-    /// that are not these disarm it.
+    /// The steps it was armed with, and whether it bypasses prompts, as
+    /// [`Armed::print`] makes it. Steps or a mode that are not these
+    /// disarm it.
     pub steps: u64,
     /// When its last cast began, or it was armed, in Unix seconds: when
     /// it is next due is counted from this.
@@ -232,23 +273,45 @@ pub struct Armed {
     /// The clock cast it and it has not ended yet.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub running: bool,
+    /// The session the running cast has, for steps that need one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
 }
 
 impl Armed {
-    /// Armed at `now` with these steps.
-    pub fn new(runes: &[Rune], now: u64) -> Armed {
+    /// Armed at `now` with the steps and the mode the stone has.
+    pub fn new(stone: &Stone, now: u64) -> Armed {
         Armed {
-            steps: super::fingerprint(runes),
+            steps: Armed::print(stone),
             last: now,
             finished: None,
             failed: false,
             running: false,
+            session: None,
         }
     }
 
-    /// Whether it is armed for these steps.
-    pub fn fits(&self, runes: &[Rune]) -> bool {
-        self.steps == super::fingerprint(runes)
+    /// Whether it is armed for the steps and the mode the stone has now.
+    pub fn fits(&self, stone: &Stone) -> bool {
+        stone.runes().is_some() && self.steps == Armed::print(stone)
+    }
+
+    /// What arming keeps of a stone: its steps, and whether it bypasses
+    /// prompts, so one turned to bypass after it was armed is not the one
+    /// that was. One that does not is its steps' fingerprint alone, as
+    /// arming was before modes.
+    fn print(stone: &Stone) -> u64 {
+        let steps = super::fingerprint(stone.runes().unwrap_or_default());
+        match &stone.errand {
+            Some(e) if e.bypass => steps.rotate_left(1) ^ 0x6279_7061_7373,
+            _ => steps,
+        }
+    }
+
+    /// What `{since}` is for its next cast: its last good finish, or, when
+    /// none has finished well yet, when it was armed or last cast.
+    pub fn since(&self) -> u64 {
+        self.finished.unwrap_or(self.last)
     }
 }
 
@@ -318,9 +381,14 @@ pub fn arm_text(stone: &Stone, on: &str) -> String {
             describe(e.every),
             length(e.most)
         ));
+        if e.bypass && !stone.sessionless() {
+            out.push_str(
+                "It skips every permission prompt: its session runs any command and edits any file without asking.\n\n",
+            );
+        }
     }
     out.push_str(&super::stone::ask_text(stone, on, false));
-    out.push_str("\n\nIf its steps change it is disarmed until you arm it again.");
+    out.push_str("\n\nIf its steps or its mode change it is disarmed until you arm it again.");
     out
 }
 
@@ -416,6 +484,7 @@ mod tests {
             errand: Errand {
                 every,
                 most: FOR_DEFAULT,
+                bypass: false,
             },
             armed: Armed {
                 steps: 0,
@@ -423,6 +492,7 @@ mod tests {
                 finished: None,
                 failed: false,
                 running: false,
+                session: None,
             },
         }
     }
@@ -478,17 +548,103 @@ mod tests {
         assert_eq!(length(90), "1m30s");
     }
 
+    fn stone(steps: Vec<Rune>, bypass: bool) -> Stone {
+        Stone {
+            label: "Errand".into(),
+            steps: Ok(steps),
+            source: super::super::Source::Project,
+            about: String::new(),
+            errand: Some(Errand {
+                every: Every::Span(3600),
+                most: FOR_DEFAULT,
+                bypass,
+            }),
+        }
+    }
+
     #[test]
-    fn arming_follows_the_steps() {
-        let steps = vec![Rune::Run {
+    fn arming_follows_the_steps_and_the_mode() {
+        let clean = || Rune::Run {
             command: "cargo clean".into(),
             show: false,
-        }];
-        let armed = Armed::new(&steps, 10);
-        assert!(armed.fits(&steps));
-        assert!(!armed.fits(&[Rune::Run {
+        };
+        let armed = Armed::new(&stone(vec![clean()], false), 10);
+        assert!(armed.fits(&stone(vec![clean()], false)));
+        // Armed before modes, a stone keeps its arming.
+        assert_eq!(armed.steps, super::super::fingerprint(&[clean()]));
+        let doc = Rune::Run {
             command: "cargo clean --doc".into(),
             show: false,
-        }]));
+        };
+        assert!(!armed.fits(&stone(vec![doc], false)));
+        // Turned to bypass after arming, it is not what was armed.
+        assert!(!armed.fits(&stone(vec![clean()], true)));
+        let bypassing = Armed::new(&stone(vec![clean()], true), 10);
+        assert!(bypassing.fits(&stone(vec![clean()], true)));
+        assert!(!bypassing.fits(&stone(vec![clean()], false)));
+    }
+
+    #[test]
+    fn a_mode_reads_bypass_or_nothing() {
+        let steps = [Rune::Say("Look".into())];
+        let of = |v: &str| errand_of(&serde_json::from_str(v).unwrap(), &steps);
+        assert!(!of(r#"{"every":"1h"}"#).unwrap().unwrap().bypass);
+        assert!(
+            of(r#"{"every":"1h","mode":"bypass"}"#)
+                .unwrap()
+                .unwrap()
+                .bypass
+        );
+        assert!(of(r#"{"every":"1h","mode":"auto"}"#)
+            .unwrap_err()
+            .contains("bypass"));
+    }
+
+    #[test]
+    fn arming_a_bypassing_session_errand_says_so() {
+        let say = vec![Rune::Say("Look".into())];
+        let skips = "skips every permission prompt";
+        assert!(arm_text(&stone(say.clone(), true), "x").contains(skips));
+        assert!(!arm_text(&stone(say, false), "x").contains(skips));
+    }
+
+    #[test]
+    fn an_errand_session_is_known_by_its_id() {
+        assert!(is_errand("errand"));
+        assert!(is_errand("errand-51234"));
+        assert!(!is_errand("errands-1"));
+        assert!(!is_errand("fix-errand-1"));
+    }
+
+    #[test]
+    fn since_is_put_in_every_step_that_has_it() {
+        let runes = [
+            Rune::Say("Read mail since {since}.".into()),
+            Rune::Run {
+                command: "log --since {since}".into(),
+                show: true,
+            },
+            Rune::Keys("{Enter}".into()),
+        ];
+        assert_eq!(
+            since(&runes, MONDAY + 9 * HOUR),
+            [
+                Rune::Say("Read mail since 2026-10-05T09:00Z.".into()),
+                Rune::Run {
+                    command: "log --since 2026-10-05T09:00Z".into(),
+                    show: true,
+                },
+                Rune::Keys("{Enter}".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn since_is_the_last_good_finish_or_the_last_start() {
+        let mut a = clocked("A", Every::Span(600), 1000).armed;
+        assert_eq!(a.since(), 1000);
+        a.finished = Some(900);
+        a.last = 2000;
+        assert_eq!(a.since(), 900);
     }
 }
