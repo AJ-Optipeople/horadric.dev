@@ -510,6 +510,9 @@ impl App {
                 rel,
                 list.as_deref(),
             ));
+            if self.drives.contains_key(&main) {
+                system.push(tasks::driven_prompt(&horadric_command()));
+            }
             if let Some((batch, n)) = tombs::of(id) {
                 system.push(tombs::system_prompt(n, tombs::weight(batch)));
             }
@@ -1022,6 +1025,7 @@ impl App {
                         &b.tasks,
                         b.mode,
                         b.parallel,
+                        self.drives.contains_key(key),
                         |id| self.holder(id),
                         |t| self.wait_met(key, t, now),
                     ),
@@ -1299,7 +1303,14 @@ impl App {
             }
         }
         if b.mode.runs() && self.tasks.ran.contains(key) {
-            let finished = tasks::next(&b.tasks, b.mode, b.parallel, |_| Holder::Live, |_| false);
+            let finished = tasks::next(
+                &b.tasks,
+                b.mode,
+                b.parallel,
+                self.drives.contains_key(key),
+                |_| Holder::Live,
+                |_| false,
+            );
             if let Next::Finished = finished {
                 out.push((
                     format!("finished:{key}"),
@@ -1348,6 +1359,7 @@ impl App {
             &b.tasks,
             b.mode,
             b.parallel,
+            self.drives.contains_key(key),
             |id| self.holder(id),
             |t| self.wait_met(key, t, now),
         );

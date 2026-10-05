@@ -3739,6 +3739,33 @@ and the rest of the caravan moves. The away card lists every
 `Assumed:` line since the human left, so each can be overruled in one
 line.
 
+**Built on 2026-10-05**: `tasks::driven_prompt` goes to a quest's
+session beside its system prompt while Warriv drives the project, and
+`warriv::driven_prompt` to Warriv's; both name the line, `quest note
+"title" "Assumed: ..."`, and what still blocks (deleting data,
+publishing, money, an account, what only the human knows). `tasks::next`
+takes whether Warriv drives: then a quest blocked on the human is passed
+over like one that waits, a quest `After:` it waits too, and the list is
+not finished while it is open. A session gone and a cycle still stop
+the list. `quest note` with a line `tasks::assumed` reads (any case,
+from any session, Warriv's too) writes an `assumed` record to the
+chronicle, and `chronicle::away` lists those since the human left,
+oldest first, the same line twice once. An assumption alone opens the
+card. On the card it is a part of its own, "assumed", in amber, between
+Warriv and the questions, each with a field that reads "Leave it, or
+overrule it in one line". What the plan did not say is where an
+overrule goes, `warriv::overrule`, by how its quest stands now: held by
+a session, it is told "You assumed X; instead: Y" as the human's answer;
+not taken yet, that is a `The human answers:` notes line; done or gone,
+a new quest "Overrule on <title>" at the end of the log, with both in
+its notes. The answered row reads "overruled". Seen on a dev instance
+with `cmd.exe` for the agent: with the drive on in `state.json` and a
+quest blocked on the human second in an auto log, the runner started
+the third; two `Assumed:` notes made the card open on `away-now`, and
+an overrule typed on the done quest's field added its "Overrule on"
+quest. Not tried on screen: an overrule told to a live session, which
+is the path the card's answers already take.
+
 **4. Warriv ships.** While it drives, a round ships local when `main` is
 green and quests have landed since the last ship, by casting the
 project's "Ship Local" stone in a session of its own. With "and ships

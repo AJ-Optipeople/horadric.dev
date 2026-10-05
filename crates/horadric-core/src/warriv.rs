@@ -17,7 +17,7 @@ use serde_json::Value;
 
 use crate::tasks::{
     end_of, find, insert_note, insert_with_notes, item_line, one_line, parse, readiness,
-    replace_line, Mark, Mode, Ready, Task,
+    replace_line, Mark, Mode, Ready, Task, ASSUMED,
 };
 
 /// What a blocked quest's reason starts with when Warriv handed it to the
@@ -447,6 +447,52 @@ pub fn system_prompt(horadric: &str, file: &str) -> String {
          a decision the docs leave open. When you have settled every event, stop. Do not ask \
          questions in this chat: nobody reads it, and the session closes when your turn ends."
     )
+}
+
+/// What Warriv is told besides, while it drives: the human is away, so
+/// it settles what can be changed later itself and writes it down, and
+/// hands on only what can not be undone or only the human can know.
+pub fn driven_prompt(horadric: &str) -> String {
+    format!(
+        "You drive this project: the human is away and the list goes on without \
+         them. When a session asks something that can be changed later (a name, a \
+         layout, which of two fixes), do not hand it on: decide, tell the session, and \
+         write it down with `{horadric} quest note \"<title>\" \"{ASSUMED} <what you chose \
+         and why>\"`. The human reads every such line when they come back and \
+         overrules in one line what they would have chosen otherwise. Hand a quest to \
+         the human only for a choice that can not be undone (deleting data, \
+         publishing, spending money, an account) or that only the human can know. A \
+         quest handed on no longer stops the list: the rest of the caravan moves."
+    )
+}
+
+/// What the human's one line against an assumption does, by how its
+/// quest stands now.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Overrule {
+    /// Its session still holds it: told, as `quest tell` would.
+    Tell(String),
+    /// Nobody took it yet: a notes line its session will read.
+    Note(String),
+    /// It is done or gone: a new quest to change it, at the end of the log.
+    Quest { title: String, notes: String },
+}
+
+/// The human overrules `assumed`, made on the quest `title`, with
+/// `answer`. `mark` is the quest's mark now, none when it left the log.
+pub fn overrule(mark: Option<Mark>, title: &str, assumed: &str, answer: &str) -> Overrule {
+    let (assumed, answer) = (one_line(assumed), one_line(answer));
+    let said = format!("You assumed \u{201C}{assumed}\u{201D}; instead: {answer}");
+    match mark {
+        Some(m) if m.held() => Overrule::Tell(said),
+        Some(Mark::Open) => Overrule::Note(human_note(&said)),
+        _ => Overrule::Quest {
+            title: one_line(&format!("Overrule on {title}")),
+            notes: format!(
+                "While it was done, it assumed \u{201C}{assumed}\u{201D}.\nThe human answers: {answer}"
+            ),
+        },
+    }
 }
 
 /// The first prompt of a wake: each event with its quest's notes and the
@@ -1043,6 +1089,39 @@ mod tests {
             assert!(p.contains(c), "{c}");
         }
         assert!(p.contains("Change no code, start no session"));
+    }
+
+    #[test]
+    fn an_overrule_goes_where_the_quest_is_now() {
+        let said = "You assumed \u{201C}port 4100\u{201D}; instead: use 4200";
+        for m in [Mark::Working, Mark::Review, Mark::Blocked] {
+            assert_eq!(
+                overrule(Some(m), "Serve", "port 4100", "use 4200"),
+                Overrule::Tell(said.into())
+            );
+        }
+        assert_eq!(
+            overrule(Some(Mark::Open), "Serve", "port 4100", "use\n4200"),
+            Overrule::Note(format!("The human answers: {said}"))
+        );
+        for m in [Some(Mark::Done), None] {
+            let Overrule::Quest { title, notes } = overrule(m, "Serve", "port 4100", "use 4200")
+            else {
+                panic!("a done quest gets a new one");
+            };
+            assert_eq!(title, "Overrule on Serve");
+            assert!(notes.ends_with("\nThe human answers: use 4200"));
+            // Its notes must not read as an assumption themselves.
+            assert!(notes.lines().all(|l| crate::tasks::assumed(l).is_none()));
+        }
+    }
+
+    #[test]
+    fn driving_warriv_assumes_what_can_be_undone() {
+        let p = driven_prompt("hx");
+        assert!(p.contains("`hx quest note \"<title>\" \"Assumed: "));
+        assert!(p.contains("can not be undone"));
+        assert!(!p.contains("  "));
     }
 
     #[test]

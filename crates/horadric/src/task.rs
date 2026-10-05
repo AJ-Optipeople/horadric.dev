@@ -316,6 +316,13 @@ fn note(cwd: &Path, title: &str, text: &str) -> Result<(), String> {
     };
     write(&project, |log| warriv::add_note(log, title, &line))?;
     warriv_ran(&project, Command::Note, title, text);
+    // The away card lists what was assumed, for the human to overrule.
+    if let Some(assumed) = tasks::assumed(text) {
+        let what = Happened::Assumed {
+            text: assumed.to_string(),
+        };
+        record(&project, String::new(), title, what);
+    }
     tell_app(&project);
     println!("Noted under the quest.");
     Ok(())

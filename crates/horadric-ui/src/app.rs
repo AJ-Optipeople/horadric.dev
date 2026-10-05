@@ -370,10 +370,11 @@ pub(crate) enum Input {
     /// was.
     Listened(Option<String>),
     /// An answer typed on the away card, for the quest `title` in the
-    /// project at `dir`.
+    /// project at `dir`: to its question, or against what was `assumed`.
     Answered {
         dir: String,
         title: String,
+        assumed: Option<String>,
         text: String,
     },
     /// The away card closed.
@@ -6272,8 +6273,22 @@ impl App {
                     }
                 }
                 Input::SetDefault(agent, setting, value) => self.set_default(agent, setting, value),
-                Input::Answered { dir, title, text } => {
+                Input::Answered {
+                    dir,
+                    title,
+                    assumed: None,
+                    text,
+                } => {
                     self.human_tell(&dir, &title, &text);
+                    self.run_tasks();
+                }
+                Input::Answered {
+                    dir,
+                    title,
+                    assumed: Some(assumed),
+                    text,
+                } => {
+                    self.overrule(&dir, &title, &assumed, &text);
                     self.run_tasks();
                 }
                 Input::AwayClosed => {

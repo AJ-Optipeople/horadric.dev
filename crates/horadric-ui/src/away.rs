@@ -1,8 +1,9 @@
 //! While you were away: one card on the stage when the human comes back
 //! after a long absence, built from the chronicle. Quests that landed, a
-//! line for each wake of Warriv, and last the questions only the human can
-//! answer, each with a one line field. Enter on one does what `quest tell`
-//! does for its quest.
+//! line for each wake of Warriv, what was assumed while Warriv drove, and
+//! last the questions only the human can answer. An assumption and a
+//! question each have a one line field. Enter on a question does what
+//! `quest tell` does for its quest; on an assumption it overrules it.
 //!
 //! It is drawn as the catch-up is, a plate of its own, but stands over the
 //! stage and stays there while the human looks elsewhere: answering often
@@ -73,6 +74,8 @@ pub enum Tone {
     Landed,
     Warriv,
     Question,
+    /// A choice made while the human was away, for them to overrule.
+    Assumed,
     /// A question answered.
     Told,
     Field,
@@ -88,11 +91,13 @@ pub struct Row {
     pub age: String,
 }
 
-/// A question's answer, for the project at `dir`.
+/// A question's answer, for the project at `dir`, or the human's word
+/// against what was `assumed` on the quest.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Answer {
     pub dir: String,
     pub title: String,
+    pub assumed: Option<String>,
 }
 
 /// The rows for each project's news, `name` its name and `dir` its folder,
@@ -121,6 +126,15 @@ pub fn rows(projects: &[(String, String, Away)], now: u64) -> (Vec<Row>, Vec<Ans
             age: age(l.at),
         });
     };
+    let field = |out: &mut Vec<Row>| {
+        out.push(Row {
+            kind: CatchupKind::Field,
+            tone: Tone::Field,
+            text: String::new(),
+            detail: String::new(),
+            age: String::new(),
+        });
+    };
     for (name, dir, a) in projects {
         if !a.landed.is_empty() {
             heading(&mut out, name, "landed");
@@ -132,6 +146,24 @@ pub fn rows(projects: &[(String, String, Away)], now: u64) -> (Vec<Row>, Vec<Ans
             heading(&mut out, name, "Warriv");
             for l in &a.wakes {
                 line(&mut out, Tone::Warriv, l);
+            }
+        }
+        if !a.assumed.is_empty() {
+            heading(&mut out, name, "assumed");
+            for x in &a.assumed {
+                out.push(Row {
+                    kind: CatchupKind::Line { detail: true },
+                    tone: Tone::Assumed,
+                    text: x.title.clone(),
+                    detail: x.text.clone(),
+                    age: age(x.at),
+                });
+                field(&mut out);
+                answers.push(Answer {
+                    dir: dir.clone(),
+                    title: x.title.clone(),
+                    assumed: Some(x.text.clone()),
+                });
             }
         }
         if !a.questions.is_empty() {
@@ -146,16 +178,11 @@ pub fn rows(projects: &[(String, String, Away)], now: u64) -> (Vec<Row>, Vec<Ans
                     detail: q.question.clone(),
                     age: String::new(),
                 });
-                out.push(Row {
-                    kind: CatchupKind::Field,
-                    tone: Tone::Field,
-                    text: String::new(),
-                    detail: String::new(),
-                    age: String::new(),
-                });
+                field(&mut out);
                 answers.push(Answer {
                     dir: dir.clone(),
                     title: q.title.clone(),
+                    assumed: None,
                 });
             }
         }
@@ -193,6 +220,7 @@ fn tone(t: Tone) -> Option<Color> {
         Tone::Landed => Some(theme::done()),
         Tone::Warriv => Some(theme::quest()),
         Tone::Question => Some(theme::error()),
+        Tone::Assumed => Some(theme::waiting()),
         Tone::Heading | Tone::Told | Tone::Field => None,
     }
 }
@@ -418,10 +446,10 @@ impl AwayCard {
             fields.push(FieldLook {
                 rect: *rect,
                 text,
-                placeholder: f.text.is_empty().then_some(if s.sent {
-                    ""
-                } else {
-                    "Answer, and Enter tells the quest"
+                placeholder: f.text.is_empty().then_some(match self.answers.get(i) {
+                    _ if s.sent => "",
+                    Some(a) if a.assumed.is_some() => "Leave it, or overrule it in one line",
+                    _ => "Answer, and Enter tells the quest",
                 }),
                 multiline: false,
                 scroll: (s.scroll, 0.0),
@@ -555,9 +583,15 @@ impl AwayCard {
             return;
         }
         let Some(a) = self.answers.get(i) else { return };
+        let told = if a.assumed.is_some() {
+            "overruled"
+        } else {
+            "told"
+        };
         app::push(Input::Answered {
             dir: a.dir.clone(),
             title: a.title.clone(),
+            assumed: a.assumed.clone(),
             text,
         });
         self.slots.borrow_mut()[i].sent = true;
@@ -575,7 +609,7 @@ impl AwayCard {
                 .and_then(|k| rows.get_mut(k))
             {
                 q.tone = Tone::Told;
-                q.age = "told".to_string();
+                q.age = told.to_string();
             }
         }
         let sent: Vec<bool> = self.slots.borrow().iter().map(|s| s.sent).collect();
@@ -795,7 +829,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use horadric_core::chronicle::Question;
+    use horadric_core::chronicle::{Assumption, Question};
 
     fn line(at: u64, text: &str, detail: &str) -> AwayLine {
         AwayLine {
@@ -806,7 +840,7 @@ mod tests {
     }
 
     #[test]
-    fn landed_then_warriv_then_questions_each_with_a_field() {
+    fn landed_then_warriv_then_assumed_then_questions_each_with_a_field() {
         let a = Away {
             landed: vec![line(40, "Serve the API", "Served on 4100")],
             wakes: vec![line(50, "Told \u{201C}A\u{201D}", "")],
@@ -814,6 +848,11 @@ mod tests {
                 title: "Pick a port".into(),
                 question: "Which port?".into(),
                 new: true,
+            }],
+            assumed: vec![Assumption {
+                at: 70,
+                title: "Serve the API".into(),
+                text: "port 4100".into(),
             }],
         };
         let (rows, answers) = rows(&[("app".into(), "c:/code/app".into(), a)], 100);
@@ -826,21 +865,34 @@ mod tests {
                 Tone::Heading,
                 Tone::Warriv,
                 Tone::Heading,
+                Tone::Assumed,
+                Tone::Field,
+                Tone::Heading,
                 Tone::Question,
                 Tone::Field,
             ]
         );
+        assert_eq!(rows[4].text, "app \u{00B7} assumed");
+        assert_eq!(rows[5].detail, "port 4100");
         assert_eq!(rows[0].text, "app \u{00B7} landed");
         assert_eq!(rows[1].kind, CatchupKind::Line { detail: true });
         assert_eq!(rows[3].kind, CatchupKind::Line { detail: false });
         assert_eq!(rows[1].age, "1 min");
-        assert_eq!(rows[6].kind, CatchupKind::Field);
+        assert_eq!(rows[9].kind, CatchupKind::Field);
         assert_eq!(
             answers,
-            [Answer {
-                dir: "c:/code/app".into(),
-                title: "Pick a port".into()
-            }]
+            [
+                Answer {
+                    dir: "c:/code/app".into(),
+                    title: "Serve the API".into(),
+                    assumed: Some("port 4100".into()),
+                },
+                Answer {
+                    dir: "c:/code/app".into(),
+                    title: "Pick a port".into(),
+                    assumed: None,
+                }
+            ]
         );
     }
 

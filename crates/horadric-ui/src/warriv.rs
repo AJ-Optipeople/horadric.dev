@@ -358,13 +358,17 @@ impl App {
             "--allowedTools".to_string(),
             format!("Bash({} quest:*)", horadric.trim_matches('"')),
         ];
-        (
-            allowed,
-            warriv::system_prompt(
-                &horadric,
-                file::rel(Path::new(&folder_key(&cwd.to_string_lossy()))),
-            ),
-        )
+        let key = folder_key(&cwd.to_string_lossy());
+        let mut prompt = warriv::system_prompt(&horadric, file::rel(Path::new(&key)));
+        if self.drives.contains_key(&key) {
+            prompt.push_str(
+                "
+
+",
+            );
+            prompt.push_str(&warriv::driven_prompt(&horadric));
+        }
+        (allowed, prompt)
     }
 
     /// `quest tell` heard: kept until the quest's session is between
@@ -419,6 +423,32 @@ impl App {
             text: text.to_string(),
             human: true,
         });
+    }
+
+    /// The human overrules what was `assumed` on the quest `title`: its
+    /// session is told, a quest nobody took yet gets a note, and one done
+    /// or gone gets a new quest to change it.
+    pub(in crate::app) fn overrule(&mut self, dir: &str, title: &str, assumed: &str, text: &str) {
+        let key = folder_key(dir);
+        let task = self.shared.boards.borrow().get(&key).and_then(|b| {
+            let i = tasks::find(&b.tasks, title).ok()?;
+            Some(b.tasks[i].clone())
+        });
+        let mark = task.as_ref().map(|t| t.mark);
+        let title = task.as_ref().map_or(title, |t| t.title.as_str());
+        let dir = Path::new(dir);
+        match warriv::overrule(mark, title, assumed, text) {
+            warriv::Overrule::Tell(said) => self.human_tell(&key, title, &said),
+            warriv::Overrule::Note(line) => {
+                let _ = file::update(dir, |log| warriv::add_note(log, title, &line).ok());
+            }
+            warriv::Overrule::Quest { title, notes } => {
+                let _ = file::update(dir, |log| {
+                    Some(tasks::append_with_notes(log, &title, &notes))
+                });
+            }
+        }
+        self.refresh_boards(true);
     }
 
     /// Types each tell into its quest's session once that is live and has
