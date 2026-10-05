@@ -3865,10 +3865,15 @@ impl App {
         if !console::is_claude(program) {
             return Vec::new();
         }
+        // The quest's model counts as the session's own choice, so the
+        // default model stays out.
+        let model = self.quest_model_args(id, args);
+        let own: Vec<String> = args.iter().chain(&model).cloned().collect();
         let mut extra =
             self.shared
                 .defaults_of(Agent::Claude)
-                .flags_for(Agent::Claude, args, bypass);
+                .flags_for(Agent::Claude, &own, bypass);
+        extra.extend(model);
         if let (Some(path), false) = (&self.status_settings, has_flag(args, "--settings")) {
             extra.push("--settings".into());
             extra.push(path.to_string_lossy().into_owned());

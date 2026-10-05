@@ -368,6 +368,12 @@ pub fn system_prompt(horadric: &str, file: &str) -> String {
          `--below \"<title>\"` to put it right under another, and `--after \"<title>\"` \
          once for each quest it needs first. Split a quest that is too big by telling its \
          session to do only the first part and adding the rest.\n\
+         - Pick each quest's model: a quest you add, or one you meet in an event, with no \
+         `Model:` line gets one, `--notes \"Model: <name>\"` on a quest you add and \
+         `{horadric} quest note \"<title>\" \"Model: <name>\"` on one there already. \
+         `haiku` for small, plain work (a rename, a string, a test for code already \
+         there), `sonnet` for most, `opus` for design, hard bugs and anything that spans \
+         the code. Never change a `Model:` line you did not write: that one is the human's.\n\
          - Hand a quest to the human when only the human can settle it: `{horadric} quest \
          blocked \"<question>\" --quest \"<title>\"`. Word the question so it can be \
          answered in one line, and say what you tried in a note first.\n\
@@ -886,6 +892,8 @@ mod tests {
             "--below \"<title>\"",
             "--after \"<title>\"",
             "hx quest blocked \"<question>\" --quest \"<title>\"",
+            "hx quest note \"<title>\" \"Model: <name>\"",
+            "Never change a `Model:` line you did not write",
         ] {
             assert!(p.contains(c), "{c}");
         }

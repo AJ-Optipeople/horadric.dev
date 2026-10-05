@@ -3688,7 +3688,17 @@ rails:
 notes line on quests it files or meets without one, by how hard the
 work is, and the runner starts the quest with that `--model` (Claude
 Code only; other agents ignore it). A human's `Model:` line is never
-changed. Pure and tested: reading the line, the flag.
+changed. Pure and tested: reading the line, the flag. **Built on
+2026-10-05**: `tasks::model_line` reads `Model: haiku|sonnet|opus` in
+any case and nothing else, so a typo starts the default model rather
+than a session that fails. `Task::model` takes a human's line over
+Warriv's (written as `Warriv: Model: ...` through `quest note`), and of
+Warriv's its last. The runner adds `--model` for Claude Code only, in
+`extra_args`, read again at every start, so a resume takes a model
+Warriv wrote since, and the usage window's default model stays out.
+Warriv's prompt says how to pick by difficulty. Seen on a dev instance:
+a `Model: haiku` quest started as `claude --model haiku`, and its pane
+read Haiku 4.5.
 
 **6. Event triggers for errands.** `"on": "landed"`, `"shipped"`,
 `"away"` or `"back"` on a stone casts it at that event instead of on a

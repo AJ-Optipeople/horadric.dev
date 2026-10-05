@@ -34,7 +34,7 @@ use horadric_core::journal::{self, Commit, Entry, What};
 use horadric_core::tasks::{self, Holder, Mark, Mode, Next, Task, Wait};
 use horadric_core::usage::{self, format_until};
 use horadric_core::worktree::{self, Worktree};
-use horadric_core::{fleet, merge, ssh, tombs, Phase, WaitReason};
+use horadric_core::{fleet, merge, ssh, tombs, Agent, Phase, Setting, WaitReason};
 use horadric_hooks::tasks as file;
 
 use super::{post, push, unix_now, with_app, App, Input, WM_HORADRIC_KEPT, WM_HORADRIC_TASK_MENU};
@@ -441,6 +441,23 @@ impl App {
             .values()
             .flat_map(|b| &b.tasks)
             .any(|t| t.mark.held() && t.holder.as_deref().is_some_and(|h| tombs::holds(h, id)))
+    }
+
+    /// What a Claude Code session started with `args` is given for its
+    /// quest's `Model:` line, read as the line is now, so a resume takes a
+    /// model Warriv wrote since. Nothing when its own `args` chose one.
+    pub(super) fn quest_model_args(&self, id: &str, args: &[String]) -> Vec<String> {
+        if Agent::Claude.chosen(Setting::Model, args) {
+            return Vec::new();
+        }
+        self.shared
+            .boards
+            .borrow()
+            .values()
+            .flat_map(|b| &b.tasks)
+            .find(|t| t.mark.held() && t.holder.as_deref().is_some_and(|h| tombs::holds(h, id)))
+            .map(|t| t.model_args(Agent::Claude))
+            .unwrap_or_default()
     }
 
     /// Whether session `id` starts with permission prompts bypassed.
