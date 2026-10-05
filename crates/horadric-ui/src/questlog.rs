@@ -16,7 +16,8 @@ use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::rc::Rc;
 
-use horadric_core::chronicle::{self, Outcome, Quest, Row};
+use horadric_core::chronicle::{self, Command, Outcome, Quest, Row, WakeDot, WakeEnd, WarrivWake};
+use horadric_core::warriv::Kind;
 use horadric_core::Agent;
 use windows::core::{w, Result, BOOL, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
@@ -52,7 +53,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use crate::app::{self, Input};
 use crate::layout::Rect;
-use crate::render::{QuestDetail, QuestLogScene, QuestRowLook, Target};
+use crate::render::{DetailList, QuestDetail, QuestLogScene, QuestRowLook, Target, WakeLook};
 use crate::theme::{self, Color};
 use crate::window::Shared;
 
@@ -99,6 +100,8 @@ pub struct QuestLogLayout {
     pub rows: Rect,
     /// Where lane 0 starts and how wide each lane is.
     pub graph_x: f32,
+    /// The middle of Warriv's lane, left of the trunk, when it has one.
+    pub wake_x: Option<f32>,
     pub lane_w: f32,
     /// Where a row's words start, after the widest the diagram gets.
     pub text_x: f32,
@@ -119,15 +122,20 @@ pub enum QuestHit {
     Close,
     /// A quest's row, by its place in the diagram's rows.
     Row(usize),
+    /// One of Warriv's wakes, by its place in the dots.
+    Wake(usize),
     /// All conversations...
     All,
     Read,
     Carry,
 }
 
+/// How near a wake's dot a click has to be to pick it, in DIPs.
+const WAKE_REACH: f32 = 7.0;
+
 /// The layout for a window `size` DIPs big whose diagram is `lanes` wide,
-/// the main line counted.
-pub fn layout(size: (f32, f32), lanes: usize) -> QuestLogLayout {
+/// the main line counted, with a lane for Warriv's wakes when `warriv`.
+pub fn layout(size: (f32, f32), lanes: usize, warriv: bool) -> QuestLogLayout {
     let (w, h) = (size.0.max(MIN_SIZE.0), size.1.max(MIN_SIZE.1));
     let close = Rect::new(w - 12.0 - 34.0, 12.0, 34.0, 28.0);
     let label = Rect::new(MARGIN + 6.0, 12.0, close.x - MARGIN - 18.0, 16.0);
@@ -172,11 +180,15 @@ pub fn layout(size: (f32, f32), lanes: usize) -> QuestLogLayout {
         list.w,
         list.bottom() - head.bottom() - 4.0,
     );
-    let graph_x = list.x + 12.0;
     // A diagram that would crowd out the words gets narrower lanes.
     let room = list.w * 0.4;
+    let own = if warriv { 1.0 } else { 0.0 };
     let lanes = lanes.max(1) as f32;
-    let lane_w = (room / lanes).clamp(LANE_MIN, LANE_W);
+    let lane_w = (room / (lanes + own)).clamp(LANE_MIN, LANE_W);
+    let left = list.x + 12.0;
+    let wake_x = warriv.then_some(left + lane_w / 2.0);
+    // A little apart from the trunk, so a picked wake's ring clears it.
+    let graph_x = left + own * (lane_w + 4.0);
     let text_x = (graph_x + lanes * lane_w + 8.0).min(list.right() - 120.0);
     let pad = 12.0;
     let key_y = detail.bottom() - pad - BUTTON_H;
@@ -199,6 +211,7 @@ pub fn layout(size: (f32, f32), lanes: usize) -> QuestLogLayout {
         all,
         rows,
         graph_x,
+        wake_x,
         lane_w,
         text_x,
         detail,
@@ -247,6 +260,28 @@ impl QuestLogLayout {
         } else {
             scroll
         }
+    }
+
+    /// Where wake `d`'s dot is drawn, `scroll` DIPs down the list.
+    pub fn wake_at(&self, d: &WakeDot, scroll: f32) -> Option<(f32, f32)> {
+        let band = self.row(d.row, scroll);
+        Some((self.wake_x?, band.y + band.h * d.at))
+    }
+
+    /// The wake whose dot is under `(x, y)`, the nearest when two are.
+    pub fn wake_hit(&self, dots: &[WakeDot], scroll: f32, x: f32, y: f32) -> Option<usize> {
+        if !self.rows.contains(x, y) {
+            return None;
+        }
+        dots.iter()
+            .enumerate()
+            .filter_map(|(i, d)| {
+                let (dx, dy) = self.wake_at(d, scroll)?;
+                let far = (dx - x).abs().max((dy - y).abs());
+                (far <= WAKE_REACH).then_some((i, far))
+            })
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(i, _)| i)
     }
 
     /// What is under `(x, y)`, with `n` rows scrolled `scroll` down.
@@ -416,7 +451,7 @@ pub fn when(at: u64, now: u64, offset: i64) -> String {
 /// Seconds local time is ahead of UTC, from the local clock now: rounded
 /// to the quarter hour, the finest any zone is cut to, so the second the
 /// two clocks are read apart does not show.
-fn utc_offset(now: u64) -> i64 {
+pub(crate) fn utc_offset(now: u64) -> i64 {
     let t = unsafe { GetLocalTime() };
     let local = i64::from(t.wHour) * 3600 + i64::from(t.wMinute) * 60 + i64::from(t.wSecond);
     let utc = (now % 86_400) as i64;
@@ -478,6 +513,201 @@ pub fn outcome_color(o: Outcome) -> Color {
         Outcome::Done => theme::done(),
         Outcome::Returned => theme::idle(),
     }
+}
+
+/// Warriv's own colour, its lane's and its wakes' dots.
+pub fn warriv_color() -> Color {
+    theme::warriv()
+}
+
+/// What a wake's end reads as, `None` while it is awake.
+pub fn end_word(end: Option<WakeEnd>) -> &'static str {
+    match end {
+        None => "awake",
+        Some(WakeEnd::Settled) => "settled",
+        Some(WakeEnd::HandedOn) => "handed on",
+        Some(WakeEnd::CutShort) => "cut short",
+    }
+}
+
+/// The colour a wake's end burns in, the lamp colour nearest its meaning:
+/// handed on is the human's to answer, as blocked is.
+pub fn end_color(end: Option<WakeEnd>) -> Color {
+    match end {
+        None => theme::working(),
+        Some(WakeEnd::Settled) => theme::done(),
+        Some(WakeEnd::HandedOn) => theme::error(),
+        Some(WakeEnd::CutShort) => theme::idle(),
+    }
+}
+
+/// What an event that woke Warriv reads as.
+pub fn kind_word(kind: Kind) -> &'static str {
+    match kind {
+        Kind::Blocked => "blocked",
+        Kind::Asks => "asks",
+        Kind::Tangled => "tangled",
+        Kind::Merge => "not merged",
+        Kind::Stalled => "stalled",
+        Kind::Dry => "ran dry",
+    }
+}
+
+/// What a command Warriv ran reads as, done.
+pub fn command_word(c: Command) -> &'static str {
+    match c {
+        Command::Tell => "told",
+        Command::Note => "noted",
+        Command::Add => "added",
+        Command::Blocked => "handed on",
+    }
+}
+
+/// The local time of day `at` was, `offset` seconds ahead of UTC.
+fn clock(at: u64, offset: i64) -> String {
+    let secs = (at as i64 + offset).rem_euclid(86_400);
+    format!("{:02}:{:02}", secs / 3600, secs % 3600 / 60)
+}
+
+/// The question Warriv left with a quest it handed on: what it asked
+/// with `quest blocked`, else why the quest is blocked now.
+fn question_for(w: &WarrivWake, title: &str, quests: &[Quest]) -> String {
+    w.commands
+        .iter()
+        .rev()
+        .find(|(_, c, t, _)| *c == Command::Blocked && t == title)
+        .map(|(_, _, _, text)| text.clone())
+        .or_else(|| {
+            quests
+                .iter()
+                .rev()
+                .find(|q| !q.main && q.title == title && q.outcome == Outcome::Blocked)
+                .map(|q| q.reason.clone())
+        })
+        .unwrap_or_default()
+}
+
+/// A quest's title and what was said of it, on one line.
+fn about(title: &str, text: &str) -> String {
+    match (one_line(title), one_line(text)) {
+        (t, x) if x.is_empty() => t,
+        (t, x) if t.is_empty() => x,
+        (t, x) => format!("{t}: {x}"),
+    }
+}
+
+/// What the section beside the list says about a wake of Warriv's: when
+/// and how long, what woke it, each command in order, and how it ended,
+/// with the question for each quest it handed on.
+pub fn wake_detail(w: &WarrivWake, quests: &[Quest], now: u64, offset: i64) -> QuestDetail {
+    let mut facts: Vec<(&'static str, String)> = vec![("Woke", when(w.woke, now, offset))];
+    match (w.end, w.slept) {
+        (None, _) => facts.push(("Awake for", duration(now.saturating_sub(w.woke)))),
+        (_, Some(at)) => {
+            facts.push(("Slept", when(at, now, offset)));
+            facts.push(("Took", duration(at.saturating_sub(w.woke))));
+        }
+        // Cut short by a crash: nobody saw when.
+        (_, None) => {}
+    }
+    facts.push(("Session", w.id.clone()));
+    let woke = DetailList {
+        name: "WHAT WOKE IT",
+        lead: warriv_color(),
+        items: w
+            .events
+            .iter()
+            .map(|e| {
+                let what = if e.quest.is_empty() {
+                    "the whole log".to_string()
+                } else {
+                    one_line(&e.quest)
+                };
+                (kind_word(e.kind).to_string(), what)
+            })
+            .collect(),
+    };
+    let mut did: Vec<(String, String)> = w
+        .commands
+        .iter()
+        .map(|(at, c, title, text)| {
+            (
+                format!("{} {}", clock(*at, offset), command_word(*c)),
+                about(title, text),
+            )
+        })
+        .collect();
+    if did.is_empty() {
+        did.push((String::new(), "Ran no commands.".into()));
+    }
+    let said = match w.end {
+        None => "Still at it.".to_string(),
+        Some(WakeEnd::Settled) => "Nothing it was given was left for the human.".into(),
+        Some(WakeEnd::CutShort) => "Its session closed before it was done.".into(),
+        Some(WakeEnd::HandedOn) => match w.handed.len() {
+            1 => "It left 1 quest to the human.".into(),
+            n => format!("It left {n} quests to the human."),
+        },
+    };
+    let mut ended = vec![(end_word(w.end).to_string(), said)];
+    ended.extend(
+        w.handed
+            .iter()
+            .map(|t| ("asked".to_string(), about(t, &question_for(w, t, quests)))),
+    );
+    QuestDetail {
+        title: "Warriv's wake".into(),
+        word: end_word(w.end),
+        color: end_color(w.end),
+        facts,
+        result: String::new(),
+        notes: String::new(),
+        commits: Vec::new(),
+        main: false,
+        wake: true,
+        lists: vec![
+            woke,
+            DetailList {
+                name: "WHAT IT DID",
+                lead: theme::legend(),
+                items: did,
+            },
+            DetailList {
+                name: "HOW IT ENDED",
+                lead: end_color(w.end),
+                items: ended,
+            },
+        ],
+        added: Vec::new(),
+        can_read: !w.conversation.is_empty(),
+        can_carry: false,
+    }
+}
+
+/// The page "Read the session" opens for a wake: its story, then the
+/// conversation.
+pub fn wake_doc(w: &WarrivWake, quests: &[Quest], transcript: &str) -> String {
+    let mut out = format!("# Warriv's wake\n\n**{}**\n\n", end_word(w.end));
+    for e in &w.events {
+        let quest = if e.quest.is_empty() {
+            "the whole log".to_string()
+        } else {
+            one_line(&e.quest)
+        };
+        out.push_str(&format!("- woke: {} {quest}\n", kind_word(e.kind)));
+    }
+    for (_, c, title, text) in &w.commands {
+        out.push_str(&format!("- {}: {}\n", command_word(*c), about(title, text)));
+    }
+    for t in &w.handed {
+        out.push_str(&format!(
+            "- asked: {}\n",
+            about(t, &question_for(w, t, quests))
+        ));
+    }
+    out.push('\n');
+    out.push_str(&transcript_part(transcript));
+    out
 }
 
 /// The file a quest's session is written out to, under the store's
@@ -545,6 +775,9 @@ pub enum Ask {
     Read(String, String),
     /// Carry on that conversation in a new session.
     Carry(String, String),
+    /// Write out the conversation of the wake of Warriv's with this
+    /// session id and waking time, and show it on the stage.
+    ReadWake(String, String, u64),
     /// Start a session in the project with this key on the agent's own
     /// picker of every conversation.
     All(String),
@@ -580,12 +813,15 @@ struct Data {
     rows: Vec<Row>,
     width: usize,
     occupants: Vec<Vec<Option<usize>>>,
+    wakes: Vec<WarrivWake>,
+    dots: Vec<WakeDot>,
 }
 
 impl Data {
-    fn new(key: String, name: String, quests: Vec<Quest>) -> Self {
+    fn new(key: String, name: String, quests: Vec<Quest>, wakes: Vec<WarrivWake>) -> Self {
         let (rows, width) = chronicle::graph(&quests);
         let occupants = occupants(&rows, width);
+        let dots = chronicle::wake_dots(&quests, &rows, &wakes);
         Data {
             key,
             name,
@@ -593,6 +829,25 @@ impl Data {
             rows,
             width,
             occupants,
+            wakes,
+            dots,
+        }
+    }
+
+    /// The dot of the wake of session `id` that woke at `woke`.
+    fn dot_of(&self, id: &str, woke: u64) -> Option<usize> {
+        self.dots.iter().position(|d| {
+            self.wakes
+                .get(d.wake)
+                .is_some_and(|w| w.id == id && w.woke == woke)
+        })
+    }
+
+    /// Whether what `pick` names is still in the log.
+    fn has(&self, pick: &Pick) -> bool {
+        match pick {
+            Pick::Quest(id) => self.row_of(id).is_some(),
+            Pick::Wake(id, woke) => self.dot_of(id, *woke).is_some(),
         }
     }
 
@@ -604,13 +859,21 @@ impl Data {
     }
 }
 
+/// What is picked: a quest or a conversation by its id, or a wake of
+/// Warriv's by its session's id and when it woke, so it stays picked as
+/// the list changes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Pick {
+    Quest(String),
+    Wake(String, u64),
+}
+
 pub struct QuestLog {
     pub hwnd: HWND,
     shared: Rc<Shared>,
     target: RefCell<Option<Target>>,
     data: RefCell<Data>,
-    /// The quest picked, by id, so it stays picked as the list changes.
-    picked: RefCell<Option<String>>,
+    picked: RefCell<Option<Pick>>,
     scroll: Cell<f32>,
     /// How far the words about the quest picked are scrolled, and how tall
     /// they were when last drawn.
@@ -629,19 +892,21 @@ thread_local! {
 
 impl QuestLog {
     /// Opens the window for the project `key`, named `name`, with its
-    /// quests, oldest first as [`chronicle::quests`] gives them.
+    /// quests, oldest first as [`chronicle::quests`] gives them, and
+    /// Warriv's wakes, as [`chronicle::wakes`] does.
     pub fn open(
         shared: Rc<Shared>,
         key: String,
         name: String,
         quests: Vec<Quest>,
+        wakes: Vec<WarrivWake>,
     ) -> Result<Box<Self>> {
-        let data = Data::new(key, name, quests);
+        let data = Data::new(key, name, quests, wakes);
         let picked = data
             .rows
             .first()
             .and_then(|r| data.quests.get(r.quest))
-            .map(|q| q.id.clone());
+            .map(|q| Pick::Quest(q.id.clone()));
         let mut win = Box::new(QuestLog {
             hwnd: HWND::default(),
             shared,
@@ -709,21 +974,20 @@ impl QuestLog {
     /// Shows the project `key` instead, or the same one's quests as they
     /// are now. A new project starts at its newest quest; the same one
     /// keeps the quest picked and where the list was scrolled.
-    pub fn set(&self, key: String, name: String, quests: Vec<Quest>) {
+    pub fn set(&self, key: String, name: String, quests: Vec<Quest>, wakes: Vec<WarrivWake>) {
         let same = self.data.borrow().key == key;
-        if same && self.data.borrow().quests == quests && self.data.borrow().name == name {
+        let unchanged = {
+            let d = self.data.borrow();
+            d.quests == quests && d.wakes == wakes && d.name == name
+        };
+        if same && unchanged {
             return;
         }
-        let data = Data::new(key, name, quests);
-        let kept = self
-            .picked
-            .borrow()
-            .as_deref()
-            .filter(|_| same)
-            .and_then(|id| data.row_of(id));
-        if kept.is_none() {
+        let data = Data::new(key, name, quests, wakes);
+        let kept = same && self.picked.borrow().as_ref().is_some_and(|p| data.has(p));
+        if !kept {
             let newest = data.rows.first().and_then(|r| data.quests.get(r.quest));
-            *self.picked.borrow_mut() = newest.map(|q| q.id.clone());
+            *self.picked.borrow_mut() = newest.map(|q| Pick::Quest(q.id.clone()));
             self.scroll.set(0.0);
             self.detail_scroll.set(0.0);
         }
@@ -783,7 +1047,12 @@ impl QuestLog {
     fn layout(&self) -> QuestLogLayout {
         let (w, h) = self.client_px();
         let s = self.scale();
-        layout((w as f32 / s, h as f32 / s), self.data.borrow().width)
+        let data = self.data.borrow();
+        layout(
+            (w as f32 / s, h as f32 / s),
+            data.width,
+            !data.dots.is_empty(),
+        )
     }
 
     fn clamp_scroll(&self) {
@@ -798,8 +1067,33 @@ impl QuestLog {
 
     /// The row of the quest picked.
     fn picked_row(&self) -> Option<usize> {
-        let id = self.picked.borrow();
-        self.data.borrow().row_of(id.as_deref()?)
+        match self.picked.borrow().as_ref()? {
+            Pick::Quest(id) => self.data.borrow().row_of(id),
+            Pick::Wake(..) => None,
+        }
+    }
+
+    /// The dot of the wake picked.
+    fn picked_dot(&self) -> Option<usize> {
+        match self.picked.borrow().as_ref()? {
+            Pick::Wake(id, woke) => self.data.borrow().dot_of(id, *woke),
+            Pick::Quest(_) => None,
+        }
+    }
+
+    /// The wake picked, if it still is one.
+    fn picked_wake(&self) -> Option<WarrivWake> {
+        let d = self.picked_dot()?;
+        let data = self.data.borrow();
+        data.wakes.get(data.dots.get(d)?.wake).cloned()
+    }
+
+    /// Whether Read the session has something to read.
+    fn can_read_picked(&self) -> bool {
+        self.picked_quest().as_ref().is_some_and(can_read)
+            || self
+                .picked_wake()
+                .is_some_and(|w| !w.conversation.is_empty())
     }
 
     /// The quest picked, if it still is one.
@@ -815,10 +1109,29 @@ impl QuestLog {
             let Some(q) = data.rows.get(row).and_then(|r| data.quests.get(r.quest)) else {
                 return;
             };
-            q.id.clone()
+            Pick::Quest(q.id.clone())
         };
-        if self.picked.borrow().as_deref() != Some(id.as_str()) {
-            *self.picked.borrow_mut() = Some(id);
+        self.pick(id, row);
+    }
+
+    fn pick_wake(&self, dot: usize) {
+        let (pick, row) = {
+            let data = self.data.borrow();
+            let Some(d) = data.dots.get(dot) else {
+                return;
+            };
+            let Some(w) = data.wakes.get(d.wake) else {
+                return;
+            };
+            (Pick::Wake(w.id.clone(), w.woke), d.row)
+        };
+        self.pick(pick, row);
+    }
+
+    /// Picks `pick`, whose row is `row`, and scrolls it into view.
+    fn pick(&self, pick: Pick, row: usize) {
+        if self.picked.borrow().as_ref() != Some(&pick) {
+            *self.picked.borrow_mut() = Some(pick);
             self.detail_scroll.set(0.0);
         }
         let l = self.layout();
@@ -866,9 +1179,23 @@ impl QuestLog {
             .collect();
         let colors: Vec<Color> = data.quests.iter().map(color_of).collect();
         let picked = self.picked_row();
-        let detail = picked
-            .and_then(|i| data.quests.get(data.rows[i].quest))
-            .map(|q| detail_of(q, &data.quests, now, offset));
+        let picked_dot = self.picked_dot();
+        let wakes: Vec<WakeLook> = data
+            .dots
+            .iter()
+            .map(|d| WakeLook {
+                row: d.row,
+                at: d.at,
+                touched: d.touched.clone(),
+                end: data.wakes.get(d.wake).and_then(|w| w.end),
+            })
+            .collect();
+        let detail = match picked_dot.and_then(|d| data.wakes.get(data.dots[d].wake)) {
+            Some(w) => Some(wake_detail(w, &data.quests, now, offset)),
+            None => picked
+                .and_then(|i| data.quests.get(data.rows[i].quest))
+                .map(|q| detail_of(q, &data.quests, now, offset)),
+        };
         let scene = QuestLogScene {
             layout: &l,
             name: &data.name,
@@ -876,7 +1203,9 @@ impl QuestLog {
             looks: &looks,
             occupants: &data.occupants,
             colors: &colors,
+            wakes: &wakes,
             picked,
+            picked_wake: picked_dot,
             hot: self.hot.get(),
             pressed: self.pressed.get(),
             scroll: self.scroll.get(),
@@ -902,13 +1231,16 @@ impl QuestLog {
     }
 
     fn hit_at(&self, x: f32, y: f32) -> QuestHit {
+        let l = self.layout();
+        let wake = l.wake_hit(&self.data.borrow().dots, self.scroll.get(), x, y);
+        if let Some(d) = wake {
+            return QuestHit::Wake(d);
+        }
         let n = self.data.borrow().rows.len();
-        let hit = self.layout().hit(n, self.scroll.get(), x, y);
+        let hit = l.hit(n, self.scroll.get(), x, y);
         // A key with nothing to do lights for nothing.
         match hit {
-            QuestHit::Read if !self.picked_quest().as_ref().is_some_and(can_read) => {
-                QuestHit::Nothing
-            }
+            QuestHit::Read if !self.can_read_picked() => QuestHit::Nothing,
             QuestHit::Carry if !self.picked_quest().as_ref().is_some_and(can_carry) => {
                 QuestHit::Nothing
             }
@@ -942,8 +1274,11 @@ impl QuestLog {
         match hit {
             QuestHit::Close => app::push(Input::QuestLog(Ask::Close)),
             QuestHit::Row(i) => self.pick_row(i),
+            QuestHit::Wake(d) => self.pick_wake(d),
             QuestHit::Read => {
-                if let Some(q) = self.picked_quest() {
+                if let Some(w) = self.picked_wake() {
+                    app::push(Input::QuestLog(Ask::ReadWake(key, w.id, w.woke)));
+                } else if let Some(q) = self.picked_quest() {
                     app::push(Input::QuestLog(Ask::Read(key, q.id)));
                 }
             }
@@ -990,7 +1325,7 @@ impl QuestLog {
             return;
         }
         if vk == VK_RETURN.0 {
-            if self.picked_quest().as_ref().is_some_and(can_read) {
+            if self.can_read_picked() {
                 self.click(QuestHit::Read);
             }
             return;
@@ -998,7 +1333,10 @@ impl QuestLog {
         if n == 0 {
             return;
         }
-        let at = self.picked_row().unwrap_or(0);
+        let wake_row = self
+            .picked_dot()
+            .and_then(|d| Some(self.data.borrow().dots.get(d)?.row));
+        let at = self.picked_row().or(wake_row).unwrap_or(0);
         let page = (self.layout().rows.h / ROW_H).floor().max(1.0) as usize;
         let to = match vk {
             v if v == VK_UP.0 => at.saturating_sub(1),
@@ -1124,10 +1462,17 @@ impl QuestLog {
             WM_LBUTTONDOWN => {
                 let (x, y) = self.point(lparam);
                 let hit = self.hit_at(x, y);
-                // A row picks as it goes down, as a list does.
-                if let QuestHit::Row(i) = hit {
-                    self.pick_row(i);
-                    return Some(LRESULT(0));
+                // A row or a wake picks as it goes down, as a list does.
+                match hit {
+                    QuestHit::Row(i) => {
+                        self.pick_row(i);
+                        return Some(LRESULT(0));
+                    }
+                    QuestHit::Wake(d) => {
+                        self.pick_wake(d);
+                        return Some(LRESULT(0));
+                    }
+                    _ => {}
                 }
                 unsafe {
                     SetCapture(self.hwnd);
@@ -1235,6 +1580,8 @@ fn talk_detail(q: &Quest, quests: &[Quest], now: u64, offset: i64) -> QuestDetai
         notes: String::new(),
         commits: Vec::new(),
         main: true,
+        wake: false,
+        lists: Vec::new(),
         added,
         can_read: can_read(q),
         can_carry: can_carry(q),
@@ -1285,6 +1632,8 @@ fn detail_of(q: &Quest, quests: &[Quest], now: u64, offset: i64) -> QuestDetail 
             .map(|c| (c.hash.clone(), one_line(&c.subject)))
             .collect(),
         main: false,
+        wake: false,
+        lists: Vec::new(),
         added: Vec::new(),
         can_read: can_read(q),
         can_carry: can_carry(q),
@@ -1404,14 +1753,14 @@ mod tests {
 
     #[test]
     fn side_by_side_when_wide_and_stacked_when_narrow() {
-        let wide = layout((1000.0, 600.0), 3);
+        let wide = layout((1000.0, 600.0), 3, false);
         assert!(wide.detail.x > wide.list.right());
         assert_eq!(wide.list.y, wide.detail.y);
-        let narrow = layout((420.0, 700.0), 3);
+        let narrow = layout((420.0, 700.0), 3, false);
         assert!(narrow.detail.y > narrow.list.bottom());
         assert_eq!(narrow.list.w, narrow.detail.w);
         // Smaller than the least is laid out at the least.
-        assert_eq!(layout((10.0, 10.0), 1).size, MIN_SIZE);
+        assert_eq!(layout((10.0, 10.0), 1, false).size, MIN_SIZE);
         for l in [wide, narrow] {
             assert!(l.read.right() < l.carry.x);
             assert!(l.carry.right() <= l.detail.right());
@@ -1422,17 +1771,17 @@ mod tests {
 
     #[test]
     fn a_wide_diagram_gets_narrower_lanes_and_leaves_room_for_words() {
-        let few = layout((1000.0, 600.0), 3);
+        let few = layout((1000.0, 600.0), 3, false);
         assert_eq!(few.lane_w, LANE_W);
         assert!(few.lane_x(0) < few.lane_x(1));
-        let many = layout((1000.0, 600.0), 40);
+        let many = layout((1000.0, 600.0), 40, false);
         assert_eq!(many.lane_w, LANE_MIN);
         assert!(many.text_x <= many.list.right() - 120.0);
     }
 
     #[test]
     fn a_point_finds_the_row_under_it_scrolled_or_not() {
-        let l = layout((1000.0, 600.0), 2);
+        let l = layout((1000.0, 600.0), 2, false);
         let x = l.text_x + 10.0;
         let y = l.rows.y + ROW_H * 1.5;
         assert_eq!(l.hit(5, 0.0, x, y), QuestHit::Row(1));
@@ -1458,7 +1807,7 @@ mod tests {
 
     #[test]
     fn the_list_scrolls_no_further_than_its_rows_and_reveals_a_row() {
-        let l = layout((1000.0, 600.0), 2);
+        let l = layout((1000.0, 600.0), 2, false);
         let fit = (l.rows.h / ROW_H).floor() as usize;
         assert_eq!(l.max_scroll(fit), 0.0);
         assert_eq!(l.max_scroll(fit + 10), (fit + 10) as f32 * ROW_H - l.rows.h);
@@ -1631,5 +1980,139 @@ mod tests {
              # The conversation\n\n## You\n\nFix it\n"
         );
         assert!(session_doc(&q, "").ends_with("nothing to read.\n"));
+    }
+    fn wake(woke: u64, end: Option<WakeEnd>) -> WarrivWake {
+        WarrivWake {
+            id: "warriv-5".into(),
+            conversation: "c9".into(),
+            woke,
+            slept: end.map(|_| woke + 90),
+            events: vec![
+                chronicle::Woken {
+                    kind: Kind::Blocked,
+                    quest: "A".into(),
+                },
+                chronicle::Woken {
+                    kind: Kind::Stalled,
+                    quest: String::new(),
+                },
+            ],
+            commands: vec![
+                (woke + 30, Command::Tell, "A".into(), "Use the port.".into()),
+                (
+                    woke + 60,
+                    Command::Blocked,
+                    "B".into(),
+                    "Which account?".into(),
+                ),
+            ],
+            end,
+            handed: vec!["B".into(), "C".into()],
+        }
+    }
+
+    #[test]
+    fn warrivs_lane_sits_left_of_the_trunk_and_a_dot_is_hit_near_it() {
+        let without = layout((1000.0, 600.0), 3, false);
+        assert_eq!(without.wake_x, None);
+        let with = layout((1000.0, 600.0), 3, true);
+        let wx = with.wake_x.unwrap();
+        assert!(wx < with.lane_x(0) && wx > with.list.x);
+        assert_eq!(
+            with.lane_x(0) - wx,
+            with.lane_w + 4.0,
+            "a lane beside the trunk"
+        );
+        let dots = [
+            WakeDot {
+                wake: 0,
+                row: 1,
+                at: 0.5,
+                touched: vec![],
+            },
+            WakeDot {
+                wake: 1,
+                row: 1,
+                at: 0.75,
+                touched: vec![],
+            },
+        ];
+        let (_, y) = with.wake_at(&dots[0], 0.0).unwrap();
+        assert_eq!(y, with.rows.y + ROW_H * 1.5);
+        assert_eq!(with.wake_hit(&dots, 0.0, wx + 3.0, y - 2.0), Some(0));
+        let (_, y1) = with.wake_at(&dots[1], 0.0).unwrap();
+        assert_eq!(
+            with.wake_hit(&dots, 0.0, wx, y1 - 1.0),
+            Some(1),
+            "the nearer"
+        );
+        assert_eq!(with.wake_hit(&dots, 0.0, wx + 20.0, y), None);
+        assert_eq!(with.wake_hit(&dots, ROW_H, wx, y), None, "scrolled away");
+        assert_eq!(without.wake_hit(&dots, 0.0, wx, y), None);
+    }
+
+    #[test]
+    fn a_wakes_detail_tells_when_what_woke_it_what_it_did_and_how_it_ended() {
+        // 2026-10-03 12:00 UTC.
+        let now = 1_791_028_800;
+        let mut c = quest("c", 1, Some(2), Outcome::Blocked);
+        c.title = "C".into();
+        c.reason = "Who pays?".into();
+        let w = wake(now - 3600, Some(WakeEnd::HandedOn));
+        let d = wake_detail(&w, &[c.clone()], now, 0);
+        assert_eq!(
+            (d.word, d.wake, d.can_read, d.can_carry),
+            ("handed on", true, true, false)
+        );
+        assert_eq!(d.facts[0], ("Woke", "today 11:00".to_string()));
+        assert_eq!(d.facts[2], ("Took", "1 min".to_string()));
+        let items = |i: usize| d.lists[i].items.clone();
+        assert_eq!(
+            items(0),
+            [
+                ("blocked".to_string(), "A".to_string()),
+                ("stalled".to_string(), "the whole log".to_string()),
+            ]
+        );
+        assert_eq!(
+            items(1)[0],
+            ("11:00 told".to_string(), "A: Use the port.".to_string())
+        );
+        assert_eq!(items(1)[1].0, "11:01 handed on");
+        // Its own question, else why the quest is blocked now.
+        assert_eq!(
+            items(2),
+            [
+                (
+                    "handed on".to_string(),
+                    "It left 2 quests to the human.".to_string()
+                ),
+                ("asked".to_string(), "B: Which account?".to_string()),
+                ("asked".to_string(), "C: Who pays?".to_string()),
+            ]
+        );
+        let awake = wake_detail(&wake(now - 120, None), &[], now, 0);
+        assert_eq!(awake.word, "awake");
+        assert_eq!(awake.facts[1], ("Awake for", "2 min".to_string()));
+        let mut quiet = wake(now - 120, Some(WakeEnd::Settled));
+        quiet.commands.clear();
+        quiet.conversation.clear();
+        let d = wake_detail(&quiet, &[], now, 0);
+        assert_eq!(d.lists[1].items[0].1, "Ran no commands.");
+        assert!(!d.can_read);
+        assert_ne!(warriv_color(), conversation_color());
+    }
+
+    #[test]
+    fn a_wake_is_written_out_with_its_story_on_top() {
+        let w = wake(100, Some(WakeEnd::Settled));
+        assert_eq!(
+            wake_doc(&w, &[], "## You\n\nHi\n"),
+            "# Warriv's wake\n\n**settled**\n\n\
+             - woke: blocked A\n- woke: stalled the whole log\n\
+             - told: A: Use the port.\n- handed on: B: Which account?\n\
+             - asked: B: Which account?\n- asked: C\n\n\
+             # The conversation\n\n## You\n\nHi\n"
+        );
     }
 }

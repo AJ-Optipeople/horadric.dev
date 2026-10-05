@@ -14,10 +14,11 @@ use serde_json::{Map, Value};
 
 use crate::agent::Agent;
 use crate::rarity::Loot;
-use crate::runeword::{OnProject, Runeword};
+use crate::runeword::{Armed, OnProject, Runeword};
 use crate::session::{Phase, Session};
 use crate::title::Title;
 use crate::usage::{Defaults, Usage};
+use crate::warriv::Drive;
 use crate::worktree::Worktree;
 
 /// Bumped when a change would make an older file mean something else.
@@ -162,6 +163,19 @@ pub struct SavedState {
     /// as labels. A stone it does not name shows after the ones it does.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub stones_order: BTreeMap<String, Vec<String>>,
+    /// The errands the human armed, by project key and label joined with
+    /// a newline, as `stones_cast` is: the steps armed and the clock's
+    /// last cast.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub errands: BTreeMap<String, Armed>,
+    /// The projects Warriv drives, by project key, so the reload a ship
+    /// causes keeps driving.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub drives: BTreeMap<String, Drive>,
+    /// The projects whose drive the stop key stopped, by project key: their
+    /// runner starts no quest until the human picks a mode or drives again.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stopped: Vec<String>,
 }
 
 /// The "Show on Discord" setting: whether Rich Presence is on, and whether

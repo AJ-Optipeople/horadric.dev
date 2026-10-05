@@ -20,6 +20,8 @@ pub struct Board {
     pub own_trees: bool,
     /// Warriv is on: what needs judgment wakes it before the human.
     pub orchestrator: bool,
+    /// The aims at the top of the log not reached yet, in order.
+    pub aims: Vec<String>,
 }
 
 impl Board {
@@ -81,6 +83,17 @@ pub fn gated(state: RowState, ready: &Ready) -> RowState {
         (RowState::Open | RowState::Waits, _) => RowState::After,
         _ => state,
     }
+}
+
+/// The ink of the quests tile's Warriv line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ink {
+    /// Asleep or resting.
+    Quiet,
+    /// Awake, in the working colour.
+    Working,
+    /// Warriv drives the project, in gold whatever it is about.
+    Drives,
 }
 
 /// How a row reads when Warriv has its quest: one that would be blocked
@@ -264,6 +277,7 @@ mod tests {
             parallel: 1,
             own_trees: false,
             orchestrator: false,
+            aims: Vec::new(),
         }
     }
 

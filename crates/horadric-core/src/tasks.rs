@@ -123,6 +123,29 @@ impl Task {
         out
     }
 
+    /// The model its `Model:` notes line names. A human's line wins over
+    /// Warriv's, since Warriv never changes a human's choice; of Warriv's
+    /// own, the last is the one it settled on.
+    pub fn model(&self) -> Option<&'static str> {
+        let human = self.notes.iter().find_map(|n| model_line(n));
+        let warriv = self
+            .notes
+            .iter()
+            .rev()
+            .find_map(|n| model_line(n.strip_prefix(crate::warriv::NOTE)?));
+        human.or(warriv)
+    }
+
+    /// What its session is started with for its `Model:` line, Claude
+    /// Code's way. Other agents name their models otherwise, so they get
+    /// none.
+    pub fn model_args(&self, agent: crate::Agent) -> Vec<String> {
+        match (agent, self.model()) {
+            (crate::Agent::Claude, Some(m)) => vec!["--model".into(), m.into()],
+            _ => Vec::new(),
+        }
+    }
+
     /// What it waited on, for its session told to go on and the toast
     /// that says so. Empty for an item that waits on nothing.
     pub fn over(&self) -> String {
@@ -149,6 +172,22 @@ pub fn after_line(note: &str) -> Option<&str> {
     let head = note.get(..6)?;
     let title = note[6..].trim();
     (head.eq_ignore_ascii_case("after:") && !title.is_empty()).then_some(title)
+}
+
+/// The models a quest's `Model:` line may name, as Claude Code's
+/// `--model` takes them, from the cheapest up.
+pub const MODELS: [&str; 3] = ["haiku", "sonnet", "opus"];
+
+/// The model a `Model: <name>` notes line names, read in any case. A name
+/// outside [`MODELS`] is not one, so a typo starts the default model
+/// rather than a session that fails at once.
+pub fn model_line(note: &str) -> Option<&'static str> {
+    let head = note.get(..6)?;
+    let name = note[6..].trim();
+    if !head.eq_ignore_ascii_case("model:") {
+        return None;
+    }
+    MODELS.into_iter().find(|m| m.eq_ignore_ascii_case(name))
 }
 
 /// The notes line that says a quest waits for `title`.
@@ -1037,9 +1076,9 @@ pub enum Next {
     /// As many items are in hand as the project lets run at once, or one
     /// of them waits for a click to resume.
     Wait,
-    /// The item at this index is in the way: blocked on the human, or held
-    /// by a session that is gone. The order is the order, so the runner
-    /// stops there.
+    /// The item at this index is in the way: blocked on the human (unless
+    /// Warriv drives), or held by a session that is gone. The order is the
+    /// order, so the runner stops there.
     Stuck(usize),
     /// The blocked item at this index waited on something that is over:
     /// its session goes on, or it starts again when that is gone.
@@ -1059,15 +1098,18 @@ pub enum Holder {
 }
 
 /// The runner's decision, given the list, the mode, how many items may be
-/// in hand at once, what became of each holder, and whether what a blocked
-/// item waits on is over. It takes the first ready open item, passing
-/// those whose `After:` quests are not done. A blocked item that waits on
-/// something the runner can check is passed by until then; one that waits
-/// on the human stops the list, and so does a cycle.
+/// in hand at once, whether Warriv drives, what became of each holder, and
+/// whether what a blocked item waits on is over. It takes the first ready
+/// open item, passing those whose `After:` quests are not done. A blocked
+/// item that waits on something the runner can check is passed by until
+/// then. One that waits on the human stops the list, since the order may
+/// matter to them, but not while Warriv drives: nobody is there to answer
+/// soon, and the rest of the caravan moves. A cycle always stops it.
 pub fn next(
     tasks: &[Task],
     mode: Mode,
     parallel: usize,
+    drives: bool,
     holder: impl Fn(&str) -> Holder,
     met: impl Fn(&Task) -> bool,
 ) -> Next {
@@ -1094,7 +1136,8 @@ pub fn next(
             (Mark::Open, _) if t.title.trim().is_empty() => {}
             (Mark::Working | Mark::Review, _) if of(t) == Holder::Live => {}
             (Mark::Working | Mark::Review, _) => return Next::Stuck(i),
-            (Mark::Blocked, _) if t.wait.is_none() => return Next::Stuck(i),
+            (Mark::Blocked, _) if t.wait.is_none() && !drives => return Next::Stuck(i),
+            (Mark::Blocked, _) if t.wait.is_none() => waits = true,
             // Only a human breaks a cycle, so the list stops there.
             (Mark::Open | Mark::Blocked, Ready::Cycle) => return Next::Stuck(i),
             (Mark::Open, Ready::Yes) => return Next::Start(i),
@@ -1232,6 +1275,36 @@ pub fn system_prompt(horadric: &str, file: &str, list: Option<&str>) -> String {
         ));
     }
     out
+}
+
+/// What a quest's session is told besides, while Warriv drives: nobody
+/// is there to answer soon, so a choice that can be changed later is made
+/// and written down, and only what can not be undone waits for the human.
+pub fn driven_prompt(horadric: &str) -> String {
+    format!(
+        "Warriv drives this project: the human is away and the list goes on without \
+         them, so do not wait on them for a choice that can be changed later (a name, \
+         a layout, which of two fixes). Make it, write it down with `{horadric} quest \
+         note \"<your quest's title>\" \"{ASSUMED} <what you chose and why>\"`, and go on; the \
+         human reads every such line when they come back and overrules in one line \
+         what they would have chosen otherwise. Run `{horadric} quest blocked` only \
+         for a choice that can not be undone (deleting data, publishing, spending \
+         money, an account) or that only the human can know. A quest blocked on the \
+         human no longer stops the list: the runner passes it over and starts the \
+         next."
+    )
+}
+
+/// How an assumption a session made is written under its quest.
+pub const ASSUMED: &str = "Assumed:";
+
+/// The assumption in a notes line written as `Assumed: ...`, in any case.
+pub fn assumed(line: &str) -> Option<&str> {
+    let line = line.trim();
+    let head = line.get(..ASSUMED.len())?;
+    head.eq_ignore_ascii_case(ASSUMED)
+        .then(|| line[ASSUMED.len()..].trim())
+        .filter(|rest| !rest.is_empty())
 }
 
 /// The first prompt of the quest giver, a session the gold ! on the
@@ -1460,11 +1533,11 @@ mod tests {
 ",
         );
         assert_eq!(
-            next(&list, Mode::Auto, 3, |_| Holder::Live, unmet),
+            next(&list, Mode::Auto, 3, false, |_| Holder::Live, unmet),
             Next::Wait
         );
         assert_eq!(
-            next(&list, Mode::Auto, 4, |_| Holder::Live, unmet),
+            next(&list, Mode::Auto, 4, false, |_| Holder::Live, unmet),
             Next::Start(1)
         );
         let list = parse(
@@ -1473,7 +1546,7 @@ mod tests {
 ",
         );
         assert_eq!(
-            next(&list, Mode::Auto, 2, |_| Holder::Live, unmet),
+            next(&list, Mode::Auto, 2, false, |_| Holder::Live, unmet),
             Next::Start(1)
         );
     }
@@ -1660,6 +1733,85 @@ mod tests {
     }
 
     #[test]
+    fn a_model_line_names_one_of_the_three_models() {
+        assert_eq!(model_line("Model: haiku"), Some("haiku"));
+        assert_eq!(model_line("model:   Opus  "), Some("opus"));
+        assert_eq!(model_line("MODEL:sonnet"), Some("sonnet"));
+        assert_eq!(model_line("Model: gpt-5"), None);
+        assert_eq!(model_line("Model:"), None);
+        assert_eq!(model_line("Models: haiku"), None);
+        assert_eq!(model_line("Mod"), None);
+        assert_eq!(model_line("æøå: haiku"), None);
+    }
+
+    #[test]
+    fn a_humans_model_line_wins_over_warrivs_and_warrivs_last_counts() {
+        let model = |notes: &str| {
+            parse(&format!(
+                "- [ ] Q
+{notes}"
+            ))[0]
+                .model()
+        };
+        assert_eq!(model(""), None);
+        assert_eq!(
+            model(
+                "  Model: opus
+"
+            ),
+            Some("opus")
+        );
+        assert_eq!(
+            model(
+                "  Warriv: Model: haiku
+"
+            ),
+            Some("haiku")
+        );
+        assert_eq!(
+            model(
+                "  Warriv: Model: haiku
+  Warriv: Model: sonnet
+"
+            ),
+            Some("sonnet")
+        );
+        assert_eq!(
+            model(
+                "  Warriv: Model: haiku
+  Model: opus
+  Warriv: Model: sonnet
+"
+            ),
+            Some("opus")
+        );
+        assert_eq!(
+            model(
+                "  Warriv: model was hard to pick
+"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn only_claude_code_is_started_with_the_quests_model() {
+        let t = &parse(
+            "- [ ] Q
+  Model: haiku
+",
+        )[0];
+        assert_eq!(t.model_args(crate::Agent::Claude), ["--model", "haiku"]);
+        assert!(t.model_args(crate::Agent::Codex).is_empty());
+        assert!(t.model_args(crate::Agent::Grok).is_empty());
+        let none = &parse(
+            "- [ ] Q
+",
+        )[0];
+        assert!(none.model_args(crate::Agent::Claude).is_empty());
+    }
+
+    #[test]
     fn a_name_matches_a_title_exactly_or_by_a_unique_start() {
         let list = parse(
             "- [ ] Build the engine\n- [ ] Build the engine: part two\n- [ ] Wire it\n- [ ] Wire it in\n",
@@ -1711,21 +1863,21 @@ mod tests {
     #[test]
     fn the_runner_passes_quests_that_wait_and_takes_the_first_ready() {
         let t = parse("- [ ] B\n  After: A\n- [ ] A\n- [ ] C\n");
-        assert_eq!(next(&t, Mode::Auto, 1, live, unmet), Next::Start(1));
+        assert_eq!(next(&t, Mode::Auto, 1, false, live, unmet), Next::Start(1));
         // A chain of three on three places: one runs, the others wait.
         let t = parse("- [/] A @a-1\n- [ ] B\n  After: A\n- [ ] C\n  After: B\n");
-        assert_eq!(next(&t, Mode::Auto, 3, live, unmet), Next::Wait);
+        assert_eq!(next(&t, Mode::Auto, 3, false, live, unmet), Next::Wait);
         let t = parse("- [/] A @a-1\n- [ ] B\n  After: A\n- [ ] D\n");
-        assert_eq!(next(&t, Mode::Auto, 3, live, unmet), Next::Start(2));
+        assert_eq!(next(&t, Mode::Auto, 3, false, live, unmet), Next::Start(2));
         // Once A is done, B goes.
         let t = parse("- [x] A @a-1\n- [ ] B\n  After: A\n");
-        assert_eq!(next(&t, Mode::Auto, 1, live, unmet), Next::Start(1));
+        assert_eq!(next(&t, Mode::Auto, 1, false, live, unmet), Next::Start(1));
         // A typo is passed over, not started early and not the end.
         let t = parse("- [x] A\n- [ ] B\n  After: Typo\n");
-        assert_eq!(next(&t, Mode::Auto, 1, live, unmet), Next::Wait);
+        assert_eq!(next(&t, Mode::Auto, 1, false, live, unmet), Next::Wait);
         // A cycle stops the list there.
         let t = parse("- [ ] A\n  After: B\n- [ ] B\n  After: A\n- [ ] C\n");
-        assert_eq!(next(&t, Mode::Auto, 1, live, unmet), Next::Stuck(0));
+        assert_eq!(next(&t, Mode::Auto, 1, false, live, unmet), Next::Stuck(0));
     }
 
     #[test]
@@ -1738,10 +1890,10 @@ mod tests {
         );
         let t = parse(&out);
         assert_eq!(t[0].wait, Some(Wait::After));
-        assert_eq!(next(&t, Mode::Auto, 1, live, met), Next::Start(1));
+        assert_eq!(next(&t, Mode::Auto, 1, false, live, met), Next::Start(1));
         let done = set_mark(&out, 3, "A", Mark::Done).unwrap();
         let t = parse(&done);
-        assert_eq!(next(&t, Mode::Auto, 1, live, met), Next::Resume(0));
+        assert_eq!(next(&t, Mode::Auto, 1, false, live, met), Next::Resume(0));
         assert!(waited("hx", &t[0]).starts_with("The quest \"A\" is done"));
         // The same name twice is one line.
         assert_eq!(
@@ -1759,37 +1911,37 @@ mod tests {
     #[test]
     fn a_plain_block_with_after_lines_still_waits_on_the_human() {
         let t = parse("- [x] A\n- [!] B @b-1: why\n  After: A\n- [ ] C\n");
-        assert_eq!(next(&t, Mode::Auto, 1, live, met), Next::Stuck(1));
+        assert_eq!(next(&t, Mode::Auto, 1, false, live, met), Next::Stuck(1));
     }
 
     #[test]
     fn the_runner_passes_a_quest_that_waits_on_something_it_can_check() {
         let t = parse("- [!] A @a-1: later {on file: b.txt}\n- [ ] B\n");
-        assert_eq!(next(&t, Mode::Auto, 1, live, unmet), Next::Start(1));
-        assert_eq!(next(&t, Mode::Auto, 1, live, met), Next::Resume(0));
+        assert_eq!(next(&t, Mode::Auto, 1, false, live, unmet), Next::Start(1));
+        assert_eq!(next(&t, Mode::Auto, 1, false, live, met), Next::Resume(0));
         assert_eq!(
-            next(&t, Mode::Auto, 1, |_| Holder::Gone, met),
+            next(&t, Mode::Auto, 1, false, |_| Holder::Gone, met),
             Next::Resume(0)
         );
         // A paused session waits for a click, and the list goes on.
         assert_eq!(
-            next(&t, Mode::Auto, 1, |_| Holder::Paused, met),
+            next(&t, Mode::Auto, 1, false, |_| Holder::Paused, met),
             Next::Start(1)
         );
         // A wait that is not over is not the end of the list.
         let t = parse("- [!] A @a-1 {on file: b.txt}\n- [x] C\n");
-        assert_eq!(next(&t, Mode::Auto, 1, live, unmet), Next::Wait);
+        assert_eq!(next(&t, Mode::Auto, 1, false, live, unmet), Next::Wait);
         // A plain why still stops it.
         let t = parse("- [!] A @a-1 {on file: b.txt}\n- [!] C @c-1: why\n- [ ] D\n");
-        assert_eq!(next(&t, Mode::Auto, 1, live, unmet), Next::Stuck(1));
-        assert_eq!(next(&t, Mode::Manual, 1, live, met), Next::Off);
+        assert_eq!(next(&t, Mode::Auto, 1, false, live, unmet), Next::Stuck(1));
+        assert_eq!(next(&t, Mode::Manual, 1, false, live, met), Next::Off);
     }
 
     #[test]
     fn going_on_takes_a_free_place_like_a_start() {
         let t = parse("- [/] A @a-1\n- [!] B @b-1 {on file: x.txt}\n- [ ] C\n");
-        assert_eq!(next(&t, Mode::Auto, 1, live, met), Next::Wait);
-        assert_eq!(next(&t, Mode::Auto, 2, live, met), Next::Resume(1));
+        assert_eq!(next(&t, Mode::Auto, 1, false, live, met), Next::Wait);
+        assert_eq!(next(&t, Mode::Auto, 2, false, live, met), Next::Resume(1));
     }
 
     #[test]
@@ -1848,10 +2000,30 @@ mod tests {
     }
 
     #[test]
+    fn a_driven_session_assumes_what_can_be_undone() {
+        let p = driven_prompt("hx");
+        assert!(p.contains("`hx quest note \"<your quest's title>\" \"Assumed: "));
+        assert!(p.contains("can not be undone"));
+        assert!(p.contains("passes it over"));
+        assert!(!p.contains("  "));
+    }
+
+    #[test]
+    fn an_assumed_line_is_read_in_any_case() {
+        assert_eq!(assumed("Assumed: port 4100"), Some("port 4100"));
+        assert_eq!(assumed("  assumed:the blue one "), Some("the blue one"));
+        assert_eq!(assumed("Assumed:"), None);
+        assert_eq!(assumed("We assumed: x"), None);
+        assert_eq!(assumed("Warriv: Assumed: x"), None);
+        assert_eq!(assumed("Ass"), None);
+        assert_eq!(assumed("Assumé: x"), None);
+    }
+
+    #[test]
     fn the_runner_waits_for_the_item_in_hand() {
         let t = parse(SAMPLE);
-        assert_eq!(next(&t, Mode::Manual, 1, live, unmet), Next::Off);
-        assert_eq!(next(&t, Mode::Auto, 1, live, unmet), Next::Wait);
+        assert_eq!(next(&t, Mode::Manual, 1, false, live, unmet), Next::Off);
+        assert_eq!(next(&t, Mode::Auto, 1, false, live, unmet), Next::Wait);
     }
 
     #[test]
@@ -1859,20 +2031,66 @@ mod tests {
         let t = parse(SAMPLE);
         // The login fix's session is gone: that item is in the way.
         assert_eq!(
-            next(&t, Mode::Auto, 1, |_| Holder::Gone, unmet),
+            next(&t, Mode::Auto, 1, false, |_| Holder::Gone, unmet),
             Next::Stuck(1)
         );
         let t = parse("- [x] A\n- [!] B @b-1: why\n- [ ] C\n");
-        assert_eq!(next(&t, Mode::Review, 1, live, unmet), Next::Stuck(1));
+        assert_eq!(
+            next(&t, Mode::Review, 1, false, live, unmet),
+            Next::Stuck(1)
+        );
+    }
+
+    #[test]
+    fn while_warriv_drives_a_quest_blocked_on_the_human_is_passed_over() {
+        let t = parse(
+            "- [x] A
+- [!] B @b-1: why
+- [ ] C
+- [ ] D
+  After: B
+",
+        );
+        assert_eq!(next(&t, Mode::Auto, 1, true, live, unmet), Next::Start(2));
+        // What needs it waits, and the list is not finished while it is open.
+        let t = parse(
+            "- [!] B @b-1: why
+- [ ] D
+  After: B
+",
+        );
+        assert_eq!(next(&t, Mode::Auto, 1, true, live, unmet), Next::Wait);
+        // A session gone and a cycle still stop it.
+        let t = parse(
+            "- [/] A @a-1
+- [ ] C
+",
+        );
+        assert_eq!(
+            next(&t, Mode::Auto, 1, true, |_| Holder::Gone, unmet),
+            Next::Stuck(0)
+        );
+        let t = parse(
+            "- [ ] A
+  After: B
+- [ ] B
+  After: A
+- [ ] C
+",
+        );
+        assert_eq!(next(&t, Mode::Auto, 1, true, live, unmet), Next::Stuck(0));
     }
 
     #[test]
     fn the_runner_starts_the_first_open_item_then_finishes() {
         let t = parse("- [x] A @a-1\n- [ ]\n- [ ] B\n- [ ] C\n");
-        assert_eq!(next(&t, Mode::Auto, 1, live, unmet), Next::Start(2));
+        assert_eq!(next(&t, Mode::Auto, 1, false, live, unmet), Next::Start(2));
         let t = parse("- [x] A\n");
-        assert_eq!(next(&t, Mode::Auto, 1, live, unmet), Next::Finished);
-        assert_eq!(next(&[], Mode::Review, 1, live, unmet), Next::Finished);
+        assert_eq!(next(&t, Mode::Auto, 1, false, live, unmet), Next::Finished);
+        assert_eq!(
+            next(&[], Mode::Review, 1, false, live, unmet),
+            Next::Finished
+        );
     }
 
     #[test]
@@ -1880,7 +2098,7 @@ mod tests {
         // Its session is still there, but it waits on the human: nothing
         // else starts past it either.
         let t = parse("- [!] A @a-1: why\n- [ ] B\n");
-        assert_eq!(next(&t, Mode::Auto, 1, live, unmet), Next::Stuck(0));
+        assert_eq!(next(&t, Mode::Auto, 1, false, live, unmet), Next::Stuck(0));
     }
 
     #[test]
@@ -1891,18 +2109,21 @@ mod tests {
 - [ ] C
 ",
         );
-        assert_eq!(next(&t, Mode::Auto, 1, live, unmet), Next::Wait);
-        assert_eq!(next(&t, Mode::Auto, 2, live, unmet), Next::Start(1));
+        assert_eq!(next(&t, Mode::Auto, 1, false, live, unmet), Next::Wait);
+        assert_eq!(next(&t, Mode::Auto, 2, false, live, unmet), Next::Start(1));
         let t = parse(
             "- [/] A @a-1
 - [?] B @b-1
 - [ ] C
 ",
         );
-        assert_eq!(next(&t, Mode::Review, 2, live, unmet), Next::Wait);
-        assert_eq!(next(&t, Mode::Review, 3, live, unmet), Next::Start(2));
+        assert_eq!(next(&t, Mode::Review, 2, false, live, unmet), Next::Wait);
+        assert_eq!(
+            next(&t, Mode::Review, 3, false, live, unmet),
+            Next::Start(2)
+        );
         // Everything started, nothing finished yet.
-        assert_eq!(next(&t[..2], Mode::Auto, 3, live, unmet), Next::Wait);
+        assert_eq!(next(&t[..2], Mode::Auto, 3, false, live, unmet), Next::Wait);
     }
 
     #[test]
@@ -1913,7 +2134,7 @@ mod tests {
 - [ ] C
 ",
         );
-        assert_eq!(next(&t, Mode::Auto, 3, live, unmet), Next::Stuck(1));
+        assert_eq!(next(&t, Mode::Auto, 3, false, live, unmet), Next::Stuck(1));
         let t = parse(
             "- [/] A @a-1
 - [/] B @b-1
@@ -1927,7 +2148,7 @@ mod tests {
                 Holder::Live
             }
         };
-        assert_eq!(next(&t, Mode::Auto, 3, gone, unmet), Next::Stuck(1));
+        assert_eq!(next(&t, Mode::Auto, 3, false, gone, unmet), Next::Stuck(1));
     }
 
     #[test]
@@ -1938,7 +2159,7 @@ mod tests {
 ",
         );
         assert_eq!(
-            next(&t, Mode::Auto, 4, |_| Holder::Paused, unmet),
+            next(&t, Mode::Auto, 4, false, |_| Holder::Paused, unmet),
             Next::Wait
         );
     }

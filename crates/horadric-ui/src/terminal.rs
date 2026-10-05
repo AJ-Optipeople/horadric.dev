@@ -627,6 +627,35 @@ impl TerminalWindow {
         self.focus_active();
     }
 
+    /// Shows this session's pane as the active one without taking the
+    /// foreground: the keyboard goes into it only while the stage is in
+    /// front already.
+    pub fn point_at(&self, id: &str) {
+        self.set_active(id.to_string());
+        if self.is_foreground() {
+            self.focus_active();
+        }
+    }
+
+    /// Which pane is active and whether it is zoomed, to be given back
+    /// with [`TerminalWindow::set_view`].
+    pub fn view(&self) -> (Option<String>, bool) {
+        (self.active(), self.zoomed.get())
+    }
+
+    /// Makes `active` the active pane, zoomed or not, as [`TerminalWindow::view`]
+    /// said. Like [`TerminalWindow::point_at`], it never takes the foreground.
+    pub fn set_view(&self, active: Option<String>, zoomed: bool) {
+        if let Some(id) = active.filter(|a| self.panes.borrow().iter().any(|p| p.session() == a)) {
+            self.point_at(&id);
+        }
+        if self.zoomed.get() != zoomed {
+            self.zoomed.set(zoomed);
+            self.layout_with(true);
+            self.spotlight();
+        }
+    }
+
     /// The project key of the sessions shown.
     pub fn project(&self) -> String {
         self.project.borrow().clone()

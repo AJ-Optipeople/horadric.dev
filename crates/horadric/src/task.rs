@@ -10,9 +10,9 @@
 
 use std::path::{Path, PathBuf};
 
-use horadric_core::chronicle::{self, Happened, Record};
+use horadric_core::chronicle::{self, Command, Happened, Record};
 use horadric_core::tasks::{self, Mark, Wait};
-use horadric_core::{tombs, warriv};
+use horadric_core::{aim, tombs, warriv};
 use horadric_hooks::listener::TasksChanged;
 use horadric_hooks::{
     client, tasks as file, COMMAND_HEADER, OWNER_ENV, SESSION_ENV, TASKS_ENV, TASKS_PATH,
@@ -37,6 +37,9 @@ usage: horadric quest done [\"summary\"]  The quest this session works is comple
        horadric quest fix \"title\" \"what\"  Send a quest waiting for review back
        horadric quest blocked \"question\" --quest \"title\"
                                         Hand a quest a session holds to the human
+       horadric quest aim \"text\"        Say where the work is going: Warriv files
+                                        the next quests toward it when the log runs dry
+       horadric quest aim done \"text\"   That aim is reached
        horadric quest list              Show the log";
 
 /// What the errors call the list, which may still be the old file.
@@ -80,6 +83,10 @@ pub fn run(args: &[String]) -> Result<(), String> {
             let (title, what) = title_and_text(&args[1..], "fix")?;
             fix(&cwd, &title, &what)
         }
+        Some("aim") => match args.get(1).map(String::as_str) {
+            Some("done") => aim(&cwd, &args[2..], true),
+            _ => aim(&cwd, &args[1..], false),
+        },
         Some("list") => list(&cwd),
         _ => Err(USAGE.into()),
     }
@@ -277,9 +284,21 @@ fn add(cwd: &Path, title: &str, notes: &str, below: Option<&str>) -> Result<(), 
         .or_else(main_list)
         .or_else(|| file::find_list(cwd))
         .unwrap_or_else(|| cwd.to_path_buf());
-    write(&project, |text| match below {
-        None => Ok(tasks::append_with_notes(text, title, notes)),
-        Some(b) => warriv::add_below(text, b, title, notes),
+    write(&project, |text| {
+        // An `After:` line naming either of two quests alike would match
+        // both, so Warriv files none that is already in the log.
+        if session().is_some_and(|id| warriv::is_warriv(&id)) {
+            if let Some(t) = tasks::parse(text)
+                .iter()
+                .find(|t| aim::same(&t.title, title))
+            {
+                return Err(format!("\"{}\" is in the log already", t.title));
+            }
+        }
+        match below {
+            None => Ok(tasks::append_with_notes(text, title, notes)),
+            Some(b) => warriv::add_below(text, b, title, notes),
+        }
     })?;
     // Inside a session the new quest grows out of whatever that session
     // works, which the quest log draws as a branch: its quest, or else its
@@ -293,6 +312,7 @@ fn add(cwd: &Path, title: &str, notes: &str, below: Option<&str>) -> Result<(), 
             Happened::Added { by, conversation },
         );
     }
+    warriv_ran(&project, Command::Add, title, notes);
     tell_app(&project);
     println!("Added to {}", file::file(&project).display());
     Ok(())
@@ -327,6 +347,14 @@ fn note(cwd: &Path, title: &str, text: &str) -> Result<(), String> {
         _ => text.to_string(),
     };
     write(&project, |log| warriv::add_note(log, title, &line))?;
+    warriv_ran(&project, Command::Note, title, text);
+    // The away card lists what was assumed, for the human to overrule.
+    if let Some(assumed) = tasks::assumed(text) {
+        let what = Happened::Assumed {
+            text: assumed.to_string(),
+        };
+        record(&project, String::new(), title, what);
+    }
     tell_app(&project);
     println!("Noted under the quest.");
     Ok(())
@@ -336,6 +364,7 @@ fn note(cwd: &Path, title: &str, text: &str) -> Result<(), String> {
 fn hand_on(cwd: &Path, title: &str, question: &str) -> Result<(), String> {
     let project = log_of(cwd)?;
     write(&project, |log| warriv::hand_on(log, title, question))?;
+    warriv_ran(&project, Command::Blocked, title, question);
     tell_app(&project);
     println!("Handed to the human. The quest waits for their answer.");
     Ok(())
@@ -367,6 +396,7 @@ fn tell(cwd: &Path, title: &str, text: &str) -> Result<(), String> {
     if heard != Some(200) {
         return Err("Horadric did not hear it. Add a note to the quest instead.".into());
     }
+    warriv_ran(&project, Command::Tell, &t.title, text);
     println!("Horadric types it into the quest's session once that is between turns.");
     Ok(())
 }
@@ -401,9 +431,39 @@ fn fix(cwd: &Path, title: &str, what: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Adds an aim to the top of the log, or marks one reached.
+fn aim(cwd: &Path, words: &[String], done: bool) -> Result<(), String> {
+    let text = tasks::one_line(&words.join(" "));
+    if text.is_empty() {
+        return Err(USAGE.into());
+    }
+    // The first aim may come before any quest, so it can start the log.
+    let project = main_list()
+        .or_else(|| file::find_list(cwd))
+        .unwrap_or_else(|| cwd.to_path_buf());
+    write(&project, |log| match done {
+        true => aim::reach(log, &text),
+        false => aim::add(log, &text),
+    })?;
+    tell_app(&project);
+    println!(
+        "{}",
+        match done {
+            true => "Marked reached.",
+            false => "Aim added. Warriv files quests toward it when the log runs dry in auto mode.",
+        }
+    );
+    Ok(())
+}
+
 fn list(cwd: &Path) -> Result<(), String> {
     let project = main_list().or_else(|| file::find_list(cwd)).ok_or(NO_LOG)?;
-    for t in tasks::parse(&file::read(&project)) {
+    let text = file::read(&project);
+    for a in aim::read(&text) {
+        let head = if a.reached { aim::REACHED } else { aim::OPEN };
+        println!("{head}{}", a.text);
+    }
+    for t in tasks::parse(&text) {
         let holder = t.holder.map(|h| format!(" @{h}")).unwrap_or_default();
         println!("[{}] {}{holder}", t.mark.char(), t.title);
     }
@@ -423,6 +483,25 @@ fn record_summary(project: &Path, id: &str, summary: &str) {
         .map(|t| t.title.clone())
         .unwrap_or_default();
     record(project, id.to_string(), &title, Happened::Summary { text });
+}
+
+/// A command Warriv ran, for the chronicle's story of its wake. Anyone
+/// else's command is no part of one.
+fn warriv_ran(project: &Path, command: Command, title: &str, text: &str) {
+    let Some(wake) = session().filter(|id| warriv::is_warriv(id)) else {
+        return;
+    };
+    record(
+        project,
+        String::new(),
+        title,
+        Happened::WarrivRan {
+            wake,
+            conversation: std::env::var("CLAUDE_CODE_SESSION_ID").unwrap_or_default(),
+            command,
+            text: text.to_string(),
+        },
+    );
 }
 
 /// Appends to the same chronicle the app writes. It is a record, not the

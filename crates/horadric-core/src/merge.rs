@@ -421,7 +421,7 @@ mod tests {
 - [ ] C
 ",
         );
-        let pick = |l: &[Task]| next(l, Mode::Auto, 2, |_| Holder::Live, |_| true);
+        let pick = |l: &[Task]| next(l, Mode::Auto, 2, false, |_| Holder::Live, |_| true);
         assert_eq!(pick(&list), Next::Start(1));
         let landing = while_landing(&list, &["A".to_string()]);
         assert_eq!(landing[0].mark, Mark::Working);

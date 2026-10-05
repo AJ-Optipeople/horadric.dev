@@ -18,7 +18,7 @@ use serde_json::Value;
 use crate::merge::{add_fix_up, FixUp};
 use crate::tasks::{
     end_of, find, insert_note, insert_with_notes, item_line, one_line, parse, readiness,
-    replace_line, set_mark, Mark, Mode, Ready, Task,
+    replace_line, set_mark, Mark, Mode, Ready, Task, ASSUMED,
 };
 
 /// What a blocked quest's reason starts with when Warriv handed it to the
@@ -46,6 +46,16 @@ pub const WAKES_AN_HOUR: usize = 6;
 /// The span the wakes are counted in, in seconds.
 pub const HOUR: u64 = 60 * 60;
 
+/// At most this many quests filed for the aims a wake.
+pub const FILE_AT_MOST: usize = 8;
+
+/// Wakes in a row for the aims that filed nothing, before the aims go to
+/// the human as a question.
+pub const DRY_WAKES: usize = 3;
+
+/// What the notes line starts with on a quest Warriv filed for an aim.
+pub const FILED: &str = "Filed by Warriv for: ";
+
 /// The longest last turn of a holding session put in a prompt, in
 /// characters. Its end says what it asks, so that is what is kept.
 const LAST_TURN: usize = 2000;
@@ -59,8 +69,66 @@ pub fn on(config: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// "Warriv drives" switched on for a project: Warriv runs it alone, the
+/// orchestrator on whatever its config says, with no budget on its wakes.
+/// The human's to flip, kept in `state.json` so a reload keeps driving.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Drive {
+    /// "and ships public": it may cut a public release unattended, not
+    /// only ship local.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ships_public: bool,
+}
+
+/// Whether Warriv hears a project's events: its config turns it on, and so
+/// does driving.
+pub fn orchestrates(config: bool, drives: bool) -> bool {
+    config || drives
+}
+
+/// What an errand due while a limit is too full to start anything does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Full {
+    /// Not run this time; it comes round at its next due time.
+    Skip,
+    /// Run once the limit has reset.
+    Wait,
+}
+
+/// A due errand in the 90 % hold. Driving, nobody is there to run it
+/// later by hand, so it waits for the reset instead of being skipped.
+pub fn when_full(drives: bool) -> Full {
+    if drives {
+        Full::Wait
+    } else {
+        Full::Skip
+    }
+}
+
+/// The words of the quests tile's Warriv line: what it is about, after
+/// "Warriv drives" while it does, which is never left out.
+pub fn line(watch: Option<String>, drive: Option<Drive>) -> Option<String> {
+    let Some(d) = drive else {
+        return watch;
+    };
+    let head = if d.ships_public {
+        "Warriv drives and ships public"
+    } else {
+        "Warriv drives"
+    };
+    Some(
+        match watch.as_deref().and_then(|w| w.strip_prefix("Warriv")) {
+            Some(rest) => format!("{head},{}", rest.trim_start_matches(':')),
+            None => head.to_string(),
+        },
+    )
+}
+
 /// What woke Warriv.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
 pub enum Kind {
     /// A quest went `[!]` on the human, not on another quest or a check.
     Blocked,
@@ -74,6 +142,9 @@ pub enum Kind {
     /// The log runs in auto mode, nothing is in hand, and every quest left
     /// waits.
     Stalled,
+    /// The same with an aim open, even with no quest left: Warriv files the
+    /// next quests toward it.
+    Dry,
 }
 
 impl Kind {
@@ -89,7 +160,7 @@ impl Kind {
             Kind::Asks => "stopped without saying it is completed",
             Kind::Tangled => "can not start: its After: lines are tangled",
             Kind::Merge => "is completed, but did not merge into main by itself",
-            Kind::Stalled => "",
+            Kind::Stalled | Kind::Dry => "",
         }
     }
 }
@@ -113,9 +184,10 @@ impl Event {
 }
 
 /// The events a project's log holds now, given the titles of the quests
-/// whose sessions stopped after the nudge. A merge that failed is not in
-/// the log, so the UI adds it to the [`Desk`] when it happens.
-pub fn events(tasks: &[Task], mode: Mode, asks: &[String]) -> Vec<Event> {
+/// whose sessions stopped after the nudge and the aims still open. A merge
+/// that failed is not in the log, so the UI adds it to the [`Desk`] when it
+/// happens.
+pub fn events(tasks: &[Task], mode: Mode, asks: &[String], aims: &[String]) -> Vec<Event> {
     let ready = readiness(tasks);
     let mut out = Vec::new();
     for (t, r) in tasks.iter().zip(&ready) {
@@ -141,16 +213,16 @@ pub fn events(tasks: &[Task], mode: Mode, asks: &[String]) -> Vec<Event> {
             });
         }
     }
-    if let Some(e) = stalled(tasks, mode, &ready) {
+    if let Some(e) = stalled(tasks, mode, &ready, aims) {
         out.push(e);
     }
     out
 }
 
 /// A log in auto mode that has nothing in hand and nothing ready to start,
-/// while quests are left. A quest blocked on the human is the reason then,
-/// and an event of its own.
-fn stalled(tasks: &[Task], mode: Mode, ready: &[Ready]) -> Option<Event> {
+/// while quests are left or an aim is open. A quest blocked on the human is
+/// the reason then, and an event of its own.
+fn stalled(tasks: &[Task], mode: Mode, ready: &[Ready], aims: &[String]) -> Option<Event> {
     if mode != Mode::Auto
         || tasks.iter().any(|t| {
             matches!(t.mark, Mark::Working | Mark::Review)
@@ -168,14 +240,36 @@ fn stalled(tasks: &[Task], mode: Mode, ready: &[Ready]) -> Option<Event> {
             _ => {}
         }
     }
+    let waits = match waiting.is_empty() {
+        true => "No quest is left to start.".to_string(),
+        false => format!("Waiting: {}.", waiting.join("; ")),
+    };
+    if !aims.is_empty() {
+        return Some(Event {
+            kind: Kind::Dry,
+            title: String::new(),
+            detail: waits,
+        });
+    }
     (!waiting.is_empty()).then(|| Event {
         kind: Kind::Stalled,
         title: String::new(),
-        detail: format!(
-            "Nothing is in hand and no quest is ready to start. Waiting: {}.",
-            waiting.join("; ")
-        ),
+        detail: format!("Nothing is in hand and no quest is ready to start. {waits}"),
     })
+}
+
+/// The notes line on a quest Warriv files for `aim`.
+pub fn filed(aim: &str) -> String {
+    format!("{FILED}{}", one_line(aim))
+}
+
+/// How many quests in the log Warriv filed for an aim, so a wake that
+/// filed nothing is known by the count staying put.
+pub fn filed_count(tasks: &[Task]) -> usize {
+    tasks
+        .iter()
+        .filter(|t| t.notes.iter().any(|n| n.starts_with(FILED)))
+        .count()
 }
 
 /// What a project's Warriv has heard: the events already taken, the ones
@@ -190,6 +284,22 @@ pub struct Desk {
     /// Events that went to the human: the budget was spent, or Warriv
     /// ended its turn with them still holding. Kept while they hold.
     human: Vec<Event>,
+    /// Wakes in a row for the aims that filed nothing.
+    dry: usize,
+    /// Warriv drives the project, which lifts the budget on its wakes.
+    driving: bool,
+}
+
+/// How a wake given the dry log ended.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Dried {
+    /// The log is no longer dry, so the count starts over.
+    Moved,
+    /// Still dry: it is heard again, for another wake.
+    Again,
+    /// The third wake in a row that changed nothing: the aims are the
+    /// human's while the log stays as it is.
+    Human,
 }
 
 /// What to do with the events waiting.
@@ -253,6 +363,33 @@ impl Desk {
             .collect()
     }
 
+    /// A wake given the dry log `e` ended. `holds` is whether the log is
+    /// still dry the same way, `moved` whether it filed a quest or the open
+    /// aims changed meanwhile. Still dry, the event is forgotten so the next
+    /// look hears it again, until [`DRY_WAKES`] in a row that moved nothing
+    /// hand it on.
+    pub fn dry_ended(&mut self, e: Event, holds: bool, moved: bool) -> Dried {
+        if !holds {
+            self.dry = 0;
+            return Dried::Moved;
+        }
+        self.dry = if moved { 0 } else { self.dry + 1 };
+        if self.dry >= DRY_WAKES {
+            self.dry = 0;
+            self.hand(e);
+            return Dried::Human;
+        }
+        self.seen.remove(&e.key());
+        Dried::Again
+    }
+
+    /// Whether Warriv drives the project now. Driving, it may wake as
+    /// often as events come: what keeps it from running away is that each
+    /// event is heard once and its own doing never wakes it.
+    pub fn drive(&mut self, on: bool) {
+        self.driving = on;
+    }
+
     /// Whether events wait.
     pub fn waiting(&self) -> bool {
         !self.queue.is_empty()
@@ -266,7 +403,7 @@ impl Desk {
         }
         let events = std::mem::take(&mut self.queue);
         self.wakes.retain(|&at| at + HOUR > now);
-        if self.wakes.len() >= WAKES_AN_HOUR {
+        if self.wakes.len() >= WAKES_AN_HOUR && !self.driving {
             let first = !std::mem::replace(&mut self.tired, true);
             for e in &events {
                 self.hand(e.clone());
@@ -277,6 +414,61 @@ impl Desk {
         self.wakes.push(now);
         Wake::Go(events)
     }
+
+    /// What Warriv is about at `now`, for the quests tile: settling the
+    /// `open` events its awake session has not answered and those waiting
+    /// for its next stop, or resting with its wakes spent. None when it
+    /// sleeps with wakes left.
+    pub fn watch(&self, open: Option<usize>, now: u64) -> Option<Watch> {
+        if let Some(open) = open {
+            return Some(Watch::Settling(open + self.queue.len()));
+        }
+        let spent: Vec<u64> = self
+            .wakes
+            .iter()
+            .copied()
+            .filter(|&at| at + HOUR > now)
+            .collect();
+        if spent.len() < WAKES_AN_HOUR || self.driving {
+            return None;
+        }
+        spent.into_iter().min().map(|first| Watch::Rests {
+            until: first + HOUR,
+        })
+    }
+}
+
+/// What the quests tile's line says of Warriv.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Watch {
+    /// Awake, with this many events in hand.
+    Settling(usize),
+    /// Its wakes are spent until this unix time.
+    Rests { until: u64 },
+}
+
+impl Watch {
+    /// The line's words. `local` is the seconds since local midnight at
+    /// the unix time `now`, which turns `until` into a time of day.
+    pub fn words(self, local: u64, now: u64) -> String {
+        match self {
+            Watch::Settling(0) => "Warriv: settling".to_string(),
+            Watch::Settling(n) => format!("Warriv: settling {n}"),
+            Watch::Rests { until } => {
+                let secs = (local as i64 + until as i64 - now as i64).rem_euclid(86_400);
+                format!(
+                    "Warriv rests until {:02}:{:02}",
+                    secs / 3600,
+                    secs % 3600 / 60
+                )
+            }
+        }
+    }
+
+    /// Whether it is at work, which reads in the working colour.
+    pub fn working(self) -> bool {
+        matches!(self, Watch::Settling(_))
+    }
 }
 
 /// An event with what Warriv needs to judge it: the quest's notes, which
@@ -286,6 +478,8 @@ pub struct Brief {
     pub event: Option<Event>,
     pub notes: Vec<String>,
     pub last_turn: Option<String>,
+    /// The open aims, for a dry log.
+    pub aims: Vec<String>,
 }
 
 /// What Warriv is told beside its first prompt, every time it starts: who
@@ -298,7 +492,7 @@ pub fn system_prompt(horadric: &str, file: &str) -> String {
          one of them can not go on, so the human hears only what needs a human. You plan; \
          you do not build. Change no code, start no session, and never edit {file} \
          directly: every change goes through `{horadric} quest`, which is the one command \
-         you may run without asking.\n\n\
+         you may run without asking. {AS_WRITTEN}\n\n\
          What you may do:\n\
          - Answer a quest's session: `{horadric} quest tell \"<title>\" \"<message>\"`. \
          Horadric types it into the session once it is between turns, and a blocked quest \
@@ -311,15 +505,77 @@ pub fn system_prompt(horadric: &str, file: &str) -> String {
          `--below \"<title>\"` to put it right under another, and `--after \"<title>\"` \
          once for each quest it needs first. Split a quest that is too big by telling its \
          session to do only the first part and adding the rest.\n\
+         - Pick each quest's model: a quest you add, or one you meet in an event, with no \
+         `Model:` line gets one, `--notes \"Model: <name>\"` on a quest you add and \
+         `{horadric} quest note \"<title>\" \"Model: <name>\"` on one there already. \
+         `haiku` for small, plain work (a rename, a string, a test for code already \
+         there), `sonnet` for most, `opus` for design, hard bugs and anything that spans \
+         the code. Never change a `Model:` line you did not write: that one is the human's.\n\
          - Hand a quest to the human when only the human can settle it: `{horadric} quest \
          blocked \"<question>\" --quest \"<title>\"`. Word the question so it can be \
          answered in one line, and say what you tried in a note first.\n\
          - Read anything: the log, `{horadric} quest list`, the code, git.\n\n\
+         The human may write where the work is going as `Aim:` lines at the top of {file}. \
+         When the log runs dry with an aim open, you plan ahead:\n\
+         - File the next quests toward the first open aim, at most {FILE_AT_MOST} a wake, in \
+         the order they should be done: `{horadric} quest add \"<title>\" --notes \"<what to \
+         build, where its reasoning lives, how to check it>\" --notes \"{FILED}<the aim>\" \
+         --after \"<title>\"`, with an `--after` for each quest it needs first. Each is one \
+         session's work, small enough to finish and check in one go. Never a title already in \
+         the log, done or not.\n\
+         - When what the aim names is all done, mark it: `{horadric} quest aim done \"<the \
+         aim>\"`. Read the log, the plan and git before you decide either way.\n\n\
          Answer from what is written: the quest's notes, the plan and docs, the code, and \
          what other quests found. Hand on what needs the human's taste, money, accounts or \
          a decision the docs leave open. When you have settled every event, stop. Do not ask \
          questions in this chat: nobody reads it, and the session closes when your turn ends."
     )
+}
+
+/// What Warriv is told besides, while it drives: the human is away, so
+/// it settles what can be changed later itself and writes it down, and
+/// hands on only what can not be undone or only the human can know.
+pub fn driven_prompt(horadric: &str) -> String {
+    format!(
+        "You drive this project: the human is away and the list goes on without \
+         them. When a session asks something that can be changed later (a name, a \
+         layout, which of two fixes), do not hand it on: decide, tell the session, and \
+         write it down with `{horadric} quest note \"<title>\" \"{ASSUMED} <what you chose \
+         and why>\"`. The human reads every such line when they come back and \
+         overrules in one line what they would have chosen otherwise. Hand a quest to \
+         the human only for a choice that can not be undone (deleting data, \
+         publishing, spending money, an account) or that only the human can know. A \
+         quest handed on no longer stops the list: the rest of the caravan moves."
+    )
+}
+
+/// What the human's one line against an assumption does, by how its
+/// quest stands now.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Overrule {
+    /// Its session still holds it: told, as `quest tell` would.
+    Tell(String),
+    /// Nobody took it yet: a notes line its session will read.
+    Note(String),
+    /// It is done or gone: a new quest to change it, at the end of the log.
+    Quest { title: String, notes: String },
+}
+
+/// The human overrules `assumed`, made on the quest `title`, with
+/// `answer`. `mark` is the quest's mark now, none when it left the log.
+pub fn overrule(mark: Option<Mark>, title: &str, assumed: &str, answer: &str) -> Overrule {
+    let (assumed, answer) = (one_line(assumed), one_line(answer));
+    let said = format!("You assumed \u{201C}{assumed}\u{201D}; instead: {answer}");
+    match mark {
+        Some(m) if m.held() => Overrule::Tell(said),
+        Some(Mark::Open) => Overrule::Note(human_note(&said)),
+        _ => Overrule::Quest {
+            title: one_line(&format!("Overrule on {title}")),
+            notes: format!(
+                "While it was done, it assumed \u{201C}{assumed}\u{201D}.\nThe human answers: {answer}"
+            ),
+        },
+    }
 }
 
 /// The first prompt of a wake: each event with its quest's notes and the
@@ -349,6 +605,22 @@ fn brief(b: &Brief) -> String {
     };
     let mut out = match e.kind {
         Kind::Stalled => format!("- The log is stalled. {}\n", e.detail),
+        Kind::Dry => {
+            let mut s = format!(
+                "- The log has run dry: nothing is in hand and nothing is ready to start. {}\n  \
+                 The aims still open, in order:\n",
+                e.detail
+            );
+            for a in &b.aims {
+                s.push_str(&format!("    Aim: {a}\n"));
+            }
+            s.push_str(&format!(
+                "  Read what the first aim points at, then file the next quests toward it, at \
+                 most {FILE_AT_MOST}, each with an `--after` for every quest it needs first and \
+                 the notes line `{FILED}<the aim>`. Or, if it is all done, mark it reached.\n"
+            ));
+            s
+        }
         k => {
             let mut s = format!("- The quest \"{}\" {}", one_line(&e.title), k.says());
             if e.detail.is_empty() {
@@ -392,10 +664,23 @@ fn tail(s: &str, n: usize) -> String {
 /// What a quest's session is told when Warriv answers it, typed into its
 /// terminal, so on one line.
 pub fn told(horadric: &str, message: &str) -> String {
+    answer(
+        "Warriv, who plans this project's quests, answers",
+        horadric,
+        message,
+    )
+}
+
+/// What a quest's session is told when the human answers it from the card
+/// that greets them back.
+pub fn answered(horadric: &str, message: &str) -> String {
+    answer("The human answers", horadric, message)
+}
+
+fn answer(who: &str, horadric: &str, message: &str) -> String {
     format!(
-        "Warriv, who plans this project's quests, answers: {} Go on with this quest, and \
-         when it is finished, commit your work and run `{horadric} quest done \"<one short \
-         line on what you achieved>\"`.",
+        "{who}: {} Go on with this quest, and when it is finished, commit your work and run \
+         `{horadric} quest done \"<one short line on what you achieved>\"`.",
         one_line(message)
     )
 }
@@ -408,9 +693,25 @@ pub fn tired(project: &str) -> String {
     )
 }
 
+/// What the human is asked when Warriv woke [`DRY_WAKES`] times in a row
+/// for the aims and filed nothing.
+pub fn stuck(aims: &[String]) -> String {
+    let aim = aims.first().map(|a| one_line(a)).unwrap_or_default();
+    format!(
+        "Warriv woke {DRY_WAKES} times for \"{aim}\" and filed nothing. What comes next, \
+         or is it reached?"
+    )
+}
+
 /// The notes line that keeps what Warriv decided.
 pub fn note(text: &str) -> String {
     format!("{NOTE}{}", one_line(text))
+}
+
+/// The notes line for the human's answer to a quest whose session is gone,
+/// which its next session reads.
+pub fn human_note(text: &str) -> String {
+    format!("The human answers: {}", one_line(text))
 }
 
 /// The reason a quest Warriv hands to the human is blocked with.
@@ -597,7 +898,7 @@ pub fn review_system_prompt(horadric: &str, file: &str) -> String {
          saw>\"`, then `{horadric} quest blocked \"<question>\" --quest \"<title>\"`, worded \
          so it can be answered in one line.\n\n\
          Judge what the quest asked for, not your own taste: style the project does not ask \
-         for is no reason to send it back. Run exactly one of the three, then stop. Do not ask \
+         for is no reason to send it back. Run exactly one of the three, then stop. {AS_WRITTEN} Do not ask \
          questions in this chat: nobody reads it, and the session closes when your turn ends."
     )
 }
@@ -709,10 +1010,133 @@ pub fn send_back(text: &str, name: &str, fix: &FixUp) -> Result<String, String> 
     Ok(add_fix_up(&done, &t.title, fix).unwrap_or(done))
 }
 
+/// The flags that let a session run `horadric quest` without asking,
+/// through either shell tool Claude Code has on Windows. Only the
+/// command as written matches: `& "..."` or a `cd` before it asks.
+pub fn quest_tools(horadric: &str) -> Vec<String> {
+    let h = horadric.trim_matches('"');
+    vec![
+        "--allowedTools".to_string(),
+        format!("Bash({h} quest:*)"),
+        format!("PowerShell({h} quest:*)"),
+    ]
+}
+
+/// What a prompt says so the quest commands run without asking.
+const AS_WRITTEN: &str = "Run it with the Bash tool, exactly as written, one command at a \
+     time, never behind `&`, `cd` or `&&`: anything else stops for the human's permission.";
+
+/// What a quest's notes line starts with when it says where the quest
+/// came from: a link, a message's id, a pull request.
+pub const FROM: &str = "From: ";
+
+/// Every `From:` a quest log's notes hold, in the log's order, once each,
+/// so an errand knows what it filed before.
+pub fn froms(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for t in parse(text) {
+        for n in &t.notes {
+            let from = n.trim().strip_prefix(FROM.trim_end()).map(str::trim);
+            if let Some(f) = from.filter(|f| !f.is_empty()) {
+                if !out.iter().any(|o| o == f) {
+                    out.push(f.to_string());
+                }
+            }
+        }
+    }
+    out
+}
+
+/// How many `From:` lines an errand's system prompt lists, the newest
+/// ones, so a long log does not make a long prompt.
+const FROMS_LISTED: usize = 200;
+
+/// The system prompt of an errand's session: a stone named `label` cast
+/// unattended on a clock, in a project whose quest log is `file`, which
+/// holds the `From:` lines `froms` already. What it finds becomes
+/// quests, each saying where it came from, and nothing is filed twice.
+pub fn errand_prompt(horadric: &str, file: &str, label: &str, froms: &[String]) -> String {
+    let mut out = format!(
+        "You run the errand \"{label}\" for Horadric, which casts it on a clock while \
+         nobody watches. Horadric shows the human's coding agent sessions and runs the \
+         project's quest log, {file}: the work agent sessions take on one quest at a time. \
+         Your steps come as prompts, one turn each; do what each says, and the session \
+         closes after the last. Do not ask questions in this chat: nobody reads it.\n\n\
+         What you find that needs doing becomes a quest, not work you do here:\n\
+         - Add one with `{horadric} quest add \"<title>\" --notes \"{FROM}<where it came \
+         from>\"`, the title a short line of what to do. Where it came from is a link, a \
+         message's id, an issue or a pull request: something that names that one finding \
+         and no other. Add `--after \"<title>\"` for a quest it needs done first.\n\
+         - Say more under it with `{horadric} quest note \"<title>\" \"<line>\"`.\n\
+         - Read the log with `{horadric} quest list`, or the file itself. Never edit the \
+         file directly.\n\
+         - File nothing whose `{FROM}` line is in the log already, done or not: that one \
+         was filed by an earlier cast. One finding is one quest.\n\
+         {AS_WRITTEN}"
+    );
+    let listed = &froms[froms.len().saturating_sub(FROMS_LISTED)..];
+    if listed.is_empty() {
+        out.push_str("\n\nThe log has no `From:` lines yet.");
+    } else {
+        out.push_str("\n\nThe `From:` lines in the log when this cast began:");
+        for f in listed {
+            out.push_str("\n- ");
+            out.push_str(f);
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::tasks::parse;
+
+    #[test]
+    fn the_quest_commands_are_allowed_in_both_shells() {
+        assert_eq!(
+            quest_tools("\"C:/h/horadric.exe\""),
+            [
+                "--allowedTools",
+                "Bash(C:/h/horadric.exe quest:*)",
+                "PowerShell(C:/h/horadric.exe quest:*)"
+            ]
+        );
+        assert!(system_prompt("h", "f").contains("never behind `&`"));
+        assert!(errand_prompt("h", "f", "l", &[]).contains("never behind `&`"));
+    }
+
+    #[test]
+    fn froms_are_read_from_every_quest_once_each() {
+        let log = "- [ ] Fix the login\n  From: https://x/issues/4\n  Model: haiku\n\
+                   - [x] Typo on the page\n  From:   slack 1234  \n\
+                   - [ ] Again\n  From: https://x/issues/4\n  From:\n\
+                   - [ ] Mine\n  Comes from: nothing\n";
+        assert_eq!(froms(log), ["https://x/issues/4", "slack 1234"]);
+        assert!(froms("").is_empty());
+    }
+
+    #[test]
+    fn an_errand_is_told_the_quest_commands_the_from_rule_and_what_is_filed() {
+        let froms = vec!["https://x/issues/4".to_string()];
+        let p = errand_prompt("horadric", ".horadric/tasks.md", "Feedback", &froms);
+        assert!(p.contains("\"Feedback\""));
+        assert!(p.contains("horadric quest add \"<title>\" --notes \"From: "));
+        assert!(p.contains("horadric quest note"));
+        assert!(p.contains(".horadric/tasks.md"));
+        assert!(p.contains("File nothing whose `From: ` line is in the log already"));
+        assert!(p.ends_with("began:\n- https://x/issues/4"));
+        assert!(errand_prompt("h", "f", "l", &[]).ends_with("no `From:` lines yet."));
+    }
+
+    #[test]
+    fn an_errand_lists_only_the_newest_froms() {
+        let froms: Vec<String> = (0..FROMS_LISTED + 5).map(|i| format!("id {i}")).collect();
+        let p = errand_prompt("h", "f", "l", &froms);
+        assert!(!p.contains("- id 4\n"));
+        assert!(p.contains("- id 5\n"));
+        assert!(p.ends_with(&format!("- id {}", FROMS_LISTED + 4)));
+    }
 
     #[test]
     fn it_is_off_unless_the_config_says_so() {
@@ -735,7 +1159,7 @@ mod tests {
              - [!] C @c-1: later {until: 2026-10-01T14:05Z}\n\
              - [!] D @d-1: Warriv asks: which account pays?\n",
         );
-        let e = events(&t, Mode::Manual, &[]);
+        let e = events(&t, Mode::Manual, &[], &[]);
         assert_eq!(
             e,
             vec![Event {
@@ -749,7 +1173,7 @@ mod tests {
     #[test]
     fn a_session_that_asks_after_the_nudge_wakes_it() {
         let t = list("- [/] A @a-1\n- [/] B @b-1\n");
-        let e = events(&t, Mode::Review, &["B".into()]);
+        let e = events(&t, Mode::Review, &["B".into()], &[]);
         assert_eq!(e.len(), 1);
         assert_eq!((e[0].kind, e[0].title.as_str()), (Kind::Asks, "B"));
     }
@@ -758,7 +1182,7 @@ mod tests {
     fn a_tangled_quest_wakes_it() {
         let t =
             list("- [ ] A\n  After: Nothing like it\n- [ ] B\n  After: C\n- [ ] C\n  After: B\n");
-        let e = events(&t, Mode::Manual, &[]);
+        let e = events(&t, Mode::Manual, &[], &[]);
         let kinds: Vec<(Kind, &str)> = e.iter().map(|e| (e.kind, e.title.as_str())).collect();
         assert_eq!(
             kinds,
@@ -775,28 +1199,138 @@ mod tests {
     fn a_log_in_auto_mode_with_nothing_ready_is_stalled() {
         let waiting =
             "- [x] A\n- [!] B @b-1: later {until: 2030-01-01T00:00Z}\n- [ ] C\n  After: B\n";
-        let e = events(&list(waiting), Mode::Auto, &[]);
+        let e = events(&list(waiting), Mode::Auto, &[], &[]);
         assert_eq!(e.last().unwrap().kind, Kind::Stalled);
         assert!(e.last().unwrap().detail.ends_with("Waiting: B; C."));
         // Not in review mode, not with a quest ready, not with one in hand.
-        assert!(events(&list(waiting), Mode::Review, &[])
+        assert!(events(&list(waiting), Mode::Review, &[], &[])
             .iter()
             .all(|e| e.kind != Kind::Stalled));
         let ready = "- [!] B @b-1: needs a key\n- [ ] D\n";
-        assert!(events(&list(ready), Mode::Auto, &[])
+        assert!(events(&list(ready), Mode::Auto, &[], &[])
             .iter()
             .all(|e| e.kind != Kind::Stalled));
         let in_hand = "- [/] A @a-1\n- [ ] C\n  After: A\n";
-        assert!(events(&list(in_hand), Mode::Auto, &[]).is_empty());
+        assert!(events(&list(in_hand), Mode::Auto, &[], &[]).is_empty());
         // One blocked on the human is the event, not the stall.
         let on_human = "- [!] B @b-1: needs a key\n- [ ] C\n  After: B\n";
-        let kinds: Vec<Kind> = events(&list(on_human), Mode::Auto, &[])
+        let kinds: Vec<Kind> = events(&list(on_human), Mode::Auto, &[], &[])
             .iter()
             .map(|e| e.kind)
             .collect();
         assert_eq!(kinds, vec![Kind::Blocked]);
         // A finished log is not stalled.
-        assert!(events(&list("- [x] A\n"), Mode::Auto, &[]).is_empty());
+        assert!(events(&list("- [x] A\n"), Mode::Auto, &[], &[]).is_empty());
+    }
+
+    #[test]
+    fn a_dry_log_with_an_aim_open_wakes_it_even_with_nothing_left() {
+        let aims = ["Ship the API".to_string()];
+        let dry = |text: &str, mode| {
+            events(&list(text), mode, &[], &aims)
+                .into_iter()
+                .find(|e| e.kind == Kind::Dry)
+        };
+        let empty = dry("", Mode::Auto).unwrap();
+        assert_eq!(empty.detail, "No quest is left to start.");
+        assert!(empty.title.is_empty());
+        assert!(dry("- [x] A\n", Mode::Auto).is_some());
+        let waiting = "- [!] B @b-1: later {until: 2030-01-01T00:00Z}\n";
+        assert_eq!(dry(waiting, Mode::Auto).unwrap().detail, "Waiting: B.");
+        // No stall besides it.
+        assert_eq!(events(&list(waiting), Mode::Auto, &[], &aims).len(), 1);
+        // Not outside auto mode, not with work ready, in hand or on the human.
+        assert!(dry("", Mode::Review).is_none());
+        assert!(dry("- [ ] A\n", Mode::Auto).is_none());
+        assert!(dry("- [/] A @a-1\n", Mode::Auto).is_none());
+        assert!(dry("- [!] A @a-1: which key?\n", Mode::Auto).is_none());
+        assert!(dry("- [!] A @a-1: Warriv asks: which key?\n", Mode::Auto).is_none());
+        // No aim, and an empty log is no event at all.
+        assert!(events(&list(""), Mode::Auto, &[], &[]).is_empty());
+    }
+
+    fn dry_log() -> Event {
+        Event {
+            kind: Kind::Dry,
+            title: String::new(),
+            detail: "No quest is left to start.".into(),
+        }
+    }
+
+    #[test]
+    fn a_dry_log_is_not_its_own_doing() {
+        let mut d = Desk::default();
+        d.hear(vec![blocked("A", "x")], false);
+        assert!(matches!(d.wake(0), Wake::Go(_)));
+        d.hear(vec![dry_log()], true);
+        assert_eq!(d.wake(1), Wake::Go(vec![dry_log()]));
+    }
+
+    #[test]
+    fn three_dry_wakes_in_a_row_that_move_nothing_go_to_the_human() {
+        let mut d = Desk::default();
+        let wake = |d: &mut Desk, at| {
+            d.hear(vec![dry_log()], false);
+            assert_eq!(d.wake(at), Wake::Go(vec![dry_log()]));
+        };
+        wake(&mut d, 0);
+        assert_eq!(d.dry_ended(dry_log(), true, false), Dried::Again);
+        wake(&mut d, 1);
+        // Filing something starts the count over.
+        assert_eq!(d.dry_ended(dry_log(), true, true), Dried::Again);
+        wake(&mut d, 2);
+        assert_eq!(d.dry_ended(dry_log(), true, false), Dried::Again);
+        wake(&mut d, 3);
+        assert_eq!(d.dry_ended(dry_log(), true, false), Dried::Again);
+        wake(&mut d, 4);
+        assert_eq!(d.dry_ended(dry_log(), true, false), Dried::Human);
+        // The human's now: heard, not queued, not held by Warriv.
+        d.hear(vec![dry_log()], false);
+        assert_eq!(d.wake(5), Wake::Nothing);
+        assert!(d.holding(&[dry_log()]).is_empty());
+        // A log that is no longer dry starts over too.
+        let mut d = Desk::default();
+        wake(&mut d, 0);
+        assert_eq!(d.dry_ended(dry_log(), false, false), Dried::Moved);
+    }
+
+    #[test]
+    fn the_dry_prompt_carries_the_aims_and_the_rules() {
+        let p = prompt(&[Brief {
+            event: Some(dry_log()),
+            aims: vec!["Ship the API".into(), "Write the docs".into()],
+            ..Brief::default()
+        }]);
+        assert!(p.contains(
+            "- The log has run dry: nothing is in hand and nothing is ready to start. \
+             No quest is left to start.\n"
+        ));
+        assert!(p.contains("    Aim: Ship the API\n    Aim: Write the docs\n"));
+        assert!(p.contains("at most 8"));
+        assert!(p.contains("`Filed by Warriv for: <the aim>`"));
+        assert!(p.contains("mark it reached"));
+        assert!(!more(&[Brief {
+            event: Some(dry_log()),
+            aims: vec!["A".into()],
+            ..Brief::default()
+        }])
+        .contains('\n'));
+    }
+
+    #[test]
+    fn quests_filed_for_an_aim_are_counted_by_their_note() {
+        assert_eq!(filed("Ship\nthe API"), "Filed by Warriv for: Ship the API");
+        let t = list(
+            "- [ ] A\n  Filed by Warriv for: Ship\n  After: B\n- [x] B\n  Filed by Warriv for: Ship\n- [ ] C\n  Warriv: no\n",
+        );
+        assert_eq!(filed_count(&t), 2);
+    }
+
+    #[test]
+    fn the_human_is_asked_about_the_first_aim() {
+        let s = stuck(&["Ship\nthe API".into(), "Docs".into()]);
+        assert!(s.contains("\"Ship the API\""));
+        assert!(!s.contains("Docs"));
     }
 
     fn blocked(title: &str, why: &str) -> Event {
@@ -946,6 +1480,110 @@ mod tests {
     }
 
     #[test]
+    fn driving_lifts_the_six_wakes_and_it_never_rests() {
+        let mut d = Desk::default();
+        d.drive(true);
+        for i in 0..WAKES_AN_HOUR as u64 * 3 {
+            d.hear(vec![blocked("A", &i.to_string())], false);
+            assert!(matches!(d.wake(i * 60), Wake::Go(_)));
+        }
+        assert_eq!(d.watch(None, 2000), None);
+        // Each event is still heard once.
+        assert_eq!(d.wake(2000), Wake::Nothing);
+        // Stopped, the budget counts the wakes it had.
+        d.drive(false);
+        d.hear(vec![blocked("A", "after the stop")], false);
+        assert!(matches!(d.wake(2100), Wake::Tired { first: true, .. }));
+    }
+
+    #[test]
+    fn driving_turns_the_orchestrator_on_and_errands_wait_out_the_hold() {
+        assert!(!orchestrates(false, false));
+        assert!(orchestrates(true, false));
+        assert!(orchestrates(false, true));
+        assert_eq!(when_full(false), Full::Skip);
+        assert_eq!(when_full(true), Full::Wait);
+    }
+
+    #[test]
+    fn the_tile_says_warriv_drives_whatever_else_it_says() {
+        let drive = Some(Drive::default());
+        let public = Some(Drive { ships_public: true });
+        assert_eq!(line(None, None), None);
+        assert_eq!(
+            line(Some("Warriv: settling 2".into()), None).as_deref(),
+            Some("Warriv: settling 2")
+        );
+        assert_eq!(line(None, drive).as_deref(), Some("Warriv drives"));
+        assert_eq!(
+            line(None, public).as_deref(),
+            Some("Warriv drives and ships public")
+        );
+        assert_eq!(
+            line(Some("Warriv: settling 2".into()), drive).as_deref(),
+            Some("Warriv drives, settling 2")
+        );
+        assert_eq!(
+            line(Some("Warriv: settling".into()), public).as_deref(),
+            Some("Warriv drives and ships public, settling")
+        );
+    }
+
+    #[test]
+    fn a_drive_keeps_in_json_with_ships_public_only_when_on() {
+        let off = serde_json::to_string(&Drive::default()).unwrap();
+        assert_eq!(off, "{}");
+        let on: Drive = serde_json::from_str(r#"{"ships_public": true}"#).unwrap();
+        assert!(on.ships_public);
+        assert_eq!(
+            serde_json::from_str::<Drive>("{}").unwrap(),
+            Drive::default()
+        );
+    }
+
+    #[test]
+    fn the_tile_says_what_it_settles_and_when_it_rests() {
+        let mut d = Desk::default();
+        assert_eq!(d.watch(None, 0), None);
+        d.hear(vec![blocked("A", "x")], false);
+        assert!(matches!(d.wake(0), Wake::Go(_)));
+        assert_eq!(d.watch(Some(1), 1), Some(Watch::Settling(1)));
+        // What waits for its next stop is in hand too.
+        d.hear(vec![blocked("A", "x"), blocked("B", "y")], true);
+        assert_eq!(d.watch(Some(1), 2), Some(Watch::Settling(2)));
+        assert!(Watch::Settling(2).working());
+        // Asleep with wakes left, it says nothing.
+        let mut d = Desk::default();
+        for i in 0..WAKES_AN_HOUR as u64 - 1 {
+            d.hear(vec![blocked("A", &i.to_string())], false);
+            assert!(matches!(d.wake(100 + i * 60), Wake::Go(_)));
+        }
+        assert_eq!(d.watch(None, 400), None);
+        d.hear(vec![blocked("A", "last")], false);
+        assert!(matches!(d.wake(500), Wake::Go(_)));
+        // Spent, it rests until the first wake is an hour old.
+        let rests = Watch::Rests { until: 100 + HOUR };
+        assert_eq!(d.watch(None, 600), Some(rests));
+        assert!(!rests.working());
+        assert_eq!(d.watch(None, 100 + HOUR), None);
+    }
+
+    #[test]
+    fn the_line_reads_plainly() {
+        assert_eq!(Watch::Settling(2).words(0, 0), "Warriv: settling 2");
+        assert_eq!(Watch::Settling(0).words(0, 0), "Warriv: settling");
+        // 20:40 local now, free again an hour on.
+        let local = 20 * 3600 + 40 * 60;
+        let rests = Watch::Rests {
+            until: 1_000 + HOUR,
+        };
+        assert_eq!(rests.words(local, 1_000), "Warriv rests until 21:40");
+        // Past midnight.
+        let late = 23 * 3600 + 30 * 60;
+        assert_eq!(rests.words(late, 1_000), "Warriv rests until 00:30");
+    }
+
+    #[test]
     fn the_first_prompt_gives_the_event_the_notes_and_the_last_turn() {
         let p = prompt(&[
             Brief {
@@ -955,6 +1593,7 @@ mod tests {
                     "Warriv: tried".into(),
                 ],
                 last_turn: Some("I built it.\nWhich port should it listen on?".into()),
+                aims: Vec::new(),
             },
             Brief {
                 event: Some(Event {
@@ -987,6 +1626,7 @@ mod tests {
             event: Some(blocked("A", "")),
             notes: Vec::new(),
             last_turn: Some(long),
+            aims: Vec::new(),
         }]);
         assert!(p.contains("- The quest \"A\" is blocked.\n"));
         assert!(p.contains("\u{2026}x"));
@@ -1000,6 +1640,7 @@ mod tests {
             event: Some(blocked("A", "x")),
             notes: vec!["n".into()],
             last_turn: Some("a\nb".into()),
+            aims: Vec::new(),
         }]);
         assert!(!m.contains('\n'));
         assert!(m.starts_with("While you worked, more happened. - The quest \"A\" is blocked: x"));
@@ -1015,10 +1656,47 @@ mod tests {
             "--below \"<title>\"",
             "--after \"<title>\"",
             "hx quest blocked \"<question>\" --quest \"<title>\"",
+            "hx quest aim done \"<the aim>\"",
+            "--notes \"Filed by Warriv for: <the aim>\"",
+            "hx quest note \"<title>\" \"Model: <name>\"",
+            "Never change a `Model:` line you did not write",
         ] {
             assert!(p.contains(c), "{c}");
         }
         assert!(p.contains("Change no code, start no session"));
+    }
+
+    #[test]
+    fn an_overrule_goes_where_the_quest_is_now() {
+        let said = "You assumed \u{201C}port 4100\u{201D}; instead: use 4200";
+        for m in [Mark::Working, Mark::Review, Mark::Blocked] {
+            assert_eq!(
+                overrule(Some(m), "Serve", "port 4100", "use 4200"),
+                Overrule::Tell(said.into())
+            );
+        }
+        assert_eq!(
+            overrule(Some(Mark::Open), "Serve", "port 4100", "use\n4200"),
+            Overrule::Note(format!("The human answers: {said}"))
+        );
+        for m in [Some(Mark::Done), None] {
+            let Overrule::Quest { title, notes } = overrule(m, "Serve", "port 4100", "use 4200")
+            else {
+                panic!("a done quest gets a new one");
+            };
+            assert_eq!(title, "Overrule on Serve");
+            assert!(notes.ends_with("\nThe human answers: use 4200"));
+            // Its notes must not read as an assumption themselves.
+            assert!(notes.lines().all(|l| crate::tasks::assumed(l).is_none()));
+        }
+    }
+
+    #[test]
+    fn driving_warriv_assumes_what_can_be_undone() {
+        let p = driven_prompt("hx");
+        assert!(p.contains("`hx quest note \"<title>\" \"Assumed: "));
+        assert!(p.contains("can not be undone"));
+        assert!(!p.contains("  "));
     }
 
     #[test]
@@ -1027,6 +1705,16 @@ mod tests {
         assert!(t.starts_with("Warriv, who plans this project's quests, answers: Use port 4100."));
         assert!(t.contains("`hx quest done"));
         assert!(!t.contains('\n'));
+        assert_eq!(
+            human_note(
+                "Blue,
+not green."
+            ),
+            "The human answers: Blue, not green."
+        );
+        let a = answered("hx", "Blue.");
+        assert!(a.starts_with("The human answers: Blue. Go on with this quest"));
+        assert!(a.contains("`hx quest done"));
     }
 
     #[test]
@@ -1099,7 +1787,7 @@ mod tests {
             .starts_with("say what you tried first"));
         // Handed on, it no longer wakes Warriv.
         let handed = hand_on(text, "Pay", "Which card?").unwrap();
-        assert!(events(&parse(&handed), Mode::Manual, &[]).is_empty());
+        assert!(events(&parse(&handed), Mode::Manual, &[], &[]).is_empty());
     }
 
     #[test]

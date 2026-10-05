@@ -7,6 +7,7 @@
 
 pub mod accounts;
 pub mod agent;
+pub mod aim;
 pub mod background;
 pub mod chronicle;
 pub mod cube;
@@ -25,6 +26,7 @@ pub mod release;
 pub mod runeword;
 pub mod saved;
 pub mod session;
+pub mod ship;
 pub mod ssh;
 pub mod tasks;
 pub mod title;

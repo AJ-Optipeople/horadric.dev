@@ -103,6 +103,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use crate::accounts;
 use crate::agents;
 use crate::appear;
+use crate::away::{self, AwayCard};
 use crate::caption;
 use crate::catchup::{self, Away, Catchup};
 use crate::columns::{self, Columns};
@@ -141,6 +142,9 @@ mod drive;
 
 #[path = "chronicler.rs"]
 mod chronicler;
+
+#[path = "spectating.rs"]
+mod spectating;
 
 pub use runner::ssh_prompt;
 
@@ -236,6 +240,8 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const HOTKEY_NEXT: i32 = 1;
 /// The catch-up, on demand.
 const HOTKEY_LISTEN: i32 = 2;
+/// Stops every drive of Warriv's at once.
+const HOTKEY_STOP: i32 = 3;
 /// Not in the `windows` crate's WindowsAndMessaging.
 const WM_WTSSESSION_CHANGE: u32 = 0x02B1;
 const WTS_SESSION_LOCK: usize = 7;
@@ -252,6 +258,9 @@ const SCREEN_TIMER: usize = 2;
 const GLIDE_TIMER: usize = 3;
 /// Runs while a session works, to breathe the tray icon's light.
 const BREATH_TIMER: usize = 4;
+/// Runs while the stage follows the work, to give it back at the first
+/// input.
+const SPECTATE_TIMER: usize = 5;
 const ENDED_LINGER: Duration = Duration::from_secs(20);
 /// A crash this long after resuming sessions after a crash is a crash of
 /// its own, not the same one again, so the next start resumes once more.
@@ -366,6 +375,16 @@ pub(crate) enum Input {
     /// The catch-up closed, with the session of the line clicked, if one
     /// was.
     Listened(Option<String>),
+    /// An answer typed on the away card, for the quest `title` in the
+    /// project at `dir`: to its question, or against what was `assumed`.
+    Answered {
+        dir: String,
+        title: String,
+        assumed: Option<String>,
+        text: String,
+    },
+    /// The away card closed.
+    AwayClosed,
     /// The start window's tile clicked: pick a folder for the first
     /// project.
     Pick,
@@ -489,6 +508,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
     dialog::register_class()?;
     toast::register_class()?;
     catchup::register_class()?;
+    away::register_class()?;
     questlog::register_class()?;
     start::register_class()?;
     terminal::register_class()?;
@@ -498,6 +518,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
     web::init(notify);
     let hotkey = register_hotkey(notify);
     let listen_key = register_listen_key(notify);
+    let stop_key = register_stop_key(notify);
     // Locking the screen is going away, and unlocking it coming back.
     unsafe {
         let _ = WTSRegisterSessionNotification(notify, NOTIFY_FOR_THIS_SESSION);
@@ -650,6 +671,8 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
         cube: Cell::new(None),
         tomes: RefCell::new(HashMap::new()),
         warriv: RefCell::new(HashMap::new()),
+        astir: RefCell::new(HashSet::new()),
+        warriv_line: RefCell::new(HashMap::new()),
     });
     menu::init(Rc::clone(&shared));
     let toasts = Toasts::new(Rc::clone(&shared), notify, WM_HORADRIC_TRAY);
@@ -703,8 +726,13 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             tiles_edge: None,
             hotkey,
             listen_key,
+            stop_key,
+            drives: saved.drives.clone(),
+            stopped: saved.stopped.iter().cloned().collect(),
             away: Away::default(),
+            spectating: Default::default(),
             catchup: None,
+            away_card: None,
             quest_log: None,
             journaled: HashMap::new(),
             next_serial: 1,
@@ -879,6 +907,28 @@ fn register_listen_key(hwnd: HWND) -> Option<&'static str> {
     };
     if let Err(e) = &ok {
         eprintln!("horadric: {label} is taken, no hotkey for the catch-up: {e}");
+    }
+    ok.ok().map(|_| label)
+}
+
+/// The shortcut that stops Warriv driving, or None when another app holds
+/// it. A dev instance adds Shift, as for the next waiting session.
+fn register_stop_key(hwnd: HWND) -> Option<&'static str> {
+    let (mods, label) = if horadric_hooks::dev() {
+        (MOD_CONTROL | MOD_ALT | MOD_SHIFT, "Ctrl+Alt+Shift+W")
+    } else {
+        (MOD_CONTROL | MOD_ALT, "Ctrl+Alt+W")
+    };
+    let ok = unsafe {
+        RegisterHotKey(
+            Some(hwnd),
+            HOTKEY_STOP,
+            mods | MOD_NOREPEAT,
+            u32::from(b'W'),
+        )
+    };
+    if let Err(e) = &ok {
+        eprintln!("horadric: {label} is taken, no hotkey to stop Warriv: {e}");
     }
     ok.ok().map(|_| label)
 }
@@ -1150,7 +1200,7 @@ fn tray_menu(hwnd: HWND) {
         app.count_experience();
         (
             app.recent.clone(),
-            [app.hotkey, app.listen_key],
+            [app.hotkey, app.listen_key, app.stop_key],
             !app.quiet,
             app.sounds,
             app.discord,
@@ -1174,10 +1224,12 @@ fn tray_menu(hwnd: HWND) {
         )
     })
     .unwrap_or_default();
+    let driven = with_app(|app| app.driven()).unwrap_or_default();
     let menu = tray::menu(
         &projects,
         autostart,
         hotkeys,
+        &driven,
         notify,
         sounds,
         discord,
@@ -1261,6 +1313,17 @@ fn tray_menu(hwnd: HWND) {
             if let Some(m) = with_app(|app| app.update.clone()).flatten() {
                 offer_update(&m);
             }
+        }
+        Some(Choice::Drive(key, on)) => {
+            with_app(|app| app.set_drive(&key, on));
+        }
+        Some(Choice::ShipsPublic(key, on)) => {
+            if !on || runner::ships_public(&key) {
+                with_app(|app| app.set_ships_public(&key, on));
+            }
+        }
+        Some(Choice::StopWarriv) => {
+            with_app(App::stop_warriv);
         }
         Some(Choice::EndAll) => {
             if confirm_end(None) {
@@ -2556,10 +2619,23 @@ struct App {
     hotkey: Option<&'static str>,
     /// The catch-up's shortcut, likewise.
     listen_key: Option<&'static str>,
+    /// The shortcut that stops Warriv driving, likewise.
+    stop_key: Option<&'static str>,
+    /// The projects Warriv drives, by project key, from the tray and the
+    /// quests tile's mode menu. Changed through [`App::set_drive`] and
+    /// [`App::stop_warriv`].
+    drives: BTreeMap<String, horadric_core::warriv::Drive>,
+    /// The projects whose drive was stopped: their runner starts nothing
+    /// until the human picks a mode or lets Warriv drive again.
+    stopped: HashSet<String>,
     /// Whether you are away, for the catch-up when you come back.
     away: Away,
+    /// Spectator mode: the stage following the work while you are away.
+    spectating: spectating::Spectating,
     /// The catch-up, while it is open.
     catchup: Option<Box<Catchup>>,
+    /// What happened while you were away, while it is open.
+    away_card: Option<Box<AwayCard>>,
     /// The quest log, while it is open.
     quest_log: Option<Box<QuestLog>>,
     /// Each session's phase as last journaled, with its project and name,
@@ -2833,10 +2909,12 @@ impl App {
             }
             WM_HOTKEY if wparam as i32 == HOTKEY_NEXT => self.next_waiting(),
             WM_HOTKEY if wparam as i32 == HOTKEY_LISTEN => self.listen_on_demand(),
+            WM_HOTKEY if wparam as i32 == HOTKEY_STOP => self.stop_warriv(),
             WM_TIMER if wparam == GLIDE_TIMER => {
                 crate::vsync::took(self.notify, GLIDE_TIMER);
                 self.glide();
             }
+            WM_TIMER if wparam == SPECTATE_TIMER => self.watch_return(),
             WM_TIMER if wparam == BREATH_TIMER => {
                 self.tray.step();
                 self.breathe_stage();
@@ -3421,6 +3499,7 @@ impl App {
                     };
                     self.alert_for = None;
                     self.tasks.merge_for = None;
+                    self.tasks.ship_for = None;
                     self.update_click = true;
                     self.toasts
                         .show(Kind::Done, &format!("Horadric {} is out", m.version), &text);
@@ -3793,8 +3872,15 @@ impl App {
             })
             // Empty, so one this Horadric was started with, as a dev
             // instance from a quest's worktree is, never sends `horadric
-            // quest` to another project's list.
-            .unwrap_or_else(|| vec![(TASKS_ENV.into(), String::new())]);
+            // quest` to another project's list. Warriv works on its own
+            // project's list from wherever its shell has wandered.
+            .unwrap_or_else(|| {
+                let main = match horadric_core::warriv::is_warriv(id) {
+                    true => folder_key(&cwd.to_string_lossy()),
+                    false => String::new(),
+                };
+                vec![(TASKS_ENV.into(), main)]
+            });
         let serial = self.next_serial;
         self.next_serial += 1;
         let console = Console::spawn(
@@ -3867,10 +3953,15 @@ impl App {
         if !console::is_claude(program) {
             return Vec::new();
         }
+        // The quest's model counts as the session's own choice, so the
+        // default model stays out.
+        let model = self.quest_model_args(id, args);
+        let own: Vec<String> = args.iter().chain(&model).cloned().collect();
         let mut extra =
             self.shared
                 .defaults_of(Agent::Claude)
-                .flags_for(Agent::Claude, args, bypass);
+                .flags_for(Agent::Claude, &own, bypass);
+        extra.extend(model);
         if let (Some(path), false) = (&self.status_settings, has_flag(args, "--settings")) {
             extra.push("--settings".into());
             extra.push(path.to_string_lossy().into_owned());
@@ -4987,6 +5078,7 @@ impl App {
         if let Some(a) = alert {
             self.alert_for = about;
             self.tasks.merge_for = None;
+            self.tasks.ship_for = None;
             self.update_click = false;
             self.toasts.show(Kind::Waiting, &a.title, &a.text);
         }
@@ -5012,6 +5104,7 @@ impl App {
         let file = o.file.rsplit(['/', '\\']).next().unwrap_or(&o.file);
         self.alert_for = Some(o.session.clone());
         self.tasks.merge_for = None;
+        self.tasks.ship_for = None;
         self.update_click = false;
         self.toasts.show(
             Kind::Waiting,
@@ -5037,6 +5130,10 @@ impl App {
     fn open_alert(&mut self) {
         if let Some(m) = self.tasks.merge_for.take() {
             runner::ask_for(self, runner::Menu::Merge(m));
+            return;
+        }
+        if let Some(key) = self.tasks.ship_for.take() {
+            runner::ask_for(self, runner::Menu::Ship(key));
             return;
         }
         match self.alert_for.take() {
@@ -5429,6 +5526,20 @@ impl App {
         if let Some(since) = self.away.idle(idle_secs(), unix_now()) {
             self.welcome_back(since);
         }
+        // A dev instance comes back from an hour away when told to, since
+        // an absence can not be tried while anyone uses the machine.
+        let back = store::dir().map(|d| d.join("away-now"));
+        if let Some(back) = back.filter(|b| horadric_hooks::dev() && b.exists()) {
+            let _ = std::fs::remove_file(back);
+            self.welcome_back(unix_now().saturating_sub(3600));
+        }
+        // And leaves at once, which only spectator mode looks at.
+        let left = store::dir().map(|d| d.join("spectate-now"));
+        let left = left.filter(|l| horadric_hooks::dev() && l.exists());
+        if let Some(l) = &left {
+            let _ = std::fs::remove_file(l);
+        }
+        self.spectate(left.is_some());
         // A run of work ends after a quiet spell no event marks.
         self.sync_discord();
         self.refresh_quest_log(false);
@@ -5555,7 +5666,14 @@ impl App {
             cast_without_asking: !self.tome.ask,
             stones_hidden: self.tome.hidden.clone(),
             stones_order: self.tome.order.clone(),
+            errands: self.tome.errands.clone(),
             update_told: self.update_told.clone(),
+            drives: self.drives.clone(),
+            stopped: {
+                let mut stopped: Vec<String> = self.stopped.iter().cloned().collect();
+                stopped.sort();
+                stopped
+            },
             ..Default::default()
         }
     }
@@ -5583,6 +5701,7 @@ impl App {
     /// Saves one last time and stops saving.
     fn freeze(&mut self) {
         self.save();
+        self.cut_wakes_short();
         // Nothing brings an attached pane back, so its host must not
         // outlive this app. The session itself runs on in the daemon.
         if let Ok(r) = self.shared.registry.lock() {
@@ -5896,7 +6015,56 @@ impl App {
     /// You came back after being away since `since`: say what happened, if
     /// anything did.
     fn welcome_back(&mut self, since: u64) {
+        if unix_now().saturating_sub(since) >= away::AWAY_FOR && self.tell_away(since) {
+            return;
+        }
         self.listen(since, Some(since), false);
+    }
+
+    /// Opens the away card if anything happened in a quest log since
+    /// `since`, in place of the catch-up. True when it opened.
+    fn tell_away(&mut self, since: u64) -> bool {
+        let state = unsafe { SHQueryUserNotificationState() }.map_or(5, |s| s.0);
+        if toast::hold_back(state) {
+            return false;
+        }
+        let records = store::chronicle_all();
+        let news: Vec<(String, String, chronicle::Away)> = {
+            let boards = self.shared.boards.borrow();
+            let warriv = self.shared.warriv.borrow();
+            let mut keys: Vec<&String> = boards.keys().collect();
+            keys.sort();
+            keys.into_iter()
+                .filter_map(|key| {
+                    let b = &boards[key];
+                    let has = warriv.get(key).cloned().unwrap_or_default();
+                    let a = chronicle::away(&records, key, &b.tasks, &has, since);
+                    let dir = self.project_dir(key)?;
+                    a.happened()
+                        .then(|| (project_name(key), dir.to_string_lossy().into_owned(), a))
+                })
+                .collect()
+        };
+        if news.is_empty() {
+            return false;
+        }
+        if let Some(c) = self.away_card.take() {
+            c.destroy();
+        }
+        let now = unix_now();
+        let (rows, answers) = away::rows(&news, now);
+        let sub = away::gone(now.saturating_sub(since));
+        let stage = self.stage.as_ref().map(|s| s.hwnd);
+        match AwayCard::open(Rc::clone(&self.shared), stage, sub, rows, answers) {
+            Ok(c) => {
+                self.away_card = Some(c);
+                true
+            }
+            Err(e) => {
+                eprintln!("horadric: cannot open the away card: {e}");
+                false
+            }
+        }
     }
 
     /// The catch-up from the tray or its hotkey: since this morning.
@@ -5969,6 +6137,10 @@ impl App {
     /// The session whose pane has the keyboard, with the stage in front,
     /// has been looked at, so a turn it finished is no longer unread.
     fn identify(&mut self) {
+        // What spectating shows was not looked at by anyone.
+        if self.spectating() {
+            return;
+        }
         let Some(id) = self
             .stage
             .as_ref()
@@ -6133,6 +6305,29 @@ impl App {
                     }
                 }
                 Input::SetDefault(agent, setting, value) => self.set_default(agent, setting, value),
+                Input::Answered {
+                    dir,
+                    title,
+                    assumed: None,
+                    text,
+                } => {
+                    self.human_tell(&dir, &title, &text);
+                    self.run_tasks();
+                }
+                Input::Answered {
+                    dir,
+                    title,
+                    assumed: Some(assumed),
+                    text,
+                } => {
+                    self.overrule(&dir, &title, &assumed, &text);
+                    self.run_tasks();
+                }
+                Input::AwayClosed => {
+                    if let Some(c) = self.away_card.take() {
+                        c.destroy();
+                    }
+                }
                 Input::Listened(session) => {
                     if let Some(c) = self.catchup.take() {
                         c.destroy();

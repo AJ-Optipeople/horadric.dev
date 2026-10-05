@@ -58,7 +58,7 @@ use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows_numerics::{Matrix3x2, Vector2};
 
 use crate::anim::{Look, Stance};
-use crate::board::RowState;
+use crate::board::{Ink, RowState};
 use crate::files::{Row, Tree};
 use crate::layout::{
     self, AskLayout, Button, CaptionHit, CaptionLayout, CatchupLayout, CatchupRow, ClusterLayout,
@@ -73,7 +73,7 @@ mod stone;
 pub(crate) use stone::{StoneLook, StoneState};
 
 mod questlog;
-pub(crate) use questlog::{QuestDetail, QuestLogScene, QuestRowLook};
+pub(crate) use questlog::{DetailList, QuestDetail, QuestLogScene, QuestRowLook, WakeLook};
 
 const FONT: PCWSTR = w!("Segoe UI Variable Text");
 /// For the project's name: the optical size cut for larger text.
@@ -105,6 +105,8 @@ const BEAM_H: f32 = 120.0;
 const LEAVE_SINK: f32 = 8.0;
 /// One slow breath of a busy project's wash.
 const BUSY_BREATH: Duration = Duration::from_millis(4000);
+/// One slow breath of the quests tile's edge while Warriv works.
+const WARRIV_BREATH: Duration = Duration::from_millis(3200);
 /// A glint's run along a nearly full context meter.
 const SHIMMER: Duration = Duration::from_millis(2600);
 /// More subagents than this still draw this many sparks.
@@ -310,7 +312,12 @@ pub struct TasksScene {
     /// What the header says about the whole list.
     pub summary: String,
     pub mode: String,
+    /// What the line under the header says of Warriv, and its ink.
+    pub warriv: Option<(String, Ink)>,
     pub collapsed: bool,
+    /// Warriv, a reviewer or an errand is at work in the project, and the
+    /// tile's edge breathes in Warriv's gold.
+    pub astir: bool,
 }
 
 /// What the Runetome shows.
@@ -332,8 +339,11 @@ pub struct TomeStone {
     pub cracked: bool,
     /// Where it is while it is cast: "2/4".
     pub progress: Option<String>,
-    /// A project's stone whose steps are not the ones last cast.
+    /// A project's stone whose steps are not the ones last cast, or an
+    /// errand not armed for its steps.
     pub marked: bool,
+    /// An errand whose last cast failed: its dot is red.
+    pub failed: bool,
 }
 
 /// How a stone of the tome draws.
@@ -475,6 +485,8 @@ pub struct CatchupScene<'a> {
     pub more: &'a str,
     pub hot: Option<usize>,
     pub close_hot: bool,
+    /// The fields of the rows that are fields, in order.
+    pub fields: Vec<FieldLook<'a>>,
 }
 
 /// A row of the catch-up as it is drawn. A heading uses only the text.
@@ -1094,7 +1106,7 @@ impl Painter<'_> {
             } else {
                 self.stone(gpu, r, &look(s, hot));
             }
-            if s.marked && !lifted {
+            if (s.marked || s.failed) && !lifted {
                 let e = D2D1_ELLIPSE {
                     point: Vector2 {
                         X: r.right() - 3.0,
@@ -1103,7 +1115,12 @@ impl Painter<'_> {
                     radiusX: 3.0,
                     radiusY: 3.0,
                 };
-                self.brush.SetColor(&color(theme::waiting()));
+                let dot = if s.failed {
+                    theme::error()
+                } else {
+                    theme::waiting()
+                };
+                self.brush.SetColor(&color(dot));
                 self.rt.FillEllipse(&e, self.brush);
             }
             let (text, ink) = match (&s.progress, &s.label) {
@@ -1876,7 +1893,11 @@ impl Painter<'_> {
                     }
                     self.text(&gpu.small_right, theme::legend(), look.age, age);
                 }
+                CatchupRow::Field(_) => {}
             }
+        }
+        for f in &scene.fields {
+            self.input(gpu, f);
         }
         if let Some(r) = l.more {
             self.text(&gpu.small, theme::legend(), scene.more, r);
@@ -2145,6 +2166,7 @@ impl Painter<'_> {
     unsafe fn light(&self, m: &Metrics, scene: &Scene) {
         let radius = m.tile_radius;
         self.busy_wash(scene);
+        self.astir_breath(m, scene);
         for (r, s, look) in tiles(scene) {
             let phase = &s.phase;
             let c = theme::phase_color(phase);
@@ -2228,6 +2250,44 @@ impl Painter<'_> {
                 self.glow_dot(tx, ty, 22.0, c, 0.6 * flare);
             }
         }
+    }
+
+    /// Warriv's gold round the inside of the quests tile, `breath` from 0
+    /// to 1, so the camp is seen moving without a word read: a rim and a
+    /// softer band inside it.
+    unsafe fn astir(&self, r: &Rect, radius: f32, breath: f32) {
+        let gold = theme::warriv();
+        self.stroke_rounded(
+            &r.inset(3.0),
+            radius - 3.0,
+            gold.with_alpha(0.06 + 0.12 * breath),
+            4.0,
+        );
+        self.stroke_rounded(
+            &r.inset(0.75),
+            radius - 0.75,
+            gold.with_alpha(0.3 + 0.5 * breath),
+            1.5,
+        );
+    }
+
+    /// The quests tile breathing while Warriv works.
+    unsafe fn astir_breath(&self, m: &Metrics, scene: &Scene) {
+        let (Some(l), Some(t)) = (&scene.layout.tasks, &scene.tasks) else {
+            return;
+        };
+        if !t.astir {
+            return;
+        }
+        let clock = scene
+            .now
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default();
+        self.astir(
+            &l.rect,
+            m.tile_radius,
+            motion::breathe(clock, WARRIV_BREATH),
+        );
     }
 
     /// While any of its sessions works, the project's colour glows a little
@@ -3059,7 +3119,15 @@ impl Painter<'_> {
             }
         }
         // Its name says how it ended, in item colours, apart from the lamp.
-        let ink = theme::rarity_color(s.rarity()).fade(presence);
+        // Warriv's own sessions and its errands' are in its gold instead.
+        let ink = if horadric_core::warriv::is_warriv(&s.id)
+            || horadric_core::runeword::is_errand(&s.id)
+        {
+            theme::warriv()
+        } else {
+            theme::rarity_color(s.rarity())
+        };
+        let ink = ink.fade(presence);
         self.text(&gpu.name, ink, s.label(), name_rect);
         let age_c = match phase {
             Phase::Waiting(_) => c,
@@ -3312,6 +3380,11 @@ impl Painter<'_> {
     /// and in the header the mode and a plus for another item.
     unsafe fn tasks(&self, gpu: &Gpu, m: &Metrics, scene: &Scene, l: &TasksLayout, t: &TasksScene) {
         self.screen(gpu, &l.rect, m.tile_radius);
+        // Held at half a breath where animations are off, and drawn over
+        // the kept layer every frame where they are on.
+        if t.astir && !scene.ambient {
+            self.astir(&l.rect, m.tile_radius, 0.5);
+        }
 
         let pad = INNER_PAD;
         let h = l.header;
@@ -3365,6 +3438,22 @@ impl Painter<'_> {
             '\u{E70D}',
             Rect::new(x + word_w + caret_gap, l.mode.y, caret_w, l.mode.h),
         );
+
+        // Under the mode, so it reads as part of how the list runs.
+        if let (Some(r), Some((words, ink))) = (l.warriv, &t.warriv) {
+            let ink = match ink {
+                Ink::Working => theme::working(),
+                Ink::Drives => theme::quest(),
+                Ink::Quiet => theme::text_dim(),
+            };
+            let right = l.mode.right();
+            self.text(
+                &gpu.small_right,
+                ink,
+                words,
+                Rect::new(r.x + pad, r.y, right - r.x - pad, r.h),
+            );
+        }
 
         let add = scene.button(Hit::TasksAdd);
         let (fill, ink) = theme::button_look(add);

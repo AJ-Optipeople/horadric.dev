@@ -59,6 +59,7 @@ pub mod paths;
 pub mod rain;
 pub mod screens;
 pub mod shell;
+pub mod spectator;
 pub mod theme;
 pub mod viewer;
 pub mod viewport;
@@ -75,6 +76,8 @@ mod appear;
 mod ask;
 #[cfg(windows)]
 pub mod autostart;
+#[cfg(windows)]
+mod away;
 #[cfg(windows)]
 mod backdrop;
 #[cfg(windows)]
