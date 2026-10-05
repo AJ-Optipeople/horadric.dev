@@ -150,7 +150,21 @@ impl Limits {
             .max_by(|a, b| a.0.total_cmp(&b.0))
             .map(|&(_, t)| t)
     }
+    /// The fullest limit at `now`, with its name, when it is at
+    /// `PACE_AT` or more: the runner starts nothing then, rather than learn
+    /// at 100 % that a session it started cannot finish its turn. A limit
+    /// whose reset has passed is empty again.
+    pub fn too_full(&self, now: u64) -> Option<(&'static str, f32)> {
+        self.named()
+            .into_iter()
+            .map(|(name, l)| (name, l.at(now).0))
+            .filter(|&(_, used)| used >= PACE_AT)
+            .max_by(|a, b| a.1.total_cmp(&b.1))
+    }
 }
+
+/// How full, in percent, a limit may be before the runner starts no more.
+pub const PACE_AT: f32 = 90.0;
 
 /// The limits as last heard, and when, in Unix seconds.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -588,6 +602,29 @@ mod tests {
         assert_eq!(l.out_until(100, true), Some(500));
         // Nothing left to reset, so nothing to wait for.
         assert_eq!(l.out_until(9000, true), None);
+    }
+
+    #[test]
+    fn the_runner_paces_at_ninety_percent_of_the_fullest_limit() {
+        let l = Limits {
+            five_hour: limit(92.0, 500),
+            seven_day: limit(95.0, 9000),
+            spend: None,
+        };
+        assert_eq!(l.too_full(100), Some(("Week", 95.0)));
+        let under = Limits {
+            five_hour: limit(89.9, 500),
+            ..Limits::default()
+        };
+        assert_eq!(under.too_full(100), None);
+        assert_eq!(Limits::default().too_full(100), None);
+        let edge = Limits {
+            five_hour: limit(90.0, 500),
+            ..Limits::default()
+        };
+        assert_eq!(edge.too_full(100), Some(("Session", 90.0)));
+        // Reset since it was heard, so it is empty again.
+        assert_eq!(edge.too_full(500), None);
     }
 
     #[test]

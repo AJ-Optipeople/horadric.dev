@@ -3290,7 +3290,11 @@ not have. Built in this order: 1, 4, 5, 6, then 2 and 3.
   to 16, and the menu offers 1, 2, 4, 8 and 16. The runner stops
   starting quests while the fullest limit the status line reports is at
   90 % or more, rather than learning at 100 % mid turn. The 10 second
-  gap between starts and every other fuse stays.
+  gap between starts and every other fuse stays. Built on 2026-10-05:
+  `Limits::too_full` is the check, the hold says "Quests wait on
+  usage" once, and tombs stay at most 8, since a human picks among
+  them. Seen on a dev instance with `cmd.exe`: starts 10 s apart, a
+  faked 92 % held the next for a minute, 50 % let it start.
 - **6. Quests in worktrees skip permission prompts.** A runner or click
   started quest in its own worktree runs with prompts bypassed, so it
   never stops for one. Sessions in the main tree, Warriv included, keep

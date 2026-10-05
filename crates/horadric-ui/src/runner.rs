@@ -19,7 +19,9 @@
 //! - review, blocked and unanswered items are announced once each;
 //! - with nothing in hand, the next open item starts;
 //! - while a usage limit is used up nothing starts, and a session the
-//!   limit stopped is told to go on once it has reset.
+//!   limit stopped is told to go on once it has reset;
+//! - while one is 90 % used nothing starts either, so the sessions
+//!   running have what is left to finish their turns.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -30,7 +32,7 @@ use std::time::{Duration, Instant, SystemTime};
 use horadric_core::chronicle::{self, Happened};
 use horadric_core::journal::{self, Commit, Entry, What};
 use horadric_core::tasks::{self, Holder, Mark, Mode, Next, Task, Wait};
-use horadric_core::usage::format_until;
+use horadric_core::usage::{self, format_until};
 use horadric_core::worktree::{self, Worktree};
 use horadric_core::{fleet, ssh, tombs, Phase, WaitReason};
 use horadric_hooks::tasks as file;
@@ -914,6 +916,7 @@ impl App {
         let now = unix_now();
         self.watch_refusals(&boards, now);
         let held = self.held_until(now);
+        let paced = self.too_full(now);
         let mut closed = false;
         let mut said = Vec::new();
         let mut waiting = false;
@@ -926,7 +929,7 @@ impl App {
             }
             self.nudge(b);
             said.extend(self.worth_saying(key, b));
-            if held.is_none() {
+            if held.is_none() && paced.is_none() {
                 if !self.start_tombs(key, b) {
                     self.start_next(key, b);
                 }
@@ -963,6 +966,19 @@ impl App {
                 format!(
                     "The quest log goes on in {}, once it resets.",
                     format_until(at.saturating_sub(now))
+                ),
+            ));
+        }
+        if let (None, Some((name, used)), true) = (held, paced, waiting) {
+            // One key while it holds, so it is said once however the
+            // percent moves.
+            said.push((
+                "pace".to_string(),
+                "Quests wait on usage".to_string(),
+                format!(
+                    "The {} limit is at {used:.0} %. No quest starts until it is under {:.0} %.",
+                    name.to_lowercase(),
+                    usage::PACE_AT
                 ),
             ));
         }
@@ -1055,6 +1071,18 @@ impl App {
             .map(|t| t + AFTER_RESET);
         let refused = self.tasks.refused.values().filter_map(|r| r.at);
         heard.into_iter().chain(refused).filter(|&t| t > now).max()
+    }
+
+    /// The limit too full for the runner to start anything, as the status
+    /// line last reported it.
+    fn too_full(&self, now: u64) -> Option<(&'static str, f32)> {
+        self.shared
+            .usage
+            .lock()
+            .ok()?
+            .as_ref()?
+            .limits
+            .too_full(now)
     }
 
     /// Ends the sessions whose items are done, once they are not mid turn:
@@ -1724,7 +1752,7 @@ fn confirm_delete(title: &str) -> bool {
 
 /// How many at once the mode menu offers. The config takes up to
 /// `tasks::MOST_PARALLEL`.
-const AT_ONCE: [usize; 4] = [1, 2, 3, 4];
+const AT_ONCE: [usize; 5] = [1, 2, 4, 8, 16];
 
 fn mode_menu(key: &str) {
     const EDIT: usize = 10;

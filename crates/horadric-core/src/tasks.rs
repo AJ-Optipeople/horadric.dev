@@ -763,7 +763,7 @@ fn with_setting(config: &str, key: &str, value: Value) -> String {
 
 /// At most this many items in hand at once, so a typo in the config can
 /// not start a crowd of agents.
-pub const MOST_PARALLEL: usize = 8;
+pub const MOST_PARALLEL: usize = 16;
 
 /// How many items the runner holds at once, from `"tasks": {"parallel":
 /// 3}` in a `config.json`. One when it says nothing or nonsense.
