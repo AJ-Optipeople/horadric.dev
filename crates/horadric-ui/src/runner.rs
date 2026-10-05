@@ -1613,8 +1613,25 @@ impl App {
             .map(|mut l| std::mem::take(&mut *l))
             .unwrap_or_default();
         for l in landed {
+            let mut holder = String::new();
             if let Some(titles) = self.tasks.landing.get_mut(&l.key) {
+                if let Some((_, h)) = titles.iter().find(|(t, _)| *t == l.title) {
+                    holder = h.clone();
+                }
                 titles.retain(|(t, _)| *t != l.title);
+            }
+            // The day's look back counts these, to see what keeps failing.
+            if let Landing::Failed(why, _) = &l.landing {
+                store::chronicle(&chronicle::Record {
+                    at: unix_now(),
+                    project: l.key.clone(),
+                    quest: holder,
+                    title: l.title.clone(),
+                    what: Happened::NotMerged {
+                        branch: l.w.branch.clone(),
+                        failure: why.clone(),
+                    },
+                });
             }
             let main = PathBuf::from(&l.w.main);
             let branch = l.w.branch.clone();

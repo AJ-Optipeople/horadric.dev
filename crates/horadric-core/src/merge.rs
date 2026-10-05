@@ -50,7 +50,8 @@ pub fn plan(checks: &[String]) -> Vec<Step> {
 }
 
 /// What a failed step means.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Failure {
     /// The rebase stopped on a conflict, and was undone.
     Conflict,

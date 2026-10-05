@@ -17,6 +17,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::journal::{self, Commit};
+use crate::merge::Failure;
 use crate::tasks::{Mark, Task};
 use crate::warriv::Kind;
 use crate::{tombs, Agent};
@@ -90,6 +91,8 @@ pub enum Happened {
         #[serde(default, skip_serializing_if = "String::is_empty")]
         checked: String,
     },
+    /// The quest's branch did not merge by itself, for `failure`.
+    NotMerged { branch: String, failure: Failure },
     /// The project's "Ship Local" stone was cast. It names no quest.
     Shipped,
     /// Warriv woke, the session `wake`, and was given these events. Given
@@ -160,6 +163,8 @@ pub enum Command {
     Add,
     /// `quest blocked --quest`, a quest handed to the human.
     Blocked,
+    /// `quest fix`, a quest a review sent back.
+    Fix,
 }
 
 /// How a wake closed.
@@ -632,6 +637,7 @@ fn wake_line(w: &WarrivWake) -> AwayLine {
                 Command::Note => format!("noted on {t}"),
                 Command::Add => format!("added {t}"),
                 Command::Blocked => format!("handed {t} to you"),
+                Command::Fix => format!("sent {t} back"),
             }
         })
         .collect();
@@ -678,6 +684,7 @@ fn wake_line(w: &WarrivWake) -> AwayLine {
                 Kind::Stalled => "the log stalled".to_string(),
                 Kind::Dry => "the log ran dry".to_string(),
                 Kind::Round => "a round".to_string(),
+                Kind::LookBack => "the day's look back".to_string(),
                 Kind::Blocked => format!("{} blocked", quoted(&e.quest)),
                 Kind::Asks => format!("{} stopped", quoted(&e.quest)),
                 Kind::Tangled => format!("{} tangled", quoted(&e.quest)),
@@ -846,7 +853,7 @@ pub fn quests(
             }
             Happened::Commits { commits } => q.commits = commits.clone(),
             Happened::Merged { branch, .. } => q.merged = Some(branch.clone()),
-            Happened::Shipped | Happened::Assumed { .. } => {}
+            Happened::Shipped | Happened::Assumed { .. } | Happened::NotMerged { .. } => {}
         }
     }
     for t in list {

@@ -149,6 +149,9 @@ pub enum Kind {
     /// While it drives: time to look at the whole project, by the clock,
     /// after a landing or as the human leaves. No quest is its cause.
     Round,
+    /// The first round after 04:00 also looks back at the day for what
+    /// keeps going wrong. Told beside that round.
+    LookBack,
 }
 
 impl Kind {
@@ -164,7 +167,7 @@ impl Kind {
             Kind::Asks => "stopped without saying it is completed",
             Kind::Tangled => "can not start: its After: lines are tangled",
             Kind::Merge => "is completed, but did not merge into main by itself",
-            Kind::Stalled | Kind::Dry | Kind::Round => "",
+            Kind::Stalled | Kind::Dry | Kind::Round | Kind::LookBack => "",
         }
     }
 }
@@ -351,9 +354,11 @@ impl Desk {
         let keys: BTreeSet<String> = now.iter().map(Event::key).collect();
         self.seen.retain(|k| keys.contains(k));
         self.human.retain(|e| keys.contains(&e.key()));
-        // A failed merge and a round are not in the log: they hold until told.
-        self.queue
-            .retain(|e| matches!(e.kind, Kind::Merge | Kind::Round) || keys.contains(&e.key()));
+        // A failed merge, a round and a look back are not in the log: they
+        // hold until told.
+        self.queue.retain(|e| {
+            matches!(e.kind, Kind::Merge | Kind::Round | Kind::LookBack) || keys.contains(&e.key())
+        });
         for e in now {
             if !self.seen.insert(e.key()) {
                 continue;
@@ -419,7 +424,23 @@ impl Desk {
         self.driving = on;
         if !on {
             self.round_at = None;
-            self.queue.retain(|e| e.kind != Kind::Round);
+            self.queue
+                .retain(|e| !matches!(e.kind, Kind::Round | Kind::LookBack));
+        }
+    }
+
+    /// The day's look back joins the round waiting, while Warriv drives,
+    /// when `due` says none was told since 04:00. `due` reads the
+    /// chronicle, so it is asked only then.
+    pub fn look_back(&mut self, due: impl FnOnce() -> bool) {
+        let round = self.queue.iter().any(|e| e.kind == Kind::Round);
+        let there = self.queue.iter().any(|e| e.kind == Kind::LookBack);
+        if self.driving && round && !there && due() {
+            self.queue.push(Event {
+                kind: Kind::LookBack,
+                title: String::new(),
+                detail: String::new(),
+            });
         }
     }
 
@@ -549,6 +570,16 @@ pub struct Brief {
     pub aims: Vec<String>,
     /// The whole project, for a round.
     pub picture: Option<Picture>,
+    /// What the chronicle shows since the last look back, for one.
+    pub looked: Option<Looked>,
+}
+
+/// What a look back is given: the day in a line and what happened more
+/// than once.
+#[derive(Debug, Clone, Default)]
+pub struct Looked {
+    pub day: String,
+    pub patterns: Vec<String>,
 }
 
 /// What a round sees of the project beside its memory, as the app finds
@@ -728,6 +759,7 @@ fn brief(b: &Brief) -> String {
     let mut out = match e.kind {
         Kind::Stalled => format!("- The log is stalled. {}\n", e.detail),
         Kind::Round => round(&e.detail, b.picture.as_ref()),
+        Kind::LookBack => look_back(b.looked.as_ref()),
         Kind::Dry => {
             let mut s = format!(
                 "- The log has run dry: nothing is in hand and nothing is ready to start. {}\n  \
@@ -880,6 +912,42 @@ fn round(why: &str, p: Option<&Picture>) -> String {
     out.push_str(
         "  Read the Open part of your memory for what you were waiting to see. If nothing \
          needs doing, write one line to Lately saying so, and stop.\n",
+    );
+    out
+}
+
+/// The day's look back, told beside the first round after 04:00: what
+/// keeps going wrong becomes a quest, and what was learned a rule.
+fn look_back(l: Option<&Looked>) -> String {
+    let mut out = String::from(
+        "- It is the first round after 04:00, so look back at the day too, for what keeps \
+         going wrong rather than what went wrong once.\n",
+    );
+    let Some(l) = l else {
+        return out;
+    };
+    if !l.day.is_empty() {
+        out.push_str(&format!(
+            "  Since the last look back, a day at most: {}.\n",
+            one_line(&l.day)
+        ));
+    }
+    if l.patterns.is_empty() {
+        out.push_str(
+            "  The chronicle shows nothing that happened twice. Write one line to Lately \
+             saying the day was clean.\n",
+        );
+        return out;
+    }
+    out.push_str("  What happened more than once:\n");
+    for p in &l.patterns {
+        out.push_str(&format!("    - {}\n", one_line(p)));
+    }
+    out.push_str(
+        "  File one quest for each of these that moves the project past it, unless a quest \
+         in the log already does, with what was seen in its notes. Where one teaches how \
+         this project wants things done, write that as a rule in your memory's Rules, so it \
+         holds from now on. Write the look back to Lately in one line.\n",
     );
     out
 }
@@ -1725,6 +1793,69 @@ mod tests {
     }
 
     #[test]
+    fn the_look_back_joins_a_round_once_it_is_due() {
+        let look = Event {
+            kind: Kind::LookBack,
+            title: String::new(),
+            detail: String::new(),
+        };
+        let mut d = Desk::default();
+        d.drive(true);
+        // No round waits: the chronicle is not even read.
+        d.look_back(|| panic!("read without a round"));
+        assert_eq!(d.wake(0), Wake::Nothing);
+        d.round(Why::Hour, 0);
+        d.look_back(|| false);
+        assert_eq!(d.wake(0), Wake::Go(vec![a_round(Why::Hour.says())]));
+        d.round(Why::Hour, 10);
+        d.look_back(|| true);
+        d.look_back(|| true);
+        // Kept through a look at the log, which never holds it.
+        d.hear(Vec::new(), false);
+        assert_eq!(
+            d.wake(10),
+            Wake::Go(vec![a_round(Why::Hour.says()), look.clone()])
+        );
+        // Not driving, there is none, and turning it off drops one.
+        d.round(Why::Hour, 20);
+        d.look_back(|| true);
+        d.drive(false);
+        assert_eq!(d.wake(20), Wake::Nothing);
+        d.look_back(|| true);
+        assert_eq!(d.wake(20), Wake::Nothing);
+    }
+
+    #[test]
+    fn the_look_back_carries_the_patterns_and_asks_for_quests_and_rules() {
+        let look = |looked| {
+            prompt(&[Brief {
+                event: Some(Event {
+                    kind: Kind::LookBack,
+                    title: String::new(),
+                    detail: String::new(),
+                }),
+                looked,
+                ..Brief::default()
+            }])
+        };
+        let p = look(Some(Looked {
+            day: "3 quests completed".into(),
+            patterns: vec!["2 merges stopped on a conflict".into()],
+        }));
+        assert!(p.contains("first round after 04:00"));
+        assert!(p.contains("Since the last look back, a day at most: 3 quests completed.\n"));
+        assert!(p.contains("    - 2 merges stopped on a conflict\n"));
+        assert!(p.contains(
+            "File one quest for each of these that moves the project past it, \
+                            unless a quest in the log already does"
+        ));
+        assert!(p.contains("as a rule in your memory's Rules"));
+        let clean = look(Some(Looked::default()));
+        assert!(clean.contains("nothing that happened twice"));
+        assert!(!clean.contains("File one quest"));
+    }
+
+    #[test]
     fn a_round_is_heard_by_nobody_but_warriv() {
         let mut d = Desk::default();
         d.drive(true);
@@ -2206,6 +2337,7 @@ mod tests {
                 last_turn: Some("I built it.\nWhich port should it listen on?".into()),
                 aims: Vec::new(),
                 picture: None,
+                looked: None,
             },
             Brief {
                 event: Some(Event {
@@ -2240,6 +2372,7 @@ mod tests {
             last_turn: Some(long),
             aims: Vec::new(),
             picture: None,
+            looked: None,
         }]);
         assert!(p.contains("- The quest \"A\" is blocked.\n"));
         assert!(p.contains("\u{2026}x"));
@@ -2255,6 +2388,7 @@ mod tests {
             last_turn: Some("a\nb".into()),
             aims: Vec::new(),
             picture: None,
+            looked: None,
         }]);
         assert!(!m.contains('\n'));
         assert!(m.starts_with("While you worked, more happened. - The quest \"A\" is blocked: x"));

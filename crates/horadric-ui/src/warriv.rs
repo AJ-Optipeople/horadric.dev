@@ -15,9 +15,9 @@ use std::time::{Instant, SystemTime};
 use horadric_core::chronicle::{self, Happened, Woken};
 use horadric_core::tasks::{self, Mark, Mode, Task};
 use horadric_core::warriv::{
-    self, Brief, Desk, Dried, Drive, Event, Kind, Picture, Review, Reviews, Wake, Why,
+    self, Brief, Desk, Dried, Drive, Event, Kind, Looked, Picture, Review, Reviews, Wake, Why,
 };
-use horadric_core::{runeword, ship, tombs, Agent, Phase};
+use horadric_core::{lookback, runeword, ship, tombs, Agent, Phase};
 use horadric_hooks::tasks as file;
 
 use super::{horadric_command, Board};
@@ -130,6 +130,20 @@ impl Camp {
     }
 }
 
+/// What the day's look back is given: the chronicle since the last one,
+/// read for what happened more than once.
+fn looked(key: &str) -> Looked {
+    let records = store::chronicle_all();
+    let since = lookback::since(&records, key, unix_now());
+    Looked {
+        day: lookback::day(&records, key, since),
+        patterns: lookback::patterns(&records, key, since)
+            .iter()
+            .map(lookback::Pattern::line)
+            .collect(),
+    }
+}
+
 /// The line for a wake given `events`.
 fn woke(id: &str, events: &[Event]) -> Happened {
     Happened::WarrivWoke {
@@ -212,6 +226,10 @@ impl App {
         }
         camp.desk.drive(drive.is_some());
         camp.desk.hourly(unix_now());
+        camp.desk.look_back(|| {
+            let offset = crate::questlog::utc_offset(unix_now());
+            lookback::due(&store::chronicle_all(), key, unix_now(), offset)
+        });
         camp.desk.hear(now.clone(), camp.awake.is_some());
         let mut closed = self.wake(key, b, &mut camp, &now);
         let holding = camp.desk.holding(&now);
@@ -478,6 +496,7 @@ impl App {
                         _ => Vec::new(),
                     },
                     picture: (e.kind == Kind::Round).then(|| self.picture(key, b)),
+                    looked: (e.kind == Kind::LookBack).then(|| looked(key)),
                 }
             })
             .collect()

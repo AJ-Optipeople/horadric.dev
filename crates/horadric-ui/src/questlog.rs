@@ -554,6 +554,7 @@ pub fn kind_word(kind: Kind) -> &'static str {
         Kind::Stalled => "stalled",
         Kind::Dry => "ran dry",
         Kind::Round => "a round",
+        Kind::LookBack => "looked back",
     }
 }
 
@@ -564,6 +565,7 @@ pub fn command_word(c: Command) -> &'static str {
         Command::Note => "noted",
         Command::Add => "added",
         Command::Blocked => "handed on",
+        Command::Fix => "sent back",
     }
 }
 

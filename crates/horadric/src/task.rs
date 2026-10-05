@@ -419,7 +419,7 @@ fn fix(cwd: &Path, title: &str, what: &str) -> Result<(), String> {
     let t = warriv::reviewed(&file::read(&project), title)?;
     let heard = post_app(&TasksChanged {
         dir: project.to_string_lossy().into_owned(),
-        quest: Some(t.title),
+        quest: Some(t.title.clone()),
         fix: Some(what.to_string()),
         by: session(),
         ..TasksChanged::default()
@@ -427,6 +427,7 @@ fn fix(cwd: &Path, title: &str, what: &str) -> Result<(), String> {
     if heard != Some(200) {
         return Err("Horadric did not hear it. Add a note to the quest instead.".into());
     }
+    warriv_ran(&project, Command::Fix, &t.title, what);
     println!("Sent back. Horadric tells its session, or files a fix-up quest; stop here.");
     Ok(())
 }

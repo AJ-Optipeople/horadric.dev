@@ -4064,6 +4064,32 @@ merge conflicts, a flaky check, sessions that stopped without
 reporting, quests that came back from review twice. Each pattern
 becomes a quest, and a lesson worth keeping becomes a rule.
 
+**Built on 2026-10-05**: the look back is an event of its own,
+`Kind::LookBack`, which `Desk::look_back` puts beside a waiting round
+while driving when `lookback::due` says none was told since the latest
+04:00 local. Due reads the chronicle (a `warriv_woke` line with a
+`look_back` event), so a reload never brings a second one, and it is
+read only when a round waits. The patterns are found by
+`lookback::patterns`, pure and tested, over the project's chronicle
+since the last look back (a day at most): two or more rebases stopped
+on a conflict, a check red two or more times, two or more wakes for a
+session that stopped without reporting, and a quest that came back from
+review twice (by `quest fix`, or taken again after `[?]`, the larger of
+the two, counted over its whole story). The chronicle did not record
+those first two, so a merge that fails now writes `not_merged` with its
+`merge::Failure`, and the reviewer's `quest fix` is a `warriv_ran` line
+with the command `fix`. The round's prompt gets the day in a line
+(`lookback::day`) and each pattern as a line, and says to file a quest
+per pattern unless one in the log already does, to write what it taught
+as a rule, and one Lately line; a clean day is one Lately line. Seen on
+a dev instance (port 4110, scratch `APPDATA`, Haiku) with fake
+chronicle lines in a scratch repository: `round-now` woke Warriv with a
+round and the look back together, and it filed five quests (the
+conflicts, the red check, one per silent session, the twice reviewed
+quest) with `Warriv:` notes and wrote a rule and Open lines to its
+memory. Haiku also tried to commit the memory itself, which the
+permission prompt stopped.
+
 **The switch and the stop.** "Warriv drives" and "and ships public" are
 in the tray menu and the quests tile's mode menu; the quests tile reads
 "Warriv drives" in gold while it is on. A tray item and a hotkey
