@@ -51,6 +51,8 @@ Usage:
                                `horadric task` is the same, from before the rename
   horadric runeword list         Every stone of this project's Runetome: its runeword name,
                                label and steps, and why any does not parse
+  horadric runeword cast NAME    Cast that stone of this project's Runetome, in a session
+                               of its own when it needs one
   horadric serve                 Listen for Claude Code hook events and show a live table
   horadric hooks install         Add Horadric hooks to ~/.claude/settings.json
   horadric hooks uninstall       Remove them

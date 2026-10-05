@@ -7,6 +7,10 @@ use crate::chronicle::{Happened, Record};
 /// The project stone a proposal casts.
 pub const STONE: &str = "Ship Local";
 
+/// The project stone that cuts a public release, which every install is
+/// offered.
+pub const PUBLIC: &str = "Ship Public";
+
 /// Fewer landed quests are not worth a reload.
 pub const AT_LEAST: usize = 3;
 

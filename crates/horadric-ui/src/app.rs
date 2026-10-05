@@ -2899,6 +2899,9 @@ impl App {
                             if let (Some(quest), Some(fix)) = (&t.quest, &t.fix) {
                                 self.hear_fix(&t.dir, quest, fix);
                             }
+                            if let Some(label) = &t.cast {
+                                self.cast_from_shell(&t.dir, label, t.by.as_deref());
+                            }
                             self.refresh_boards(true);
                             self.run_tasks();
                         }

@@ -30,7 +30,7 @@ use crate::menu::{self, Item};
 use crate::render::TomeStone;
 use crate::store;
 use crate::toast::Kind;
-use crate::window::{project_key, project_name};
+use crate::window::{folder_key, project_key, project_name};
 
 /// How long apart the pieces of a `keys` step are written, so the agent
 /// takes each as typed rather than as one paste.
@@ -960,6 +960,58 @@ impl App {
                 .cast
                 .insert(cast_key(key, label), runeword::fingerprint(&runes));
             self.save();
+        }
+        self.redraw_tiles();
+    }
+
+    /// `horadric runeword cast` heard from the project in `dir`: the stone
+    /// cast unattended, on the project when it needs no session, else in
+    /// a fresh session of its own in the main tree, named after it. What
+    /// a Warriv may cast is `warriv::may_cast`.
+    pub(in crate::app) fn cast_from_shell(&mut self, dir: &str, label: &str, by: Option<&str>) {
+        let key = folder_key(dir);
+        let by_warriv = by.is_some_and(horadric_core::warriv::is_warriv);
+        let drive = self.drives.get(&key).copied();
+        let refused = horadric_core::warriv::may_cast(by_warriv, drive, label)
+            .err()
+            .or_else(|| {
+                (!self.has_stone(&key, label)).then(|| "the project has no such stone".into())
+            });
+        if let Some(why) = refused {
+            eprintln!("horadric: not casting \"{label}\": {why}");
+            self.toasts
+                .show(Kind::Failed, &format!("Cannot cast {label}"), &why);
+            return;
+        }
+        let Some(stone) = self.stone(&key, label) else {
+            return;
+        };
+        let runes = stone.runes().map(<[Rune]>::to_vec).unwrap_or_default();
+        if stone.sessionless() {
+            self.cast_on_project(&key, label, runes);
+        } else {
+            let started = self
+                .project_dir(&key)
+                .ok_or_else(|| "the project has no folder".to_string())
+                .and_then(|dir| {
+                    let slug = horadric_core::tasks::slug(label);
+                    let id = self.unique_id(if slug.is_empty() { "cast" } else { &slug });
+                    self.launch_cast(&id, dir, label, runes)
+                });
+            if let Err(e) = started {
+                self.toasts
+                    .show(Kind::Failed, &format!("Cannot cast {label}"), &e);
+                return;
+            }
+        }
+        if label == ship::STONE {
+            store::chronicle(&chronicle::Record {
+                at: unix_now(),
+                project: key.clone(),
+                quest: String::new(),
+                title: String::new(),
+                what: Happened::Shipped,
+            });
         }
         self.redraw_tiles();
     }

@@ -16,6 +16,7 @@ use std::collections::{BTreeSet, VecDeque};
 use serde_json::Value;
 
 use crate::merge::{add_fix_up, FixUp};
+use crate::runeword::{describe, due, Armed, Every};
 use crate::session::made_from;
 use crate::tasks::{
     end_of, find, insert_note, insert_with_notes, item_line, one_line, parse, readiness,
@@ -145,6 +146,9 @@ pub enum Kind {
     /// The same with an aim open, even with no quest left: Warriv files the
     /// next quests toward it.
     Dry,
+    /// While it drives: time to look at the whole project, by the clock,
+    /// after a landing or as the human leaves. No quest is its cause.
+    Round,
 }
 
 impl Kind {
@@ -160,7 +164,7 @@ impl Kind {
             Kind::Asks => "stopped without saying it is completed",
             Kind::Tangled => "can not start: its After: lines are tangled",
             Kind::Merge => "is completed, but did not merge into main by itself",
-            Kind::Stalled | Kind::Dry => "",
+            Kind::Stalled | Kind::Dry | Kind::Round => "",
         }
     }
 }
@@ -288,6 +292,30 @@ pub struct Desk {
     dry: usize,
     /// Warriv drives the project, which lifts the budget on its wakes.
     driving: bool,
+    /// When the last round was due, while it drives: the next by the
+    /// clock is [`HOUR`] after.
+    round_at: Option<u64>,
+}
+
+/// Why a round is due.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Why {
+    /// An hour has passed since the last.
+    Hour,
+    /// A quest landed on `main`.
+    Landed,
+    /// The human left.
+    Left,
+}
+
+impl Why {
+    fn says(self) -> &'static str {
+        match self {
+            Why::Hour => "an hour has passed since the last round",
+            Why::Landed => "a quest landed on main",
+            Why::Left => "the human left",
+        }
+    }
 }
 
 /// How a wake given the dry log ended.
@@ -323,8 +351,9 @@ impl Desk {
         let keys: BTreeSet<String> = now.iter().map(Event::key).collect();
         self.seen.retain(|k| keys.contains(k));
         self.human.retain(|e| keys.contains(&e.key()));
+        // A failed merge and a round are not in the log: they hold until told.
         self.queue
-            .retain(|e| e.kind == Kind::Merge || keys.contains(&e.key()));
+            .retain(|e| matches!(e.kind, Kind::Merge | Kind::Round) || keys.contains(&e.key()));
         for e in now {
             if !self.seen.insert(e.key()) {
                 continue;
@@ -388,6 +417,44 @@ impl Desk {
     /// event is heard once and its own doing never wakes it.
     pub fn drive(&mut self, on: bool) {
         self.driving = on;
+        if !on {
+            self.round_at = None;
+            self.queue.retain(|e| e.kind != Kind::Round);
+        }
+    }
+
+    /// A round is due at `now` for `why`, while Warriv drives. One waiting
+    /// already takes the reason too, so rounds never pile up, and one due
+    /// while Warriv is awake is told at its next stop, as any event is.
+    /// The clock's hour starts again from here.
+    pub fn round(&mut self, why: Why, now: u64) {
+        if !self.driving {
+            return;
+        }
+        self.round_at = Some(now);
+        let says = why.says();
+        match self.queue.iter_mut().find(|e| e.kind == Kind::Round) {
+            Some(e) if e.detail.split("; ").any(|d| d == says) => {}
+            Some(e) => e.detail = format!("{}; {says}", e.detail),
+            None => self.queue.push(Event {
+                kind: Kind::Round,
+                title: String::new(),
+                detail: says.to_string(),
+            }),
+        }
+    }
+
+    /// The clock's round, [`HOUR`] after the last one was due. The first
+    /// look while driving, after the switch or a reload, starts the hour.
+    pub fn hourly(&mut self, now: u64) {
+        if !self.driving {
+            return;
+        }
+        match self.round_at {
+            None => self.round_at = Some(now),
+            Some(at) if now >= at + HOUR => self.round(Why::Hour, now),
+            Some(_) => {}
+        }
     }
 
     /// Whether events wait.
@@ -480,7 +547,28 @@ pub struct Brief {
     pub last_turn: Option<String>,
     /// The open aims, for a dry log.
     pub aims: Vec<String>,
+    /// The whole project, for a round.
+    pub picture: Option<Picture>,
 }
+
+/// What a round sees of the project beside its memory, as the app finds
+/// it when the round is told.
+#[derive(Debug, Clone, Default)]
+pub struct Picture {
+    /// The log's quests as they stand.
+    pub tasks: Vec<Task>,
+    pub aims: Vec<String>,
+    /// How `main`'s checks stand, a line.
+    pub checks: String,
+    /// Each armed errand, a line with when it goes next.
+    pub errands: Vec<String>,
+    /// The stones the project has, by label.
+    pub stones: Vec<String>,
+}
+
+/// At most this many quests not done are listed in a round's prompt, the
+/// first in the log's order, since a first prompt goes on a command line.
+const ROUND_QUESTS: usize = 40;
 
 /// What Warriv is told beside its first prompt, every time it starts: who
 /// it is, what it may do, and how. `horadric` is how to run this Horadric
@@ -545,8 +633,42 @@ pub fn driven_prompt(horadric: &str) -> String {
          overrules in one line what they would have chosen otherwise. Hand a quest to \
          the human only for a choice that can not be undone (deleting data, \
          publishing, spending money, an account) or that only the human can know. A \
-         quest handed on no longer stops the list: the rest of the caravan moves."
+         quest handed on no longer stops the list: the rest of the caravan moves.\n\n\
+         While you drive, Horadric also wakes you for rounds: every hour, after a quest \
+         lands and when the human leaves. A round is for judgment, not one event: read \
+         the whole picture it gives you and your memory, then do what moves the project \
+         on. That may be anything a wake does, and also casting one of the project's \
+         stones, which runs its steps in a session of its own: `{horadric} runeword cast \
+         \"<stone>\"`. Cast a stone only when the picture calls for it. When a round finds \
+         nothing to do, write one line to Lately in your memory and stop."
     )
+}
+
+/// Whether a stone `label` cast from a shell goes ahead. The human's own
+/// casts always do. A Warriv's only while it drives the project, and the
+/// public release only with "and ships public" on, since every install
+/// sees it.
+pub fn may_cast(by_warriv: bool, drive: Option<Drive>, label: &str) -> Result<(), String> {
+    if !by_warriv {
+        return Ok(());
+    }
+    match drive {
+        None => Err("Warriv casts stones only while it drives the project".into()),
+        Some(d) if label == crate::ship::PUBLIC && !d.ships_public => Err(format!(
+            "\"{label}\" waits for \"and ships public\", which is off"
+        )),
+        Some(_) => Ok(()),
+    }
+}
+
+/// The rules that let a Warriv driving the project cast a stone without
+/// asking, to follow [`quest_tools`]' in its `--allowedTools`.
+pub fn cast_tools(horadric: &str) -> Vec<String> {
+    let h = horadric.trim_matches('"');
+    vec![
+        format!("Bash({h} runeword cast:*)"),
+        format!("PowerShell({h} runeword cast:*)"),
+    ]
 }
 
 /// What the human's one line against an assumption does, by how its
@@ -605,6 +727,7 @@ fn brief(b: &Brief) -> String {
     };
     let mut out = match e.kind {
         Kind::Stalled => format!("- The log is stalled. {}\n", e.detail),
+        Kind::Round => round(&e.detail, b.picture.as_ref()),
         Kind::Dry => {
             let mut s = format!(
                 "- The log has run dry: nothing is in hand and nothing is ready to start. {}\n  \
@@ -648,6 +771,112 @@ fn brief(b: &Brief) -> String {
             tail(turn, LAST_TURN).replace('\n', "\n    ")
         ));
     }
+    out
+}
+
+/// How `main` stands, for a round's picture: `head`, the commit it is at,
+/// whether the checks passed there, and how many quests landed since the
+/// last ship.
+pub fn main_line(head: &str, checked: bool, landed: usize) -> String {
+    let at = head.get(..7).unwrap_or(head);
+    let checks = match (at.is_empty(), checked) {
+        (true, _) => "its commit could not be read".to_string(),
+        (false, true) => format!("at {at}, where the checks passed"),
+        (false, false) => format!("at {at}, where nobody has run the checks yet"),
+    };
+    let landed = match landed {
+        0 => "no quest landed since the last ship".to_string(),
+        1 => "1 quest landed since the last ship".to_string(),
+        n => format!("{n} quests landed since the last ship"),
+    };
+    format!("{checks}; {landed}.")
+}
+
+/// An armed errand, for a round's picture: when it goes, and how its last
+/// cast went. `offset` is how far the local clock is ahead of UTC.
+pub fn errand_line(label: &str, every: Every, armed: &Armed, offset: i64) -> String {
+    let mut out = format!("\"{label}\": {}", describe(every));
+    if armed.running {
+        out.push_str(", running now");
+    } else if armed.fired.is_some() {
+        out.push_str(", due now");
+    } else {
+        let next = due(every, armed.last, offset);
+        if next != u64::MAX {
+            let local = (next as i64 + offset).rem_euclid(86_400);
+            out.push_str(&format!(
+                ", next at {:02}:{:02}",
+                local / 3600,
+                local % 3600 / 60
+            ));
+        }
+    }
+    if armed.failed {
+        out.push_str(", and its last cast failed");
+    }
+    out
+}
+
+/// A round's brief: why it is due, then the whole project as it stands.
+fn round(why: &str, p: Option<&Picture>) -> String {
+    let mut out =
+        format!("- A round, since {why}. Look at the whole project and decide what moves it on.\n");
+    let Some(p) = p else {
+        return out;
+    };
+    let open: Vec<&Task> = p
+        .tasks
+        .iter()
+        .filter(|t| t.mark != Mark::Done && !t.title.trim().is_empty())
+        .collect();
+    let done = p.tasks.iter().filter(|t| t.mark == Mark::Done).count();
+    out.push_str(&format!(
+        "  The log: {done} quests done, {} not.\n",
+        open.len()
+    ));
+    for t in open.iter().take(ROUND_QUESTS) {
+        out.push_str(&format!("    [{}] {}", t.mark.char(), one_line(&t.title)));
+        if let (Mark::Blocked, Some(r)) = (t.mark, t.reason.as_deref()) {
+            match question(r) {
+                Some(q) => out.push_str(&format!(" (asks the human: {})", one_line(q))),
+                None => out.push_str(&format!(" (blocked: {})", one_line(r))),
+            }
+        }
+        out.push('\n');
+    }
+    if open.len() > ROUND_QUESTS {
+        out.push_str(&format!(
+            "    and {} more: read the log for them.\n",
+            open.len() - ROUND_QUESTS
+        ));
+    }
+    if p.aims.is_empty() {
+        out.push_str("  No aim is open.\n");
+    } else {
+        out.push_str("  The aims still open, in order:\n");
+        for a in &p.aims {
+            out.push_str(&format!("    Aim: {}\n", one_line(a)));
+        }
+    }
+    if !p.checks.is_empty() {
+        out.push_str(&format!("  Main: {}\n", one_line(&p.checks)));
+    }
+    if p.errands.is_empty() {
+        out.push_str("  No errand is armed.\n");
+    } else {
+        out.push_str("  Errands armed:\n");
+        for e in &p.errands {
+            out.push_str(&format!("    {}\n", one_line(e)));
+        }
+    }
+    if !p.stones.is_empty() {
+        let names: Vec<String> = p.stones.iter().map(|s| format!("\"{s}\"")).collect();
+        out.push_str(&format!("  Stones: {}.\n", names.join(", ")));
+    }
+    out.push_str(
+        "  Read the Open part of your memory for what you were waiting to see. If nothing \
+         needs doing, write one line to Lately saying so, and stop.\n",
+    );
     out
 }
 
@@ -1400,6 +1629,237 @@ mod tests {
         }
     }
 
+    fn a_round(detail: &str) -> Event {
+        Event {
+            kind: Kind::Round,
+            title: String::new(),
+            detail: detail.into(),
+        }
+    }
+
+    #[test]
+    fn a_round_comes_by_the_clock_only_while_driving() {
+        let mut d = Desk::default();
+        d.hourly(0);
+        d.round(Why::Landed, 0);
+        assert_eq!(d.wake(0), Wake::Nothing);
+        d.drive(true);
+        // The first look starts the hour; it does not go round at once.
+        d.hourly(100);
+        assert_eq!(d.wake(100), Wake::Nothing);
+        d.hourly(100 + HOUR - 1);
+        assert_eq!(d.wake(100 + HOUR - 1), Wake::Nothing);
+        d.hourly(100 + HOUR);
+        assert_eq!(
+            d.wake(100 + HOUR),
+            Wake::Go(vec![a_round("an hour has passed since the last round")])
+        );
+        // The next hour counts from that round.
+        d.hourly(100 + 2 * HOUR - 1);
+        assert_eq!(d.wake(100 + 2 * HOUR - 1), Wake::Nothing);
+    }
+
+    #[test]
+    fn a_landing_or_the_human_leaving_brings_a_round_and_restarts_the_hour() {
+        let mut d = Desk::default();
+        d.drive(true);
+        d.hourly(0);
+        d.round(Why::Landed, 1000);
+        d.round(Why::Left, 1001);
+        d.round(Why::Landed, 1002);
+        // Waiting rounds are one, with every reason once.
+        assert_eq!(
+            d.wake(1002),
+            Wake::Go(vec![a_round("a quest landed on main; the human left")])
+        );
+        d.hourly(HOUR + 500);
+        assert_eq!(d.wake(HOUR + 500), Wake::Nothing);
+        d.hourly(HOUR + 1002);
+        assert!(matches!(d.wake(HOUR + 1002), Wake::Go(_)));
+    }
+
+    #[test]
+    fn a_round_due_while_warriv_is_awake_folds_into_its_next_stop() {
+        let mut d = Desk::default();
+        d.drive(true);
+        d.hear(vec![blocked("A", "x")], false);
+        assert!(matches!(d.wake(0), Wake::Go(_)));
+        // Due mid turn: it waits for the stop, with what else happened.
+        d.round(Why::Landed, 10);
+        d.hear(vec![blocked("A", "x"), blocked("B", "y")], true);
+        d.hear(vec![blocked("A", "x"), blocked("B", "y")], true);
+        assert_eq!(
+            d.wake(20),
+            Wake::Go(vec![a_round("a quest landed on main"), blocked("B", "y")])
+        );
+        // Told as more, on one line, with the whole picture.
+        let m = more(&[Brief {
+            event: Some(a_round("a quest landed on main")),
+            picture: Some(Picture {
+                tasks: list("- [ ] C\n- [x] D\n"),
+                ..Picture::default()
+            }),
+            ..Brief::default()
+        }]);
+        assert!(!m.contains('\n'));
+        assert!(m.contains("A round, since a quest landed on main."));
+        assert!(m.contains("[ ] C"));
+    }
+
+    #[test]
+    fn turning_the_drive_off_drops_the_round_waiting() {
+        let mut d = Desk::default();
+        d.drive(true);
+        d.round(Why::Left, 5);
+        d.drive(false);
+        assert_eq!(d.wake(6), Wake::Nothing);
+        // On again, the hour starts over.
+        d.drive(true);
+        d.hourly(7);
+        d.hourly(7 + HOUR - 1);
+        assert_eq!(d.wake(7 + HOUR - 1), Wake::Nothing);
+    }
+
+    #[test]
+    fn a_round_is_heard_by_nobody_but_warriv() {
+        let mut d = Desk::default();
+        d.drive(true);
+        d.round(Why::Hour, 0);
+        assert!(d.holding(&[]).is_empty());
+        assert_eq!(d.watch(None, 0), None);
+        assert!(!Kind::Round.can_be_own());
+    }
+
+    #[test]
+    fn the_round_prompt_is_the_whole_picture() {
+        let mut log = String::from(
+            "- [x] Done one\n- [/] Working @w-1\n- [!] Asking @a-1: Warriv asks: which key?\n\
+             - [!] Stuck @s-1: the build fails\n",
+        );
+        for i in 0..45 {
+            log.push_str(&format!("- [ ] Q{i}\n"));
+        }
+        let p = prompt(&[Brief {
+            event: Some(a_round("the human left")),
+            picture: Some(Picture {
+                tasks: list(&log),
+                aims: vec!["Ship the API".into()],
+                checks: "The checks passed on main at abc1234.".into(),
+                errands: vec!["\"Mail\": every day at 09:00, next at 09:00".into()],
+                stones: vec!["Ship Local".into(), "Mail".into()],
+            }),
+            ..Brief::default()
+        }]);
+        assert!(p.contains(
+            "- A round, since the human left. Look at the whole project and decide what \
+             moves it on.\n  The log: 1 quests done, 48 not.\n    [/] Working\n    \
+             [!] Asking (asks the human: which key?)\n    [!] Stuck (blocked: the build fails)\n"
+        ));
+        assert!(p.contains("    [ ] Q36\n    and 8 more: read the log for them.\n"));
+        assert!(!p.contains("Q37"));
+        assert!(!p.contains("Done one"));
+        assert!(p.contains("  The aims still open, in order:\n    Aim: Ship the API\n"));
+        assert!(p.contains("  Main: The checks passed on main at abc1234.\n"));
+        assert!(p.contains("  Errands armed:\n    \"Mail\": every day at 09:00"));
+        assert!(p.contains("  Stones: \"Ship Local\", \"Mail\".\n"));
+        assert!(p.contains("write one line to Lately"));
+        // Nothing armed, no aim: said, so the round does not go looking.
+        let bare = prompt(&[Brief {
+            event: Some(a_round("x")),
+            picture: Some(Picture::default()),
+            ..Brief::default()
+        }]);
+        assert!(bare.contains("  No aim is open.\n"));
+        assert!(bare.contains("  No errand is armed.\n"));
+        assert!(!bare.contains("Stones:"));
+    }
+
+    #[test]
+    fn a_driving_warriv_may_cast_a_stone_in_a_round() {
+        let p = driven_prompt("hx");
+        assert!(p.contains("`hx runeword cast \"<stone>\"`"));
+        assert!(p.contains("every hour, after a quest lands and when the human leaves"));
+        assert!(p.contains("write one line to Lately"));
+        assert_eq!(
+            cast_tools("\"C:/h.exe\""),
+            vec![
+                "Bash(C:/h.exe runeword cast:*)".to_string(),
+                "PowerShell(C:/h.exe runeword cast:*)".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn mains_line_says_the_commit_the_checks_and_what_landed() {
+        assert_eq!(
+            main_line("abc1234def", true, 3),
+            "at abc1234, where the checks passed; 3 quests landed since the last ship."
+        );
+        assert_eq!(
+            main_line("abc", false, 1),
+            "at abc, where nobody has run the checks yet; 1 quest landed since the last ship."
+        );
+        assert_eq!(
+            main_line("", false, 0),
+            "its commit could not be read; no quest landed since the last ship."
+        );
+    }
+
+    #[test]
+    fn an_errands_line_says_when_it_goes_next() {
+        let armed = Armed {
+            steps: 0,
+            last: 0,
+            fired: None,
+            finished: None,
+            failed: false,
+            running: false,
+            session: None,
+        };
+        // Armed at midnight UTC, an hour ahead: 09:00 local is 08:00 UTC.
+        assert_eq!(
+            errand_line("Mail", Every::Day(9 * 60), &armed, 3600),
+            "\"Mail\": every day at 09:00, next at 09:00"
+        );
+        assert_eq!(
+            errand_line("Sweep", Every::Span(90 * 60), &armed, 0),
+            "\"Sweep\": every 1h30m, next at 01:30"
+        );
+        let on = Every::On(crate::runeword::Event::Landed);
+        assert_eq!(
+            errand_line("Post", on, &armed, 0),
+            "\"Post\": on each landing"
+        );
+        let fired = Armed {
+            fired: Some(5),
+            failed: true,
+            ..armed.clone()
+        };
+        assert_eq!(
+            errand_line("Post", on, &fired, 0),
+            "\"Post\": on each landing, due now, and its last cast failed"
+        );
+        let running = Armed {
+            running: true,
+            ..armed
+        };
+        assert_eq!(
+            errand_line("Mail", Every::Day(0), &running, 0),
+            "\"Mail\": every day at 00:00, running now"
+        );
+    }
+
+    #[test]
+    fn warriv_casts_only_while_it_drives_and_public_only_when_it_ships_public() {
+        let local = Drive::default();
+        let public = Drive { ships_public: true };
+        assert!(may_cast(false, None, "Ship Public").is_ok());
+        assert!(may_cast(true, None, "Ship Local").is_err());
+        assert!(may_cast(true, Some(local), "Ship Local").is_ok());
+        assert!(may_cast(true, Some(local), "Ship Public").is_err());
+        assert!(may_cast(true, Some(public), "Ship Public").is_ok());
+    }
+
     #[test]
     fn a_dry_log_is_not_its_own_doing() {
         let mut d = Desk::default();
@@ -1737,6 +2197,7 @@ mod tests {
                 ],
                 last_turn: Some("I built it.\nWhich port should it listen on?".into()),
                 aims: Vec::new(),
+                picture: None,
             },
             Brief {
                 event: Some(Event {
@@ -1770,6 +2231,7 @@ mod tests {
             notes: Vec::new(),
             last_turn: Some(long),
             aims: Vec::new(),
+            picture: None,
         }]);
         assert!(p.contains("- The quest \"A\" is blocked.\n"));
         assert!(p.contains("\u{2026}x"));
@@ -1784,6 +2246,7 @@ mod tests {
             notes: vec!["n".into()],
             last_turn: Some("a\nb".into()),
             aims: Vec::new(),
+            picture: None,
         }]);
         assert!(!m.contains('\n'));
         assert!(m.starts_with("While you worked, more happened. - The quest \"A\" is blocked: x"));

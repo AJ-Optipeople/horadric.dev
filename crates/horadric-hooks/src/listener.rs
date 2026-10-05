@@ -118,6 +118,8 @@ pub struct TasksChanged {
     pub tell: Option<String>,
     /// What a review found wrong with that quest, which sends it back.
     pub fix: Option<String>,
+    /// A stone to cast, from `horadric runeword cast`.
+    pub cast: Option<String>,
     /// The session that ran the command, so the app knows Warriv's own.
     pub by: Option<String>,
 }
@@ -131,6 +133,7 @@ impl TasksChanged {
             "quest": self.quest,
             "tell": self.tell,
             "fix": self.fix,
+            "cast": self.cast,
             "by": self.by,
         })
         .to_string()
@@ -146,6 +149,7 @@ impl TasksChanged {
             quest: text("quest"),
             tell: text("tell"),
             fix: text("fix"),
+            cast: text("cast"),
             by: text("by"),
         })
     }
@@ -706,6 +710,7 @@ X-Horadric-Port: {dev}
             quest: Some("Serve the API".into()),
             tell: Some("Use port 4100.".into()),
             fix: Some("No tests.".into()),
+            cast: Some("Ship Local".into()),
             by: Some("warriv-5".into()),
         };
         let json = want.to_json();

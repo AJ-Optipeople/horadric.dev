@@ -541,7 +541,7 @@ fn main_tree() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-fn session() -> Option<String> {
+pub(crate) fn session() -> Option<String> {
     std::env::var(SESSION_ENV).ok().filter(|s| !s.is_empty())
 }
 
@@ -557,7 +557,7 @@ fn tell_app(project: &Path) {
 }
 
 /// Posts to the Horadric that owns this session, and says what it answered.
-fn post_app(body: &TasksChanged) -> Option<u16> {
+pub(crate) fn post_app(body: &TasksChanged) -> Option<u16> {
     let port = std::env::var(OWNER_ENV)
         .ok()
         .and_then(|p| p.parse().ok())

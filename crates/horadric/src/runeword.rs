@@ -1,6 +1,7 @@
 //! `horadric runeword list`: every stone a project's Runetome has, so the
 //! Runesmith, or anyone, can check a stone it wrote parses before the
-//! human looks for it on the tile.
+//! human looks for it on the tile. `horadric runeword cast` has the app
+//! cast one, which is how Warriv's rounds use the tome.
 
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -8,18 +9,77 @@ use std::process::{Command, Stdio};
 
 use horadric_core::runeword::{self, Source, Stone};
 use horadric_core::tasks::CONFIG_FILE;
+use horadric_hooks::listener::TasksChanged;
 use horadric_hooks::TASKS_ENV;
 
 use crate::CREATE_NO_WINDOW;
 
-const USAGE: &str =
-    "usage: horadric runeword list    Every stone this project has, and any that do not parse";
+const USAGE: &str = "\
+usage: horadric runeword list         Every stone this project has, and any that do not parse
+       horadric runeword cast \"name\"  Cast that stone, in a session of its own when it needs one";
 
 pub fn run(args: &[String]) -> Result<(), String> {
     match args.first().map(String::as_str) {
         Some("list") => list(),
+        Some("cast") => cast(&args[1..].join(" ")),
         _ => Err(USAGE.into()),
     }
+}
+
+/// The project's stones, from its config and every project's file.
+fn read_stones(project: &Path) -> Vec<Stone> {
+    let read = |p: &Path| std::fs::read_to_string(p).unwrap_or_default();
+    let global = horadric_hooks::tasks::runewords_file();
+    runeword::stones(
+        &read(&project.join(CONFIG_FILE)),
+        &global.as_deref().map(read).unwrap_or_default(),
+    )
+}
+
+/// Asks the app to cast the stone `name` on this project. It must be one
+/// the project has and that parses, so a typo is told here and not lost.
+fn cast(name: &str) -> Result<(), String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("say which: horadric runeword cast \"name\"".into());
+    }
+    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    let project = project(&cwd);
+    let stones = read_stones(&project);
+    let stone = which(&stones, name)?;
+    if let Err(why) = &stone.steps {
+        return Err(format!("\"{}\" does not parse: {why}", stone.label));
+    }
+    let heard = crate::task::post_app(&TasksChanged {
+        dir: project.to_string_lossy().into_owned(),
+        cast: Some(stone.label.clone()),
+        by: crate::task::session(),
+        ..TasksChanged::default()
+    });
+    if heard != Some(200) {
+        return Err("Horadric did not hear it: is it running?".into());
+    }
+    println!("Horadric casts \"{}\".", stone.label);
+    Ok(())
+}
+
+/// The stone called `name`, by its label or its runeword name, in any
+/// case. The first in the tome's order wins, as it does in the app, so the
+/// project's own goes before every project's.
+fn which<'a>(stones: &'a [Stone], name: &str) -> Result<&'a Stone, String> {
+    let lower = name.to_lowercase();
+    stones
+        .iter()
+        .find(|s| {
+            s.label.to_lowercase() == lower || runeword::name(&s.label).to_lowercase() == lower
+        })
+        .ok_or_else(|| {
+            let labels: Vec<String> = stones.iter().map(|s| format!("\"{}\"", s.label)).collect();
+            format!(
+                "this project has no stone called \"{name}\". It has {}.",
+                labels.join(", ")
+            )
+        })
 }
 
 fn list() -> Result<(), String> {
@@ -186,6 +246,24 @@ mod tests {
             ),
             "{shown}"
         );
+    }
+
+    #[test]
+    fn a_stone_to_cast_is_found_by_label_or_name_in_any_case() {
+        let stones = runeword::stones(
+            r#"{ "runewords": { "Ship Local": [ { "say": "Ship local" } ] } }"#,
+            r#"{ "runewords": { "Ship Local": [ { "say": "other" } ], "Mail": [ { "run": "x" } ] } }"#,
+        );
+        let s = which(&stones, "ship local").unwrap();
+        assert_eq!(s.source, Source::Project);
+        let name = runeword::name("Mail");
+        assert_eq!(which(&stones, &name).unwrap().label, "Mail");
+        let e = which(&stones, "Ship").unwrap_err();
+        assert!(
+            e.starts_with("this project has no stone called \"Ship\". It has "),
+            "{e}"
+        );
+        assert!(e.contains("\"Mail\""), "{e}");
     }
 
     #[test]

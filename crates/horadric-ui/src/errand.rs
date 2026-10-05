@@ -76,8 +76,14 @@ impl App {
 
     /// The event errands with `"on"` are cast at happened, in the project
     /// with this key, or with None in every project. Each armed one that
-    /// hears it is due from now until it is cast.
+    /// hears it is due from now until it is cast. A landing and the human
+    /// leaving bring Warriv's round too, where it drives.
     pub(in crate::app) fn errand_event(&mut self, key: Option<&str>, event: Event) {
+        match event {
+            Event::Landed => self.round_for(key, warriv::Why::Landed),
+            Event::Away => self.round_for(key, warriv::Why::Left),
+            Event::Shipped | Event::Back => {}
+        }
         let now = unix_now();
         let armed: Vec<String> = self
             .tome
@@ -276,20 +282,33 @@ impl App {
         if let Some(a) = self.tome.errands.get_mut(&cast_key(key, label)) {
             a.session = Some(id.clone());
         }
+        self.launch_cast(&id, dir, label, runes)
+    }
+
+    /// Starts the session `id` in `dir`, named `label`, casting `runes`
+    /// on it. A first step that is said goes in as the session's first
+    /// prompt, so nothing is typed into an agent still starting.
+    pub(in crate::app) fn launch_cast(
+        &mut self,
+        id: &str,
+        dir: std::path::PathBuf,
+        label: &str,
+        runes: Vec<Rune>,
+    ) -> Result<(), String> {
         let mut word = Runeword::new(label, runes);
         if let Some(Rune::Say(first)) = word.runes.first() {
-            self.tasks.prompts.insert(id.clone(), first.clone());
+            self.tasks.prompts.insert(id.to_string(), first.clone());
             word.step = Step::Told {
                 at: std::time::SystemTime::now(),
                 heard: None,
             };
         }
         let run = Run::Agent(Agent::Claude);
-        if let Err(e) = self.launch(&id, label, dir, Vec::new(), run, false) {
-            self.tasks.prompts.remove(&id);
+        if let Err(e) = self.launch(id, label, dir, Vec::new(), run, false) {
+            self.tasks.prompts.remove(id);
             return Err(e);
         }
-        self.set_runeword(&id, Some(word));
+        self.set_runeword(id, Some(word));
         Ok(())
     }
 

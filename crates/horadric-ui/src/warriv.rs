@@ -14,8 +14,10 @@ use std::time::{Instant, SystemTime};
 
 use horadric_core::chronicle::{self, Happened, Woken};
 use horadric_core::tasks::{self, Mark, Mode, Task};
-use horadric_core::warriv::{self, Brief, Desk, Dried, Drive, Event, Kind, Review, Reviews, Wake};
-use horadric_core::{tombs, Agent, Phase};
+use horadric_core::warriv::{
+    self, Brief, Desk, Dried, Drive, Event, Kind, Picture, Review, Reviews, Wake, Why,
+};
+use horadric_core::{runeword, ship, tombs, Agent, Phase};
 use horadric_hooks::tasks as file;
 
 use super::{horadric_command, Board};
@@ -209,6 +211,7 @@ impl App {
             self.ask_aims(key, b, stuck);
         }
         camp.desk.drive(drive.is_some());
+        camp.desk.hourly(unix_now());
         camp.desk.hear(now.clone(), camp.awake.is_some());
         let mut closed = self.wake(key, b, &mut camp, &now);
         let holding = camp.desk.holding(&now);
@@ -273,7 +276,7 @@ impl App {
                 None => false,
             },
             Wake::Go(events) => {
-                let briefs = self.briefs(b, &events);
+                let briefs = self.briefs(key, b, &events);
                 match &mut camp.awake {
                     Some(a) => {
                         let Some(c) = self.consoles.get(&a.id) else {
@@ -455,11 +458,14 @@ impl App {
     }
 
     /// Each event with its quest's notes and its session's last turn.
-    fn briefs(&self, b: &Board, events: &[Event]) -> Vec<Brief> {
+    fn briefs(&self, key: &str, b: &Board, events: &[Event]) -> Vec<Brief> {
         events
             .iter()
             .map(|e| {
-                let t = b.tasks.iter().find(|t| t.title == e.title);
+                let t = b
+                    .tasks
+                    .iter()
+                    .find(|t| !e.title.is_empty() && t.title == e.title);
                 let last_turn = t
                     .and_then(|t| t.holder.as_deref())
                     .and_then(|h| self.shared.registry.lock().ok()?.get(h)?.last_turn.clone());
@@ -471,9 +477,63 @@ impl App {
                         Kind::Dry => b.aims.clone(),
                         _ => Vec::new(),
                     },
+                    picture: (e.kind == Kind::Round).then(|| self.picture(key, b)),
                 }
             })
             .collect()
+    }
+
+    /// The whole project as a round sees it, beside the memory it reads
+    /// itself: the log, the aims, how `main` stands, the armed errands and
+    /// the stones it may cast.
+    fn picture(&self, key: &str, b: &Board) -> Picture {
+        let checks = self.project_dir(key).map_or_else(String::new, |main| {
+            let records = store::chronicle_all();
+            let log = store::dir()
+                .and_then(|d| std::fs::read_to_string(d.join("reload.log")).ok())
+                .unwrap_or_default();
+            let head = crate::worktree::head(&main).unwrap_or_default();
+            let landed = ship::landed_since(key, &records, ship::last(key, &log, &records));
+            warriv::main_line(&head, ship::checked(key, &records, &head), landed)
+        });
+        let offset = crate::questlog::utc_offset(unix_now());
+        let stones = self.stones_of(key);
+        let errands = stones
+            .iter()
+            .filter_map(|s| {
+                let every = s.errand.as_ref()?.every;
+                let armed = self.armed(key, s)?;
+                Some(warriv::errand_line(&s.label, every, armed, offset))
+            })
+            .collect();
+        Picture {
+            tasks: b.tasks.clone(),
+            aims: b.aims.clone(),
+            checks,
+            errands,
+            stones: stones
+                .into_iter()
+                .filter(|s| s.source != runeword::Source::BuiltIn && s.steps.is_ok())
+                .map(|s| s.label)
+                .collect(),
+        }
+    }
+
+    /// A landing in the project `key`, or with None the human leaving,
+    /// brings a round in each project it concerns that Warriv drives.
+    pub(in crate::app) fn round_for(&mut self, key: Option<&str>, why: Why) {
+        let now = unix_now();
+        let driven: Vec<String> = self
+            .drives
+            .keys()
+            .filter(|k| key.is_none_or(|key| key == k.as_str()))
+            .cloned()
+            .collect();
+        for k in driven {
+            let camp = self.tasks.warriv.camps.entry(k).or_default();
+            camp.desk.drive(true);
+            camp.desk.round(why, now);
+        }
     }
 
     /// A fresh Warriv session in the project's main tree, with the events
@@ -525,13 +585,15 @@ impl App {
         let horadric = horadric_command();
         let key = folder_key(&cwd.to_string_lossy());
         let mut prompt = warriv::system_prompt(&horadric, file::rel(Path::new(&key)));
+        let mut tools = memory_tools(&horadric);
         if self.drives.contains_key(&key) {
             prompt.push_str("\n\n");
             prompt.push_str(&warriv::driven_prompt(&horadric));
+            tools.extend(warriv::cast_tools(&horadric));
         }
         prompt.push_str("\n\n");
         prompt.push_str(&memory_prompt(cwd));
-        (memory_tools(&horadric), prompt)
+        (tools, prompt)
     }
 
     /// The flags an errand's session starts with: the quest commands it may
