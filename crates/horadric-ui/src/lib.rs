@@ -46,7 +46,6 @@ pub mod find;
 pub mod frame;
 pub mod glide;
 pub mod highlight;
-pub mod history;
 pub mod icon;
 pub mod inbox;
 pub mod keys;
@@ -97,6 +96,10 @@ pub mod discord;
 #[cfg(windows)]
 pub use dialog::error_alone;
 pub use store::exe_command;
+/// For `horadric quest`, which writes the chronicle from a session's shell
+/// under the same project key the app uses.
+#[cfg(windows)]
+pub use {project::folder_key, store::chronicle};
 #[cfg(windows)]
 mod dropdown;
 #[cfg(windows)]
@@ -111,6 +114,8 @@ mod pane;
 mod picker;
 #[cfg(windows)]
 mod project;
+#[cfg(windows)]
+mod questlog;
 #[cfg(windows)]
 mod recent;
 #[cfg(windows)]
