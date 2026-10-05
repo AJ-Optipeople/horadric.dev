@@ -3577,6 +3577,13 @@ It ends one of three ways:
 Reviews have their own budget, not the six wakes: one reviewer a
 project at a time, the rest queued. The reviewer runs no checks, since
 landing runs them. The mode menu says what the mode does in one line.
+Built on 2026-10-05: `Mode::Warriv` (`"mode": "warriv"`) finishes a
+quest as review does and lands it as auto does. `warriv::Reviews` keeps
+the queue, `warriv::review_prompt` puts the diff in (cut at 20 000
+characters, since the prompt goes on a command line), and a reviewer is
+a session `warriv-review-*`, so it counts as a Warriv for notes and for
+handing on. A reviewer that ends without a verdict leaves the quest to
+the human, who hears "Ready for review" then and not before.
 
 **3. While you were away.** When the human has given no input for 30
 minutes (`GetLastInputInfo`, already read in `app.rs`) and then comes
@@ -3823,16 +3830,17 @@ answer as a rule, so the same kind of question never comes twice.
 Committed with the project, so it travels with the repository and its
 history shows how Warriv's judgment grew. `warriv::memory_prompt` and
 the compaction rule are pure and tested.
-**Built on 2026-10-05**, for wakes and errand sessions, the Warriv
-sessions there are yet (`memory_tools` and `memory_prompt` in the UI's
-`warriv.rs`): rounds and the reviewer add the same two when they land. The session reads and writes the file
-itself, so the prompt says how instead of carrying it; it is the one
+**Built on 2026-10-05**, for wakes, reviewers and errand sessions, the
+Warriv sessions there are yet (`memory_tools` and `memory_prompt` in
+the UI's `warriv.rs`); rounds add the same two when they land. The
+session reads and writes the file itself, so the prompt says how instead of carrying it; it is the one
 file Warriv may edit (`Edit(./.horadric/warriv.md)` is in its allowed
 tools, and covers writing it too; Claude Code refuses a `Write(...)`
 rule). Past `MEMORY_LINES` (200) the prompt asks for a compaction to
 under 150: every rule and Open kept, the newest twenty Lately lines as
 they are, older ones folded a line a day or week. The app commits the
-file alone (`git commit --only`) when a wake closes. A handed on
+file alone (`git commit --only`) when a wake, a review or an errand
+closes. A handed on
 question is noted with when Horadric first saw it; the next prompt into
 its quest's session, or a `quest tell` from the human, is the answer,
 and Horadric writes it into Open as an `- Answered:` line

@@ -82,7 +82,10 @@ work. Worktrees are next.
   `horadric quest done` or `horadric quest blocked "why"`, and the row
   shows where it is. The mode button picks how the list is worked: Manual,
   one click per item; Review, the next item starts once you approve the
-  last; Auto, down the list until it is done. The `+` adds an item, and so
+  last; Warriv reviews, as Review but a reviewer session reads each
+  finished quest and its diff first, then lands it with `horadric quest
+  pass "title"`, sends it back with `horadric quest fix "title" "what"`
+  or hands it to you; Auto, down the list until it is done. The `+` adds an item, and so
   does `horadric quest add` from any shell. A quest blocked with
   `--on-quest "title"`, `--on-main ref`, `--on-file path`, `--on-cmd
   "command"` or `--until +30m` goes on by itself once that holds, and the

@@ -336,6 +336,8 @@ impl App {
                 }
             }
         }
+        // A cast with a session may have written Warriv's memory.
+        self.keep_memory(key);
         self.save();
         self.redraw_tiles();
         true
