@@ -1456,8 +1456,9 @@ impl App {
     }
 
     /// What came of the merges by themselves: a merged branch goes with its
-    /// worktree, one a worker can fix gets a fix-up quest first in the
-    /// list, and anything else is left to the human's click.
+    /// worktree, one a worker can fix gets a fix-up quest right below its
+    /// own that the quests after it wait for, and anything else is left to
+    /// the human's click.
     fn after_landing(&mut self) {
         let landed = self
             .tasks
@@ -1474,19 +1475,8 @@ impl App {
                 Landing::Failed(why, out) if why.fixable() => {
                     eprintln!("horadric: cannot merge {branch}: {why:?}");
                     let fix = merge::fix_up(&l.title, &branch, &l.into, &why, &out);
-                    let added = file::update(&l.dir, |text| {
-                        let list = tasks::parse(text);
-                        if list
-                            .iter()
-                            .any(|t| t.title == fix.title && t.mark != Mark::Done)
-                        {
-                            return None;
-                        }
-                        Some(match merge::place(&list) {
-                            Some(at) => tasks::insert_with_notes(text, at, &fix.title, &fix.notes),
-                            None => tasks::append_with_notes(text, &fix.title, &fix.notes),
-                        })
-                    });
+                    let added =
+                        file::update(&l.dir, |text| merge::add_fix_up(text, &l.title, &fix));
                     if let Err(e) = added {
                         eprintln!("horadric: cannot add \"{}\": {e}", fix.title);
                     }
@@ -1494,7 +1484,7 @@ impl App {
                     self.toasts.show(
                         Kind::Failed,
                         &format!("Cannot merge {branch}"),
-                        &format!("Added the quest \"{}\" first in the list.", fix.title),
+                        &format!("Added the quest \"{}\" below it.", fix.title),
                     );
                     self.refresh_boards(false);
                 }

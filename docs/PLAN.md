@@ -3305,7 +3305,7 @@ not have. Built in this order: 1, 4, 5, 6, then 2 and 3.
   Built on 2026-10-05. `horadric_core::merge` decides: `checks` reads
   the list (one string is one check), `plan` is rebase, each check,
   fast forward, `failed` reads what a step's failure means, `fix_up`
-  writes the quest, and `place` says where it goes. The UI's
+  writes the quest, and `add_fix_up` puts it in the list. The UI's
   `worktree::land` runs the plan on a thread when an auto mode quest's
   session ends, before its worktree goes, holding a lock per project.
   A rebase that conflicts is aborted. A check runs with `cmd /c` in
@@ -3318,12 +3318,13 @@ not have. Built in this order: 1, 4, 5, 6, then 2 and 3.
   merge the branch into its own. Anything else (uncommitted changes in
   the worktree, or work in the main tree in the way of the fast
   forward) is no quest a worker can do, so it falls back to the
-  toast whose click merges by hand. Since `After:` lines were not on
-  `main` when this was built, the fix-up goes in front of the first
-  open quest, which the runner takes next, and its notes say so. When
-  they land, the fix-up should go right below the finished quest and
-  the quests after it should wait for it too. Manual and review mode
-  keep the click. This repository's checks are fmt, clippy and test.
+  toast whose click merges by hand. `add_fix_up` puts the fix-up right
+  below the finished quest and gives every quest whose `After:` names
+  the finished one an `After:` line for the fix-up as well, so nothing
+  built on the work starts before it is on `main`. A line of output
+  that reads as an `After:` line is quoted with `>`. Manual and review
+  mode keep the click. This repository's checks are fmt, clippy and
+  test.
 - **5. Up to 16 at once, paced by usage.** `MOST_PARALLEL` goes from 8
   to 16, and the menu offers 1, 2, 4, 8 and 16. The runner stops
   starting quests while the fullest limit the status line reports is at

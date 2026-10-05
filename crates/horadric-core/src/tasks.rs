@@ -638,6 +638,25 @@ pub fn insert_with_notes(text: &str, line: usize, title: &str, notes: &str) -> S
     lines.concat()
 }
 
+/// `text` with `note` put as a notes line in front of line `line`, which
+/// is right under an item or among its notes, or at the end when there is
+/// no such line.
+pub fn insert_note(text: &str, line: usize, note: &str) -> String {
+    let (mut lines, ending) = cut(text);
+    if let Some(last) = lines.last_mut().filter(|l| !l.ends_with('\n')) {
+        last.push_str(ending);
+    }
+    let note = format!("  {}{ending}", one_line(note));
+    lines.insert(line.min(lines.len()), note);
+    lines.concat()
+}
+
+/// The line just past the item on `line` and its notes.
+pub fn end_of(text: &str, line: usize) -> usize {
+    let (lines, _) = cut(text);
+    span(&lines, line).end
+}
+
 /// A new open item's line and its notes, each line ended.
 fn new_item(title: &str, notes: &str, ending: &str) -> String {
     let mut out = item_line(Mark::Open, &one_line(title), None, None, None);

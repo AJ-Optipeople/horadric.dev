@@ -6,7 +6,10 @@
 
 use serde_json::Value;
 
-use crate::tasks::{one_line, Mark, Task};
+use crate::tasks::{
+    after_line, after_note, append_with_notes, end_of, find, insert_note, insert_with_notes,
+    one_line, parse, Mark,
+};
 
 /// The project's checks, from `"checks": ["cargo test", ...]` in its
 /// `config.json`. A single string is one check. None means a finished
@@ -116,9 +119,7 @@ pub fn fix_up(title: &str, branch: &str, into: &str, why: &Failure, output: &str
              `git branch -d {branch}`. Your branch merges like any finished quest and takes \
              its work along."
         ),
-        "Put first in the list by the auto merge, since `After:` lines are not built yet, so \
-         it runs before the quests after the finished one."
-            .to_string(),
+        "The quests after the finished one wait for this one too.".to_string(),
     ];
     let tail = tail(output);
     if !tail.is_empty() {
@@ -147,7 +148,11 @@ fn tail(output: &str) -> Vec<String> {
     lines[from..]
         .iter()
         .map(|l| {
-            if l.chars().count() > LINE_CHARS {
+            if after_line(l.trim_start()).is_some() {
+                // Read as the fix-up's own `After:` line, it would make it
+                // wait on whatever the output named.
+                format!("> {l}")
+            } else if l.chars().count() > LINE_CHARS {
                 let cut: String = l.chars().take(LINE_CHARS).collect();
                 format!("{cut}...")
             } else {
@@ -157,17 +162,44 @@ fn tail(output: &str) -> Vec<String> {
         .collect()
 }
 
-/// The line a fix-up quest goes in front of: the first open quest, so the
-/// runner, which takes the first open one, takes it next. None puts it at
-/// the end, when nothing is open.
-pub fn place(list: &[Task]) -> Option<usize> {
-    list.iter().find(|t| t.mark == Mark::Open).map(|t| t.line)
+/// The list with `fix` added right below the quest `finished` and its
+/// notes, and an `After:` line for it on every quest that waits for
+/// `finished`, so they wait for the fix-up too and the work they build on
+/// is on `main` before they start. At the end when `finished` is not in
+/// the list any more. None when the fix-up is there already and not done.
+pub fn add_fix_up(text: &str, finished: &str, fix: &FixUp) -> Option<String> {
+    let list = parse(text);
+    if list
+        .iter()
+        .any(|t| t.title == fix.title && t.mark != Mark::Done)
+    {
+        return None;
+    }
+    let Ok(at) = find(&list, finished) else {
+        return Some(append_with_notes(text, &fix.title, &fix.notes));
+    };
+    let waiting = list
+        .iter()
+        .filter(|t| t.after().iter().any(|n| find(&list, n) == Ok(at)))
+        .map(|t| t.line);
+    // From the bottom up, so each line number still points where it did.
+    let mut edits: Vec<(usize, bool)> = waiting.map(|l| (l + 1, false)).collect();
+    edits.push((end_of(text, list[at].line), true));
+    edits.sort_by(|a, b| b.cmp(a));
+    let mut out = text.to_string();
+    for (line, is_fix) in edits {
+        out = if is_fix {
+            insert_with_notes(&out, line, &fix.title, &fix.notes)
+        } else {
+            insert_note(&out, line, &after_note(&fix.title))
+        };
+    }
+    Some(out)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tasks::parse;
 
     #[test]
     fn checks_come_from_the_config_as_a_list_or_one_string() {
@@ -245,7 +277,10 @@ mod tests {
              `main`: the check `cargo test` fails after rebasing it on `main`."
         );
         assert!(lines[1].starts_with("Merge `add-the-login` into your branch"));
-        assert!(lines[2].contains("first in the list"));
+        assert_eq!(
+            lines[2],
+            "The quests after the finished one wait for this one too."
+        );
         assert_eq!(
             &lines[3..],
             [
@@ -283,9 +318,75 @@ mod tests {
     }
 
     #[test]
-    fn a_fix_up_goes_before_the_first_open_quest_or_at_the_end() {
-        let list = parse("- [x] A @a\n  note\n- [/] B @b\n- [ ] C\n- [ ] D\n");
-        assert_eq!(place(&list), Some(3));
-        assert_eq!(place(&parse("- [x] A\n")), None);
+    fn output_that_reads_as_an_after_line_is_quoted() {
+        assert_eq!(tail("After: something\n"), ["> After: something"]);
+    }
+
+    fn fix() -> FixUp {
+        FixUp {
+            title: "Fix the merge of a".into(),
+            notes: "Why.".into(),
+        }
+    }
+
+    #[test]
+    fn a_fix_up_goes_below_the_finished_quest_and_its_waiters_wait_for_it() {
+        let text = "\
+# Quests
+- [x] A @a
+  A's note.
+
+- [ ] B
+  After: A
+- [ ] C
+- [ ] D
+  First note.
+  after: a
+";
+        let out = add_fix_up(text, "A", &fix()).unwrap();
+        assert_eq!(
+            out,
+            "\
+# Quests
+- [x] A @a
+  A's note.
+- [ ] Fix the merge of a
+  Why.
+
+- [ ] B
+  After: Fix the merge of a
+  After: A
+- [ ] C
+- [ ] D
+  After: Fix the merge of a
+  First note.
+  after: a
+"
+        );
+        let list = parse(&out);
+        let ready = crate::tasks::readiness(&list);
+        assert_eq!(list[1].title, "Fix the merge of a");
+        assert_eq!(ready[1], crate::tasks::Ready::Yes);
+        assert_eq!(
+            ready[2],
+            crate::tasks::Ready::After("Fix the merge of a".into())
+        );
+        assert_eq!(ready[3], crate::tasks::Ready::Yes);
+    }
+
+    #[test]
+    fn a_fix_up_is_added_once_and_at_the_end_when_its_quest_is_gone() {
+        let text = "- [x] A @a\n- [ ] B\n";
+        let once = add_fix_up(text, "A", &fix()).unwrap();
+        assert_eq!(add_fix_up(&once, "A", &fix()), None);
+        assert_eq!(
+            add_fix_up(text, "Gone", &fix()).unwrap(),
+            "- [x] A @a\n- [ ] B\n- [ ] Fix the merge of a\n  Why.\n"
+        );
+        // The last quest, with no ending on its last line.
+        assert_eq!(
+            add_fix_up("- [x] A @a\n  n", "A", &fix()).unwrap(),
+            "- [x] A @a\n  n\n- [ ] Fix the merge of a\n  Why.\n"
+        );
     }
 }
