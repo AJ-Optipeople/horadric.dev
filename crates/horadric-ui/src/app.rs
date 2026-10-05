@@ -661,6 +661,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
         cube: Cell::new(None),
         tomes: RefCell::new(HashMap::new()),
         warriv: RefCell::new(HashMap::new()),
+        astir: RefCell::new(HashSet::new()),
         warriv_line: RefCell::new(HashMap::new()),
     });
     menu::init(Rc::clone(&shared));
