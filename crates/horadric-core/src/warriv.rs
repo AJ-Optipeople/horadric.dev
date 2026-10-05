@@ -1821,6 +1821,8 @@ mod tests {
             failed: false,
             running: false,
             session: None,
+            cast: None,
+            why: String::new(),
         };
         // Armed at midnight UTC, an hour ahead: 09:00 local is 08:00 UTC.
         assert_eq!(
