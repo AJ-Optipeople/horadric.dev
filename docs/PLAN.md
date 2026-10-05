@@ -3436,6 +3436,37 @@ not have. Built in this order: 1, 4, 5, 6, then 2 and 3.
 - Which model Warriv runs on. Its turns are short and many, which says a
   small one, but a wrong call costs more than the turn saves.
 
+### Warriv in the quest log
+
+Asked for on 2026-10-05. Warriv's work is hard to see: a tile named
+Warriv while it is awake, rows on the quests tile that read "Warriv",
+and `Warriv:` notes in each quest's detail. Nothing shows a wake as a
+whole, what woke it, what it did and how it ended, and nothing shows
+it after its session closes.
+
+- **The chronicle records wakes.** A line when Warriv wakes (the
+  wake's id, its conversation id, the events, each by kind and quest),
+  a line for each `quest` command it runs (`tell`, `note`, `add`,
+  `blocked`, with the quest and the text), and a line when it closes:
+  settled, or handed on (the quests it handed to the human), or cut
+  short (its session killed or the app quit). The app writes the first
+  and last from `warriv.rs`; the CLI writes the commands, since it
+  already knows when Warriv runs one (`warriv::is_warriv` on the
+  session id, as `quest note` uses to mark `Warriv: `).
+- **Its own lane.** In the quest log diagram Warriv's wakes sit on a
+  lane of their own beside the trunk, a dot a wake in Warriv's own
+  colour, a gold that is neither a lamp nor the magic blue. A thin
+  line runs from the dot to each quest the wake touched, at that
+  quest's row. `chronicle::graph` places them, pure and tested.
+- **A wake's detail.** Click the dot: when, how long, the events that
+  woke it, each command in order, and how it ended, with the question
+  for each quest it handed on. Read the session works as for a quest.
+- **A live line on the quests tile.** While Warriv is awake, a line
+  under the mode reads "Warriv: settling 2" in the working colour; when
+  its six wakes are spent, "Warriv rests until 21:40" in the dim colour.
+  Nothing when it is off or asleep with wakes left. The words are pure
+  and tested.
+
 ### The agent's cursor
 
 Asked for on 2026-10-01. Proposed, not built. When an agent tests a dev
