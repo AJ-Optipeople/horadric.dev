@@ -380,6 +380,26 @@ impl App {
             .is_some_and(|c| c.exit_code().is_none())
     }
 
+    /// Whether session `id` holds an item of a list, alone or in a tomb.
+    pub(super) fn holds_quest(&self, id: &str) -> bool {
+        self.shared
+            .boards
+            .borrow()
+            .values()
+            .flat_map(|b| &b.tasks)
+            .any(|t| t.mark.held() && t.holder.as_deref().is_some_and(|h| tombs::holds(h, id)))
+    }
+
+    /// Whether session `id` starts with permission prompts bypassed.
+    pub(super) fn bypasses_prompts(&self, id: &str) -> bool {
+        let own_tree = self
+            .shared
+            .registry
+            .lock()
+            .is_ok_and(|r| r.get(id).is_some_and(|s| s.worktree.is_some()));
+        tasks::bypasses_prompts(self.holds_quest(id), own_tree)
+    }
+
     /// What to add to a session's command line started in `cwd`: what it
     /// is told about the task list when it holds an item, about its own
     /// worktree when it has one and about the project's hosts when it has
@@ -388,13 +408,7 @@ impl App {
     /// prompt. Last, since the prompt is positional. Both are read as they
     /// are now, so a resume sees the hosts of today.
     pub(super) fn task_args(&mut self, id: &str, program: &Path, cwd: &Path) -> Vec<String> {
-        let holds = self
-            .shared
-            .boards
-            .borrow()
-            .values()
-            .flat_map(|b| &b.tasks)
-            .any(|t| t.mark.held() && t.holder.as_deref().is_some_and(|h| tombs::holds(h, id)));
+        let holds = self.holds_quest(id);
         let batch = horadric_pty::is_batch(program);
         let mut system = Vec::new();
         let own_tree = self

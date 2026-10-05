@@ -931,6 +931,15 @@ pub fn prompt(task: &Task, horadric: &str, file: &str) -> String {
     out
 }
 
+/// Whether a session runs with permission prompts bypassed: only when it
+/// holds a quest in a worktree of its own. In the main tree a wrong
+/// command touches what the human and other agents work in, so a quest
+/// there, the quest giver and any session holding none keep the
+/// project's mode.
+pub fn bypasses_prompts(holds_quest: bool, own_tree: bool) -> bool {
+    holds_quest && own_tree
+}
+
 /// What the agent is told beside its first prompt, every time it starts or
 /// resumes: that it works one item of the list, and how to report back.
 /// `horadric` is how to run this Horadric from the agent's shell, `file`
@@ -1020,6 +1029,14 @@ pub fn one_line(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_quest_in_its_own_worktree_bypasses_prompts() {
+        assert!(bypasses_prompts(true, true));
+        assert!(!bypasses_prompts(true, false));
+        assert!(!bypasses_prompts(false, true));
+        assert!(!bypasses_prompts(false, false));
+    }
 
     const SAMPLE: &str = "# Backlog\n\
         \n\

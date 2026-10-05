@@ -3907,23 +3907,25 @@ impl App {
     }
 
     /// What goes before a session's own arguments this time: the defaults
-    /// from the usage window, the status line that feeds it, the tools for
+    /// from the usage window (prompts bypassed for a quest in its own
+    /// worktree), the status line that feeds it, the tools for
     /// the project's browser pane, and what it is told about the task list
     /// and the project's hosts. Only for Claude
     /// Code, not for a shell put in its place with `HORADRIC_AGENT`, and not
     /// over settings the session brought itself.
     fn extra_args(&mut self, id: &str, program: &Path, args: &[String], cwd: &Path) -> Vec<String> {
+        let bypass = self.bypasses_prompts(id);
         if console::agent_of(program) == Some(Agent::Codex) {
             let hook = store::exe_command(&console::host_program(), "hook codex");
             let mut extra = Agent::Codex.hook_args(&hook);
             extra.extend(Agent::Codex.login_args());
             let exe = console::host_program();
             extra.extend(Agent::Codex.mcp_args(&exe.to_string_lossy(), None));
-            extra.extend(
-                self.shared
-                    .defaults_of(Agent::Codex)
-                    .flags(Agent::Codex, args),
-            );
+            extra.extend(self.shared.defaults_of(Agent::Codex).flags_for(
+                Agent::Codex,
+                args,
+                bypass,
+            ));
             return extra;
         }
         // Grok's hook is in its home, written by `install`.
@@ -3931,15 +3933,15 @@ impl App {
             return self
                 .shared
                 .defaults_of(Agent::Grok)
-                .flags(Agent::Grok, args);
+                .flags_for(Agent::Grok, args, bypass);
         }
         if !console::is_claude(program) {
             return Vec::new();
         }
-        let mut extra = self
-            .shared
-            .defaults_of(Agent::Claude)
-            .flags(Agent::Claude, args);
+        let mut extra =
+            self.shared
+                .defaults_of(Agent::Claude)
+                .flags_for(Agent::Claude, args, bypass);
         if let (Some(path), false) = (&self.status_settings, has_flag(args, "--settings")) {
             extra.push("--settings".into());
             extra.push(path.to_string_lossy().into_owned());

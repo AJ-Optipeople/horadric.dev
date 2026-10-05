@@ -3203,6 +3203,22 @@ not have. Built in this order: 1, 4, 5, 6, then 2 and 3.
   the project's mode, since there a wrong command touches what the
   human and other agents work in.
 
+  Built on 2026-10-05. A session that holds a quest and has a worktree
+  of its own (`tasks::bypasses_prompts`) starts with
+  `Defaults::flags_for(.., bypass)`: the mode picked in the usage window
+  gives way to `Agent::bypass_args`, which is `--permission-mode
+  bypassPermissions` for Claude Code, the form its other modes take,
+  `--dangerously-bypass-approvals-and-sandbox` for Codex and
+  `--always-approve` for Grok. A mode the session's own arguments chose
+  still wins. It is worked out at every start, so a resume after the
+  quest is done gets the project's mode back. Tried with a dev instance
+  and Haiku in a scratch repository: the worktree quest ran `echo` and
+  `quest done` with no prompt, a main tree session in the same project
+  stopped at "Do you want to proceed?". Claude's folder trust check still
+  comes first in a folder Claude has not been told to trust, as it did
+  for the scratch repository in `%TEMP%`; Horadric's own worktrees
+  beside a trusted checkout do not show it.
+
 **Open questions.**
 
 - Whether Warriv may review `[?]` quests in review mode, as a first

@@ -376,6 +376,24 @@ impl Defaults {
         }
         out
     }
+
+    /// `flags`, with permission prompts bypassed in place of the mode
+    /// picked when `bypass`. A mode the session's own `args` chose still
+    /// wins.
+    pub fn flags_for(&self, agent: Agent, args: &[String], bypass: bool) -> Vec<String> {
+        if !bypass {
+            return self.flags(agent, args);
+        }
+        let others = Defaults {
+            permission_mode: None,
+            ..self.clone()
+        };
+        let mut out = others.flags(agent, args);
+        if !agent.chosen(Setting::Permissions, args) {
+            out.extend(agent.bypass_args());
+        }
+        out
+    }
 }
 
 /// Whether `args` hold `flag`, alone or as `flag=value`.
@@ -607,6 +625,35 @@ mod tests {
             args("--model opus")
         );
         assert!(Defaults::default().flags(Agent::Claude, &[]).is_empty());
+    }
+
+    #[test]
+    fn a_bypass_takes_the_place_of_the_mode_picked() {
+        let d = Defaults {
+            model: Some("opus".into()),
+            effort: None,
+            permission_mode: Some("plan".into()),
+        };
+        assert_eq!(
+            d.flags_for(Agent::Claude, &[], true),
+            args("--model opus --permission-mode bypassPermissions")
+        );
+        assert_eq!(
+            d.flags_for(Agent::Claude, &[], false),
+            d.flags(Agent::Claude, &[])
+        );
+        assert_eq!(
+            d.flags_for(Agent::Claude, &args("--permission-mode auto"), true),
+            args("--model opus")
+        );
+        assert_eq!(
+            Defaults::default().flags_for(Agent::Codex, &[], true),
+            args("--dangerously-bypass-approvals-and-sandbox")
+        );
+        assert_eq!(
+            Defaults::default().flags_for(Agent::Grok, &args("--always-approve"), true),
+            Vec::<String>::new()
+        );
     }
 
     #[test]
