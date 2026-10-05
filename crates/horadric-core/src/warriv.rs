@@ -147,12 +147,14 @@ pub fn events(tasks: &[Task], mode: Mode, asks: &[String]) -> Vec<Event> {
 }
 
 /// A log in auto mode that has nothing in hand and nothing ready to start,
-/// while quests are left: the runner waits for something nobody will do.
+/// while quests are left. A quest blocked on the human is the reason then,
+/// and an event of its own.
 fn stalled(tasks: &[Task], mode: Mode, ready: &[Ready]) -> Option<Event> {
     if mode != Mode::Auto
-        || tasks
-            .iter()
-            .any(|t| matches!(t.mark, Mark::Working | Mark::Review))
+        || tasks.iter().any(|t| {
+            matches!(t.mark, Mark::Working | Mark::Review)
+                || (t.mark == Mark::Blocked && t.wait.is_none())
+        })
     {
         return None;
     }
@@ -271,7 +273,8 @@ pub fn system_prompt(horadric: &str, file: &str) -> String {
          Horadric types it into the session once it is between turns, and a blocked quest \
          goes on. Once per quest each time you are woken.\n\
          - Write down what you decided under the quest, which is how the next wake knows: \
-         `{horadric} quest note \"<title>\" \"<what you decided and why>\"`. Do this for \
+         `{horadric} quest note \"<title>\" \"<what you decided and why>\"`, which Horadric marks as \
+         yours. Do this for \
          every event you settle.\n\
          - Add quests: `{horadric} quest add \"<title>\" --notes \"<notes>\"`, with \
          `--below \"<title>\"` to put it right under another, and `--after \"<title>\"` \
@@ -499,7 +502,8 @@ mod tests {
 
     #[test]
     fn a_log_in_auto_mode_with_nothing_ready_is_stalled() {
-        let waiting = "- [x] A\n- [!] B @b-1: needs a key\n- [ ] C\n  After: B\n";
+        let waiting =
+            "- [x] A\n- [!] B @b-1: later {until: 2030-01-01T00:00Z}\n- [ ] C\n  After: B\n";
         let e = events(&list(waiting), Mode::Auto, &[]);
         assert_eq!(e.last().unwrap().kind, Kind::Stalled);
         assert!(e.last().unwrap().detail.ends_with("Waiting: B; C."));
@@ -513,6 +517,13 @@ mod tests {
             .all(|e| e.kind != Kind::Stalled));
         let in_hand = "- [/] A @a-1\n- [ ] C\n  After: A\n";
         assert!(events(&list(in_hand), Mode::Auto, &[]).is_empty());
+        // One blocked on the human is the event, not the stall.
+        let on_human = "- [!] B @b-1: needs a key\n- [ ] C\n  After: B\n";
+        let kinds: Vec<Kind> = events(&list(on_human), Mode::Auto, &[])
+            .iter()
+            .map(|e| e.kind)
+            .collect();
+        assert_eq!(kinds, vec![Kind::Blocked]);
         // A finished log is not stalled.
         assert!(events(&list("- [x] A\n"), Mode::Auto, &[]).is_empty());
     }
