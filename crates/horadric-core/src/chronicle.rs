@@ -82,8 +82,16 @@ pub enum Happened {
     },
     /// The commits made under the quest, newest first.
     Commits { commits: Vec<Commit> },
-    /// The quest's branch went into the main tree.
-    Merged { branch: String },
+    /// The quest's branch went into the main tree. `checked` is the
+    /// commit the main tree's branch was left at when the project's checks
+    /// passed on it, which a merge by hand, running none, leaves empty.
+    Merged {
+        branch: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        checked: String,
+    },
+    /// The project's "Ship Local" stone was cast. It names no quest.
+    Shipped,
     /// Warriv woke, the session `wake`, and was given these events. Given
     /// more while awake, it is another line with the same `wake`. None of
     /// Warriv's lines name a quest holder: they are about the wake.
@@ -491,7 +499,8 @@ pub fn quests(
                 }
             }
             Happened::Commits { commits } => q.commits = commits.clone(),
-            Happened::Merged { branch } => q.merged = Some(branch.clone()),
+            Happened::Merged { branch, .. } => q.merged = Some(branch.clone()),
+            Happened::Shipped => {}
         }
     }
     for t in list {

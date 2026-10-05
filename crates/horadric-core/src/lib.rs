@@ -25,6 +25,7 @@ pub mod release;
 pub mod runeword;
 pub mod saved;
 pub mod session;
+pub mod ship;
 pub mod ssh;
 pub mod tasks;
 pub mod title;
