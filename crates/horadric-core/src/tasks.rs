@@ -123,6 +123,29 @@ impl Task {
         out
     }
 
+    /// The model its `Model:` notes line names. A human's line wins over
+    /// Warriv's, since Warriv never changes a human's choice; of Warriv's
+    /// own, the last is the one it settled on.
+    pub fn model(&self) -> Option<&'static str> {
+        let human = self.notes.iter().find_map(|n| model_line(n));
+        let warriv = self
+            .notes
+            .iter()
+            .rev()
+            .find_map(|n| model_line(n.strip_prefix(crate::warriv::NOTE)?));
+        human.or(warriv)
+    }
+
+    /// What its session is started with for its `Model:` line, Claude
+    /// Code's way. Other agents name their models otherwise, so they get
+    /// none.
+    pub fn model_args(&self, agent: crate::Agent) -> Vec<String> {
+        match (agent, self.model()) {
+            (crate::Agent::Claude, Some(m)) => vec!["--model".into(), m.into()],
+            _ => Vec::new(),
+        }
+    }
+
     /// What it waited on, for its session told to go on and the toast
     /// that says so. Empty for an item that waits on nothing.
     pub fn over(&self) -> String {
@@ -149,6 +172,22 @@ pub fn after_line(note: &str) -> Option<&str> {
     let head = note.get(..6)?;
     let title = note[6..].trim();
     (head.eq_ignore_ascii_case("after:") && !title.is_empty()).then_some(title)
+}
+
+/// The models a quest's `Model:` line may name, as Claude Code's
+/// `--model` takes them, from the cheapest up.
+pub const MODELS: [&str; 3] = ["haiku", "sonnet", "opus"];
+
+/// The model a `Model: <name>` notes line names, read in any case. A name
+/// outside [`MODELS`] is not one, so a typo starts the default model
+/// rather than a session that fails at once.
+pub fn model_line(note: &str) -> Option<&'static str> {
+    let head = note.get(..6)?;
+    let name = note[6..].trim();
+    if !head.eq_ignore_ascii_case("model:") {
+        return None;
+    }
+    MODELS.into_iter().find(|m| m.eq_ignore_ascii_case(name))
 }
 
 /// The notes line that says a quest waits for `title`.
@@ -1634,6 +1673,85 @@ mod tests {
         assert_eq!(after_line("AFTER: x"), Some("x"));
         assert_eq!(after_line("Aft"), None);
         assert_eq!(after_line("æøå: x"), None);
+    }
+
+    #[test]
+    fn a_model_line_names_one_of_the_three_models() {
+        assert_eq!(model_line("Model: haiku"), Some("haiku"));
+        assert_eq!(model_line("model:   Opus  "), Some("opus"));
+        assert_eq!(model_line("MODEL:sonnet"), Some("sonnet"));
+        assert_eq!(model_line("Model: gpt-5"), None);
+        assert_eq!(model_line("Model:"), None);
+        assert_eq!(model_line("Models: haiku"), None);
+        assert_eq!(model_line("Mod"), None);
+        assert_eq!(model_line("æøå: haiku"), None);
+    }
+
+    #[test]
+    fn a_humans_model_line_wins_over_warrivs_and_warrivs_last_counts() {
+        let model = |notes: &str| {
+            parse(&format!(
+                "- [ ] Q
+{notes}"
+            ))[0]
+                .model()
+        };
+        assert_eq!(model(""), None);
+        assert_eq!(
+            model(
+                "  Model: opus
+"
+            ),
+            Some("opus")
+        );
+        assert_eq!(
+            model(
+                "  Warriv: Model: haiku
+"
+            ),
+            Some("haiku")
+        );
+        assert_eq!(
+            model(
+                "  Warriv: Model: haiku
+  Warriv: Model: sonnet
+"
+            ),
+            Some("sonnet")
+        );
+        assert_eq!(
+            model(
+                "  Warriv: Model: haiku
+  Model: opus
+  Warriv: Model: sonnet
+"
+            ),
+            Some("opus")
+        );
+        assert_eq!(
+            model(
+                "  Warriv: model was hard to pick
+"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn only_claude_code_is_started_with_the_quests_model() {
+        let t = &parse(
+            "- [ ] Q
+  Model: haiku
+",
+        )[0];
+        assert_eq!(t.model_args(crate::Agent::Claude), ["--model", "haiku"]);
+        assert!(t.model_args(crate::Agent::Codex).is_empty());
+        assert!(t.model_args(crate::Agent::Grok).is_empty());
+        let none = &parse(
+            "- [ ] Q
+",
+        )[0];
+        assert!(none.model_args(crate::Agent::Claude).is_empty());
     }
 
     #[test]

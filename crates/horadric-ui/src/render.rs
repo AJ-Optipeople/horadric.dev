@@ -73,7 +73,7 @@ mod stone;
 pub(crate) use stone::{StoneLook, StoneState};
 
 mod questlog;
-pub(crate) use questlog::{QuestDetail, QuestLogScene, QuestRowLook};
+pub(crate) use questlog::{DetailList, QuestDetail, QuestLogScene, QuestRowLook, WakeLook};
 
 const FONT: PCWSTR = w!("Segoe UI Variable Text");
 /// For the project's name: the optical size cut for larger text.
@@ -310,6 +310,9 @@ pub struct TasksScene {
     /// What the header says about the whole list.
     pub summary: String,
     pub mode: String,
+    /// What the line under the header says of Warriv, and whether it is at
+    /// work, which reads in the working colour.
+    pub warriv: Option<(String, bool)>,
     pub collapsed: bool,
 }
 
@@ -3371,6 +3374,22 @@ impl Painter<'_> {
             '\u{E70D}',
             Rect::new(x + word_w + caret_gap, l.mode.y, caret_w, l.mode.h),
         );
+
+        // Under the mode, so it reads as part of how the list runs.
+        if let (Some(r), Some((words, working))) = (l.warriv, &t.warriv) {
+            let ink = if *working {
+                theme::working()
+            } else {
+                theme::text_dim()
+            };
+            let right = l.mode.right();
+            self.text(
+                &gpu.small_right,
+                ink,
+                words,
+                Rect::new(r.x + pad, r.y, right - r.x - pad, r.h),
+            );
+        }
 
         let add = scene.button(Hit::TasksAdd);
         let (fill, ink) = theme::button_look(add);

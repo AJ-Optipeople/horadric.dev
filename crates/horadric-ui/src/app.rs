@@ -661,6 +661,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
         cube: Cell::new(None),
         tomes: RefCell::new(HashMap::new()),
         warriv: RefCell::new(HashMap::new()),
+        warriv_line: RefCell::new(HashMap::new()),
     });
     menu::init(Rc::clone(&shared));
     let toasts = Toasts::new(Rc::clone(&shared), notify, WM_HORADRIC_TRAY);
@@ -3432,6 +3433,7 @@ impl App {
                     };
                     self.alert_for = None;
                     self.tasks.merge_for = None;
+                    self.tasks.ship_for = None;
                     self.update_click = true;
                     self.toasts
                         .show(Kind::Done, &format!("Horadric {} is out", m.version), &text);
@@ -3878,10 +3880,15 @@ impl App {
         if !console::is_claude(program) {
             return Vec::new();
         }
+        // The quest's model counts as the session's own choice, so the
+        // default model stays out.
+        let model = self.quest_model_args(id, args);
+        let own: Vec<String> = args.iter().chain(&model).cloned().collect();
         let mut extra =
             self.shared
                 .defaults_of(Agent::Claude)
-                .flags_for(Agent::Claude, args, bypass);
+                .flags_for(Agent::Claude, &own, bypass);
+        extra.extend(model);
         if let (Some(path), false) = (&self.status_settings, has_flag(args, "--settings")) {
             extra.push("--settings".into());
             extra.push(path.to_string_lossy().into_owned());
@@ -4998,6 +5005,7 @@ impl App {
         if let Some(a) = alert {
             self.alert_for = about;
             self.tasks.merge_for = None;
+            self.tasks.ship_for = None;
             self.update_click = false;
             self.toasts.show(Kind::Waiting, &a.title, &a.text);
         }
@@ -5023,6 +5031,7 @@ impl App {
         let file = o.file.rsplit(['/', '\\']).next().unwrap_or(&o.file);
         self.alert_for = Some(o.session.clone());
         self.tasks.merge_for = None;
+        self.tasks.ship_for = None;
         self.update_click = false;
         self.toasts.show(
             Kind::Waiting,
@@ -5048,6 +5057,10 @@ impl App {
     fn open_alert(&mut self) {
         if let Some(m) = self.tasks.merge_for.take() {
             runner::ask_for(self, runner::Menu::Merge(m));
+            return;
+        }
+        if let Some(key) = self.tasks.ship_for.take() {
+            runner::ask_for(self, runner::Menu::Ship(key));
             return;
         }
         match self.alert_for.take() {

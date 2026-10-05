@@ -46,6 +46,17 @@ struct Awake {
     settled: HashSet<String>,
 }
 
+impl Awake {
+    /// The events it was given that still hold and that it has not
+    /// answered: what it is settling.
+    fn open(&self, now: &[Event]) -> usize {
+        self.given
+            .iter()
+            .filter(|e| now.contains(e) && !self.settled.contains(&e.title))
+            .count()
+    }
+}
+
 impl Camp {
     /// The session is done with: each event it was given that still holds
     /// and whose quest it did not answer is the human's now.
@@ -111,6 +122,7 @@ impl App {
     /// session closed, which the clusters have to hear.
     pub(super) fn orchestrate(&mut self, key: &str, b: &Board) -> bool {
         if !b.orchestrator {
+            self.shared.warriv_line.borrow_mut().remove(key);
             return self.shared.warriv.borrow_mut().remove(key).is_some();
         }
         let asks: Vec<String> = b
@@ -133,7 +145,20 @@ impl App {
         camp.desk.hear(now.clone(), camp.awake.is_some());
         let mut closed = self.wake(key, b, &mut camp, &now);
         let holding = camp.desk.holding(&now);
+        let line = camp
+            .desk
+            .watch(camp.awake.as_ref().map(|a| a.open(&now)), unix_now())
+            .map(|w| (w.words(crate::app::local_secs(), unix_now()), w.working()));
         self.tasks.warriv.camps.insert(key.to_string(), camp);
+        let mut lines = self.shared.warriv_line.borrow_mut();
+        if lines.get(key) != line.as_ref() {
+            match line {
+                Some(l) => lines.insert(key.to_string(), l),
+                None => lines.remove(key),
+            };
+            closed = true;
+        }
+        drop(lines);
         // The rows of what changed hands read anew.
         let mut shown = self.shared.warriv.borrow_mut();
         if shown.get(key) != Some(&holding) {

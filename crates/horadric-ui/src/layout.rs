@@ -69,6 +69,9 @@ pub struct Metrics {
     pub task_foot: f32,
     /// The button in the tasks tile's header that shows the mode.
     pub mode_w: f32,
+    /// The line under the tasks tile's header that says what Warriv is
+    /// about.
+    pub warriv_h: f32,
     /// A rune stone in the Runetome, its label under it, and how many
     /// stand in a row.
     pub stone: f32,
@@ -115,6 +118,7 @@ impl Default for Metrics {
             task_rows: 8,
             task_foot: 6.0,
             mode_w: 72.0,
+            warriv_h: 20.0,
             stone: 44.0,
             stone_label_h: 18.0,
             stones_per_row: 4,
@@ -177,6 +181,9 @@ pub struct TasksLayout {
     pub add: Rect,
     /// The quest giver left of the plus, which asks an agent for quests.
     pub give: Rect,
+    /// The line under the header that says what Warriv is about, while it
+    /// says anything.
+    pub warriv: Option<Rect>,
     /// One rect per visible row, top to bottom.
     pub rows: Vec<Rect>,
     /// The approve button at the right end of each row waiting for review.
@@ -231,8 +238,9 @@ impl FilesLayout {
 }
 
 /// Lays out a cluster with `n` tiles. `tasks` is one entry per task row
-/// shown, true where the row has an approve button, none for no tasks
-/// tile; empty is its header alone. `tome` is how many stones the
+/// shown, true where the row has an approve button, and whether Warriv's
+/// line shows, none for no tasks tile; no rows and no line is its header
+/// alone. `tome` is how many stones the
 /// Runetome shows, none for no tome and zero for its header alone. `files` is how tall the files tile is
 /// below its header, in DIPs, none for no files tile. Zero is the tile
 /// folded to its header. It holds as many whole rows as fit and the rest is
@@ -242,7 +250,7 @@ pub fn cluster(
     m: &Metrics,
     n: usize,
     collapsed: bool,
-    tasks: Option<&[bool]>,
+    tasks: Option<(&[bool], bool)>,
     tome: Option<usize>,
     files: Option<f32>,
 ) -> ClusterLayout {
@@ -270,8 +278,8 @@ pub fn cluster(
         add = Some(Rect::new(m.pad, y, wide, m.add_h));
         shell = Some(Rect::new(m.pad + wide + m.gap, y, m.shell_w, m.add_h));
         y += m.add_h + m.gap;
-        if let Some(approve) = tasks {
-            let l = tasks_tile(m, y, approve);
+        if let Some((approve, warriv)) = tasks {
+            let l = tasks_tile(m, y, approve, warriv);
             y = l.rect.bottom() + m.gap;
             tasks_layout = Some(l);
         }
@@ -369,8 +377,9 @@ fn tome_tile(m: &Metrics, y: f32, n: usize) -> TomeLayout {
 /// How far the tasks tile's plus stands in from the tile's right edge.
 const TASKS_ADD_IN: f32 = 6.0;
 
-/// The tasks tile with its top at `y`, a row for each of `approve`.
-fn tasks_tile(m: &Metrics, y: f32, approve: &[bool]) -> TasksLayout {
+/// The tasks tile with its top at `y`, a row for each of `approve`, under
+/// Warriv's line when it shows.
+fn tasks_tile(m: &Metrics, y: f32, approve: &[bool], warriv: bool) -> TasksLayout {
     let full = m.width - 2.0 * m.pad;
     let header = Rect::new(m.pad, y, full, m.files_header_h);
     // The plus is a glyph in a square, so the square stands in from the
@@ -386,6 +395,11 @@ fn tasks_tile(m: &Metrics, y: f32, approve: &[bool]) -> TasksLayout {
     let mut rows = Vec::new();
     let mut buttons = Vec::new();
     let mut row_y = header.bottom();
+    let warriv = warriv.then(|| {
+        let r = Rect::new(m.pad, row_y, full, m.warriv_h);
+        row_y += m.warriv_h;
+        r
+    });
     for &a in approve {
         let r = Rect::new(m.pad, row_y, full, m.task_row_h);
         let side = m.task_row_h - 6.0;
@@ -393,7 +407,7 @@ fn tasks_tile(m: &Metrics, y: f32, approve: &[bool]) -> TasksLayout {
         rows.push(r);
         row_y += m.task_row_h;
     }
-    let bottom = if approve.is_empty() {
+    let bottom = if row_y == header.bottom() {
         header.bottom()
     } else {
         row_y + m.task_foot
@@ -404,6 +418,7 @@ fn tasks_tile(m: &Metrics, y: f32, approve: &[bool]) -> TasksLayout {
         mode,
         add,
         give,
+        warriv,
         rows,
         approve: buttons,
     }
@@ -2616,7 +2631,7 @@ mod tests {
             &m,
             1,
             false,
-            Some(&approve),
+            Some((&approve, false)),
             None,
             Some(5.0 * m.file_row_h + m.file_foot),
         );
@@ -2647,7 +2662,7 @@ mod tests {
     #[test]
     fn the_tome_sits_under_the_tasks_tile_its_stones_in_rows() {
         let m = Metrics::default();
-        let l = cluster(&m, 1, false, Some(&[]), Some(6), Some(0.0));
+        let l = cluster(&m, 1, false, Some((&[], false)), Some(6), Some(0.0));
         let tasks = l.tasks.as_ref().unwrap();
         let t = l.tome.as_ref().unwrap();
         let f = l.files.as_ref().unwrap();
@@ -2674,23 +2689,41 @@ mod tests {
         assert_eq!(at(t.stones[5]), Some(4));
         assert_eq!(stone_slot(t, 20.0, t.rect.bottom() + 5.0), None);
         // Folded, the header alone.
-        let folded = cluster(&m, 1, false, Some(&[]), Some(0), None);
+        let folded = cluster(&m, 1, false, Some((&[], false)), Some(0), None);
         let t = folded.tome.unwrap();
         assert_eq!(t.rect, t.header);
-        assert!(cluster(&m, 1, true, Some(&[]), Some(6), None)
+        assert!(cluster(&m, 1, true, Some((&[], false)), Some(6), None)
             .tome
             .is_none());
     }
 
     #[test]
+    fn warrivs_line_sits_under_the_header_above_the_rows() {
+        let m = Metrics::default();
+        let l = cluster(&m, 1, false, Some((&[false, true], true)), None, None);
+        let t = l.tasks.unwrap();
+        let w = t.warriv.unwrap();
+        assert_eq!(w.y, t.header.bottom());
+        assert_eq!(w.h, m.warriv_h);
+        assert_eq!(t.rows[0].y, w.bottom());
+        assert_eq!(t.rect.bottom(), t.rows[1].bottom() + m.task_foot);
+        // With no rows the line still shows, folded or empty.
+        let l = cluster(&m, 1, false, Some((&[], true)), None, None);
+        let t = l.tasks.unwrap();
+        assert_eq!(t.rect.bottom(), t.warriv.unwrap().bottom() + m.task_foot);
+        let l = cluster(&m, 1, false, Some((&[false], false)), None, None);
+        assert!(l.tasks.unwrap().warriv.is_none());
+    }
+
+    #[test]
     fn an_empty_or_folded_tasks_tile_is_its_header() {
         let m = Metrics::default();
-        let l = cluster(&m, 1, false, Some(&[]), None, None);
+        let l = cluster(&m, 1, false, Some((&[], false)), None, None);
         let t = l.tasks.unwrap();
         assert!(t.rows.is_empty());
         assert_eq!(t.rect, t.header);
         assert_eq!(l.size.1, t.rect.bottom() + m.pad);
-        assert!(cluster(&m, 1, true, Some(&[true]), None, None)
+        assert!(cluster(&m, 1, true, Some((&[true], false)), None, None)
             .tasks
             .is_none());
     }
