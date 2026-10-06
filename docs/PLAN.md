@@ -914,8 +914,26 @@ settled "no web view" for web pages only: Horadric's own UI stays Direct2D.
   pick one, as in a browser (`web::tab_key`, pure), caught in the page by
   `AcceleratorKeyPressed` and in the pane while the address is typed. A
   tab is named by its page's title, else its address (`web::tab_name`).
-  An address Ctrl+clicked in a terminal opens in a new tab. An agent's
-  tools drive the shown tab. The tabs are kept over a reload, see above.
+  An address Ctrl+clicked in a terminal opens in a new tab. The tabs are
+  kept over a reload, see above.
+- **A tab per agent** (`web::pick_tab`, pure, `Tab::driver`). Asked for
+  because an agent drove whichever tab was shown, so the user showing
+  another tab, or a second session opening a page, moved it off its
+  work. Now each session keeps to a tab of its own. Its first call takes
+  the shown tab when no other live agent has it (so "look at this page"
+  works); otherwise opening a page gives it a new tab behind the shown
+  one, and a read looks at the shown tab without taking it. A popup its
+  click opened within 3 s becomes its tab and hands it back on closing.
+  `browser_close` closes only its own tab. A tab an agent works in shows
+  its session's initial on a disc in the colour of its phase, dim while
+  idle, gone when it ends; the owner is kept over a reload
+  (`SavedTab::driver`). A background tab an agent calls on draws on the
+  app's hidden window meanwhile, as a page off the stage does. Tested
+  over the listener with two fake sessions in one project: each navigated
+  and read its own tab, a screenshot of the background tab came back,
+  closing one left the other, and a `window.open` popup took its agent
+  and gave it back. The badge was not seen on screen yet: the desktop
+  was locked.
 - Popups and links to a new window (a middle click, `target=_blank`, an
   OAuth login) open in a new tab: `NewWindowRequested` is deferred until
   the tab's WebView is made and then handed it, so the popup keeps its

@@ -32,6 +32,7 @@ use std::fs;
 use std::net::TcpListener;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 use webview2_com::Microsoft::Web::WebView2::Win32::{
     CreateCoreWebView2EnvironmentWithOptions, ICoreWebView2, ICoreWebView2Controller,
@@ -100,7 +101,19 @@ struct Tab {
     /// nothing, and a screenshot or a click waits for it to draw, so a
     /// page off the stage is shown on the app's hidden window meanwhile.
     driven: u32,
+    /// The session whose agent works in this tab, so its calls stay here
+    /// when the user shows another tab.
+    driver: Option<String>,
+    /// When its agent last called on it, so a popup it opens is known
+    /// for the agent's and not the user's.
+    called: Option<Instant>,
+    /// The tab that opened it as a popup, given its agent back when it
+    /// closes.
+    from: Option<u64>,
 }
+
+/// How soon after an agent's call a popup from its tab is the agent's.
+const POPUP_AFTER_CALL: Duration = Duration::from_secs(3);
 
 /// The size a page that was never on the stage lays out at while an agent
 /// drives it, in CSS pixels: a laptop's.
@@ -124,6 +137,9 @@ impl Tab {
             waiting: Vec::new(),
             loading: Vec::new(),
             driven: 0,
+            driver: None,
+            called: None,
+            from: None,
         }
     }
 }
@@ -236,7 +252,7 @@ pub fn open(key: &str, url: Option<&str>) {
         }
         Some(None) => {}
         None => {
-            add_tab(key, Tab::new(url.map(str::to_string)));
+            add_tab(key, Tab::new(url.map(str::to_string)), true);
         }
     }
 }
@@ -244,12 +260,13 @@ pub fn open(key: &str, url: Option<&str>) {
 /// Opens `url` in a new tab of the project's browser, shown at once, or
 /// opens the browser at it when the project has none.
 pub fn open_tab(key: &str, url: Option<&str>) {
-    add_tab(key, Tab::new(url.map(str::to_string)));
+    add_tab(key, Tab::new(url.map(str::to_string)), true);
 }
 
-/// Puts `tab` after the browser's others and shows it, making the browser
-/// when the project has none, then asks WebView2 for its page.
-fn add_tab(key: &str, tab: Tab) {
+/// Puts `tab` after the browser's others, shown when `front` or when it is
+/// the only one, making the browser when the project has none, then asks
+/// WebView2 for its page.
+fn add_tab(key: &str, tab: Tab, front: bool) {
     let id = tab.id;
     WEBS.with(|w| {
         let mut w = w.borrow_mut();
@@ -262,10 +279,119 @@ fn add_tab(key: &str, tab: Tab) {
             room: None,
         });
         web.tabs.push(tab);
-        web.active = web.tabs.len() - 1;
+        if front || web.tabs.len() == 1 {
+            web.active = web.tabs.len() - 1;
+        }
     });
     show(key);
     make(key, id);
+}
+
+/// Which tab a session's agent works in, from the session driving each tab
+/// (None where no live one does) and the one shown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pick {
+    /// The tab at this place: its own, or the shown one lent for a look.
+    At(usize),
+    /// The shown tab, which no agent has, becomes this session's.
+    Claim(usize),
+    /// A tab of its own, opened beside the others.
+    New,
+    /// The project has no page.
+    Nothing,
+}
+
+/// A session keeps to the tab it works in, whichever one the user shows.
+/// Without one it takes the shown tab when no other agent has it, so "look
+/// at this page" works. Otherwise, to open a page it gets a tab of its
+/// own, and to read one it looks at the shown tab without taking it.
+pub fn pick_tab(drivers: &[Option<&str>], active: usize, session: &str, make: bool) -> Pick {
+    if let Some(i) = drivers.iter().position(|d| *d == Some(session)) {
+        return Pick::At(i);
+    }
+    match drivers.get(active) {
+        Some(None) => Pick::Claim(active),
+        _ if make => Pick::New,
+        Some(Some(_)) => Pick::At(active),
+        None => Pick::Nothing,
+    }
+}
+
+/// The tab `session`'s agent works in, opening one for it when `make` and
+/// it has none to take (see [`pick_tab`]). A tab whose session is not
+/// `live` any more is free.
+pub fn agent_tab(key: &str, session: &str, live: impl Fn(&str) -> bool, make: bool) -> Option<u64> {
+    let picked = WEBS.with(|w| {
+        let mut w = w.borrow_mut();
+        let Some(web) = w.get_mut(key) else {
+            return if make { Err(()) } else { Ok(None) };
+        };
+        let drivers: Vec<Option<&str>> = web
+            .tabs
+            .iter()
+            .map(|t| t.driver.as_deref().filter(|d| live(d)))
+            .collect();
+        match pick_tab(&drivers, web.active, session, make) {
+            Pick::At(i) => Ok(Some((web.tabs[i].id, false))),
+            Pick::Claim(i) => {
+                web.tabs[i].driver = Some(session.to_string());
+                Ok(Some((web.tabs[i].id, true)))
+            }
+            Pick::New => Err(()),
+            Pick::Nothing => Ok(None),
+        }
+    });
+    match picked {
+        Ok(Some((id, claimed))) => {
+            if claimed {
+                changed(key, None, |_| {});
+            }
+            Some(id)
+        }
+        Ok(None) => None,
+        Err(()) => {
+            let mut tab = Tab::new(None);
+            tab.driver = Some(session.to_string());
+            let id = tab.id;
+            add_tab(key, tab, false);
+            Some(id)
+        }
+    }
+}
+
+/// Takes the tab `id` to `url`, or has it open there once it is made.
+pub fn navigate(key: &str, id: u64, url: &str) {
+    let view = WEBS.with(|w| {
+        let mut w = w.borrow_mut();
+        let tab = w.get_mut(key)?.by_id(id)?;
+        if tab.webview.is_none() {
+            tab.pending = Some(url.to_string());
+        }
+        tab.webview.clone()
+    });
+    if let Some(v) = view {
+        navigate_view(&v, url);
+    }
+}
+
+/// Closes the tab `id`, and the browser with it when it is the last.
+pub fn close_tab(key: &str, id: u64) -> bool {
+    let at = WEBS.with(|w| w.borrow().get(key)?.tabs.iter().position(|t| t.id == id));
+    if let Some(at) = at {
+        tab(key, TabStep::Close(Some(at)));
+    }
+    at.is_some()
+}
+
+/// Where the tab `id` is among its browser's, how many there are, and
+/// whether it is the one shown.
+pub fn place_of(key: &str, id: u64) -> Option<(usize, usize, bool)> {
+    WEBS.with(|w| {
+        let w = w.borrow();
+        let web = w.get(key)?;
+        let at = web.tabs.iter().position(|t| t.id == id)?;
+        Some((at, web.tabs.len(), at == web.active))
+    })
 }
 
 fn navigate_view(view: &ICoreWebView2, url: &str) {
@@ -320,13 +446,13 @@ pub fn is_shown(key: &str) -> bool {
     WEBS.with(|w| w.borrow().get(key).is_some_and(|w| w.pane.is_some()))
 }
 
-/// Runs `f` with the project's shown page once it is made, at once when it
-/// is. None when the project has no page, or it could not be made.
-pub fn with_view(key: &str, f: impl FnOnce(Option<ICoreWebView2>) + 'static) {
+/// Runs `f` with the tab `id`'s page once it is made, at once when it is.
+/// None when the tab is gone, or it could not be made.
+pub fn with_view(key: &str, id: u64, f: impl FnOnce(Option<ICoreWebView2>) + 'static) {
     let f: Box<dyn FnOnce(Option<ICoreWebView2>)> = Box::new(f);
     let now = WEBS.with(|w| {
         let mut w = w.borrow_mut();
-        let Some(tab) = w.get_mut(key).and_then(Web::tab_mut) else {
+        let Some(tab) = w.get_mut(key).and_then(|w| w.by_id(id)) else {
             return Some((f, None));
         };
         match tab.webview.clone() {
@@ -342,12 +468,12 @@ pub fn with_view(key: &str, f: impl FnOnce(Option<ICoreWebView2>) + 'static) {
     }
 }
 
-/// Runs `f` once the shown page's next navigation ends, saying whether it
-/// loaded. False at once when the project has no page.
-pub fn after_load(key: &str, f: impl FnOnce(bool) + 'static) {
+/// Runs `f` once the tab `id`'s next navigation ends, saying whether it
+/// loaded. False at once when the tab is gone.
+pub fn after_load(key: &str, id: u64, f: impl FnOnce(bool) + 'static) {
     let f: Box<dyn FnOnce(bool)> = Box::new(f);
     let gone = WEBS.with(
-        |w| match w.borrow_mut().get_mut(key).and_then(Web::tab_mut) {
+        |w| match w.borrow_mut().get_mut(key).and_then(|w| w.by_id(id)) {
             Some(tab) => {
                 tab.loading.push(f);
                 None
@@ -360,16 +486,17 @@ pub fn after_load(key: &str, f: impl FnOnce(bool) + 'static) {
     }
 }
 
-/// Sends the project's page a DevTools protocol call, `params` a JSON
+/// Sends the tab `id`'s page a DevTools protocol call, `params` a JSON
 /// object, and gives `done` the JSON it answered or why it did not.
 pub fn devtools(
     key: &str,
+    tab: u64,
     method: &str,
     params: &str,
     done: impl FnOnce(Result<String, String>) + 'static,
 ) {
     let (method, params, owned) = (method.to_string(), params.to_string(), key.to_string());
-    with_view(key, move |view| {
+    with_view(key, tab, move |view| {
         let Some(view) = view else {
             return done(Err("the browser is not open".into()));
         };
@@ -416,31 +543,38 @@ fn wake(key: &str, view: &ICoreWebView2) -> Option<u64> {
     let (id, parked) = WEBS.with(|w| {
         let mut w = w.borrow_mut();
         let web = w.get_mut(key)?;
-        let (pane, never_shown) = (web.pane, web.bounds.right <= web.bounds.left);
-        let tab = web
+        let (pane, bounds, active) = (web.pane, web.bounds, web.active);
+        let at = web
             .tabs
-            .iter_mut()
-            .find(|t| t.webview.as_ref() == Some(view))?;
+            .iter()
+            .position(|t| t.webview.as_ref() == Some(view))?;
+        let tab = &mut web.tabs[at];
         tab.driven += 1;
+        tab.called = Some(Instant::now());
+        // A tab behind the shown one is off the stage too.
         let parked = match pane {
-            Some(_) => None,
-            None => tab.controller.clone().map(|c| (c, never_shown)),
+            Some(_) if at == active => None,
+            _ => tab.controller.clone().map(|c| (c, bounds)),
         };
         Some((tab.id, parked))
     })?;
-    if let Some((c, never_shown)) = parked {
+    if let Some((c, bounds)) = parked {
         unsafe {
-            if never_shown {
+            let bounds = if bounds.right > bounds.left {
+                bounds
+            } else {
                 let scale = GetDpiForWindow(park_hwnd()).max(96) as f64 / 96.0;
                 let (w, h) = PARKED;
                 let size = |v: i32| (v as f64 * scale).round() as i32;
-                let _ = c.SetBounds(RECT {
+                RECT {
                     left: 0,
                     top: 0,
                     right: size(w),
                     bottom: size(h),
-                });
-            }
+                }
+            };
+            let _ = c.SetParentWindow(park_hwnd());
+            let _ = c.SetBounds(bounds);
             let _ = c.SetIsVisible(true);
         }
     }
@@ -453,8 +587,9 @@ fn rest(key: &str, id: u64) {
     let idle = WEBS.with(|w| {
         let mut w = w.borrow_mut();
         let web = w.get_mut(key)?;
-        let off_stage = web.pane.is_none();
-        let tab = web.by_id(id)?;
+        let at = web.tabs.iter().position(|t| t.id == id)?;
+        let off_stage = web.pane.is_none() || at != web.active;
+        let tab = &mut web.tabs[at];
         tab.driven = tab.driven.saturating_sub(1);
         (tab.driven == 0 && off_stage).then(|| tab.controller.clone())?
     });
@@ -518,7 +653,14 @@ pub fn tab(key: &str, step: TabStep) {
                     return Some(None);
                 }
                 web.active = after_close(web.active, at, len);
-                Some(Some(web.tabs.remove(at)))
+                let gone = web.tabs.remove(at);
+                // A popup done hands its agent back to the page that opened it.
+                if let (Some(d), Some(from)) = (&gone.driver, gone.from) {
+                    if let Some(t) = web.by_id(from).filter(|t| t.driver.is_none()) {
+                        t.driver = Some(d.clone());
+                    }
+                }
+                Some(Some(gone))
             }
         }
     });
@@ -570,6 +712,16 @@ pub fn tabs(key: &str) -> Option<(Vec<String>, usize)> {
             .map(|t| tab_name(&t.title, &t.url))
             .collect();
         Some((names, web.active))
+    })
+}
+
+/// The session whose agent works in each of the project's tabs.
+pub fn drivers(key: &str) -> Vec<Option<String>> {
+    WEBS.with(|w| {
+        w.borrow()
+            .get(key)
+            .map(|web| web.tabs.iter().map(|t| t.driver.clone()).collect())
+            .unwrap_or_default()
     })
 }
 
@@ -692,6 +844,7 @@ pub fn pages() -> std::collections::BTreeMap<String, SavedPages> {
                             t.url.clone()
                         },
                         title: t.title.clone(),
+                        driver: t.driver.clone(),
                     })
                     .collect();
                 Some((k.clone(), SavedPages::of(tabs, web.active)?))
@@ -718,6 +871,7 @@ pub fn restore(key: &str, saved: &SavedPages) {
             let mut tab = Tab::new(Some(t.url.clone()));
             tab.title = t.title.clone();
             tab.url = t.url.clone();
+            tab.driver = t.driver.clone();
             web.tabs.push(tab);
         }
         web.active = start + saved.active.min(saved.tabs.len().saturating_sub(1));
@@ -818,11 +972,13 @@ fn show(key: &str) {
     for p in placed.iter().filter(|p| !p.shown) {
         unsafe {
             // An agent's call in flight still needs a page off the stage
-            // drawn.
-            if pane.is_some() || !p.driven {
+            // drawn, on the app window, not over the shown one.
+            if p.driven {
+                let _ = p.controller.SetParentWindow(park_hwnd());
+            } else {
                 let _ = p.controller.SetIsVisible(false);
+                let _ = p.controller.SetParentWindow(pane.unwrap_or_else(park_hwnd));
             }
-            let _ = p.controller.SetParentWindow(pane.unwrap_or_else(park_hwnd));
         }
     }
     for p in placed.iter().filter(|p| p.shown) {
@@ -903,23 +1059,37 @@ pub fn focus(key: &str) {
     }
 }
 
-/// The shown page's title and address, for the pane's header.
-pub fn label(key: &str) -> Option<(String, String)> {
+/// Reads the tab `id`, or the shown one with None.
+fn read_tab<T>(key: &str, id: Option<u64>, f: impl FnOnce(&Tab) -> T) -> Option<T> {
     WEBS.with(|w| {
         let w = w.borrow();
-        let tab = w.get(key)?.tab()?;
-        Some((tab.title.clone(), tab.url.clone()))
+        let web = w.get(key)?;
+        let tab = match id {
+            Some(id) => web.tabs.iter().find(|t| t.id == id),
+            None => web.tab(),
+        }?;
+        Some(f(tab))
     })
+}
+
+/// The shown page's title and address, for the pane's header.
+pub fn label(key: &str) -> Option<(String, String)> {
+    label_of(key, None)
+}
+
+/// The title and address of the tab `id`, or of the shown one.
+pub fn label_of(key: &str, id: Option<u64>) -> Option<(String, String)> {
+    read_tab(key, id, |t| (t.title.clone(), t.url.clone()))
 }
 
 /// Whether the shown page has somewhere to go back and forward to.
 pub fn history(key: &str) -> (bool, bool) {
-    WEBS.with(|w| {
-        w.borrow()
-            .get(key)
-            .and_then(Web::tab)
-            .map_or((false, false), |t| (t.back, t.forward))
-    })
+    history_of(key, None)
+}
+
+/// Whether the tab `id`, or the shown one, can go back and forward.
+pub fn history_of(key: &str, id: Option<u64>) -> (bool, bool) {
+    read_tab(key, id, |t| (t.back, t.forward)).unwrap_or((false, false))
 }
 
 /// Puts the keyboard in the address field of the pane showing the page.
@@ -942,12 +1112,12 @@ pub fn edit(key: &str) -> bool {
 
 /// Back, forward or reload, from the header's buttons or the keys.
 pub fn go(key: &str, step: Step) {
-    let Some(view) = WEBS.with(|w| {
-        w.borrow()
-            .get(key)
-            .and_then(Web::tab)
-            .and_then(|t| t.webview.clone())
-    }) else {
+    go_in(key, None, step);
+}
+
+/// Back, forward or reload in the tab `id`, or the shown one.
+pub fn go_in(key: &str, id: Option<u64>, step: Step) {
+    let Some(view) = read_tab(key, id, |t| t.webview.clone()).flatten() else {
         return;
     };
     let _ = unsafe {
@@ -1247,7 +1417,23 @@ fn listen(key: &str, id: u64, view: &ICoreWebView2) {
         let deferral = unsafe { args.GetDeferral()? };
         let mut tab = Tab::new(None);
         tab.opener = Some((args, deferral));
-        add_tab(&owned, tab);
+        tab.from = Some(id);
+        // A popup its agent just clicked open is where the agent goes on,
+        // and it comes up where its opener is: in front, or behind.
+        let front = WEBS.with(|w| {
+            let mut w = w.borrow_mut();
+            let web = w.get_mut(&owned)?;
+            let front = web.tab().is_some_and(|t| t.id == id);
+            let opener = web.by_id(id)?;
+            let agents = opener
+                .called
+                .is_some_and(|at| at.elapsed() < POPUP_AFTER_CALL);
+            if agents {
+                tab.driver = opener.driver.take();
+            }
+            Some(front)
+        });
+        add_tab(&owned, tab, front.unwrap_or(true));
         Ok(())
     }));
     // A page closing itself, a login popup done, closes its tab.
@@ -1463,6 +1649,21 @@ mod tests {
         assert_eq!(after_close(3, 3, 4), 2);
         // After the shown one: nothing moves.
         assert_eq!(after_close(1, 3, 4), 1);
+    }
+
+    #[test]
+    fn an_agent_keeps_to_its_own_tab() {
+        // Its own tab, though the user shows another.
+        assert_eq!(pick_tab(&[Some("a"), None], 1, "a", true), Pick::At(0));
+        // None of its own: the shown tab no agent has becomes its.
+        assert_eq!(pick_tab(&[Some("b"), None], 1, "a", true), Pick::Claim(1));
+        // The shown tab is another agent's: a tab of its own to open a
+        // page, a look at the shown one to read.
+        assert_eq!(pick_tab(&[Some("b"), None], 0, "a", true), Pick::New);
+        assert_eq!(pick_tab(&[Some("b"), None], 0, "a", false), Pick::At(0));
+        // No page at all.
+        assert_eq!(pick_tab(&[], 0, "a", true), Pick::New);
+        assert_eq!(pick_tab(&[], 0, "a", false), Pick::Nothing);
     }
 
     #[test]

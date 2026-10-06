@@ -510,6 +510,31 @@ impl Pane {
         }
     }
 
+    /// Which session's agent works in each of the browser's tabs, in the
+    /// colour of what it is doing. None where none does, or its session
+    /// has ended.
+    fn tab_badges(&self, key: &str) -> Vec<Option<glyphs::TabBadge>> {
+        let drivers = web::drivers(key);
+        let Ok(r) = self.shared.registry.lock() else {
+            return Vec::new();
+        };
+        drivers
+            .iter()
+            .map(|d| {
+                let s = r.get(d.as_deref()?)?;
+                (s.phase != horadric_core::Phase::Ended).then(|| glyphs::TabBadge {
+                    letter: glyphs::badge_letter(s.label()),
+                    ink: match s.phase {
+                        horadric_core::Phase::Idle | horadric_core::Phase::Paused => {
+                            theme::text_dim()
+                        }
+                        _ => theme::phase_color(&s.phase),
+                    },
+                })
+            })
+            .collect()
+    }
+
     /// Fades the pane in from the background, for a stage that has just
     /// switched to its project.
     pub fn reveal(&self) {
@@ -822,11 +847,18 @@ impl Pane {
             .as_deref()
             .and_then(web::tabs)
             .unwrap_or_default();
+        let badges = self
+            .console
+            .web
+            .as_deref()
+            .map(|key| self.tab_badges(key))
+            .unwrap_or_default();
         let bar = self.console.web.as_deref().map(|key| {
             let (back, forward) = web::history(key);
             Bar {
                 tabs: &tab_names,
                 tab,
+                badges: &badges,
                 text: &shown,
                 edit: edit.as_ref().map(|f| {
                     let (a, b) = f.selection();

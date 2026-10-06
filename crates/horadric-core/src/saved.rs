@@ -521,6 +521,9 @@ pub struct SavedTab {
     /// Names the tab until its page loads and says its own.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub title: String,
+    /// The session whose agent works in it, which keeps it over a reload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub driver: Option<String>,
 }
 
 impl SavedPages {
@@ -547,6 +550,7 @@ mod tests {
         SavedTab {
             url: url.to_string(),
             title: String::new(),
+            driver: None,
         }
     }
 

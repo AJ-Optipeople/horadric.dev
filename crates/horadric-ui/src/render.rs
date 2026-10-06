@@ -47,12 +47,12 @@ use windows::Win32::Graphics::DirectWrite::{
     DWriteCreateFactory, IDWriteFactory, IDWriteFontCollection, IDWriteRenderingParams,
     IDWriteTextFormat, IDWriteTextLayout, IDWriteTextLayout1, DWRITE_FACTORY_TYPE_SHARED,
     DWRITE_FONT_FEATURE, DWRITE_FONT_FEATURE_TAG_TABULAR_FIGURES, DWRITE_FONT_STRETCH_NORMAL,
-    DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT, DWRITE_FONT_WEIGHT_NORMAL,
-    DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_HIT_TEST_METRICS, DWRITE_MEASURING_MODE_NATURAL,
-    DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_NEAR,
-    DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_TEXT_RANGE,
-    DWRITE_TRIMMING, DWRITE_TRIMMING_GRANULARITY_CHARACTER, DWRITE_TRIMMING_GRANULARITY_NONE,
-    DWRITE_WORD_WRAPPING_NO_WRAP, DWRITE_WORD_WRAPPING_WRAP,
+    DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT, DWRITE_FONT_WEIGHT_BOLD,
+    DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_HIT_TEST_METRICS,
+    DWRITE_MEASURING_MODE_NATURAL, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
+    DWRITE_PARAGRAPH_ALIGNMENT_NEAR, DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_TRAILING,
+    DWRITE_TEXT_RANGE, DWRITE_TRIMMING, DWRITE_TRIMMING_GRANULARITY_CHARACTER,
+    DWRITE_TRIMMING_GRANULARITY_NONE, DWRITE_WORD_WRAPPING_NO_WRAP, DWRITE_WORD_WRAPPING_WRAP,
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows_numerics::{Matrix3x2, Vector2};
@@ -138,6 +138,8 @@ pub struct Gpu {
     /// Icons, centred in the rect they are drawn in.
     pub icon: IDWriteTextFormat,
     pub icon_small: IDWriteTextFormat,
+    /// The initial on a browser tab's badge, centred on it.
+    pub badge: IDWriteTextFormat,
     pub text_params: IDWriteRenderingParams,
 }
 
@@ -163,6 +165,8 @@ impl Gpu {
             icon.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
             let icon_small = format(&dw, icons, 11.0, normal, false)?;
             icon_small.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
+            let badge = format(&dw, FONT, 9.5, DWRITE_FONT_WEIGHT_BOLD, false)?;
+            badge.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
             // The system's text contrast is tuned for dark text on white.
             // Light strokes on a near black background come out thin with
             // it, so raise it and keep the rest of the user's tuning.
@@ -188,6 +192,7 @@ impl Gpu {
                 chip,
                 icon,
                 icon_small,
+                badge,
             })
         }
     }

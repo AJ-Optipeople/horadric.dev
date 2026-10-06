@@ -145,9 +145,9 @@ impl<A: FnMut(Value) -> Result<Value, String>> Server<A> {
             "browser_close" => {
                 let closed = (self.app)(json!({ "op": "close" }))?["closed"] == true;
                 Ok(vec![text(if closed {
-                    "Closed the browser pane."
+                    "Closed your tab in the browser pane."
                 } else {
-                    "The browser pane was not open."
+                    "You had no tab of your own open."
                 })])
             }
             "browser_snapshot" => Ok(vec![text(self.snapshot()?)]),
@@ -624,23 +624,26 @@ fn tools() -> Vec<Value> {
     vec![
         tool(
             "browser_open",
-            "Open this project's browser pane in Horadric, at url when given. It is a real \
-             browser (Edge WebView2) beside the user's terminals, logged in wherever the user \
-             logged in. Open it when a task needs a web page; it stays open until closed.",
+            "Open this project's browser pane in Horadric, and a tab of your own in it, at url \
+             when given. It is a real browser (Edge WebView2) beside the user's terminals, \
+             logged in wherever the user logged in. Open it when a task needs a web page; it \
+             stays open until closed.",
             json!({ "url": { "type": "string", "description": "Where to go; a bare host like localhost:3000 is fine" } }),
             &[],
         ),
         tool(
             "browser_close",
-            "Close this project's browser pane. Do it once you are done with the page, unless \
-             the user is using it or asked to keep it.",
+            "Close your tab in this project's browser pane, and the pane with it when it was \
+             the last. Do it once you are done with the page, unless the user is using it or \
+             asked to keep it.",
             json!({}),
             &[],
         ),
         tool(
             "browser_navigate",
-            "Go to a url in the browser pane, opening the pane if it is closed, and wait for \
-             the page to load. A bare host like example.com or localhost:3000 is fine.",
+            "Go to a url in your tab of the browser pane, opening the pane or the tab if \
+             needed, and wait for the page to load. A bare host like example.com or \
+             localhost:3000 is fine.",
             json!({ "url": { "type": "string" } }),
             &["url"],
         ),
@@ -652,7 +655,8 @@ fn tools() -> Vec<Value> {
         ),
         tool(
             "browser_info",
-            "Whether the browser pane is open, whether the user can see it, and its address and title.",
+            "Whether the browser pane is open, which tab is yours, whether the user can see it, \
+             and its address and title.",
             json!({}),
             &[],
         ),
@@ -786,11 +790,14 @@ fn tool(name: &str, description: &str, properties: Value, required: &[&str]) -> 
 }
 
 const INSTRUCTIONS: &str = "Horadric gives this session a browser: a pane on the Horadric \
-stage beside the user's terminals, one per project and shared by the project's sessions. The \
-user sees the page you drive. Open it with browser_open or browser_navigate when a task needs \
+stage beside the user's terminals, one per project with tabs, shared by the project's sessions. \
+You work in a tab of your own: the first page you open or look at becomes yours (the tab shown, \
+unless another session has it, else a new one), and your calls stay in it whichever tab the \
+user shows. A popup your click opens becomes yours until it closes. The user sees the page you \
+drive. Open it with browser_open or browser_navigate when a task needs \
 the web (trying a page you built, reading docs, a login), read it with browser_snapshot, act \
 with browser_click, browser_type, browser_select (for a dropdown) and browser_press, and look \
-with browser_screenshot. Refs from browser_snapshot are surer than guessed selectors. Close it with \
+with browser_screenshot. Refs from browser_snapshot are surer than guessed selectors. Close your tab with \
 browser_close when you are done, unless the user is using it. It keeps one login profile with \
 the user's own use of it, so take care on sites where they are logged in.";
 

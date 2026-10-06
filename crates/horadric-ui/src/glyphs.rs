@@ -135,7 +135,30 @@ pub struct Bar<'a> {
     pub tabs: &'a [String],
     /// The tab shown.
     pub tab: usize,
+    /// The session whose agent works in each tab, where one does.
+    pub badges: &'a [Option<TabBadge>],
 }
+
+/// The mark on a tab an agent works in: its session's initial on a disc
+/// in the colour of what the session is doing.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TabBadge {
+    pub letter: char,
+    pub ink: Color,
+}
+
+/// The letter that stands for a session on a tab: the first letter or
+/// digit of its name, in capitals, or a dot for a name with none.
+pub fn badge_letter(label: &str) -> char {
+    label
+        .chars()
+        .find(|c| c.is_alphanumeric())
+        .and_then(|c| c.to_uppercase().next())
+        .unwrap_or('\u{2022}')
+}
+
+/// A tab badge's radius, in DIPs.
+const BADGE_R: f32 = 6.5;
 
 /// Height of a browser pane's tab strip, a row of keys on the plate
 /// between its address bar and its glass.
@@ -1045,7 +1068,11 @@ impl GridTarget {
                 self.tab_lamp(left + 10.0, (top + bottom) / 2.0, lit);
             }
             let cross = l.crosses[i];
-            let text_left = left + if wide { 19.0 } else { 6.0 };
+            let mut text_left = left + if wide { 19.0 } else { 6.0 };
+            if let Some(b) = bar.badges.get(i).copied().flatten().filter(|_| wide) {
+                self.tab_badge(gpu, b, text_left + BADGE_R, (top + bottom) / 2.0);
+                text_left += 2.0 * BADGE_R + 5.0;
+            }
             let text_right = cross.unwrap_or(right - 4.0);
             let name: Vec<u16> = name.encode_utf16().collect();
             self.brush.SetColor(&render::color(if shown {
@@ -1189,6 +1216,37 @@ impl GridTarget {
                 dot(2.5, theme::lamp_off());
             }
         }
+    }
+
+    /// Which session's agent works in a tab: its initial, dark on a disc
+    /// of the colour of what it is doing.
+    unsafe fn tab_badge(&self, gpu: &Gpu, b: TabBadge, x: f32, y: f32) {
+        self.brush.SetColor(&render::color(b.ink));
+        self.rt.FillEllipse(
+            &D2D1_ELLIPSE {
+                point: Vector2 { X: x, Y: y },
+                radiusX: BADGE_R,
+                radiusY: BADGE_R,
+            },
+            &self.brush,
+        );
+        let mut letter = [0u16; 2];
+        let letter = b.letter.encode_utf16(&mut letter);
+        self.brush
+            .SetColor(&render::color(theme::surface().mix(Color::rgb(0), 0.5)));
+        self.rt.DrawText(
+            letter,
+            &gpu.badge,
+            &D2D_RECT_F {
+                left: x - BADGE_R,
+                top: y - BADGE_R,
+                right: x + BADGE_R,
+                bottom: y + BADGE_R,
+            },
+            &self.brush,
+            D2D1_DRAW_TEXT_OPTIONS_NONE,
+            DWRITE_MEASURING_MODE_NATURAL,
+        );
     }
 
     /// A stage in outline with its browser's part of it filled: the left
@@ -2011,6 +2069,14 @@ mod tests {
         assert_eq!(r[1], ((oy + 32.0) * 1.5).round() as i32);
         assert_eq!(r[2] - r[0], 12);
         assert_eq!(r[3] - r[1], 24);
+    }
+
+    #[test]
+    fn a_tab_badge_shows_the_sessions_initial() {
+        assert_eq!(badge_letter("fix the login"), 'F');
+        assert_eq!(badge_letter("  #42 tabs"), '4');
+        assert_eq!(badge_letter("ærø"), 'Æ');
+        assert_eq!(badge_letter("!?"), '\u{2022}');
     }
 
     #[test]
