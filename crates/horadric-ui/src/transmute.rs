@@ -60,6 +60,8 @@ pub(in crate::app) fn look(s: &Session) -> StashLook {
         project: project_name(&key),
         accent: theme::accent(&key),
         ink: theme::rarity_color(s.rarity()),
+        last: s.last_line.clone(),
+        branch: s.worktree.as_ref().map(|w| w.branch.clone()),
     }
 }
 

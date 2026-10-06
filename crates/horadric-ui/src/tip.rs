@@ -310,7 +310,28 @@ pub fn tab(hit: TabHit) -> &'static str {
 }
 
 /// What a stashed session's row does.
-pub const STASHED: &str = "Bring this session back to the stage";
+pub const STASHED: &str = "Click to bring it back to the stage. Right click for more";
+
+/// A stashed session's whole story, since its row has room for only a
+/// line of each: its name, where it worked, what it last did, then what
+/// a click does.
+pub fn stashed(name: &str, project: &str, branch: Option<&str>, last: &str) -> String {
+    let mut s = name.trim().to_string();
+    s.push('\n');
+    s.push_str(project);
+    if let Some(b) = branch.filter(|b| !b.is_empty()) {
+        s.push_str(", on ");
+        s.push_str(b);
+    }
+    let last = last.trim();
+    if !last.is_empty() {
+        s.push('\n');
+        s.push_str(last);
+    }
+    s.push_str("\n\n");
+    s.push_str(STASHED);
+    s
+}
 
 thread_local! {
     static TIPS: RefCell<Tips> = RefCell::new(Tips::default());
@@ -762,6 +783,17 @@ mod tests {
         assert_ne!(bar(BarHit::Place(Side::Left), Some(Side::Right)), back);
         assert_ne!(bar(BarHit::Place(Side::Top), None), back);
         assert_eq!(bar(BarHit::Field, None), None);
+    }
+
+    #[test]
+    fn a_stashed_line_says_name_place_and_last_words_before_the_click() {
+        let s = stashed(" fix login ", "shop", Some("fix-login"), "Ran the tests");
+        assert_eq!(
+            s,
+            format!("fix login\nshop, on fix-login\nRan the tests\n\n{STASHED}")
+        );
+        let bare = stashed("x", "shop", Some(""), "  ");
+        assert_eq!(bare, format!("x\nshop\n\n{STASHED}"));
     }
 
     #[test]

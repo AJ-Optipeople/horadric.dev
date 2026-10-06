@@ -1999,10 +1999,15 @@ columns, and a click brings it back as it was.
 - **The window** (`stash.rs`) is a column window like the usage window,
   key `columns::STASH`, dragged the same way, under the usage window when
   it first comes (`Columns::add_under`) and there only while the stash
-  holds something. A grid of nine in a well sunk into the plate
-  (`layout::stash`, tested): a stashed session a key with its name in its
-  item colour and its project beside a lamp in the project's accent, an
-  empty slot a latched bay. "Stash" and "n of 9" above.
+  holds something. A list in a well sunk into the plate (`layout::stash`,
+  tested), a row per stashed session the column's full width, so the
+  window grows and shrinks with what it holds. A row is a key with its
+  name in its item colour, and under it a lamp in the project's accent,
+  the project and the last thing it said. Resting the cursor on a row
+  shows all of it (`tip::stashed`, tested): name, project and branch,
+  the whole last line, then what a click does. "Stash" and "n of 9"
+  above. It was a three by three grid first, and a third of the column
+  cut every name to a word.
 - Saved as `stash` in `state.json`, left out while empty. A saved entry
   that is also a tile, or past the ninth, is dropped on load.
 

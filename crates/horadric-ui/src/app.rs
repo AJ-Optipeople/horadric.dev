@@ -4527,6 +4527,8 @@ impl App {
                         project: project_name(&key),
                         accent: theme::accent(&key),
                         ink: theme::rarity_color(s.rarity()),
+                        last: s.last_line.clone(),
+                        branch: s.worktree.as_ref().map(|w| w.branch.clone()),
                     };
                     (s.id.clone(), look)
                 })

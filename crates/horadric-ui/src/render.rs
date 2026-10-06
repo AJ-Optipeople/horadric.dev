@@ -22,7 +22,7 @@ use std::time::{Duration, SystemTime};
 use horadric_core::diff::Diff;
 use horadric_core::rarity::Rarity;
 use horadric_core::usage::format_until;
-use horadric_core::{format_age, Limit, Phase, Session, Usage};
+use horadric_core::{format_age, Limit, Phase, Session, Usage, STASH_SLOTS};
 use windows::core::{w, Interface, Result, BOOL, PCWSTR};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Direct2D::Common::{
@@ -588,6 +588,10 @@ pub struct StashLook {
     pub accent: Color,
     /// How it ended, in item colours, as its tile's name was.
     pub ink: Color,
+    /// The last thing it said or did, as its tile's line was.
+    pub last: String,
+    /// Its worktree's branch, when it has one of its own.
+    pub branch: Option<String>,
 }
 
 /// Something the cube held, swirling into it as a recipe runs: where its
@@ -1245,17 +1249,17 @@ impl Painter<'_> {
         }
     }
 
-    /// The stash: its name and how full it is, then a well of nine slots,
-    /// a stashed session a key standing in its slot and an empty slot a
-    /// bay. Keys are latched further in than a tile's: put away, not at
-    /// work.
+    /// The stash: its name and how full it is, then a well of a row per
+    /// stashed session, each a key with its name across the whole row and
+    /// under it its project's lamp, the project and what it last did. Keys
+    /// are latched further in than a tile's: put away, not at work.
     unsafe fn stash(&self, gpu: &Gpu, m: &Metrics, scene: &StashScene) {
         let l = scene.layout;
         self.plate(m, l.size);
         let h = &l.header;
         let label = Rect::new(h.x + 4.0, h.y, h.w - 8.0, h.h);
         self.text(&gpu.small, theme::text_dim(), "Stash", label);
-        let count = format!("{} of {}", scene.items.len(), l.slots.len());
+        let count = format!("{} of {}", scene.items.len(), STASH_SLOTS);
         self.text_tabular(gpu, &gpu.small_right, theme::text_dim(), &count, label);
         self.sunk(gpu, &l.well, m.tile_radius, theme::well());
         let radius = m.tile_radius - 4.0;
@@ -1271,19 +1275,25 @@ impl Painter<'_> {
                 Button::Pressed => 0.1,
             };
             self.key(gpu, r, radius, theme::surface(), depth, 1.0);
-            let pad = 8.0;
-            let line_h = (r.h - 8.0) / 2.0;
-            let name = Rect::new(r.x + pad, r.y + 4.0, r.w - 2.0 * pad, line_h);
+            let pad = 10.0;
+            let line_h = (r.h - 6.0) / 2.0;
+            let name = Rect::new(r.x + pad, r.y + 3.0, r.w - 2.0 * pad, line_h);
             self.text(&gpu.small, item.ink, &item.name, name);
             let led_x = r.x + pad + 2.5;
-            let project = Rect::new(
+            let below = Rect::new(
                 led_x + 7.0,
                 name.bottom(),
                 r.right() - pad - led_x - 7.0,
                 line_h,
             );
-            self.led(led_x, project.y + project.h / 2.0, item.accent);
-            self.text(&gpu.small, theme::text_dim(), &item.project, project);
+            self.led(led_x, below.y + below.h / 2.0, item.accent);
+            let last = item.last.lines().next().unwrap_or("").trim();
+            let detail = if last.is_empty() {
+                item.project.clone()
+            } else {
+                format!("{}: {last}", item.project)
+            };
+            self.text(&gpu.small, theme::text_dim(), &detail, below);
         }
     }
 

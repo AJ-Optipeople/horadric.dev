@@ -1,4 +1,4 @@
-//! The stash: a three by three grid of sessions put away for later.
+//! The stash: a list of sessions put away for later, a row each.
 //!
 //! History has every conversation; the stash has the few you chose. A
 //! stashed session is paused and out of the columns, and a click on its
@@ -50,7 +50,8 @@ pub struct StashWindow {
     pub hwnd: HWND,
     shared: Rc<Shared>,
     target: RefCell<Option<Target>>,
-    layout: StashLayout,
+    /// Made again whenever the number of rows changes.
+    layout: RefCell<StashLayout>,
     /// Each stashed session's id and look, oldest first, set by the app.
     items: RefCell<Vec<(String, StashLook)>>,
     drag: RefCell<Option<Drag>>,
@@ -84,7 +85,7 @@ impl StashWindow {
     /// Creates the window at `(x, y)` in physical pixels and shows it
     /// without activating it.
     pub fn create(shared: Rc<Shared>, x: i32, y: i32) -> Result<Box<Self>> {
-        let layout = layout::stash(&shared.metrics);
+        let layout = RefCell::new(layout::stash(&shared.metrics, 0));
         let mut win = Box::new(StashWindow {
             hwnd: HWND::default(),
             shared,
@@ -143,7 +144,7 @@ impl StashWindow {
 
     pub fn size_px(&self) -> (i32, i32) {
         let s = self.scale();
-        let (w, h) = self.layout.size;
+        let (w, h) = self.layout.borrow().size;
         ((w * s).round() as i32, (h * s).round() as i32)
     }
 
@@ -192,10 +193,20 @@ impl StashWindow {
         }
     }
 
-    /// What the slots show from now on.
+    /// What the rows show from now on. A row more or fewer resizes the
+    /// window, and the columns are laid out again to make room.
     pub fn set_items(&self, items: Vec<(String, StashLook)>) {
+        let rows = items.len();
         *self.items.borrow_mut() = items;
-        self.invalidate();
+        let next = layout::stash(&self.shared.metrics, rows);
+        let resized = self.layout.borrow().size != next.size;
+        *self.layout.borrow_mut() = next;
+        if resized {
+            self.fit();
+            app::push(Input::Arrange);
+        } else {
+            self.invalidate();
+        }
     }
 
     /// Sizes the window to its layout, at the DPI it is on.
@@ -230,8 +241,9 @@ impl StashWindow {
         }
         let items = self.items.borrow();
         let looks: Vec<&StashLook> = items.iter().map(|(_, l)| l).collect();
+        let layout = self.layout.borrow();
         let scene = StashScene {
-            layout: &self.layout,
+            layout: &layout,
             items: &looks,
             hot: self.hot.get(),
             pressed: self.pressed.get(),
@@ -249,7 +261,7 @@ impl StashWindow {
         let s = self.scale();
         let x = (lparam.0 & 0xffff) as i16 as f32 / s;
         let y = ((lparam.0 >> 16) & 0xffff) as i16 as f32 / s;
-        layout::stash_hit(&self.layout, x, y).filter(|&i| i < self.items.borrow().len())
+        layout::stash_hit(&self.layout.borrow(), x, y).filter(|&i| i < self.items.borrow().len())
     }
 
     fn id_at(&self, slot: Option<usize>) -> Option<String> {
@@ -257,7 +269,12 @@ impl StashWindow {
     }
 
     fn hover(&self, hot: Option<usize>) {
-        tip::over(&self.shared, self.hwnd, hot.map(|_| tip::STASHED));
+        let line = hot.and_then(|i| {
+            let items = self.items.borrow();
+            let (_, l) = items.get(i)?;
+            Some(tip::stashed(&l.name, &l.project, l.branch.as_deref(), &l.last).into())
+        });
+        tip::over_line(&self.shared, self.hwnd, line);
         if self.hot.replace(hot) != hot {
             self.invalidate();
         }
