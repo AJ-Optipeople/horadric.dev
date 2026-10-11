@@ -4,6 +4,7 @@
 - Do not wait for main's checks before casting a ship stone: nothing runs them between landings, and the ship session runs all three first (RELEASING.md step 2) and stops on red.
 
 ## Lately
+- 2026-10-11 Hourly round (main at 761cf46): OSC 7501 plain terminals under way, CSI c fence queued (opus), cloud tiles still with the human, nothing landed since the last ship. Nothing to do.
 - 2026-10-11 Hourly round (main at 3872e49): OSC 7501 plain terminals under way, CSI c fence queued (opus), cloud tiles still with the human, nothing landed since the last ship. Nothing to do.
 - 2026-10-11 Wake: "Propose tiles for Claude Code cloud sessions" blocked again, same report, no human answer in its notes. Still the human's pick, nothing new to do.
 - 2026-10-11 Hourly round (main at 646d98c): OSC 7501 plain terminals still under way, CSI c fence queued (opus), cloud tiles still with the human, nothing landed since the last ship. Nothing to do.
