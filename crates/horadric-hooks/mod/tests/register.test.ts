@@ -2,6 +2,9 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 
 // `as never` on a spawn: the engine fills in the rest of what it takes.
 const TAGGED = { HORADRIC_SESSION: 'tile-1', HORADRIC_OWNER_PORT: '43118' }
+// What the engine draws above the prompt when no mod draws there.
+const ENGINE_BAND = { type: 'Box' as const, props: { key: 'engine' } }
+const KNOWS_NOTHING = { value: { status: 200, ok: true, headers: {}, text: '{}' } }
 
 describe('horadric mod', () => {
   test('posts the roster to the owner when it changes, and only then', async ($, on) => {
@@ -11,6 +14,7 @@ describe('horadric mod', () => {
     const clock = mock.clock(on)
     const posts: { url: string; headers?: Record<string, string>; body: any }[] = []
     on('http.fetch', ($, e) => {
+      if (e.url.endsWith('/know')) return KNOWS_NOTHING
       posts.push({ url: e.url, headers: e.init?.headers, body: JSON.parse(e.init?.body ?? '{}') })
       return { value: { status: 200, ok: true, headers: {}, text: '' } }
     })
@@ -44,6 +48,7 @@ describe('horadric mod', () => {
     const clock = mock.clock(on)
     const posts: any[] = []
     on('http.fetch', ($, e) => {
+      if (e.url.endsWith('/know')) return KNOWS_NOTHING
       posts.push(JSON.parse(e.init?.body ?? '{}'))
       return { value: { status: 200, ok: true, headers: {}, text: '' } }
     })
@@ -88,5 +93,82 @@ describe('horadric mod', () => {
     const started = await $.agent.spawn({ prompt: 'p', description: 'd', subagentType: 'Explore' } as never)
     await clock.settle()
     expect(started.agentId).toBe('a4')
+  })
+
+  test('shows the quest and a file another session changed above the prompt', async ($, on) => {
+    mock.env(on, TAGGED)
+    on('session.id', () => ({ value: 'conv-1' }))
+    on('session.start', ($, e) => ({ cwd: e.cwd }))
+    const clock = mock.clock(on)
+    let answer: object = {}
+    const asked: (Record<string, string> | undefined)[] = []
+    on('http.fetch', ($, e) => {
+      if (e.url === 'http://127.0.0.1:43118/horadric/know') asked.push(e.init?.headers)
+      return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(answer) } }
+    })
+    on('agent.list', () => ({ value: [] }))
+    on('ui.render', () => ENGINE_BAND)
+    await $.session.start({ cwd: '/p', surface: null, isInteractive: true })
+    const band = await $.ui.mount({
+      plugin: 'horadric',
+      surface: 'terminal',
+      component: 'AbovePrompt',
+      props: { hasSurvey: false, isWorking: false, maxRows: 20, bodyColumns: 80 } as never,
+    })
+    await clock.advance(3000)
+    expect(asked[0]?.['X-Horadric-Session']).toBe('tile-1')
+    expect(await band.find({ text: 'Quest' })).toBeUndefined()
+
+    answer = {
+      quest: 'Serve the API',
+      overlaps: [{ file: 'overlap.rs', path: 'C:/app/overlap.rs', others: ['fix-a', 'fix-b'] }],
+    }
+    await clock.advance(3000)
+    expect(await band.find({ text: 'Serve the API' })).toBeDefined()
+    expect(await band.find({ text: 'overlap.rs' })).toBeDefined()
+    expect(await band.find({ text: ' also changed by fix-a and fix-b, not committed' })).toBeDefined()
+
+    answer = {}
+    await clock.advance(3000)
+    expect(await band.find({ text: 'Serve the API' })).toBeUndefined()
+  })
+
+  test('tells Claude of a shared file with the next prompt, once', async ($, on) => {
+    mock.env(on, TAGGED)
+    on('session.id', () => ({ value: 'conv-1' }))
+    on('session.start', ($, e) => ({ cwd: e.cwd }))
+    const clock = mock.clock(on)
+    const answer = { overlaps: [{ file: 'overlap.rs', path: 'C:/app/overlap.rs', others: ['fix-a'] }] }
+    on('http.fetch', () => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(answer) } }))
+    on('agent.list', () => ({ value: [] }))
+    on('prompt.submit', ($, e) => ({ text: e.text, context: e.context }))
+    await $.session.start({ cwd: '/p', surface: null, isInteractive: true })
+    await clock.advance(3000)
+
+    const first = await $.prompt.submit({ text: 'go on' } as never)
+    expect(first.context?.join(' ')).toContain('C:/app/overlap.rs (also changed by fix-a)')
+    const second = await $.prompt.submit({ text: 'and then' } as never)
+    expect(second.context ?? []).toEqual([])
+  })
+
+  test('a closed Horadric shows nothing above the prompt', async ($, on) => {
+    mock.env(on, TAGGED)
+    on('session.id', () => ({ value: 'conv-1' }))
+    on('session.start', ($, e) => ({ cwd: e.cwd }))
+    const clock = mock.clock(on)
+    on('http.fetch', () => {
+      throw new Error('connection refused')
+    })
+    on('agent.list', () => ({ value: [] }))
+    on('ui.render', () => ENGINE_BAND)
+    await $.session.start({ cwd: '/p', surface: null, isInteractive: true })
+    await clock.advance(3000)
+    const band = await $.ui.mount({
+      plugin: 'horadric',
+      surface: 'terminal',
+      component: 'AbovePrompt',
+      props: { hasSurvey: false, isWorking: false, maxRows: 20, bodyColumns: 80 } as never,
+    })
+    expect(await band.drawn()).toEqual(expect.objectContaining({ type: 'Box', props: { key: 'engine' } }))
   })
 })

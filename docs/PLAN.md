@@ -5517,8 +5517,20 @@ use what is new. Each part is a quest in the log.
   `workflow_run`) as a subagent starts, and `HoradricAgents` (the whole
   `$.agent.list()`, each `agent_id`, `agent_type`, `status`) whenever it
   changes, looked at every 2 seconds. Neither moves a phase yet.
-  `claude plugin test crates/horadric-hooks/mod` runs its tests. The band
-  is still to do.
+  `claude plugin test crates/horadric-hooks/mod` runs its tests.
+  **The band, built (2026-10-11).** Every 3 seconds the mod posts to the
+  owner's `/horadric/know` with the tag (refused without one or from a web
+  page). The listener adds the files the session shares with others from
+  its claims (`Claims::shared`, the same claims the `PostToolUse` reply
+  warns from), the app adds the quest the session holds and names the
+  others as their tiles are, and answers `{quest, overlaps: [{file, path,
+  others}]}`, empty when there is nothing to say. The mod keeps it in
+  `$.state` and draws it above the prompt ("Quest ...", "overlap.rs also
+  changed by alpha, not committed"), nothing when it is empty or
+  Horadric is closed. A shared file also goes to Claude as context on the
+  next prompt, once per change. Verified on screen with two sessions on
+  one file. The theme colours (`warning`, `subtle`) are not drawn in
+  Horadric's terminal yet; the text is plain.
 - **Subagents on the tile.** Today a tile counts subagents by `agent_id`
   and calls one finished after 30 quiet seconds. With the mod's reports
   the tile can show each by type, and when it really ends.

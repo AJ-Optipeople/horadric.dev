@@ -64,7 +64,7 @@ use horadric_core::{
     session_id, Carry, HookEvent, Phase, Registry, Route, SavedCluster, SavedPanel, SavedSession,
     SavedState, Session, Setting, Usage,
 };
-use horadric_hooks::listener::{self, Command, Reload, Tagged};
+use horadric_hooks::listener::{self, Command, KnowCall, Reload, Tagged};
 use horadric_hooks::transcript::{self, Past};
 use horadric_hooks::{install, TASKS_ENV};
 use windows::core::{w, BOOL, PCWSTR};
@@ -3093,6 +3093,7 @@ impl App {
                         }
                         Command::Overlap(o) => self.overlapped(&o),
                         Command::Browser(call) => self.browser_call(call),
+                        Command::Know(call) => self.know_call(call),
                     }
                 }
             }
@@ -5836,6 +5837,31 @@ impl App {
         );
     }
 
+    /// Answers Horadric's Claude mod: the quest its session holds and the
+    /// files it shares with other sessions, those named as their tiles are.
+    fn know_call(&mut self, call: KnowCall) {
+        let quest = self.held_quest(&call.session);
+        let shared: Vec<(String, Vec<String>)> = self
+            .shared
+            .registry
+            .lock()
+            .map(|r| {
+                call.overlaps
+                    .iter()
+                    .map(|o| {
+                        let names = o
+                            .others
+                            .iter()
+                            .filter_map(|id| r.get(id))
+                            .map(|s| s.label().to_string());
+                        (o.file.clone(), names.collect())
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        call.reply.send(known(quest.as_deref(), &shared));
+    }
+
     /// The notification was clicked: show the session it was about, or,
     /// for several, the one that has waited longest.
     /// The release the last notification told of, when it did, for a
@@ -7867,9 +7893,54 @@ pub(crate) fn work_area(chosen: Option<&str>) -> (i32, i32, i32, i32) {
     (r.left, r.top, r.right, r.bottom)
 }
 
+/// What the mod is told: `quest` when there is one, and each file shared
+/// with sessions still in Horadric, by its name alone since the band is
+/// narrow. Empty when there is nothing to say.
+fn known(quest: Option<&str>, shared: &[(String, Vec<String>)]) -> serde_json::Value {
+    let mut out = serde_json::Map::new();
+    if let Some(q) = quest {
+        out.insert("quest".into(), q.into());
+    }
+    let files: Vec<serde_json::Value> = shared
+        .iter()
+        .filter(|(_, others)| !others.is_empty())
+        .map(|(file, others)| {
+            let name = file.rsplit(['/', '\\']).next().unwrap_or(file);
+            serde_json::json!({ "file": name, "path": file, "others": others })
+        })
+        .collect();
+    if !files.is_empty() {
+        out.insert("overlaps".into(), files.into());
+    }
+    out.into()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_mod_is_told_the_quest_and_files_shared_with_live_sessions() {
+        assert_eq!(known(None, &[]), serde_json::json!({}));
+        let shared = [
+            (
+                r"C:\app\src\overlap.rs".to_string(),
+                vec!["fix-a".to_string()],
+            ),
+            ("C:/app/gone.rs".to_string(), Vec::new()),
+        ];
+        assert_eq!(
+            known(Some("Serve the API"), &shared),
+            serde_json::json!({
+                "quest": "Serve the API",
+                "overlaps": [{
+                    "file": "overlap.rs",
+                    "path": r"C:\app\src\overlap.rs",
+                    "others": ["fix-a"],
+                }],
+            })
+        );
+    }
 
     #[test]
     fn a_default_list_puts_default_first_and_picks_back_its_value() {

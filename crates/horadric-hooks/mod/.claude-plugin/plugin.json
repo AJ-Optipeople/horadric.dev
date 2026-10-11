@@ -1,6 +1,7 @@
 {
   "name": "horadric",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": { "name": "Horadric" },
-  "description": "Tells Horadric what its hooks can not: each subagent and teammate, its type and whether it is still at work."
+  "description": "Tells Horadric what its hooks can not, and tells Claude and you what Horadric knows: the quest this session holds and any file another session is changing too.",
+  "types": "./types/index.d.ts"
 }

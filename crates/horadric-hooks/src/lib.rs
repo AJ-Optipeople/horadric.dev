@@ -78,6 +78,11 @@ pub const TASKS_PATH: &str = "/horadric/tasks";
 /// pane. The reply carries what the app answered.
 pub const BROWSER_PATH: &str = "/horadric/browser";
 
+/// Path Horadric's Claude mod posts to every few seconds: what Horadric
+/// knows about its session, for the band above the prompt. The reply
+/// carries it.
+pub const KNOW_PATH: &str = "/horadric/know";
+
 /// Header a command request must carry. A browser can not send a custom
 /// header to another origin without a preflight we never answer, so this is
 /// what stops a web page from starting processes through localhost.

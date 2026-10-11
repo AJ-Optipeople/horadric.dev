@@ -209,9 +209,10 @@ pub const MOD_FILES: &[(&str, &str)] = &[
     ),
     ("hooks/hooks.json", include_str!("../mod/hooks/hooks.json")),
     (
-        "hooks/register.ts",
-        include_str!("../mod/hooks/register.ts"),
+        "hooks/register.tsx",
+        include_str!("../mod/hooks/register.tsx"),
     ),
+    ("types/index.d.ts", include_str!("../mod/types/index.d.ts")),
 ];
 
 const LIST_SEP: char = if cfg!(windows) { ';' } else { ':' };
