@@ -5519,6 +5519,89 @@ use what is new. Each part is a quest in the log.
 - **Cloud sessions.** Claude Code runs on its own cloud machine now
   (blog, 2026-10-06). Tiles for them beside the local ones are a new
   kind of session with no terminal here. Proposed first, not built.
+  The proposal is below, under Cloud session tiles.
+
+#### Cloud session tiles (proposal, 2026-10-11)
+
+Not built. Written for the human to choose an option.
+
+**What this machine can see today**, checked with Claude Code 2.1.296:
+
+- `claude agents --json --all` lists only local sessions: `kind` is
+  `interactive` or `background`, nothing else. No cloud session appears
+  and no flag asks for them. Horadric already polls this list for
+  background sessions (see Background sessions above).
+- `claude --cloud [description|session_id|url]` creates a cloud session
+  or attaches this terminal to one, by id or by its claude.ai/code URL.
+  `--environment <ccpool_...>` runs a new one on a self-hosted pool.
+  `--teleport [session]` pulls a cloud session down to run here.
+- `claude --remote-control [name]` makes a local session reachable from
+  claude.ai and the phone. It goes the other way: it publishes this
+  machine's sessions, it does not list the cloud's.
+- Claude Code's own agent listing (the one a session uses to message
+  peers) can show "your Claude sessions running in the cloud" and Remote
+  Control sessions on other machines, so the account does expose such a
+  list. It is not a documented command or API that Horadric can call.
+- `claude -p "msg" --cloud <id> --output-format json` queues a message
+  to a cloud session and exits with `{ok, session_id, url}`. It does not
+  wait for the reply. So a tile could answer a cloud session without a
+  pane, but not follow it.
+- The docs (code.claude.com, agent-view) say outright that cloud
+  sessions are not in `claude agents`. They document no command, local
+  API or event stream that lists cloud sessions or their state.
+- HTTP APIs, per platform.claude.com: routines' `/fire` starts a run and
+  returns its id, nothing more. The Managed Agents Sessions API (list,
+  get, stream) is for API key agents and does not say it covers
+  claude.ai/code sessions. The Compliance API lists remote sessions with
+  a status, but needs an org admin's key. None is the user's own list
+  under their claude.ai login.
+- Hooks run inside the cloud machine, and only those committed in the
+  repository's `.claude/settings.json` (not `~/.claude/settings.json`,
+  where Horadric's live). They would post to the cloud machine's
+  localhost. To reach anything outside, the environment's network must
+  be Full or list the host under Custom; the default, Trusted, answers
+  `403 host_not_allowed`.
+
+**Options.**
+
+1. **Attach on click, list nothing.** A cloud session the human starts
+   or attaches from Horadric (`claude --cloud <id or URL>` in a pane,
+   `Run::Cloud`, like `Run::Attach`) gets a tile with a cloud mark. Its
+   phase comes from OSC 7501 in the attached pane, since hooks do not
+   reach us. Closing the pane leaves the tile dimmed, "in the cloud",
+   until clicked again. Cheap, uses only documented commands, and needs
+   the OSC 7501 parser from the quest beside this one. It misses
+   sessions started on the web or the phone until the human pastes
+   their URL ("Follow a cloud session..." in the tray).
+2. **Poll the account's session list.** Call whatever the CLI calls to
+   list cloud sessions, with the CLI's own login, every minute. Sees
+   every cloud session, including ones started elsewhere, with a phase.
+   But it is undocumented, would mean reading Claude Code's OAuth token
+   and an HTTPS client (a new dependency, or WinHTTP by hand), and can
+   break on any release. If Claude Code adds `kind: "cloud"` to `claude
+   agents --json`, this becomes free and safe, and Horadric already
+   reads that list.
+3. **Hooks out of the cloud.** The repository's committed
+   `.claude/settings.json` carries a hook that posts to Horadric through
+   the Town Portal relay. Real hook phases, same as local. But it means
+   committing Horadric hooks into every repository, setting each cloud
+   environment's network to reach the relay, and a key on a machine
+   Horadric does not own. Most work, most moving parts.
+4. **Wait.** Do nothing until Claude Code lists cloud sessions locally.
+
+**Recommendation: 1 now, 2 only through `claude agents`.** Option 1 is
+small, uses documented commands, and the OSC 7501 parser lands anyway.
+It gives the tile, the stage pane and a phase while attached. For the
+list, do not reach into private APIs: file a request upstream for cloud
+sessions in `claude agents --json`, and when they appear there, the
+feeder that finds background sessions picks them up with a new `kind`.
+Option 3 stays a note for if a phase is wanted while nothing is attached.
+
+**Questions for the human.** Is a cloud tile only worth having if it
+shows sessions started on the web or phone (then option 1 is not
+enough, and the choice is between 2 and waiting)? And does attaching
+a pane cost anything on the cloud side (it keeps a connection open, but
+the session runs either way)?
 
 ## Not in any step yet, but needed before daily use
 
