@@ -1,6 +1,7 @@
 //! Town Portal's pairing and framing, the pure part: the config in
-//! `portal.json`, the PC's id, the pairing link and the relay's channel
-//! frames. The protocol is in `docs/PORTAL.md`.
+//! `portal.json`, the paired phones, the one-time pairing ticket, the PC's
+//! id, the pairing link and the relay's channel frames. The protocol is in
+//! `docs/PORTAL.md`.
 
 use std::io;
 use std::path::Path;
@@ -13,6 +14,15 @@ pub const DEFAULT_RELAY: &str = "wss://portal.horadric.dev";
 /// The channel that reaches every phone of a PC at once.
 pub const BROADCAST: u32 = 0xFFFF_FFFF;
 
+/// How long a pairing code works, in seconds. Long enough to find the
+/// phone, short enough that a code seen over a shoulder or left in a
+/// browser's history is dead by the time anyone tries it.
+pub const TICKET_SECS: u64 = 300;
+
+/// A phone not seen for this long, in seconds, is forgotten: a lost phone
+/// stops being a way in by itself.
+pub const STALE_SECS: u64 = 30 * 24 * 3600;
+
 /// The file in the state folder.
 const FILE: &str = "portal.json";
 
@@ -22,7 +32,6 @@ pub struct Config {
     pub enabled: bool,
     pub relay: String,
     pub secret: String,
-    pub key: String,
     /// The Web Push signing key's private scalar, b64url, made on first
     /// use. Older files have none, hence the defaults.
     #[serde(default)]
@@ -30,19 +39,64 @@ pub struct Config {
     /// Its public key as an uncompressed point, `04 || x || y`, b64url.
     #[serde(default)]
     pub vapid_pub: String,
+    /// Every paired phone, each with a key of its own, so one can be
+    /// forgotten without the others.
+    #[serde(default)]
+    pub phones: Vec<Phone>,
+    /// The pairing code the QR shows, while there is one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ticket: Option<Ticket>,
+}
+
+/// One paired phone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Phone {
+    pub id: String,
+    /// What the phone called itself, such as "iPhone, Safari".
+    pub name: String,
+    /// Its AES-256 key, b64url. It crossed the relay once, sealed with
+    /// the ticket, and lives only here and in that phone's browser.
+    pub key: String,
+    /// When it paired and when it last said hello, Unix seconds.
+    pub paired: u64,
+    pub seen: u64,
+}
+
+/// A pairing code: works once, until `until` (Unix seconds).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Ticket {
+    pub key: String,
+    pub until: u64,
+    /// Set when a phone paired with it. The key is kept until it expires
+    /// so a second phone trying it hears "used", which tells the human
+    /// that someone else got there first.
+    #[serde(default)]
+    pub used: bool,
+}
+
+/// What a pairing attempt with the ticket comes to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Paired {
+    /// A new phone, now in the list.
+    New(Phone),
+    /// The ticket was used already.
+    Used,
+    /// The ticket ran out, or there is none.
+    Expired,
 }
 
 impl Config {
-    /// A new config from 64 random bytes: the first 32 the secret, the
-    /// rest the key. Taking the bytes keeps this pure.
-    pub fn fresh(random: &[u8; 64]) -> Config {
+    /// A new config from 32 random bytes, the secret. No phone is paired
+    /// yet. Taking the bytes keeps this pure.
+    pub fn fresh(random: &[u8; 32]) -> Config {
         Config {
             enabled: true,
             relay: DEFAULT_RELAY.to_string(),
-            secret: b64url(&random[..32]),
-            key: b64url(&random[32..]),
+            secret: b64url(random),
             vapid_d: String::new(),
             vapid_pub: String::new(),
+            phones: Vec::new(),
+            ticket: None,
         }
     }
 
@@ -58,34 +112,124 @@ impl Config {
         std::fs::write(dir.join(FILE), text)
     }
 
-    /// The key as AES-256 wants it, `None` when it is not 32 bytes.
-    pub fn key_bytes(&self) -> Option<[u8; 32]> {
-        unb64url(&self.key)?.try_into().ok()
+    /// A new pairing code from 32 random bytes, replacing any before it.
+    pub fn open_ticket(&mut self, random: &[u8; 32], now: u64) {
+        self.ticket = Some(Ticket {
+            key: b64url(random),
+            until: now + TICKET_SECS,
+            used: false,
+        });
     }
 
-    /// The link a phone opens to pair. Everything after `#` stays in the
-    /// browser, so the key never reaches a server.
-    pub fn link(&self, pc_name: &str) -> String {
-        format!("{}/#{}", page_origin(&self.relay), self.fragment(pc_name))
+    /// The ticket's key while it has not run out, used or not.
+    pub fn ticket_key(&self, now: u64) -> Option<[u8; 32]> {
+        let t = self.ticket.as_ref().filter(|t| now < t.until)?;
+        key32(&t.key)
+    }
+
+    /// Pairs a phone with the ticket: the first to ask gets a key of its
+    /// own, made from `random`, and the ticket is spent.
+    pub fn pair(&mut self, name: &str, random: &[u8; 40], now: u64) -> Paired {
+        let Some(t) = self.ticket.as_mut().filter(|t| now < t.until) else {
+            return Paired::Expired;
+        };
+        if t.used {
+            return Paired::Used;
+        }
+        t.used = true;
+        let name: String = name.trim().chars().take(60).collect();
+        let phone = Phone {
+            id: b64url(&random[..8]),
+            name: if name.is_empty() {
+                "Phone".into()
+            } else {
+                name
+            },
+            key: b64url(&random[8..]),
+            paired: now,
+            seen: now,
+        };
+        self.phones.push(phone.clone());
+        Paired::New(phone)
+    }
+
+    /// Drops a ticket that ran out, so the file does not keep a dead key.
+    /// True when it did.
+    pub fn drop_expired_ticket(&mut self, now: u64) -> bool {
+        let gone = self.ticket.as_ref().is_some_and(|t| now >= t.until);
+        if gone {
+            self.ticket = None;
+        }
+        gone
+    }
+
+    /// Forgets the phones not seen for [`STALE_SECS`]. True when any went.
+    pub fn forget_stale(&mut self, now: u64) -> bool {
+        let before = self.phones.len();
+        self.phones
+            .retain(|p| now.saturating_sub(p.seen) < STALE_SECS);
+        self.phones.len() != before
+    }
+
+    /// The link a phone opens to pair, while there is a ticket. Everything
+    /// after `#` stays in the browser, so the code never reaches a server.
+    pub fn link(&self, pc_name: &str) -> Option<String> {
+        Some(format!(
+            "{}/#{}",
+            page_origin(&self.relay),
+            self.fragment(pc_name)?
+        ))
     }
 
     /// The page that shows [`Config::link`] as a QR code.
-    pub fn pair_url(&self, pc_name: &str) -> String {
-        format!(
+    pub fn pair_url(&self, pc_name: &str) -> Option<String> {
+        Some(format!(
             "{}/pair.html#{}",
             page_origin(&self.relay),
-            self.fragment(pc_name)
-        )
+            self.fragment(pc_name)?
+        ))
     }
 
-    fn fragment(&self, pc_name: &str) -> String {
-        format!(
-            "r={}&id={}&k={}&n={}",
+    /// The subscriptions of phones still paired. One from a phone since
+    /// forgotten, or from before phones had keys of their own, is skipped.
+    pub fn paired_subs(&self, subs: &Subs) -> Vec<PushSub> {
+        subs.0
+            .iter()
+            .filter(|s| self.phones.iter().any(|p| p.id == s.phone))
+            .cloned()
+            .collect()
+    }
+
+    fn fragment(&self, pc_name: &str) -> Option<String> {
+        let t = self.ticket.as_ref()?;
+        Some(format!(
+            "r={}&id={}&p={}&x={}&n={}",
             uri_encode(&self.relay),
             id(&self.secret),
-            self.key,
+            t.key,
+            t.until,
             uri_encode(pc_name)
-        )
+        ))
+    }
+}
+
+/// A b64url key as AES-256 wants it, `None` when it is not 32 bytes.
+pub fn key32(b64: &str) -> Option<[u8; 32]> {
+    unb64url(b64)?.try_into().ok()
+}
+
+/// Whether a phone's message belongs to the connection it arrived on:
+/// it carries that connection's `s`, and a count past the last one. A
+/// relay that replays an old frame, from this connection or another,
+/// fails one or the other. `last` moves on when it passes.
+pub fn fresh_message(msg: &serde_json::Value, s: &str, last: &mut u64) -> bool {
+    let n = msg.get("n").and_then(|n| n.as_u64());
+    match n {
+        Some(n) if msg.get("s").and_then(|v| v.as_str()) == Some(s) && n > *last => {
+            *last = n;
+            true
+        }
+        _ => false,
     }
 }
 
@@ -99,6 +243,10 @@ pub struct PushSub {
     pub endpoint: String,
     pub p256dh: String,
     pub auth: String,
+    /// The id of the phone that sent it. A push goes only to phones still
+    /// paired, so forgetting a phone also stops its notifications.
+    #[serde(default)]
+    pub phone: String,
 }
 
 /// Every stored subscription, one per endpoint.
@@ -119,7 +267,7 @@ impl Subs {
         std::fs::write(dir.join(PUSH_FILE), text)
     }
 
-    /// Forgets every phone's subscription, as a new key unpairs them.
+    /// Forgets every phone's subscription, as forgetting every phone does.
     pub fn clear(dir: &Path) -> io::Result<()> {
         match std::fs::remove_file(dir.join(PUSH_FILE)) {
             Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
@@ -149,6 +297,7 @@ impl Subs {
             endpoint,
             p256dh: text(keys.get("p256dh"))?,
             auth: text(keys.get("auth"))?,
+            phone: String::new(),
         })
     }
 }
@@ -400,33 +549,31 @@ mod tests {
     }
 
     #[test]
-    fn fresh_config_splits_the_bytes() {
-        let mut r = [0u8; 64];
-        r[32..].fill(7);
-        let c = Config::fresh(&r);
+    fn fresh_config_has_a_secret_and_no_phones() {
+        let c = Config::fresh(&[0; 32]);
         assert!(c.enabled);
         assert_eq!(c.relay, DEFAULT_RELAY);
-        assert_eq!(c.key_bytes(), Some([7; 32]));
         assert_eq!(unb64url(&c.secret).unwrap(), vec![0; 32]);
+        assert!(c.phones.is_empty() && c.ticket.is_none());
+        assert_eq!(c.link("x"), None);
     }
 
     #[test]
-    fn links_carry_the_fragment() {
-        let c = Config {
-            enabled: true,
-            relay: "wss://portal.horadric.dev".into(),
-            secret: "abc".into(),
-            key: "KEY".into(),
-            vapid_d: String::new(),
-            vapid_pub: String::new(),
-        };
+    fn links_carry_the_ticket_in_the_fragment() {
+        let mut c = Config::fresh(&[0; 32]);
+        c.secret = "abc".into();
+        c.open_ticket(&[0xfb; 32], 1000);
+        let p = b64url(&[0xfb; 32]);
         assert_eq!(
-            c.link("MY PC"),
-            "https://portal.horadric.dev/#r=wss%3A%2F%2Fportal.horadric.dev\
-             &id=ba7816bf8f01cfea414140de5dae2223&k=KEY&n=MY%20PC"
+            c.link("MY PC").unwrap(),
+            format!(
+                "https://portal.horadric.dev/#r=wss%3A%2F%2Fportal.horadric.dev\
+                 &id=ba7816bf8f01cfea414140de5dae2223&p={p}&x=1300&n=MY%20PC"
+            )
         );
         assert!(c
             .pair_url("x")
+            .unwrap()
             .starts_with("https://portal.horadric.dev/pair.html#r="));
         assert_eq!(
             page_origin("ws://127.0.0.1:43201/"),
@@ -435,9 +582,97 @@ mod tests {
     }
 
     #[test]
+    fn a_ticket_pairs_one_phone_once_and_runs_out() {
+        let mut c = Config::fresh(&[0; 32]);
+        assert_eq!(c.pair("a", &[1; 40], 0), Paired::Expired);
+        c.open_ticket(&[9; 32], 1000);
+        assert_eq!(c.ticket_key(1299), Some([9; 32]));
+        let Paired::New(phone) = c.pair("  iPhone, Safari ", &[1; 40], 1010) else {
+            panic!("did not pair");
+        };
+        assert_eq!(phone.name, "iPhone, Safari");
+        assert_eq!(key32(&phone.key), Some([1; 32]));
+        assert_eq!((phone.paired, phone.seen), (1010, 1010));
+        assert_eq!(c.phones, vec![phone]);
+        // A second phone with the same code hears it was used, while the
+        // code lasts, and then that it ran out.
+        assert_eq!(c.pair("b", &[2; 40], 1020), Paired::Used);
+        assert_eq!(c.ticket_key(1299), Some([9; 32]));
+        assert_eq!(c.ticket_key(1300), None);
+        assert_eq!(c.pair("b", &[2; 40], 1300), Paired::Expired);
+        assert_eq!(c.phones.len(), 1);
+        assert!(!c.drop_expired_ticket(1299));
+        assert!(c.drop_expired_ticket(1300));
+        assert!(c.ticket.is_none());
+    }
+
+    #[test]
+    fn a_phone_without_a_name_is_a_phone() {
+        let mut c = Config::fresh(&[0; 32]);
+        c.open_ticket(&[9; 32], 0);
+        let Paired::New(phone) = c.pair(" ", &[1; 40], 1) else {
+            panic!("did not pair");
+        };
+        assert_eq!(phone.name, "Phone");
+    }
+
+    #[test]
+    fn phones_unseen_for_thirty_days_are_forgotten() {
+        let mut c = Config::fresh(&[0; 32]);
+        for (i, seen) in [0, 100].into_iter().enumerate() {
+            c.open_ticket(&[9; 32], seen);
+            c.pair(&format!("p{i}"), &[i as u8; 40], seen);
+        }
+        assert!(!c.forget_stale(STALE_SECS - 1));
+        assert!(c.forget_stale(STALE_SECS));
+        assert_eq!(c.phones.len(), 1);
+        assert_eq!(c.phones[0].name, "p1");
+    }
+
+    #[test]
+    fn only_paired_phones_are_pushed() {
+        let mut c = Config::fresh(&[0; 32]);
+        c.open_ticket(&[9; 32], 0);
+        let Paired::New(phone) = c.pair("p", &[1; 40], 1) else {
+            panic!("did not pair");
+        };
+        let sub = |e: &str, phone: &str| PushSub {
+            endpoint: e.into(),
+            p256dh: "k".into(),
+            auth: "a".into(),
+            phone: phone.into(),
+        };
+        let subs = Subs(vec![
+            sub("https://p/1", &phone.id),
+            sub("https://p/2", "gone"),
+            sub("https://p/3", ""),
+        ]);
+        assert_eq!(c.paired_subs(&subs), vec![sub("https://p/1", &phone.id)]);
+    }
+
+    #[test]
+    fn a_message_belongs_to_its_connection_and_comes_once() {
+        let mut last = 0;
+        let m = |s: &str, n: u64| serde_json::json!({"t":"input","s":s,"n":n});
+        assert!(fresh_message(&m("S", 1), "S", &mut last));
+        assert!(!fresh_message(&m("S", 1), "S", &mut last));
+        assert!(fresh_message(&m("S", 5), "S", &mut last));
+        assert!(!fresh_message(&m("S", 4), "S", &mut last));
+        assert!(!fresh_message(&m("old", 9), "S", &mut last));
+        assert!(!fresh_message(
+            &serde_json::json!({"t":"input"}),
+            "S",
+            &mut last
+        ));
+        assert_eq!(last, 5);
+    }
+
+    #[test]
     fn config_saves_and_loads() {
         let dir = std::env::temp_dir().join(format!("horadric-portal-{}", std::process::id()));
-        let c = Config::fresh(&[3; 64]);
+        let mut c = Config::fresh(&[3; 32]);
+        c.open_ticket(&[4; 32], 7);
+        c.pair("p", &[5; 40], 8);
         c.save(&dir).unwrap();
         assert_eq!(Config::load(&dir), Some(c));
         std::fs::remove_dir_all(&dir).unwrap();
@@ -450,6 +685,7 @@ mod tests {
             endpoint: e.into(),
             p256dh: k.into(),
             auth: "a".into(),
+            phone: String::new(),
         };
         let mut s = Subs::default();
         s.add(sub("https://p/1", "x"));
@@ -478,6 +714,7 @@ mod tests {
                 endpoint: "https://fcm.googleapis.com/fcm/send/abc".into(),
                 p256dh: "P".into(),
                 auth: "A".into(),
+                phone: String::new(),
             })
         );
         assert_eq!(
@@ -522,9 +759,11 @@ mod tests {
     }
 
     #[test]
-    fn old_configs_load_without_vapid() {
+    fn old_configs_load_and_their_shared_key_pairs_nothing() {
         let c: Config =
             serde_json::from_str(r#"{"enabled":true,"relay":"r","secret":"s","key":"k"}"#).unwrap();
         assert!(c.vapid_d.is_empty() && c.vapid_pub.is_empty());
+        assert!(c.phones.is_empty() && c.ticket.is_none());
+        assert!(!serde_json::to_string(&c).unwrap().contains("\"key\""));
     }
 }

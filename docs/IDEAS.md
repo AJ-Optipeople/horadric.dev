@@ -161,10 +161,12 @@ clients.
   with no content in it, so it holds nothing worth stealing.
 - **Off by default.** This is remote control of a machine whose agents
   may run with permissions bypassed. A phone is paired by a link (a QR
-  code) whose key lives only in the URL's fragment, which browsers never
-  send to a server. Whoever holds the key can control the PC, so a new
-  key revokes every paired phone. The PC listens on no port: its only
-  way in is its own outgoing connection to the relay.
+  code) that lives only in the URL's fragment, which browsers never send
+  to a server. The link holds a one-time code good for 5 minutes, which
+  the phone trades for a key of its own, so a leaked QR code is dead
+  soon after and each phone can be forgotten alone (decided 2026-10-11,
+  after 0.21 put one long-lived key in the QR code). The PC listens on
+  no port: its only way in is its own outgoing connection to the relay.
 - **An inbox first, not a terminal.** Typing into a terminal on a phone
   is slow. Away from the desk the need is "2 sessions wait for you":
   approve a permission, answer a question, send a short prompt, and a

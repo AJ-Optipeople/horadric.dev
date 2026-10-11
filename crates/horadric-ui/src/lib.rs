@@ -134,6 +134,8 @@ pub mod portal_crypto;
 #[cfg(windows)]
 pub mod portal_link;
 #[cfg(windows)]
+pub mod portal_pair;
+#[cfg(windows)]
 pub mod portal_push;
 mod project;
 #[cfg(windows)]

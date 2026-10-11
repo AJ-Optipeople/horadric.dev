@@ -1,26 +1,27 @@
-//! The app's side of Town Portal: a phone, through the relay, sees the
-//! sessions and projects, watches one's terminal and types into it, starts
-//! and resumes sessions, and is pushed when one starts waiting. What the
-//! messages say is [`crate::portal`]; the connection is
-//! [`crate::portal_link`].
+//! The app's side of Town Portal: a phone, through the relay, pairs with a
+//! one-time code, sees the sessions and projects, watches one's terminal
+//! and types into it, starts and resumes sessions, and is pushed when one
+//! starts waiting. What the messages say is [`crate::portal`]; the
+//! connection is [`crate::portal_link`].
 //!
 //! Everything here runs on the UI thread, woken by the link's thread with
 //! [`WM_HORADRIC_PORTAL`] and by [`PORTAL_TIMER`] while the link is up, so
 //! a watched screen follows its output without a message per byte.
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
-use horadric_core::portal::Config;
+use horadric_core::portal::{b64url, fresh_message, Config, Paired};
 use horadric_core::Phase;
 use serde_json::{json, Value};
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{KillTimer, PostMessageW, SetTimer};
 
-use super::{App, PORTAL_TIMER, WM_HORADRIC_PORTAL};
-use crate::portal::{self, fingerprint};
+use super::{unix_now, App, PORTAL_TIMER, WM_HORADRIC_PORTAL};
+use crate::portal::{self, fingerprint, Sender};
+use crate::portal_crypto;
 use crate::portal_link::{Incoming, Link};
 use crate::portal_push::{self, Subs};
 use crate::project::{folder_key, project_key, project_name};
@@ -29,19 +30,23 @@ use crate::project::{folder_key, project_key, project_name};
 const CHECK_EVERY: Duration = Duration::from_secs(2);
 /// How often a watched screen is looked at: at most 4 sends a second.
 const PUSH_MS: u32 = 250;
-/// Every phone, as the relay reads a channel.
-const EVERY: u32 = 0xFFFF_FFFF;
 /// The least time between two pushes, so a burst of waiting sessions
 /// buzzes the phone once.
 const PUSH_GAP: Duration = Duration::from_secs(60);
+/// How stale a phone's "last seen" may get before a hello writes it, in
+/// seconds, so reconnects do not write `portal.json` every time.
+const SEEN_EVERY: u64 = 3600;
 
 /// A link to the relay and the phones on it.
 pub(super) struct Portal {
-    /// The config the link runs with, to see when it changes.
+    /// The config as last read. Phones and the ticket follow the file;
+    /// a new relay or secret starts a new link.
     config: Config,
     link: Link,
     rx: Receiver<Incoming>,
     phones: HashMap<u32, Phone>,
+    /// Whether the link to the relay is up now.
+    relay_up: bool,
     /// The session list last sent, so an unchanged one is not sent again.
     sent: Option<u64>,
     /// The projects message last sent, the same way.
@@ -58,10 +63,23 @@ pub(super) struct Portal {
 /// One phone, by its channel.
 #[derive(Default)]
 struct Phone {
-    hello: bool,
+    /// Which paired phone this is and its key, once a frame opened with
+    /// it. Until then the channel is nobody, and nothing is sent to it.
+    who: Option<(String, [u8; 32])>,
+    /// This connection's `s`, made at hello; every later message must
+    /// carry it. Empty before hello.
+    s: String,
+    /// The last message count heard on this connection.
+    n: u64,
     watch: Option<String>,
     /// The screen last sent, so an unchanged one is not sent again.
     screen: Option<u64>,
+}
+
+impl Phone {
+    fn hello(&self) -> bool {
+        !self.s.is_empty()
+    }
 }
 
 /// When `portal.json` was last read. Kept apart from the portal, which is
@@ -77,6 +95,8 @@ struct Asked {
     inputs: Vec<(u32, String, String)>,
     starts: Vec<(u32, String)>,
     resumes: Vec<(u32, String)>,
+    /// Pairing attempts: channel, the name the phone gave, the ticket key.
+    pairs: Vec<(u32, String, [u8; 32])>,
 }
 
 impl App {
@@ -98,17 +118,19 @@ impl App {
             self.portal_stop();
             return;
         };
-        // Before comparing, so the push keys it adds once do not read as a
-        // change and restart the link.
         portal_push::ensure_vapid(&mut config, &dir);
-        if self.portal.as_ref().is_some_and(|p| p.config == config) {
-            return;
+        let now = unix_now();
+        let expired = config.drop_expired_ticket(now);
+        if config.forget_stale(now) | expired {
+            let _ = config.save(&dir);
         }
-        let Some(key) = config.key_bytes() else {
-            eprintln!("horadric: portal.json has no usable key");
-            self.portal_stop();
-            return;
-        };
+        if let Some(p) = self.portal.as_mut() {
+            if p.config.relay == config.relay && p.config.secret == config.secret {
+                p.config = config;
+                p.unpair_forgotten();
+                return;
+            }
+        }
         self.portal_stop();
         let (tx, rx) = mpsc::channel();
         let notify = self.notify.0 as isize;
@@ -120,12 +142,13 @@ impl App {
                 LPARAM(0),
             );
         });
-        let link = Link::start(&config.relay, &config.secret, key, tx, wake);
+        let link = Link::start(&config.relay, &config.secret, tx, wake);
         self.portal = Some(Portal {
             config,
             link,
             rx,
             phones: HashMap::new(),
+            relay_up: false,
             sent: None,
             projects_sent: None,
             waiting: None,
@@ -152,6 +175,7 @@ impl App {
         };
         let heard: Vec<Incoming> = p.rx.try_iter().collect();
         let mut asked = Asked::default();
+        let now = unix_now();
         for incoming in heard {
             match incoming {
                 Incoming::Open(ch) => {
@@ -160,9 +184,17 @@ impl App {
                 Incoming::Close(ch) => {
                     p.phones.remove(&ch);
                 }
-                Incoming::Connected(_) => {}
-                Incoming::Msg(ch, msg) => heard_from(p, ch, &msg, &mut asked),
+                Incoming::Connected(up) => {
+                    p.relay_up = up;
+                    if !up {
+                        p.phones.clear();
+                    }
+                }
+                Incoming::Sealed(ch, sealed) => heard_from(p, ch, &sealed, now, &mut asked),
             }
+        }
+        for (ch, name, key) in asked.pairs {
+            p.pair(ch, &name, key, now);
         }
         for (ch, project) in asked.starts {
             let reply = match self.portal_start(&project) {
@@ -170,7 +202,7 @@ impl App {
                 Err(e) => json!({"t": "error", "text": e}),
             };
             if let Some(p) = &self.portal {
-                p.link.send(ch, &reply);
+                p.send(ch, &reply);
             }
         }
         for (ch, id) in asked.resumes {
@@ -185,7 +217,7 @@ impl App {
                 return;
             };
             if let Err(e) = result {
-                p.link.send(ch, &json!({"t": "error", "text": e}));
+                p.send(ch, &json!({"t": "error", "text": e}));
             }
             if let Some(phone) = p.phones.get_mut(&ch) {
                 phone.screen = None;
@@ -198,17 +230,21 @@ impl App {
             return;
         };
         for ch in asked.hellos {
-            p.link.send(
+            let Some(phone) = p.phones.get(&ch) else {
+                continue;
+            };
+            p.send(
                 ch,
                 &json!({
                     "t": "hello",
                     "v": portal::VERSION,
                     "pc": pc,
                     "vapid": p.config.vapid_pub,
+                    "s": phone.s,
                 }),
             );
-            p.link.send(ch, &list);
-            p.link.send(ch, &projects);
+            p.send(ch, &list);
+            p.send(ch, &projects);
             p.sent = Some(fingerprint(&list));
             p.projects_sent = Some(fingerprint(&projects));
         }
@@ -218,7 +254,7 @@ impl App {
                     c.note_typed();
                     c.write(data.into_bytes());
                 }
-                None => p.link.send(
+                None => p.send(
                     ch,
                     &json!({"t": "error", "text": "That session is not running on the PC."}),
                 ),
@@ -239,15 +275,15 @@ impl App {
         let Some(p) = self.portal.as_mut() else {
             return;
         };
-        let anyone = p.phones.values().any(|ph| ph.hello);
+        let anyone = p.phones.values().any(Phone::hello);
         let print = fingerprint(&list);
         if p.sent != Some(print) && anyone {
-            p.link.send(EVERY, &list);
+            p.send_all(&list);
             p.sent = Some(print);
         }
         let print = fingerprint(&projects);
         if p.projects_sent != Some(print) && anyone {
-            p.link.send(EVERY, &projects);
+            p.send_all(&projects);
             p.projects_sent = Some(print);
         }
         let edge = p
@@ -259,6 +295,7 @@ impl App {
             p.pushed = Some(Instant::now());
             portal_push::send_all(&p.dir, &p.config);
         }
+        let mut out = Vec::new();
         for (&ch, phone) in p.phones.iter_mut() {
             let Some(id) = phone.watch.clone() else {
                 continue;
@@ -271,7 +308,7 @@ impl App {
                     } else {
                         "Open this session once on the PC, then watch it here."
                     };
-                    p.link.send(ch, &json!({"t": "error", "text": text}));
+                    out.push((ch, json!({"t": "error", "text": text})));
                 }
                 continue;
             };
@@ -286,8 +323,11 @@ impl App {
             let print = fingerprint(&msg);
             if phone.screen != Some(print) {
                 phone.screen = Some(print);
-                p.link.send(ch, &msg);
+                out.push((ch, msg));
             }
+        }
+        for (ch, msg) in out {
+            p.send(ch, &msg);
         }
     }
 
@@ -352,16 +392,150 @@ impl App {
     }
 }
 
-/// Takes one phone's message: what only the portal needs is done here,
-/// what needs the app goes into `asked`.
-fn heard_from(p: &mut Portal, ch: u32, msg: &Value, asked: &mut Asked) {
-    let phone = p.phones.entry(ch).or_default();
-    let text = |k: &str| msg[k].as_str().map(str::to_string);
-    match msg["t"].as_str() {
-        Some("hello") => {
-            phone.hello = true;
-            asked.hellos.push(ch);
+impl Portal {
+    /// What the portal's key in the stage shows: whether the relay is
+    /// connected, and how many paired phones said hello on it.
+    // Until the stage's portal key, being built beside this, reads it.
+    #[allow(dead_code)]
+    pub(super) fn look(&self) -> (bool, usize) {
+        let phones = self
+            .phones
+            .values()
+            .filter(|p| p.hello() && p.who.is_some())
+            .count();
+        (self.relay_up, phones)
+    }
+
+    /// Seals `msg` with the key of the phone on `ch` and sends it. A
+    /// channel no key has opened yet gets nothing.
+    fn send(&self, ch: u32, msg: &Value) {
+        if let Some((_, key)) = self.phones.get(&ch).and_then(|p| p.who.as_ref()) {
+            self.link.send(ch, key, msg);
         }
+    }
+
+    /// Sends `msg` to every phone that said hello, each sealed with its
+    /// own key.
+    fn send_all(&self, msg: &Value) {
+        for (&ch, phone) in &self.phones {
+            if let (true, Some((_, key))) = (phone.hello(), &phone.who) {
+                self.link.send(ch, key, msg);
+            }
+        }
+    }
+
+    /// Cuts off every connection from a phone no longer in the config,
+    /// telling it why with the key it had, so a forgotten phone stops at
+    /// once rather than at its next reconnect.
+    fn unpair_forgotten(&mut self) {
+        for (&ch, phone) in self.phones.iter_mut() {
+            let Some((id, key)) = &phone.who else {
+                continue;
+            };
+            if self.config.phones.iter().any(|p| &p.id == id) {
+                continue;
+            }
+            self.link.send(ch, key, &json!({"t": "unpaired"}));
+            *phone = Phone::default();
+        }
+    }
+
+    /// A phone pairing with the ticket: it gets a key of its own, sealed
+    /// with the ticket's, or hears why not.
+    fn pair(&mut self, ch: u32, name: &str, ticket: [u8; 32], now: u64) {
+        // Read again: `horadric portal` may have written since the last look.
+        let mut config = Config::load(&self.dir).unwrap_or_else(|| self.config.clone());
+        let mut random = [0u8; 40];
+        portal_crypto::random(&mut random);
+        let reply = match config.pair(name, &random, now) {
+            Paired::New(phone) => {
+                if config.save(&self.dir).is_err() {
+                    json!({"t": "error", "text": "The PC could not save the pairing."})
+                } else {
+                    if let (Some(slot), Some(key)) = (
+                        self.phones.get_mut(&ch),
+                        horadric_core::portal::key32(&phone.key),
+                    ) {
+                        slot.who = Some((phone.id.clone(), key));
+                    }
+                    json!({"t": "paired", "phone": phone.id, "key": phone.key})
+                }
+            }
+            Paired::Used => json!({"t": "error", "code": "used", "text":
+                "This pairing code was used already. If that was not you, run \
+                 `horadric portal phones` on the PC and forget the phone you do not know."}),
+            Paired::Expired => json!({"t": "error", "code": "expired", "text":
+                "This pairing code ran out. Run `horadric portal` on the PC for a new one."}),
+        };
+        self.link.send(ch, &ticket, &reply);
+        self.config = config;
+    }
+}
+
+/// Notes that a paired phone was here now, unless it was lately.
+fn seen(dir: &Path, config: &mut Config, id: &str, now: u64) {
+    let stale = |c: &Config| {
+        c.phones
+            .iter()
+            .any(|p| p.id == id && now.saturating_sub(p.seen) >= SEEN_EVERY)
+    };
+    if !stale(config) {
+        return;
+    }
+    let mut fresh = Config::load(dir).unwrap_or_else(|| config.clone());
+    if let Some(p) = fresh.phones.iter_mut().find(|p| p.id == id) {
+        p.seen = now;
+        let _ = fresh.save(dir);
+    }
+    *config = fresh;
+}
+
+/// Takes one phone's sealed message: what only the portal needs is done
+/// here, what needs the app goes into `asked`. A frame no known key opens
+/// is dropped, and so is any message after hello that does not belong to
+/// this connection.
+fn heard_from(p: &mut Portal, ch: u32, sealed: &[u8], now: u64, asked: &mut Asked) {
+    let phone = p.phones.entry(ch).or_default();
+    let msg = match &phone.who {
+        Some((_, key)) => {
+            let Some(msg) = portal_crypto::open(key, sealed)
+                .and_then(|plain| serde_json::from_slice::<Value>(&plain).ok())
+            else {
+                return;
+            };
+            msg
+        }
+        None => match portal::identify(&p.config, sealed, now) {
+            Some((Sender::Phone(id, key), msg)) => {
+                phone.who = Some((id, key));
+                msg
+            }
+            Some((Sender::Pairing(key), msg)) => {
+                if msg["t"] == "pair" {
+                    let name = msg["name"].as_str().unwrap_or_default().to_string();
+                    asked.pairs.push((ch, name, key));
+                }
+                return;
+            }
+            None => return,
+        },
+    };
+    let text = |k: &str| msg[k].as_str().map(str::to_string);
+    if msg["t"] == "hello" {
+        let mut s = [0u8; 16];
+        portal_crypto::random(&mut s);
+        phone.s = b64url(&s);
+        phone.n = 0;
+        asked.hellos.push(ch);
+        if let Some((id, _)) = phone.who.clone() {
+            seen(&p.dir, &mut p.config, &id, now);
+        }
+        return;
+    }
+    if !phone.hello() || !fresh_message(&msg, &phone.s, &mut phone.n) {
+        return;
+    }
+    match msg["t"].as_str() {
         Some("watch") => {
             phone.watch = text("id");
             phone.screen = None;
@@ -386,7 +560,9 @@ fn heard_from(p: &mut Portal, ch: u32, msg: &Value, asked: &mut Asked) {
             }
         }
         Some("push") => {
-            if let Some(sub) = Subs::parse(&msg["sub"]) {
+            let who = phone.who.as_ref().map(|(id, _)| id.clone());
+            if let (Some(mut sub), Some(who)) = (Subs::parse(&msg["sub"]), who) {
+                sub.phone = who;
                 let mut subs = Subs::load(&p.dir);
                 subs.add(sub);
                 let _ = subs.save(&p.dir);

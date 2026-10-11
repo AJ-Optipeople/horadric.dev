@@ -15,27 +15,54 @@ three parts:
 On the PC, `<data dir>/portal.json` holds:
 
 ```json
-{ "enabled": true, "relay": "wss://portal.horadric.dev", "secret": "<b64url, 32 random bytes>", "key": "<b64url, 32 random bytes>" }
+{ "enabled": true, "relay": "wss://portal.horadric.dev", "secret": "<b64url, 32 random bytes>",
+  "phones": [{ "id": "<b64url, 8 random bytes>", "name": "iPhone, Safari", "key": "<b64url, 32 random bytes>", "paired": 1760000000, "seen": 1760000000 }],
+  "ticket": { "key": "<b64url, 32 random bytes>", "until": 1760000300, "used": false } }
 ```
 
 `<data dir>` is `%APPDATA%\Horadric`, or `%APPDATA%\Horadric-dev` for a dev
-instance. b64url is base64url without padding.
+instance. b64url is base64url without padding. Times are Unix seconds.
 
 - The PC's **id** is the first 32 hex characters (lowercase) of the
   SHA-256 of the secret string's UTF-8 bytes. The relay computes it the
   same way, so it needs no storage to know which PC is which, and nobody
   without the secret can pose as the PC.
+- **Every phone has a key of its own.** So one phone can be forgotten
+  without the others, and a key leaked from one phone opens nothing
+  once that phone is forgotten. A phone not seen for 30 days is
+  forgotten by itself.
+- **The QR code holds a ticket, not a key.** A ticket works once, for 5
+  minutes. A QR code seen over a shoulder, posted in a screenshot or
+  left in a browser's history is dead by the time anyone tries it.
 - The **pairing link** is
-  `https://portal.horadric.dev/#r=<relay, URI-encoded>&id=<id>&k=<key>&n=<PC name, URI-encoded>`.
+  `https://portal.horadric.dev/#r=<relay, URI-encoded>&id=<id>&p=<ticket key>&x=<until>&n=<PC name, URI-encoded>`.
   The fragment never reaches a server. The page stores it in
-  `localStorage` (a list, one entry per PC, keyed by id).
+  `localStorage` (a list, one entry per PC, keyed by id), wipes it from
+  the address bar, and trades the ticket for the phone's key at once.
 - `https://portal.horadric.dev/pair.html#<same fragment>` shows the link as
   a QR code, drawn in the browser, for the phone to scan.
-- `horadric portal` turns it on (creating secret and key if missing),
-  prints the link and opens the QR page. `horadric portal off` turns it
-  off. `horadric portal rekey` makes a new key, which unpairs every phone.
-  The UI looks at `portal.json` every 2 seconds and connects or
-  disconnects to match.
+- `horadric portal` turns it on (making the secret if missing), opens a
+  new ticket, prints the link, opens the QR page and waits, saying which
+  phone paired or that the code ran out. `horadric portal phones` lists
+  the phones, `horadric portal forget N` forgets one and `forget all`
+  every one; a phone connected at that moment is cut off within 2
+  seconds. `horadric portal off` turns it off. The UI looks at
+  `portal.json` every 2 seconds and connects or disconnects to match.
+
+Trading the ticket, sealed with the ticket's key:
+
+- Phone to PC, `{"t":"pair","v":2,"name":"<what the phone calls itself>"}`.
+- PC to phone, `{"t":"paired","phone":"<id>","key":"<the phone's key>"}`.
+  From then on both ends use that key, and the phone says hello.
+- Or `{"t":"error","code":"used"}` when another phone took the ticket
+  first (the PC keeps a used ticket's key until it runs out, so it can
+  say so), or `"code":"expired"`. A frame sealed with a ticket that ran
+  out opens with no key the PC has, so it gets no answer at all, and
+  the page says the code ran out by itself, from `x`.
+
+Horadric 0.21 put one shared key in the link (`k=` instead of `p=`),
+good until a rekey. The page still speaks to such a PC; a 0.22 PC
+ignores that key, so its phones pair again.
 
 ## The relay
 
@@ -65,10 +92,24 @@ The relay keeps nothing on disk and logs no payloads.
 
 ## Encryption
 
-Every payload is AES-256-GCM with the pairing key: 12 random bytes of
-nonce, then the ciphertext with its 16 byte tag appended. The plaintext
-is UTF-8 JSON. The PC drops any frame that does not decrypt, so the key
-is also the proof a phone was paired.
+Every payload is AES-256-GCM with the phone's key (or the ticket's,
+while pairing): 12 random bytes of nonce, then the ciphertext with its
+16 byte tag appended. The plaintext is UTF-8 JSON. The PC learns which
+phone a channel is from the key that opens its first frame, and drops
+any frame no key opens, so the key is also the proof a phone was
+paired.
+
+**No replays.** The PC's answer to hello carries `"s"`, 16 random bytes
+b64url, new for every connection. Every later message from the phone
+carries that `"s"` and `"n"`, a count from 1 that only goes up. The PC
+drops a message with another `s` or an `n` it has passed, so the relay,
+which sees every sealed frame, cannot play an old `input` back to the
+PC, on this connection or another.
+
+When a phone is forgotten while connected, the PC sends it
+`{"t":"unpaired"}` and ignores it from then on; the page drops the key.
+A page whose hello gets no answer in 10 seconds says the PC may have
+forgotten it.
 
 ## Messages
 
@@ -76,7 +117,8 @@ Inside the encryption. Every message has `"t"`.
 
 Phone to PC:
 
-- `{"t":"hello","v":1}`: first thing after `open`.
+- `{"t":"hello","v":2}`: first thing after `open` (after `paired`, when
+  pairing). 0.21 pages send `v` 1.
 - `{"t":"watch","id":"<session id>"}`: stream this session's screen. One
   at a time per phone; a new watch replaces the old.
   `{"t":"unwatch"}` stops it.
@@ -86,7 +128,8 @@ Phone to PC:
 
 PC to phone:
 
-- `{"t":"hello","v":1,"pc":"<computer name>"}`: the answer to hello.
+- `{"t":"hello","v":2,"pc":"<computer name>","s":"<connection id>"}`:
+  the answer to hello. A 0.21 PC says `v` 1 and sends no `s`.
 - `{"t":"sessions","list":[{"id","name","project","phase","line"}]}`: on
   hello and whenever the list or a phase changes. `phase` is `working`,
   `waiting` (needs the human: a permission, a question), `idle` or
@@ -135,7 +178,9 @@ Push, sent by the PC itself, so no server of ours holds subscriptions:
   minute per PC. An endpoint answering 404 or 410 is dropped. With no
   body the push carries nothing, so the service worker shows "A session
   waits for you" and opens the page on a click.
-- `rekey` also clears `portal-push.json`.
+- Each stored subscription notes the phone it came from, and a push
+  goes only to phones still paired. `forget all` clears
+  `portal-push.json`.
 
 Liveness:
 

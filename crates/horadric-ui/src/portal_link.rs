@@ -1,7 +1,8 @@
 //! Town Portal's connection out to the relay: a WebSocket through WinHTTP,
 //! which ships with Windows and uses the system's proxy, kept open on a
 //! thread of its own and opened again whenever it drops. Everything that
-//! crosses it is sealed with the pairing key, see [`crate::portal_crypto`].
+//! crosses it is sealed with the key of the phone it is for, see
+//! [`crate::portal_crypto`]; which key that is, the app knows.
 //! The protocol is in `docs/PORTAL.md`.
 
 use std::ffi::c_void;
@@ -24,7 +25,7 @@ use windows::Win32::Networking::WinHttp::{
     WINHTTP_WEB_SOCKET_UTF8_FRAGMENT_BUFFER_TYPE, WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE,
 };
 
-use crate::portal_crypto::{open, seal};
+use crate::portal_crypto::seal;
 
 /// What the relay and the phones behind it say, as the UI thread drains it.
 #[derive(Debug, Clone, PartialEq)]
@@ -33,8 +34,8 @@ pub enum Incoming {
     Open(u32),
     /// The phone on this channel went.
     Close(u32),
-    /// A message from the phone on this channel, decrypted.
-    Msg(u32, serde_json::Value),
+    /// A sealed message from the phone on this channel.
+    Sealed(u32, Vec<u8>),
     /// The relay connection came up, or went down.
     Connected(bool),
 }
@@ -104,7 +105,6 @@ pub struct Link {
     stop: Arc<AtomicBool>,
     slot: Slot,
     out: Option<Sender<Out>>,
-    key: [u8; 32],
 }
 
 impl Link {
@@ -114,7 +114,6 @@ impl Link {
     pub fn start(
         relay: &str,
         secret: &str,
-        key: [u8; 32],
         tx: Sender<Incoming>,
         wake: Box<dyn Fn() + Send>,
     ) -> Link {
@@ -142,7 +141,7 @@ impl Link {
                 .name("portal-read".into())
                 .spawn(move || {
                     let hear = || heard.store(ms(origin), Ordering::SeqCst);
-                    read_loop(&url, key, &stop, &slot, &tx, &*wake, &hear)
+                    read_loop(&url, &stop, &slot, &tx, &*wake, &hear)
                 })
                 .ok();
         }
@@ -157,15 +156,14 @@ impl Link {
             stop,
             slot,
             out: Some(out),
-            key,
         }
     }
 
-    /// Encrypts and sends; channel 0xFFFF_FFFF goes to every phone. Never
-    /// blocks on the network: the frame is queued for the writer, and
-    /// dropped if the relay is not connected by the time it is sent.
-    pub fn send(&self, ch: u32, msg: &serde_json::Value) {
-        let sealed = seal(&self.key, msg.to_string().as_bytes());
+    /// Seals with `key` and sends to the phone on `ch`. Never blocks on
+    /// the network: the frame is queued for the writer, and dropped if
+    /// the relay is not connected by the time it is sent.
+    pub fn send(&self, ch: u32, key: &[u8; 32], msg: &serde_json::Value) {
+        let sealed = seal(key, msg.to_string().as_bytes());
         if let Some(out) = &self.out {
             let _ = out.send((false, frame(ch, &sealed)));
         }
@@ -238,7 +236,6 @@ fn silent(now: u64, heard: u64) -> bool {
 
 fn read_loop(
     url: &str,
-    key: [u8; 32],
     stop: &AtomicBool,
     slot: &Slot,
     tx: &Sender<Incoming>,
@@ -265,7 +262,7 @@ fn read_loop(
                 deliver(Incoming::Connected(true));
                 while let Some((text, data)) = receive(&socket) {
                     hear();
-                    if let Some(i) = incoming(text, &data, &key) {
+                    if let Some(i) = incoming(text, &data) {
                         deliver(i);
                     }
                 }
@@ -291,7 +288,7 @@ fn read_loop(
 }
 
 /// What one frame from the relay means, `None` for anything to drop.
-fn incoming(text: bool, data: &[u8], key: &[u8; 32]) -> Option<Incoming> {
+fn incoming(text: bool, data: &[u8]) -> Option<Incoming> {
     if text {
         let v: serde_json::Value = serde_json::from_slice(data).ok()?;
         if let Some(ch) = v.get("open").and_then(|c| c.as_u64()) {
@@ -301,8 +298,7 @@ fn incoming(text: bool, data: &[u8], key: &[u8; 32]) -> Option<Incoming> {
         return Some(Incoming::Close(ch as u32));
     }
     let (ch, sealed) = unframe(data)?;
-    let plain = open(key, sealed)?;
-    Some(Incoming::Msg(ch, serde_json::from_slice(&plain).ok()?))
+    Some(Incoming::Sealed(ch, sealed.to_vec()))
 }
 
 /// One whole message, fragments joined, as (is text, bytes). `None` when
@@ -440,7 +436,7 @@ fn handle(raw: *mut c_void, what: &str) -> Result<Raw, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use horadric_core::portal::{frame, BROADCAST};
+    use horadric_core::portal::frame;
 
     #[test]
     fn a_quiet_relay_is_dead_after_seventy_seconds() {
@@ -451,41 +447,29 @@ mod tests {
 
     #[test]
     fn relay_control_and_sealed_frames_read() {
-        let key = [5; 32];
+        assert_eq!(incoming(true, br#"{"open":7}"#), Some(Incoming::Open(7)));
+        assert_eq!(incoming(true, br#"{"close":7}"#), Some(Incoming::Close(7)));
+        assert_eq!(incoming(true, br#"{"what":1}"#), None);
+        assert_eq!(incoming(true, br#"{"pong":1}"#), None);
         assert_eq!(
-            incoming(true, br#"{"open":7}"#, &key),
-            Some(Incoming::Open(7))
+            incoming(false, &frame(3, b"sealed")),
+            Some(Incoming::Sealed(3, b"sealed".to_vec()))
         );
-        assert_eq!(
-            incoming(true, br#"{"close":7}"#, &key),
-            Some(Incoming::Close(7))
-        );
-        assert_eq!(incoming(true, br#"{"what":1}"#, &key), None);
-        assert_eq!(incoming(true, br#"{"pong":1}"#, &key), None);
-        let sealed = seal(&key, br#"{"t":"hello","v":1}"#);
-        assert_eq!(
-            incoming(false, &frame(3, &sealed), &key),
-            Some(Incoming::Msg(3, serde_json::json!({"t":"hello","v":1})))
-        );
-        assert_eq!(incoming(false, &frame(3, &sealed), &[6; 32]), None);
-        assert_eq!(incoming(false, &frame(BROADCAST, b"short"), &key), None);
+        assert_eq!(incoming(false, &[0, 0]), None);
     }
 
-    /// Against a relay at `PORTAL_RELAY` (127.0.0.1:43201 by default) and a phone that says hello,
-    /// see `docs/PORTAL.md`. Run by hand: `cargo test -p horadric-ui
-    /// portal_link -- --ignored`, with `PORTAL_SECRET` and `PORTAL_KEY`
-    /// set to what the phone script uses.
+    /// Against a relay at `PORTAL_RELAY` (127.0.0.1:43201 by default) and a
+    /// phone that says hello, see `docs/PORTAL.md`. Run by hand: `cargo test
+    /// -p horadric-ui portal_link -- --ignored`, with `PORTAL_SECRET` and
+    /// `PORTAL_KEY` set to what the phone script uses.
     #[test]
     #[ignore]
     fn talks_to_a_local_relay() {
         let secret = std::env::var("PORTAL_SECRET").unwrap();
-        let key: [u8; 32] = horadric_core::portal::unb64url(&std::env::var("PORTAL_KEY").unwrap())
-            .unwrap()
-            .try_into()
-            .unwrap();
+        let key = horadric_core::portal::key32(&std::env::var("PORTAL_KEY").unwrap()).unwrap();
         let (tx, rx) = mpsc::channel();
         let relay = std::env::var("PORTAL_RELAY").unwrap_or("ws://127.0.0.1:43201".into());
-        let link = Link::start(&relay, &secret, key, tx, Box::new(|| {}));
+        let link = Link::start(&relay, &secret, tx, Box::new(|| {}));
         let wait = Duration::from_secs(20);
         assert_eq!(rx.recv_timeout(wait).unwrap(), Incoming::Connected(true));
         let ch = loop {
@@ -494,13 +478,18 @@ mod tests {
             }
         };
         let hello = loop {
-            if let Incoming::Msg(c, v) = rx.recv_timeout(wait).unwrap() {
+            if let Incoming::Sealed(c, sealed) = rx.recv_timeout(wait).unwrap() {
                 assert_eq!(c, ch);
-                break v;
+                let plain = crate::portal_crypto::open(&key, &sealed).unwrap();
+                break serde_json::from_slice::<serde_json::Value>(&plain).unwrap();
             }
         };
         assert_eq!(hello["t"], "hello");
-        link.send(ch, &serde_json::json!({"t":"hello","v":1,"pc":"test"}));
+        link.send(
+            ch,
+            &key,
+            &serde_json::json!({"t":"hello","v":2,"pc":"test"}),
+        );
         // Give the phone script time to read and print it.
         std::thread::sleep(Duration::from_secs(2));
         drop(link);

@@ -65,11 +65,11 @@ fn authorization(cfg: &Config, endpoint: &str, now: u64) -> Option<String> {
     Some(vapid_authorization(&input, &signature, &cfg.vapid_pub))
 }
 
-/// Pushes "a session waits" to every stored subscription, on a thread of
-/// its own so the UI never waits on a push service. Subscriptions the
-/// service says are gone (404, 410) are dropped.
+/// Pushes "a session waits" to every paired phone's subscription, on a
+/// thread of its own so the UI never waits on a push service.
+/// Subscriptions the service says are gone (404, 410) are dropped.
 pub fn send_all(dir: &Path, cfg: &Config) {
-    let subs = Subs::load(dir);
+    let subs = Subs(cfg.paired_subs(&Subs::load(dir)));
     if subs.0.is_empty() {
         return;
     }
@@ -197,7 +197,7 @@ mod tests {
     #[test]
     fn vapid_keys_are_made_once_and_sign() {
         let dir = std::env::temp_dir().join(format!("horadric-vapid-{}", std::process::id()));
-        let mut cfg = Config::fresh(&[1; 64]);
+        let mut cfg = Config::fresh(&[1; 32]);
         assert!(ensure_vapid(&mut cfg, &dir));
         assert!(!ensure_vapid(&mut cfg, &dir));
         assert_eq!(Config::load(&dir).unwrap().vapid_pub, cfg.vapid_pub);
@@ -220,7 +220,7 @@ mod tests {
     #[ignore]
     fn vapid_token_for_node() {
         let dir = std::env::temp_dir().join(format!("horadric-vapid-n-{}", std::process::id()));
-        let mut cfg = Config::fresh(&[2; 64]);
+        let mut cfg = Config::fresh(&[2; 32]);
         ensure_vapid(&mut cfg, &dir);
         println!(
             "AUTH {}",
@@ -238,7 +238,7 @@ mod tests {
         // The key must stay the one the subscription was made with, so it
         // lives in a folder that outlasts the run.
         let dir = std::env::temp_dir().join("horadric-vapid-push-test");
-        let mut cfg = Config::load(&dir).unwrap_or_else(|| Config::fresh(&[2; 64]));
+        let mut cfg = Config::load(&dir).unwrap_or_else(|| Config::fresh(&[2; 32]));
         ensure_vapid(&mut cfg, &dir);
         println!("VAPID {}", cfg.vapid_pub);
         let Ok(endpoint) = std::env::var("PUSH_ENDPOINT") else {

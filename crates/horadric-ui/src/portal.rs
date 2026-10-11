@@ -8,11 +8,13 @@ use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::Term;
+use horadric_core::portal::{key32, Config};
 use horadric_core::{Phase, Session};
 use serde_json::{json, Value};
 
-/// The protocol version this side speaks.
-pub const VERSION: u64 = 1;
+/// The protocol version this side speaks. 2 brought a key per phone and
+/// the per-connection `s` and `n`.
+pub const VERSION: u64 = 2;
 
 /// The most scrollback a screen message carries, so a long session does
 /// not send megabytes on every change.
@@ -63,6 +65,33 @@ pub fn newly_waiting(
     now: &std::collections::HashSet<String>,
 ) -> bool {
     now.iter().any(|id| !before.contains(id))
+}
+
+/// Whose key opened a phone's first frame on a channel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Sender {
+    /// A paired phone: its id and key.
+    Phone(String, [u8; 32]),
+    /// A phone pairing with the ticket's key.
+    Pairing([u8; 32]),
+}
+
+/// Opens a frame from a channel not yet known: with each paired phone's
+/// key, then with the ticket's while it lasts. `None` when no key opens
+/// it, which is every frame from a phone that was forgotten.
+pub fn identify(config: &Config, sealed: &[u8], now: u64) -> Option<(Sender, Value)> {
+    let read = |key: &[u8; 32]| -> Option<Value> {
+        serde_json::from_slice(&crate::portal_crypto::open(key, sealed)?).ok()
+    };
+    for phone in &config.phones {
+        if let Some(key) = key32(&phone.key) {
+            if let Some(msg) = read(&key) {
+                return Some((Sender::Phone(phone.id.clone(), key), msg));
+            }
+        }
+    }
+    let key = config.ticket_key(now)?;
+    Some((Sender::Pairing(key), read(&key)?))
 }
 
 /// A terminal's text: up to [`HISTORY`] lines of scrollback, then the
@@ -216,6 +245,30 @@ mod tests {
         assert!(!newly_waiting(&set(&["a"]), &set(&["a"])));
         assert!(newly_waiting(&set(&["a"]), &set(&["a", "b"])));
         assert!(!newly_waiting(&set(&["a", "b"]), &set(&["b"])));
+    }
+
+    #[test]
+    fn a_frame_is_known_by_the_key_that_opens_it() {
+        let mut c = horadric_core::portal::Config::fresh(&[0; 32]);
+        c.open_ticket(&[9; 32], 0);
+        c.pair("p", &[1; 40], 1);
+        let phone = c.phones[0].id.clone();
+        c.open_ticket(&[8; 32], 100);
+        let hi = br#"{"t":"hello"}"#;
+        let sealed = |k: u8| crate::portal_crypto::seal(&[k; 32], hi);
+        assert_eq!(
+            identify(&c, &sealed(1), 100),
+            Some((Sender::Phone(phone, [1; 32]), json!({"t":"hello"})))
+        );
+        assert_eq!(
+            identify(&c, &sealed(8), 100),
+            Some((Sender::Pairing([8; 32]), json!({"t":"hello"})))
+        );
+        // The ticket's key opens nothing once it ran out, nor does the
+        // old shared key or any other.
+        assert_eq!(identify(&c, &sealed(8), 400), None);
+        assert_eq!(identify(&c, &sealed(9), 100), None);
+        assert_eq!(identify(&c, b"short", 100), None);
     }
 
     #[test]
