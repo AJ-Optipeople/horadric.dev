@@ -148,6 +148,9 @@ mod chronicler;
 #[path = "spectating.rs"]
 mod spectating;
 
+#[path = "portaling.rs"]
+mod portaling;
+
 pub use runner::ssh_prompt;
 
 /// Hook events changed the registry. What they did waits in [`EVENTS`].
@@ -220,6 +223,8 @@ const WM_HORADRIC_SETTINGS_LIST: u32 = WM_APP + 31;
 /// Ask what a row of the Settings window needs asked first, the row the
 /// app's `settings_ask` names.
 const WM_HORADRIC_SETTINGS_ASK: u32 = WM_APP + 36;
+/// Town Portal's link heard something from the relay.
+const WM_HORADRIC_PORTAL: u32 = WM_APP + 40;
 
 /// What the list of a row of the Settings window offers.
 struct SettingsList {
@@ -307,6 +312,8 @@ const BREATH_TIMER: usize = 4;
 /// Runs while the stage follows the work, to give it back at the first
 /// input.
 const SPECTATE_TIMER: usize = 5;
+/// Runs while Town Portal is on, to send a watched screen as it changes.
+const PORTAL_TIMER: usize = 6;
 const ENDED_LINGER: Duration = Duration::from_secs(20);
 /// A crash this long after resuming sessions after a crash is a crash of
 /// its own, not the same one again, so the next start resumes once more.
@@ -780,6 +787,8 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             logins: Agent::ALL.map(|a| (a, Login::default())).into(),
             clusters: Vec::new(),
             consoles: HashMap::new(),
+            portal: None,
+            portal_checked: Default::default(),
             views: HashMap::new(),
             webs: HashMap::new(),
             web_ask: None,
@@ -1234,6 +1243,7 @@ unsafe extern "system" fn app_proc(
             | WM_HORADRIC_UPDATE
             | WM_HORADRIC_DOWNLOADED
             | WM_HORADRIC_KEPT
+            | WM_HORADRIC_PORTAL
             | WM_HOTKEY
             | WM_TIMER
     );
@@ -2682,6 +2692,9 @@ struct App {
     /// Sessions Horadric started itself, by session id. A `horadric run`
     /// session has a tile but no console: its terminal is somewhere else.
     consoles: HashMap<String, Arc<Console>>,
+    /// Town Portal's link to the relay, while `portal.json` turns it on.
+    portal: Option<portaling::Portal>,
+    portal_checked: portaling::Checked,
     /// Files shown on the stage, at most one per project, by project key.
     /// A click on another file replaces it, like VS Code's preview tab, so
     /// browsing a project never piles up panes.
@@ -3017,6 +3030,8 @@ impl App {
                 self.glide();
             }
             WM_TIMER if wparam == SPECTATE_TIMER => self.watch_return(),
+            WM_TIMER if wparam == PORTAL_TIMER => self.portal_push(),
+            WM_HORADRIC_PORTAL => self.portal_drain(),
             WM_TIMER if wparam == BREATH_TIMER => {
                 self.tray.step();
                 self.breathe_stage();
@@ -3040,6 +3055,7 @@ impl App {
                 self.switch_step();
                 self.tick_tasks();
                 self.reload_when_ready();
+                self.portal_check();
                 if self
                     .last_check
                     .is_none_or(|t| t.elapsed() >= release::CHECK_EVERY)
