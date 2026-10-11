@@ -177,7 +177,10 @@ pub fn log_in(agent: Agent) -> io::Result<()> {
         ))
         .creation_flags(CREATE_NO_WINDOW);
     let tags = [horadric_hooks::SESSION_ENV, horadric_hooks::OWNER_ENV];
-    for name in console::PARENT_SESSION_ENV.iter().chain(&tags) {
+    for name in console::inherited_env(console::under_claude())
+        .iter()
+        .chain(&tags)
+    {
         command.env_remove(name);
     }
     command.spawn().map(drop)
