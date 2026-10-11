@@ -4,6 +4,7 @@
 - Do not wait for main's checks before casting a ship stone: nothing runs them between landings, and the ship session runs all three first (RELEASING.md step 2) and stops on red.
 
 ## Lately
+- 2026-10-11 Wake: "Propose tiles for Claude Code cloud sessions" blocked again, same report (pick an option in PLAN.md). Already settled as the human's pick, no human answer yet, so nothing new to do.
 - 2026-10-11 Round after "Subagents on the tile by type" landed (4a7b9d9): five quests in since the last ship and the shared tree is clean now (the two still under way work elsewhere), so cast "Ship Local". Cloud tiles still with the human.
 - 2026-10-11 Round after "Horadric's own Claude mod" landed (a7987f4): OSC 7501 reading and subagents by type still mid work in the shared tree, so the ship stays held. Cloud tiles still with the human. Nothing else to do.
 - 2026-10-11 Round after "A waiting tile names what it waits on" landed (8427c03): OSC 7501 reading and the mod still under way, so the ship stays held. Gave the three queued 2.1.287 to 2.1.296 quests models (sonnet for plain terminals and subagents by type, opus for the mod band). Cloud tiles still with the human.
