@@ -61,6 +61,14 @@ pub struct HookEvent {
     /// session. Not part of any Claude Code payload.
     #[serde(default)]
     pub name: Option<String>,
+    /// [`HookEvent::SPAWN`] and `SubagentStart`: the subagent's type, such
+    /// as `Explore`.
+    #[serde(default)]
+    pub agent_type: Option<String>,
+    /// [`HookEvent::AGENTS`] only: every subagent and teammate the session
+    /// has, as the mod last saw them.
+    #[serde(default)]
+    pub agents: Option<Vec<ModAgent>>,
     /// The conversation's title, read from the transcript by the listener
     /// before the event is passed on. Never in a payload.
     #[serde(skip)]
@@ -68,6 +76,26 @@ pub struct HookEvent {
     /// Horadric's own `Status` event only: what the status line was told.
     #[serde(skip)]
     pub status: Option<Status>,
+}
+
+/// One subagent or teammate as Horadric's Claude mod reports it, from
+/// Claude Code's `$.agent.list()`.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct ModAgent {
+    pub agent_id: String,
+    /// `Explore`, `general-purpose`, a plugin's `<plugin>:<name>`, or
+    /// `teammate`.
+    #[serde(default)]
+    pub agent_type: String,
+    /// `pending`, `running`, `waiting`, `idle`, `completed`, `failed` or
+    /// `killed`.
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub description: String,
+    /// The agent that spawned it; none when the main loop did.
+    #[serde(default)]
+    pub parent_id: Option<String>,
 }
 
 impl HookEvent {
@@ -82,6 +110,14 @@ impl HookEvent {
     /// Horadric's own event for what Claude Code gave the status line: the
     /// model, the context and the usage limits. It never changes a phase.
     pub const STATUS: &'static str = "HoradricStatus";
+
+    /// What Horadric's Claude mod reports on every change: the session's
+    /// subagents and teammates, each with its type and status.
+    pub const AGENTS: &'static str = "HoradricAgents";
+
+    /// What Horadric's Claude mod reports as a subagent starts, carrying its
+    /// `agent_id` and `agent_type`.
+    pub const SPAWN: &'static str = "HoradricSpawn";
 
     /// An event Horadric makes up itself, with every optional field empty.
     pub fn synthetic(hook_event_name: &str) -> Self {
@@ -127,6 +163,26 @@ impl HookEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_mods_reports_parse() {
+        let roster = br#"{"session_id":"c","hook_event_name":"HoradricAgents","agents":[
+            {"agent_id":"a1","agent_type":"Explore","status":"completed","description":"look"},
+            {"agent_id":"a2","status":"running","parent_id":"a1","teammate_id":"x@t"}]}"#;
+        let e = HookEvent::from_json(roster).unwrap();
+        assert_eq!(e.hook_event_name, HookEvent::AGENTS);
+        let agents = e.agents.unwrap();
+        assert_eq!(agents[0].agent_type, "Explore");
+        assert_eq!(agents[0].status, "completed");
+        assert_eq!(agents[1].parent_id.as_deref(), Some("a1"));
+        assert!(!HookEvent::from_json(roster).unwrap().is_subagent());
+
+        let spawn = br#"{"session_id":"c","hook_event_name":"HoradricSpawn",
+            "agent_id":"a1","agent_type":"Explore","model":"claude-haiku-4-5"}"#;
+        let e = HookEvent::from_json(spawn).unwrap();
+        assert_eq!(e.agent_type.as_deref(), Some("Explore"));
+        assert!(e.is_subagent());
+    }
 
     #[test]
     fn only_main_loop_turn_edges_with_a_transcript_retitle() {

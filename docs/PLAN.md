@@ -5503,6 +5503,22 @@ use what is new. Each part is a quest in the log.
   agents with their run. Through the band above the prompt it can tell
   Claude and the human what Horadric knows: another session editing the
   same file (`overlap.rs`), the quest this session holds.
+  **Built (2026-10-11), the reporting half.** The mod's source is
+  `crates/horadric-hooks/mod`, embedded in the binary and written to
+  `~/.claude/horadric-mod` by `horadric_hooks::install::install`, which
+  every install, `hooks install` and ship local calls; `uninstall` takes
+  it away. It is loaded by naming that folder in `CLAUDE_CODE_PLUGIN_DIRS`
+  in the settings' `env`, after any folders of the user's own, since a
+  marketplace would need `claude plugin install`. The folder is rewritten
+  only when its files changed, because every running session reloads the
+  mod on a write. Without `HORADRIC_SESSION` and `HORADRIC_OWNER_PORT` it
+  does nothing; with them it posts to the owner's `/horadric/hook` with
+  the tag: `HoradricSpawn` (`agent_id`, `agent_type`, `model`,
+  `workflow_run`) as a subagent starts, and `HoradricAgents` (the whole
+  `$.agent.list()`, each `agent_id`, `agent_type`, `status`) whenever it
+  changes, looked at every 2 seconds. Neither moves a phase yet.
+  `claude plugin test crates/horadric-hooks/mod` runs its tests. The band
+  is still to do.
 - **Subagents on the tile.** Today a tile counts subagents by `agent_id`
   and calls one finished after 30 quiet seconds. With the mod's reports
   the tile can show each by type, and when it really ends.

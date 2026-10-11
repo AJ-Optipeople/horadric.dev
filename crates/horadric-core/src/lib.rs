@@ -39,7 +39,7 @@ pub mod warriv;
 pub mod worktree;
 
 pub use agent::Agent;
-pub use event::HookEvent;
+pub use event::{HookEvent, ModAgent};
 pub use registry::{Registry, Route, STASH_SLOTS};
 pub use saved::{Carry, SavedCluster, SavedPanel, SavedSession, SavedState};
 pub use session::{format_age, session_id, Phase, Session, WaitReason};

@@ -669,6 +669,17 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             let Some(target) = target else {
                 continue;
             };
+            if std::env::var_os("HORADRIC_DEBUG").is_some()
+                && matches!(
+                    t.event.hook_event_name.as_str(),
+                    HookEvent::AGENTS | HookEvent::SPAWN
+                )
+            {
+                eprintln!(
+                    "mod {} for {target}: {:?} {:?} {:?}",
+                    t.event.hook_event_name, t.event.agent_id, t.event.agent_type, t.event.agents
+                );
+            }
             let changed = feed_registry
                 .lock()
                 .map(|mut r| r.apply(&target, &t.event, SystemTime::now()))

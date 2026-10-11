@@ -922,6 +922,25 @@ Always."
     }
 
     #[test]
+    fn the_mods_reports_never_move_the_phase() {
+        let mut s = Session::new("g1", "x", "");
+        s.apply(&ev("UserPromptSubmit"), now());
+        s.apply(&ev("Stop"), now());
+        let spawn = HookEvent {
+            agent_id: Some("a1".into()),
+            agent_type: Some("Explore".into()),
+            ..ev(HookEvent::SPAWN)
+        };
+        assert!(!s.apply(&spawn, now()));
+        let roster = HookEvent {
+            agents: Some(vec![]),
+            ..ev(HookEvent::AGENTS)
+        };
+        assert!(!s.apply(&roster, now()));
+        assert_eq!(s.phase, Phase::Done);
+    }
+
+    #[test]
     fn compaction_does_not_reset() {
         let mut s = Session::new("g1", "x", "");
         s.apply(&ev("UserPromptSubmit"), now());
