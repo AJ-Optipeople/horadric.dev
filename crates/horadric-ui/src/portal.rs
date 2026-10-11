@@ -149,6 +149,106 @@ pub fn fingerprint(v: &Value) -> u64 {
     h.finish()
 }
 
+/// The folders the human's projects live in: the parent of each project
+/// folder, once each (Windows paths compare without case and either
+/// slash), in first seen order. A drive's root is left out, and so is
+/// anything in `skip`, such as the temp folder scratch projects sit in.
+pub fn roots(projects: &[String], skip: &[String]) -> Vec<String> {
+    let norm = |p: &str| p.replace('\\', "/").trim_end_matches('/').to_lowercase();
+    let skip: Vec<String> = skip.iter().map(|s| norm(s)).collect();
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for project in projects {
+        let trimmed = project.trim_end_matches(['\\', '/']);
+        let Some(cut) = trimmed.rfind(['\\', '/']) else {
+            continue;
+        };
+        let parent = &trimmed[..cut];
+        // Listing a whole drive is not a folder of projects.
+        if parent.is_empty() || parent.ends_with(':') {
+            continue;
+        }
+        let key = norm(parent);
+        if skip
+            .iter()
+            .any(|s| key == *s || key.starts_with(&format!("{s}/")))
+        {
+            continue;
+        }
+        if seen.insert(key) {
+            out.push(parent.to_string());
+        }
+    }
+    out
+}
+
+/// A folder a phone may start a session in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Folder {
+    pub path: String,
+    pub name: String,
+    pub git: bool,
+    /// Last changed, in seconds since the epoch, for the order.
+    pub changed: u64,
+}
+
+/// At most this many folders a root.
+pub const FOLDERS_MAX: usize = 300;
+
+/// Puts a root's folders newest first and cuts them to [`FOLDERS_MAX`].
+pub fn order_folders(mut list: Vec<Folder>) -> Vec<Folder> {
+    list.sort_by(|a, b| b.changed.cmp(&a.changed).then_with(|| a.name.cmp(&b.name)));
+    list.truncate(FOLDERS_MAX);
+    list
+}
+
+/// The folders message, one entry a root.
+pub fn folders_message(roots: &[(String, Vec<Folder>)]) -> Value {
+    let roots: Vec<Value> = roots
+        .iter()
+        .map(|(path, list)| {
+            let list: Vec<Value> = list
+                .iter()
+                .map(|f| json!({"path": f.path, "name": f.name, "git": f.git}))
+                .collect();
+            let name = crate::project::project_name(&path.replace('\\', "/"));
+            json!({"path": path, "name": name, "list": list})
+        })
+        .collect();
+    json!({"t": "folders", "roots": roots})
+}
+
+/// Why a new project's folder name will not do, or `None` when it will:
+/// 1 to 64 letters, digits, spaces, dots, dashes and underscores, not
+/// starting with a dot, and not a name Windows keeps for a device.
+pub fn bad_project_name(name: &str) -> Option<&'static str> {
+    if name.is_empty() || name.chars().count() > 64 {
+        return Some("The name must be 1 to 64 characters.");
+    }
+    if name.starts_with('.') {
+        return Some("The name cannot start with a dot.");
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_alphanumeric() || matches!(c, ' ' | '.' | '-' | '_'))
+    {
+        return Some("Use letters, digits, spaces, dots, dashes and underscores.");
+    }
+    // Windows drops a trailing dot or space, so the folder would not be the name.
+    if name.ends_with(['.', ' ']) || name.starts_with(' ') {
+        return Some("The name cannot start with a space or end with a dot or a space.");
+    }
+    let stem = name.split('.').next().unwrap_or(name).to_ascii_uppercase();
+    let device = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || ((stem.starts_with("COM") || stem.starts_with("LPT"))
+            && stem.len() == 4
+            && stem.as_bytes()[3].is_ascii_digit());
+    if device {
+        return Some("Windows keeps that name for a device.");
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -276,5 +376,66 @@ mod tests {
         let a = json!({"t": "sessions", "list": [1, 2]});
         assert_eq!(fingerprint(&a), fingerprint(&a.clone()));
         assert_ne!(fingerprint(&a), fingerprint(&json!({"t": "sessions"})));
+    }
+
+    #[test]
+    fn roots_are_parents_once_each() {
+        let projects = vec![
+            r"C:\Users\me\Github\app".to_string(),
+            "c:/users/me/github/other/".to_string(),
+            r"C:\Users\me\Work\thing".to_string(),
+            r"C:\top".to_string(),
+            r"C:\Users\me\AppData\Local\Temp\x\scratch".to_string(),
+            "nofolder".to_string(),
+        ];
+        let skip = vec![r"C:\Users\me\AppData\Local\Temp".to_string()];
+        assert_eq!(
+            roots(&projects, &skip),
+            vec![
+                r"C:\Users\me\Github".to_string(),
+                r"C:\Users\me\Work".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn folders_go_newest_first_and_are_capped() {
+        let f = |name: &str, changed| Folder {
+            path: format!("C:/r/{name}"),
+            name: name.into(),
+            git: false,
+            changed,
+        };
+        let list = order_folders(vec![f("old", 1), f("new", 9), f("mid", 5)]);
+        let names: Vec<&str> = list.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["new", "mid", "old"]);
+        let many = (0..400).map(|i| f(&i.to_string(), i)).collect();
+        assert_eq!(order_folders(many).len(), FOLDERS_MAX);
+    }
+
+    #[test]
+    fn folders_message_has_roots_and_folders() {
+        let app = Folder {
+            path: "C:/x/app".into(),
+            name: "app".into(),
+            git: true,
+            changed: 0,
+        };
+        let m = folders_message(&[(r"C:\Users\me\Github".into(), vec![app])]);
+        assert_eq!(m["t"], "folders");
+        assert_eq!(m["roots"][0]["name"], "Github");
+        assert_eq!(m["roots"][0]["list"][0]["git"], true);
+    }
+
+    #[test]
+    fn project_names_are_checked() {
+        assert_eq!(bad_project_name("my-app_2.0 beta"), None);
+        assert_eq!(bad_project_name("console"), None);
+        for bad in [
+            "", ".hidden", "a/b", r"a\b", "..", "x:", "trail.", " lead", "con", "COM1.txt",
+        ] {
+            assert!(bad_project_name(bad).is_some(), "{bad}");
+        }
+        assert!(bad_project_name(&"a".repeat(65)).is_some());
     }
 }

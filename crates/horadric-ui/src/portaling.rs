@@ -95,6 +95,10 @@ struct Asked {
     inputs: Vec<(u32, String, String)>,
     starts: Vec<(u32, String)>,
     resumes: Vec<(u32, String)>,
+    /// Phones that asked for the folders projects may be started in.
+    folders: Vec<u32>,
+    /// New projects: channel, root, folder name.
+    creates: Vec<(u32, String, String)>,
     /// Pairing attempts: channel, the name the phone gave, the ticket key.
     pairs: Vec<(u32, String, [u8; 32])>,
 }
@@ -199,6 +203,23 @@ impl App {
         for (ch, project) in asked.starts {
             let reply = match self.portal_start(&project) {
                 Ok(id) => json!({"t": "started", "project": project, "id": id}),
+                Err(e) => json!({"t": "error", "text": e}),
+            };
+            if let Some(p) = &self.portal {
+                p.send(ch, &reply);
+            }
+        }
+        if !asked.folders.is_empty() {
+            let folders = portal::folders_message(&self.portal_folders());
+            if let Some(p) = &self.portal {
+                for ch in &asked.folders {
+                    p.send(*ch, &folders);
+                }
+            }
+        }
+        for (ch, root, name) in asked.creates {
+            let reply = match self.portal_create(&root, &name) {
+                Ok((project, id)) => json!({"t": "started", "project": project, "id": id}),
                 Err(e) => json!({"t": "error", "text": e}),
             };
             if let Some(p) = &self.portal {
@@ -378,17 +399,76 @@ impl App {
     }
 
     /// Starts a session in one of the tiles' projects, as their "new
-    /// session" does. Only those: a phone does not get to pick any folder
-    /// on the PC.
+    /// session" does, or in a folder the folders message offers. Only
+    /// those: a phone does not get to pick any folder on the PC.
     fn portal_start(&mut self, project: &str) -> Result<String, String> {
         let key = folder_key(project);
-        if !self.clusters.iter().any(|c| c.key == key) {
+        if self.clusters.iter().any(|c| c.key == key) {
+            let dir = self
+                .project_dir(&key)
+                .ok_or_else(|| format!("{project} is not there any more."))?;
+            return self.start(None, dir, Vec::new());
+        }
+        let offered = self
+            .portal_folders()
+            .into_iter()
+            .flat_map(|(_, list)| list)
+            .any(|f| folder_key(&f.path) == key);
+        if !offered {
             return Err(format!("{project} is not one of the PC's projects."));
         }
-        let dir = self
-            .project_dir(&key)
-            .ok_or_else(|| format!("{project} is not there any more."))?;
-        self.start(None, dir, Vec::new())
+        self.start(None, PathBuf::from(project), Vec::new())
+    }
+
+    /// The folders projects live in, each with its subfolders: the
+    /// parents of the tiles' projects, the recent ones and every session's.
+    fn portal_folders(&self) -> Vec<(String, Vec<portal::Folder>)> {
+        let mut projects: Vec<String> = self
+            .clusters
+            .iter()
+            .filter_map(|c| self.project_dir(&c.key))
+            .map(|d| d.to_string_lossy().into_owned())
+            .collect();
+        projects.extend(self.recent.iter().cloned());
+        if let Ok(r) = self.shared.registry.lock() {
+            projects.extend(r.all().filter(|s| !s.cwd.is_empty()).map(|s| s.cwd.clone()));
+        }
+        // Scratch folders and app data are not where the human keeps projects.
+        let mut skip = vec![std::env::temp_dir().to_string_lossy().into_owned()];
+        skip.extend(
+            ["APPDATA", "LOCALAPPDATA"]
+                .iter()
+                .filter_map(|v| std::env::var(v).ok()),
+        );
+        portal::roots(&projects, &skip)
+            .into_iter()
+            .map(|root| {
+                let list = subfolders(Path::new(&root));
+                (root, list)
+            })
+            .collect()
+    }
+
+    /// Makes a new project folder in one of the roots, with git, and
+    /// starts a session in it. Answers the project's path and the session.
+    fn portal_create(&mut self, root: &str, name: &str) -> Result<(String, String), String> {
+        if let Some(why) = portal::bad_project_name(name) {
+            return Err(why.to_string());
+        }
+        let key = folder_key(root);
+        let roots = self.portal_folders();
+        let Some((root, _)) = roots.iter().find(|(r, _)| folder_key(r) == key) else {
+            return Err(format!("{root} is not a folder the PC's projects live in."));
+        };
+        let dir = Path::new(root).join(name);
+        if dir.exists() {
+            return Err(format!("{name} is there already."));
+        }
+        std::fs::create_dir(&dir).map_err(|e| format!("Could not make {name}: {e}"))?;
+        git_init(&dir);
+        let project = dir.to_string_lossy().into_owned();
+        let id = self.start(None, dir, Vec::new())?;
+        Ok((project, id))
     }
 }
 
@@ -557,6 +637,12 @@ fn heard_from(p: &mut Portal, ch: u32, sealed: &[u8], now: u64, asked: &mut Aske
                 asked.resumes.push((ch, id));
             }
         }
+        Some("folders") => asked.folders.push(ch),
+        Some("create") => {
+            if let (Some(root), Some(name)) = (text("root"), text("name")) {
+                asked.creates.push((ch, root, name));
+            }
+        }
         Some("push") => {
             let who = phone.who.as_ref().map(|(id, _)| id.clone());
             if let (Some(mut sub), Some(who)) = (Subs::parse(&msg["sub"]), who) {
@@ -575,4 +661,50 @@ fn heard_from(p: &mut Portal, ch: u32, sealed: &[u8], now: u64, asked: &mut Aske
         }
         _ => {}
     }
+}
+
+/// The folders in `root` a session could start in, newest first: hidden
+/// ones and dot folders left out.
+fn subfolders(root: &Path) -> Vec<portal::Folder> {
+    use std::os::windows::fs::MetadataExt;
+    const HIDDEN: u32 = 0x2;
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let list = entries
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let meta = e.metadata().ok()?;
+            if !meta.is_dir() || name.starts_with('.') || meta.file_attributes() & HIDDEN != 0 {
+                return None;
+            }
+            let path = e.path();
+            let changed = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |d| d.as_secs());
+            Some(portal::Folder {
+                git: path.join(".git").exists(),
+                path: path.to_string_lossy().into_owned(),
+                name,
+                changed,
+            })
+        })
+        .collect();
+    portal::order_folders(list)
+}
+
+/// `git init` in a new project, without a console window. A PC without
+/// git still gets the folder and the session.
+fn git_init(dir: &Path) {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let _ = std::process::Command::new("git")
+        .arg("init")
+        .arg("-q")
+        .current_dir(dir)
+        .creation_flags(CREATE_NO_WINDOW)
+        .status();
 }
