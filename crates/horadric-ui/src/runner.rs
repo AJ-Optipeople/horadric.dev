@@ -665,21 +665,37 @@ impl App {
 
     /// A row clicked: an item that would start is briefed first, since
     /// one click must not set an agent off on a quest nobody has read,
-    /// and any other shows its session.
+    /// and any other shows its session. A blocked item is answered in its
+    /// session, so a click takes the human there, or, with the session
+    /// gone, offers to start it again.
     pub(super) fn task_clicked(&mut self, key: &str, line: usize, title: &str) {
         let Some(task) = self.task_at(key, line, title) else {
             return;
         };
+        let brief =
+            |app: &mut Self| ask_for(app, Menu::Brief(key.to_string(), line, title.to_string()));
         match self.row_state(&task) {
-            RowState::Open | RowState::Gone => {
-                ask_for(self, Menu::Brief(key.to_string(), line, title.to_string()))
-            }
-            _ => self.accept_task(key, line, title),
+            RowState::Open | RowState::Gone => brief(self),
+            _ => match self.held_session(&task) {
+                Some(h) => self.reveal(&h, false),
+                None if task.mark == Mark::Blocked => brief(self),
+                None => {}
+            },
         }
     }
 
-    /// An item accepted: an open one starts, one whose session is gone
-    /// starts again, and any other shows its session.
+    /// The session to show for an item: its holder's, or a tomb's, none
+    /// when that session is gone.
+    fn held_session(&self, task: &Task) -> Option<String> {
+        let h = task.holder.as_deref()?;
+        if self.holder(h) == Holder::Gone {
+            return None;
+        }
+        self.shown_for(h)
+    }
+
+    /// An item accepted: an open one starts, and one whose session is
+    /// gone, a blocked one too, starts again.
     pub(super) fn accept_task(&mut self, key: &str, line: usize, title: &str) {
         let Some(task) = self.task_at(key, line, title) else {
             return;
@@ -687,6 +703,9 @@ impl App {
         let result = match self.row_state(&task) {
             RowState::Open => self.take_task(key, line, title, true).map(drop),
             RowState::Gone => self.start_again(key, line, title, true),
+            RowState::Blocked | RowState::Waits if self.held_session(&task).is_none() => {
+                self.start_again(key, line, title, true)
+            }
             _ => Ok(()),
         };
         if let Err(e) = result {
@@ -1941,7 +1960,7 @@ fn brief(key: &str, line: usize, title: &str) {
         return;
     };
     let accept = match state {
-        RowState::Gone => "Accept again",
+        RowState::Gone | RowState::Blocked | RowState::Waits => "Accept again",
         _ => "Accept",
     };
     let pressed = super::ask(&crate::dialog::Dialog {
