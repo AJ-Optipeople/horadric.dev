@@ -5477,6 +5477,49 @@ repository", "Needs a quest log", "Only while Warriv drives". Ships public
 asks first, as the tray does. The project menu lost Work mode, Colour
 and Add host and has "Project settings...", which opens the window there.
 
+### Claude Code 2.1.287 to 2.1.296
+
+Asked for on 2026-10-11 after reading the changelog through 2.1.296:
+use what is new. Each part is a quest in the log.
+
+- **OSC 7501, the Program Status Protocol** (2.1.295). Claude Code,
+  Codex, Crush, Terraform and Homebrew write their state into the
+  terminal stream: idle, working, blocked, done or error, with progress
+  and a message. Find the spec itself before building; the coverage on
+  2026-10-11 was secondhand. This is **an exception to "state comes from
+  hook events, never from parsing terminal output"**, decided
+  2026-10-11: OSC 7501 is a status the program sends on purpose, in a
+  fixed format, not scraping what it shows. Hooks still win where both
+  speak. It gives a phase to sessions that have no hooks (an agent
+  without them, a plain terminal running a long build) and a second
+  opinion when a hook is lost. The parser is pure and tested; it reads
+  the sequence where the console already sees the bytes, and the grid
+  never has to understand it.
+- **Claude Mods** (2.1.287). Plugins can run TypeScript inside a
+  session. Horadric ships a plugin with a mod, installed and removed with
+  the hooks and refused by a dev instance as the hooks are. The mod
+  reports what hooks can not: `$.agent.list()` with each subagent and
+  teammate idle or waiting, `agent.spawn` with the agent type, workflow
+  agents with their run. Through the band above the prompt it can tell
+  Claude and the human what Horadric knows: another session editing the
+  same file (`overlap.rs`), the quest this session holds.
+- **Subagents on the tile.** Today a tile counts subagents by `agent_id`
+  and calls one finished after 30 quiet seconds. With the mod's reports
+  the tile can show each by type, and when it really ends.
+- **What a waiting tile waits on** (2.1.295). A session waiting on a
+  permission prompt now names the MCP tool. The tile says "waiting on
+  browser_click", not just waiting.
+- **Workflow agents' model** (2.1.296). `CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL`
+  sets one model for every workflow agent. A Sessions default beside
+  model and effort, passed into every session's environment.
+- **`onFailure: "block"`** (2.1.295) on a hook makes a failed hook block
+  the action. Horadric's hooks must never carry it: a closed Horadric
+  would stop every prompt on the machine. The installer strips it and a
+  test says so.
+- **Cloud sessions.** Claude Code runs on its own cloud machine now
+  (blog, 2026-10-06). Tiles for them beside the local ones are a new
+  kind of session with no terminal here. Proposed first, not built.
+
 ## Not in any step yet, but needed before daily use
 
 - **Expanding from a synthetic click can open behind other windows.** Windows

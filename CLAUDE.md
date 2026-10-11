@@ -26,6 +26,9 @@ Do not reopen these without asking. They were argued through and chosen.
   click switches the project. No session gets a window of its own. Ten
   sessions must not mean ten terminals piled up.
 - **State comes from hook events, never from parsing terminal output.**
+  The one exception is OSC 7501, a status the program sends on purpose
+  (decided 2026-10-11, see the plan's Claude Code 2.1.287 to 2.1.296).
+  Hooks win where both speak.
 - **Dependencies are justified one at a time.** Today: `serde`, `serde_json`,
   `windows`, `windows-numerics`, `alacritty_terminal` for the terminal
   grid (writing a VT parser is not the project), `syntect` for the
