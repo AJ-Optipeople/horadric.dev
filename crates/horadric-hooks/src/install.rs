@@ -52,7 +52,9 @@ pub fn settings_path() -> Option<PathBuf> {
     Some(Path::new(&home).join(".claude").join("settings.json"))
 }
 
-/// The handler Claude Code runs. One shape for every event.
+/// The handler Claude Code runs. One shape for every event. It never
+/// carries `onFailure`: set to `"block"`, a closed Horadric would stop
+/// every prompt and tool call on the machine.
 fn handler(port: u16) -> Value {
     json!({
         "type": "http",
@@ -73,7 +75,9 @@ fn is_ours(handler: &Value) -> bool {
         .is_some_and(|u| u.contains(HOOK_PATH))
 }
 
-/// Adds or refreshes Horadric's hooks in a settings document.
+/// Adds or refreshes Horadric's hooks in a settings document. Ours are
+/// taken out and written fresh, so an `onFailure` someone put on one is
+/// dropped with it.
 pub fn install_into(settings: &mut Value, port: u16) {
     remove_from(settings);
     let root = ensure_object(settings);
@@ -115,7 +119,8 @@ pub fn remove_from(settings: &mut Value) {
     }
 }
 
-/// True when the document has a Horadric hook on every event we need.
+/// True when the document has a Horadric hook on every event we need,
+/// none of them with an `onFailure` that `install_into` would strip.
 pub fn is_installed(settings: &Value, port: u16) -> bool {
     let url = hook_url(port);
     EVENTS.iter().all(|event| {
@@ -125,8 +130,10 @@ pub fn is_installed(settings: &Value, port: u16) -> bool {
             .is_some_and(|groups| {
                 groups.iter().any(|g| {
                     g.get("hooks").and_then(Value::as_array).is_some_and(|l| {
-                        l.iter()
-                            .any(|h| h.get("url").and_then(Value::as_str) == Some(&url))
+                        l.iter().any(|h| {
+                            h.get("url").and_then(Value::as_str) == Some(&url)
+                                && h.get("onFailure").is_none()
+                        })
                     })
                 })
             })
@@ -574,6 +581,34 @@ mod tests {
         );
         assert!(s.pointer("/hooks/Notification").is_none());
         assert_eq!(s["model"], "opus");
+    }
+
+    #[test]
+    fn our_hooks_never_carry_on_failure() {
+        let mut s = json!({
+            "hooks": {
+                "Stop": [ { "hooks": [ { "type": "command", "command": "echo mine", "onFailure": "block" } ] } ]
+            }
+        });
+        install_into(&mut s, 43117);
+        let mut ours = 0;
+        for groups in s["hooks"].as_object().unwrap().values() {
+            for g in groups.as_array().unwrap() {
+                for h in g["hooks"].as_array().unwrap().iter().filter(|h| is_ours(h)) {
+                    assert!(h.get("onFailure").is_none());
+                    ours += 1;
+                }
+            }
+        }
+        assert_eq!(ours, EVENTS.len());
+        // A user's own hook may block if they chose that.
+        assert_eq!(s["hooks"]["Stop"][0]["hooks"][0]["onFailure"], "block");
+
+        s["hooks"]["Stop"][1]["hooks"][0]["onFailure"] = json!("block");
+        assert!(!is_installed(&s, 43117));
+        install_into(&mut s, 43117);
+        assert!(is_installed(&s, 43117));
+        assert!(s["hooks"]["Stop"][1]["hooks"][0].get("onFailure").is_none());
     }
 
     #[test]

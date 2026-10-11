@@ -4148,6 +4148,10 @@ impl App {
                 };
                 vec![(TASKS_ENV.into(), main)]
             });
+        let mut env = env;
+        if !attach && !shell && console::is_claude(&program) {
+            env.extend(self.shared.defaults_of(Agent::Claude).env(Agent::Claude));
+        }
         let serial = self.next_serial;
         self.next_serial += 1;
         let console = Console::spawn(
