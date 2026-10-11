@@ -61,7 +61,6 @@ pub mod palette;
 pub mod paste;
 pub mod paths;
 pub mod plist;
-pub mod portal;
 pub mod rain;
 pub mod screens;
 pub mod shell;
