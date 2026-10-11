@@ -4,6 +4,8 @@
 - Do not wait for main's checks before casting a ship stone: nothing runs them between landings, and the ship session runs all three first (RELEASING.md step 2) and stops on red.
 
 ## Lately
+- 2026-10-11 Wake: "Propose tiles for Claude Code cloud sessions" committed its proposal (0c6e46d) and reported blocked. The quest asks the human to pick, so left it with them. Other 2.1.287 to 2.1.296 quests under way.
+- 2026-10-11 Wake: "Propose tiles for Claude Code cloud sessions" stopped mid-work, waiting on its own background docs agent. Not stuck, so no tell; noted it. It will report blocked for the human's pick itself.
 - 2026-10-11 Hourly rounds (four more, latest at 1378387): 155 done, none open, no aim, only memory commits since v0.19.0. Nothing to do.
 - 2026-10-11 Daily look back: the day was clean (no quests, 25 idle Warriv rounds, nothing repeated).
 - 2026-10-11 Hourly round (main at 0b8396a): 155 done, none open, no aim, only memory commits since v0.19.0. Nothing to do.
@@ -66,3 +68,4 @@
 - 2026-10-06 Daily look back: the day was clean (24 quests completed, all 24 merged by themselves).
 
 ## Open
+- "Propose tiles for Claude Code cloud sessions": waits on the human's pick of option in PLAN.md "Cloud session tiles" (recommended: attach with claude --cloud, OSC 7501, list later). Once picked, file the build quests.
