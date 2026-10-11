@@ -28,10 +28,11 @@ pub fn phase_word(phase: &Phase) -> &'static str {
     }
 }
 
-/// One session as the list on a phone shows it. A paused session says so
-/// in its line, since a phone cannot resume it.
-pub fn session_entry(s: &Session, project: &str) -> Value {
-    let line = if matches!(s.phase, Phase::Paused) && s.last_line.is_empty() {
+/// One session as the list on a phone shows it. `paused` is a session with
+/// no live host, which the phone offers to resume.
+pub fn session_entry(s: &Session, project: &str, paused: bool) -> Value {
+    let paused = paused || matches!(s.phase, Phase::Paused);
+    let line = if paused && s.last_line.is_empty() {
         "paused".to_string()
     } else {
         s.last_line.clone()
@@ -42,7 +43,26 @@ pub fn session_entry(s: &Session, project: &str) -> Value {
         "project": project,
         "phase": phase_word(&s.phase),
         "line": line,
+        "paused": paused,
     })
+}
+
+/// The projects message: each as (path, name), in the tiles' order.
+pub fn projects_message(projects: &[(String, String)]) -> Value {
+    let list: Vec<Value> = projects
+        .iter()
+        .map(|(path, name)| json!({"path": path, "name": name}))
+        .collect();
+    json!({"t": "projects", "list": list})
+}
+
+/// Whether a session in `now` waits that did not in `before`: the edge a
+/// push is sent on, so one already waiting does not push again.
+pub fn newly_waiting(
+    before: &std::collections::HashSet<String>,
+    now: &std::collections::HashSet<String>,
+) -> bool {
+    now.iter().any(|id| !before.contains(id))
 }
 
 /// A terminal's text: up to [`HISTORY`] lines of scrollback, then the
@@ -168,10 +188,34 @@ mod tests {
     fn a_paused_session_says_so() {
         let mut s = Session::new("a1", "fix", "C:/p/x");
         s.phase = Phase::Paused;
-        let e = session_entry(&s, "x");
+        let e = session_entry(&s, "x", false);
         assert_eq!(e["line"], "paused");
+        assert_eq!(e["paused"], true);
         assert_eq!(e["phase"], "idle");
         assert_eq!(e["project"], "x");
+    }
+
+    #[test]
+    fn a_session_without_a_host_is_paused_whatever_its_phase() {
+        let s = Session::new("a1", "fix", "C:/p/x");
+        assert_eq!(session_entry(&s, "x", true)["paused"], true);
+        assert_eq!(session_entry(&s, "x", false)["paused"], false);
+    }
+
+    #[test]
+    fn projects_keep_their_order() {
+        let m = projects_message(&[("C:/a".into(), "a".into()), ("C:/b".into(), "b".into())]);
+        assert_eq!(m["t"], "projects");
+        assert_eq!(m["list"][1]["name"], "b");
+        assert_eq!(m["list"][0]["path"], "C:/a");
+    }
+
+    #[test]
+    fn only_a_session_that_starts_waiting_pushes() {
+        let set = |ids: &[&str]| ids.iter().map(|s| s.to_string()).collect();
+        assert!(!newly_waiting(&set(&["a"]), &set(&["a"])));
+        assert!(newly_waiting(&set(&["a"]), &set(&["a", "b"])));
+        assert!(!newly_waiting(&set(&["a", "b"]), &set(&["b"])));
     }
 
     #[test]
