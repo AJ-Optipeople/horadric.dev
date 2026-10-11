@@ -14,6 +14,8 @@ mod conpty;
 #[cfg(any(windows, unix))]
 pub mod host;
 #[cfg(windows)]
+pub mod openconsole;
+#[cfg(windows)]
 pub mod pipe;
 #[cfg(unix)]
 #[path = "socket.rs"]

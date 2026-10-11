@@ -34,7 +34,10 @@ Do not reopen these without asking. They were argued through and chosen.
   grid (writing a VT parser is not the project), `syntect` for the
   file viewer's colours (writing grammars is not either), and
   `webview2-com` for the browser pane (the WebView2 COM bindings, on the
-  same `windows` version). Adding one is a decision, not a reflex.
+  same `windows` version). Not a crate but vendored: `conpty.dll` and
+  `OpenConsole.exe` from Microsoft's ConPTY package, the pseudo console
+  that passes `CSI c` through so OSC 7501 works (see
+  `crates/horadric-pty/conpty/README.md`). Adding one is a decision, not a reflex.
 
 ## Conventions
 

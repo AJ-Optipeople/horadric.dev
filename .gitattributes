@@ -1,2 +1,4 @@
 * text=auto eol=lf
 *.rs text eol=lf
+*.dll binary
+*.exe binary

@@ -5544,9 +5544,25 @@ use what is new. Each part is a quest in the log.
   harness, and in none of 3 through a dev instance, whose answer takes
   longer.
   On a Mac there is no pseudo console, and answering before the grid
-  puts the answer ahead of the fence's. Fixing Windows is a quest of
-  its own (the pseudo console's passthrough mode, or Claude Code
-  learning that a terminal speaks it some other way).
+  puts the answer ahead of the fence's.
+
+  **Windows fixed 2026-10-11 by bundling the newer pseudo console.**
+  `PSEUDOCONSOLE_PASSTHROUGH_MODE` does nothing in the console host of
+  Windows 11 build 26200 (it still answers `CSI c` itself), and the
+  ConPTY rewrite in Windows Terminal 1.22 dropped the flag. Claude Code
+  2.1.296 has no switch either: `programStatus` starts pending and only
+  a reply ahead of the fence's settles it yes. But OpenConsole from the
+  `Microsoft.Windows.Console.ConPTY` NuGet package (1.25.260930003, MIT)
+  passes `CSI c` on to the terminal, and an OSC typed into its input
+  reaches the program. Both files sit in `crates/horadric-pty/conpty`,
+  embedded in the binary; the UI unpacks them to `hosts\conpty-<version>`
+  beside the host copies, and a host loads `conpty.dll` from beside
+  itself, falling back to Windows' own when it is missing or
+  `HORADRIC_CONPTY=inbox`. Claude Code then said `programStatus=yes` in
+  3 of 3 starts in a harness and through a dev instance, against no
+  behind Windows' own. Since the grid now sees `CSI c` and colour
+  queries, a reattached host's replay is parsed with the grid's answers
+  muted, as its OSC 7501 queries already were.
 - **Claude Mods** (2.1.287). Plugins can run TypeScript inside a
   session. Horadric ships a plugin with a mod, installed and removed with
   the hooks and refused by a dev instance as the hooks are. The mod

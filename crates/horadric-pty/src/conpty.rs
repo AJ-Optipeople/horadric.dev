@@ -10,9 +10,7 @@ use std::thread;
 
 use windows::core::{BOOL, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{HANDLE, INVALID_HANDLE_VALUE};
-use windows::Win32::System::Console::{
-    ClosePseudoConsole, CreatePseudoConsole, ResizePseudoConsole, COORD, HPCON,
-};
+use windows::Win32::System::Console::{COORD, HPCON};
 use windows::Win32::System::JobObjects::{
     CreateJobObjectW, IsProcessInJob, JobObjectBasicLimitInformation, SetInformationJobObject,
     JOBOBJECT_BASIC_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_BREAKAWAY_OK,
@@ -26,6 +24,7 @@ use windows::Win32::System::Threading::{
     PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, STARTF_USESTDHANDLES, STARTUPINFOEXW,
 };
 
+use crate::openconsole::Api;
 use crate::{environment_block, launch_line, wide, Command};
 
 /// A running child in a pseudo console.
@@ -38,6 +37,8 @@ pub struct Pty {
     /// Zero once closed. Closing ends the child and lets the output pipe
     /// reach end of file, which it never does on its own.
     console: Mutex<HPCON>,
+    /// The one that made `console`, which alone may resize and close it.
+    api: Api,
     process: OwnedHandle,
     /// Holds the child and everything it starts, so a window can be traced
     /// back to the session whose agent opened it. Nothing is limited, and
@@ -50,6 +51,10 @@ pub struct Pty {
 impl Pty {
     /// Starts the child. Returns the handle and the output stream.
     pub fn spawn(cmd: &Command) -> io::Result<(Pty, File)> {
+        Pty::spawn_with(Api::get(), cmd)
+    }
+
+    fn spawn_with(api: Api, cmd: &Command) -> io::Result<(Pty, File)> {
         unsafe {
             let (in_read, in_write) = pipe()?;
             let (out_read, out_write) = pipe()?;
@@ -57,11 +62,10 @@ impl Pty {
                 X: cmd.cols.max(1) as i16,
                 Y: cmd.rows.max(1) as i16,
             };
-            let console = CreatePseudoConsole(
+            let console = api.create(
                 size,
                 HANDLE(in_read.as_raw_handle()),
                 HANDLE(out_write.as_raw_handle()),
-                0,
             )?;
             // The console host holds its own copies now.
             drop(in_read);
@@ -74,7 +78,7 @@ impl Pty {
             let job = match CreateJobObjectW(None, job_name) {
                 Ok(j) => OwnedHandle::from_raw_handle(j.0),
                 Err(e) => {
-                    ClosePseudoConsole(console);
+                    api.close(console);
                     return Err(e.into());
                 }
             };
@@ -94,7 +98,7 @@ impl Pty {
             let (process, pid) = match started {
                 Ok(p) => p,
                 Err(e) => {
-                    ClosePseudoConsole(console);
+                    api.close(console);
                     return Err(e);
                 }
             };
@@ -111,6 +115,7 @@ impl Pty {
 
             let pty = Pty {
                 console: Mutex::new(console),
+                api,
                 process,
                 job,
                 input,
@@ -146,7 +151,7 @@ impl Pty {
             X: cols.max(1) as i16,
             Y: rows.max(1) as i16,
         };
-        unsafe { ResizePseudoConsole(*console, size)? };
+        unsafe { self.api.resize(*console, size)? };
         Ok(())
     }
 
@@ -173,7 +178,7 @@ impl Pty {
     fn close(&self) {
         if let Ok(mut console) = self.console.lock() {
             if console.0 != 0 {
-                unsafe { ClosePseudoConsole(*console) };
+                unsafe { self.api.close(*console) };
                 *console = HPCON(0);
             }
         }
@@ -279,8 +284,21 @@ mod tests {
     use super::*;
     use std::io::Read;
 
+    fn bundled() -> Api {
+        Api::load(&crate::openconsole::source_folder()).expect("conpty.dll loads")
+    }
+
     #[test]
     fn runs_a_child_and_reads_its_output() {
+        echoes(Api::Inbox);
+    }
+
+    #[test]
+    fn runs_a_child_in_the_bundled_console() {
+        echoes(bundled());
+    }
+
+    fn echoes(api: Api) {
         let comspec = std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".into());
         let cmd = Command {
             program: comspec.into(),
@@ -292,7 +310,7 @@ mod tests {
             rows: 24,
             job_name: None,
         };
-        let (pty, mut out) = Pty::spawn(&cmd).unwrap();
+        let (pty, mut out) = Pty::spawn_with(api, &cmd).unwrap();
         let reader = thread::spawn(move || {
             let mut all = Vec::new();
             let _ = out.read_to_end(&mut all);
@@ -302,6 +320,41 @@ mod tests {
         assert_eq!(pty.wait(), 0);
         let text = reader.join().unwrap();
         assert!(text.contains("pty-says-hi"), "output was {text:?}");
+    }
+
+    /// The reason the bundled console exists: a program's `CSI c` comes
+    /// out after the query it fences, for the terminal to answer, where
+    /// Windows' own console host answers it unseen.
+    #[test]
+    fn the_bundled_console_passes_the_fence_on() {
+        let cmd = Command {
+            program: "powershell.exe".into(),
+            args: vec![
+                "-NoProfile".into(),
+                "-Command".into(),
+                "[Console]::Write([char]27 + ']7501;?' + [char]7 + [char]27 + '[c')".into(),
+            ],
+            cwd: std::env::temp_dir(),
+            env_set: vec![],
+            env_remove: vec![],
+            cols: 80,
+            rows: 24,
+            job_name: None,
+        };
+        let (pty, mut out) = Pty::spawn_with(bundled(), &cmd).unwrap();
+        let reader = thread::spawn(move || {
+            let mut all = Vec::new();
+            let _ = out.read_to_end(&mut all);
+            all
+        });
+        pty.wait();
+        let all = reader.join().unwrap();
+        let query = all.windows(6).position(|w| w == b"]7501;").expect("query");
+        assert!(
+            all[query..].windows(3).any(|w| w == b"[c"),
+            "output was {:?}",
+            String::from_utf8_lossy(&all)
+        );
     }
 
     #[test]

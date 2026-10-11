@@ -427,7 +427,8 @@ pub fn running_hosts() -> Vec<String> {
 /// build, in `%LOCALAPPDATA%\Horadric\hosts`. A host outlives the UI, and
 /// the UI's own binary has to stay free: `reload` renames it and a dev
 /// build overwrites it. Copies no host runs from any more are deleted as
-/// a new one is made; one still running can not be, and stays.
+/// a new one is made; one still running can not be, and stays. The
+/// pseudo console the hosts load sits beside them.
 #[cfg(windows)]
 pub fn host_program() -> PathBuf {
     static HOST: OnceLock<PathBuf> = OnceLock::new();
@@ -454,6 +455,9 @@ fn copy_for_hosts(exe: &Path) -> Option<PathBuf> {
     let modified = meta.modified().ok()?.duration_since(UNIX_EPOCH).ok()?;
     let name = host_file_name(meta.len(), modified.as_secs());
     let target = dir.join(&name);
+    // Before the host copy, so a host never starts without its console.
+    // Without it a host falls back to Windows' own.
+    let _ = horadric_pty::openconsole::unpack(&dir);
     if target.is_file() {
         return Some(target);
     }
@@ -509,7 +513,7 @@ impl Console {
         };
         env_set.push(("COLORTERM".into(), "truecolor".into()));
         // Programs pick a light or dark theme from it when OSC 11 goes
-        // unanswered, which on Windows it always does.
+        // unanswered, which behind Windows' own pseudo console it always does.
         let fgbg = palette::colorfgbg(palette::background());
         env_set.push(("COLORFGBG".into(), fgbg.into()));
         env_set.extend(agent.map(Agent::env).unwrap_or_default());
@@ -601,9 +605,11 @@ impl Console {
         let size = GridSize { cols, rows };
         let remote = Arc::new(remote);
         let title = Arc::new(Mutex::new(None));
+        let replaying = Arc::new(AtomicBool::new(meta.reattached));
         let events = Events {
             remote: Some(Arc::clone(&remote)),
             title: Arc::clone(&title),
+            replaying: Arc::clone(&replaying),
         };
         let config = Config {
             scrolling_history: SCROLLBACK,
@@ -642,19 +648,16 @@ impl Console {
         });
         let notify = waker(notify);
         let reader = Arc::clone(&console);
-        let reattached = meta.reattached;
-        thread::spawn(move || reader.read(incoming, notify, reattached));
+        thread::spawn(move || reader.read(incoming, notify, replaying));
         console
     }
 
     /// Parses output into the grid until the host says the program ended,
     /// or goes away without saying.
-    fn read(&self, mut incoming: Incoming, notify: Waker, reattached: bool) {
+    /// `replaying` is set when the first output is a reattached host's
+    /// replay, and cleared once it is parsed.
+    fn read(&self, mut incoming: Incoming, notify: Waker, replaying: Arc<AtomicBool>) {
         let mut scanner = Scanner::default();
-        // Queries in a replay were asked long ago. An answer now would be
-        // typed into whatever reads the input today, a shell's prompt
-        // perhaps.
-        let mut replay = reattached;
         let mut seqs = Vec::new();
         let code = loop {
             match incoming.recv() {
@@ -662,18 +665,24 @@ impl Console {
                     // Before the grid: Claude Code fences its OSC 7501
                     // query with a `CSI c` the grid answers, and takes an
                     // answer to the fence first as no to the query. On
-                    // Windows the pseudo console answers the fence itself,
-                    // before the query even reaches here, so Claude Code
-                    // there mostly hears no (see the plan).
+                    // Windows that needs the bundled pseudo console, as
+                    // Windows' own answers the fence itself (see
+                    // `horadric_pty::openconsole`).
                     scanner.feed(&bytes, &mut seqs);
+                    let replay = replaying.load(Ordering::Acquire);
+                    // Queries in a replay were asked long ago. An answer
+                    // now would be typed into whatever reads the input
+                    // today, a shell's prompt perhaps.
                     if replay {
                         seqs.retain(|s| *s != Sequence::Query);
-                        replay = false;
                     }
                     self.hear_program(seqs.drain(..));
                     if let Ok(mut s) = self.screen.lock() {
                         let Screen { term, parser } = &mut *s;
                         parser.advance(term, &bytes);
+                    }
+                    if replay {
+                        replaying.store(false, Ordering::Release);
                     }
                     if !self.dirty.swap(true, Ordering::AcqRel) {
                         post(notify, Note::Output, self.serial);
@@ -736,6 +745,7 @@ impl Console {
         let events = Events {
             remote: None,
             title: Arc::clone(&title),
+            replaying: Arc::default(),
         };
         let cwd = path.parent().map(Path::to_path_buf);
         let console = Arc::new(Console {
@@ -790,6 +800,7 @@ impl Console {
         let events = Events {
             remote: None,
             title: Arc::clone(&title),
+            replaying: Arc::default(),
         };
         Arc::new(Console {
             id,
@@ -948,6 +959,7 @@ impl Console {
         let events = Events {
             remote: None,
             title: Arc::clone(&self.title),
+            replaying: Arc::default(),
         };
         let config = Config {
             scrolling_history: r.rows.len(),
@@ -1221,6 +1233,15 @@ fn post(_: Waker, note: Note, serial: usize) {
 pub struct Events {
     remote: Option<Arc<Remote>>,
     title: Arc<Mutex<Option<String>>>,
+    /// While a replay is parsed, whose queries get no answers, for the
+    /// same reason as in [`Console::read`].
+    replaying: Arc<AtomicBool>,
+}
+
+impl Events {
+    fn replaying(&self) -> bool {
+        self.replaying.load(Ordering::Acquire)
+    }
 }
 
 impl EventListener for Events {
@@ -1228,15 +1249,15 @@ impl EventListener for Events {
         match event {
             // Answers to device status and attribute queries.
             Event::PtyWrite(text) => {
-                if let Some(remote) = &self.remote {
+                if let Some(remote) = self.remote.as_ref().filter(|_| !self.replaying()) {
                     remote.write(text.into_bytes());
                 }
             }
             // Programs ask for the background to pick a light or dark theme.
-            // Only off Windows: the pseudo console keeps these queries to
-            // itself, and COLORFGBG answers there instead.
+            // Windows' own pseudo console keeps these queries to itself,
+            // and COLORFGBG answers there instead.
             Event::ColorRequest(index, format) => {
-                if let Some(remote) = &self.remote {
+                if let Some(remote) = self.remote.as_ref().filter(|_| !self.replaying()) {
                     remote.write(format(palette::default_rgb(index)).into_bytes());
                 }
             }
