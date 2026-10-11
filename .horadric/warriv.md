@@ -4,6 +4,7 @@
 - Do not wait for main's checks before casting a ship stone: nothing runs them between landings, and the ship session runs all three first (RELEASING.md step 2) and stops on red.
 
 ## Lately
+- 2026-10-11 Round after the human left (main at 14e19ac): the b021e49 ship reloaded fine. OSC 7501 plain terminals under way, the CSI c fence quest ready (opus), cloud tiles still with the human, nothing landed since. Nothing to do.
 - 2026-10-11 Wake: "Propose tiles for Claude Code cloud sessions" blocked again, same report. Still the human's pick (PLAN.md, Cloud session tiles), nothing new to do.
 - 2026-10-11 Round after "OSC 11 colour replies" landed (b021e49): "Theme colours in the mod's band" is in too, the 1b663c0 ship reloaded fine and the shared tree is clean, so cast "Ship Local". OSC 7501 plain terminals under way, CSI c fence queued (opus), cloud tiles still with the human.
 - 2026-10-11 Wake with no new event: two OSC quests under way, the CSI c fence quest queued (opus), cloud tiles still with the human. Nothing to do.
@@ -80,5 +81,4 @@
 - 2026-10-06 Daily look back: the day was clean (24 quests completed, all 24 merged by themselves).
 
 ## Open
-- Check the "Ship Local" cast at b021e49 reloaded fine (reload.log).
 - "Propose tiles for Claude Code cloud sessions": waits on the human's pick of option in PLAN.md "Cloud session tiles" (recommended: attach with claude --cloud, OSC 7501, list later). Once picked, file the build quests.
