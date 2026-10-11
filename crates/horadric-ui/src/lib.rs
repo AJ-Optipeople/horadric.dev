@@ -61,6 +61,7 @@ pub mod palette;
 pub mod paste;
 pub mod paths;
 pub mod plist;
+pub mod portal;
 pub mod rain;
 pub mod screens;
 pub mod shell;
@@ -128,6 +129,10 @@ mod net;
 mod pane;
 #[cfg(windows)]
 mod picker;
+#[cfg(windows)]
+pub mod portal_crypto;
+#[cfg(windows)]
+pub mod portal_link;
 mod project;
 #[cfg(windows)]
 mod questlog;

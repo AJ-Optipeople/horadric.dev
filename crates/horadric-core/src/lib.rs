@@ -21,6 +21,7 @@ pub mod journal;
 pub mod lookback;
 pub mod merge;
 pub mod overlap;
+pub mod portal;
 pub mod presence;
 pub mod rarity;
 pub mod registry;
