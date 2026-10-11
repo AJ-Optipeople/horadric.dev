@@ -4,6 +4,7 @@
 - Do not wait for main's checks before casting a ship stone: nothing runs them between landings, and the ship session runs all three first (RELEASING.md step 2) and stops on red.
 
 ## Lately
+- 2026-10-11 Hourly round (main at 7b182d9): "OSC 7501: plain terminals" under way 7 hours with no commit, so told it to commit what works or name its blocker. CSI c fence queued (opus), cloud tiles still with the human.
 - 2026-10-11 Hourly round (main at 9984581): OSC 7501 plain terminals under way, CSI c fence queued (opus), cloud tiles still with the human, nothing landed since the last ship. Nothing to do.
 - 2026-10-11 Hourly round (main at ac123ee): OSC 7501 plain terminals under way, CSI c fence queued (opus), cloud tiles still with the human, nothing landed since the last ship. Nothing to do.
 - 2026-10-11 Hourly round (main at 40f0bc9): OSC 7501 plain terminals under way, CSI c fence queued (opus), cloud tiles still with the human, nothing landed since the last ship. Nothing to do.
@@ -90,3 +91,4 @@
 
 ## Open
 - "Propose tiles for Claude Code cloud sessions": waits on the human's pick of option in PLAN.md "Cloud session tiles" (recommended: attach with claude --cloud, OSC 7501, list later). Once picked, file the build quests.
+- "OSC 7501: plain terminals": nudged at 7 hours with no commit. Next round, check for a commit or a reported blocker; if still silent, consider splitting it.
