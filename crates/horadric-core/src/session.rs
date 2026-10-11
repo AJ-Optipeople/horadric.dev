@@ -152,6 +152,10 @@ pub struct Session {
     /// ends. Only for the tile's icon, so it is not saved.
     #[serde(skip)]
     pub tool: Option<String>,
+    /// The tool a permission prompt asks about, while the session waits
+    /// on it. A phase is not saved, so neither is this.
+    #[serde(skip)]
+    pub waits_on: Option<String>,
     /// When the agent last did something, newest last, going back at most
     /// [`ACTIVITY_SPAN`]. The tile draws it as a trace of the last minutes.
     #[serde(skip)]
@@ -205,6 +209,7 @@ impl Session {
             created: now,
             status: None,
             tool: None,
+            waits_on: None,
             activity: Vec::new(),
             agents: Vec::new(),
             prompted_at: None,
@@ -369,7 +374,8 @@ impl Session {
             }
             "PermissionRequest" => {
                 if let Some(t) = &event.tool_name {
-                    self.last_line = format!("allow {t}?");
+                    self.waits_on = Some(t.clone());
+                    self.last_line = waiting_on(t);
                 }
                 Some(Phase::Waiting(WaitReason::Permission))
             }
@@ -426,7 +432,7 @@ impl Session {
             self.title = Some(t.clone());
         }
 
-        match next {
+        let changed = match next {
             Some(phase) if phase != self.phase => {
                 self.unseen = phase == Phase::Done;
                 self.phase = phase;
@@ -434,7 +440,11 @@ impl Session {
                 true
             }
             _ => false,
+        };
+        if self.phase != Phase::Waiting(WaitReason::Permission) {
+            self.waits_on = None;
         }
+        changed
     }
 
     /// Whether the event's conversation is this tile's: the one it knows,
@@ -583,8 +593,17 @@ impl Session {
             "elicitation_complete" | "elicitation_response" => Phase::Working,
             _ => return None,
         };
-        if let Some(m) = &event.message {
-            self.last_line = first_line(m);
+        // Claude Code's `PermissionRequest` named the tool before this; other
+        // agents may name it here. The tool says more than the message.
+        if kind == "permission_prompt" {
+            if let Some(t) = &event.tool_name {
+                self.waits_on = Some(t.clone());
+            }
+        }
+        match (&self.waits_on, &event.message) {
+            (Some(t), _) if kind == "permission_prompt" => self.last_line = waiting_on(t),
+            (_, Some(m)) => self.last_line = first_line(m),
+            _ => {}
         }
         Some(next)
     }
@@ -635,6 +654,17 @@ pub fn made_from(id: &str, base: &str) -> bool {
 
 fn first_line(s: &str) -> String {
     s.lines().next().unwrap_or("").trim().to_string()
+}
+
+/// What a tile says while a permission prompt waits on `tool`. An MCP
+/// tool's id, `mcp__server__tool`, is long and mostly prefix: the tool's
+/// own name is what the human recognises.
+pub fn waiting_on(tool: &str) -> String {
+    let short = tool
+        .strip_prefix("mcp__")
+        .and_then(|rest| rest.split_once("__"))
+        .map_or(tool, |(_, name)| name);
+    format!("waiting on {short}")
 }
 
 #[cfg(test)]
@@ -799,9 +829,61 @@ Always."
         p.tool_name = Some("Edit".into());
         assert!(s.apply(&p, now()));
         assert_eq!(s.phase, Phase::Waiting(WaitReason::Permission));
-        assert_eq!(s.last_line, "allow Edit?");
+        assert_eq!(s.last_line, "waiting on Edit");
+        assert_eq!(s.waits_on.as_deref(), Some("Edit"));
         assert!(s.apply(&ev("PostToolUse"), now()));
         assert_eq!(s.phase, Phase::Working);
+        assert_eq!(s.waits_on, None);
+    }
+
+    #[test]
+    fn a_waiting_line_names_the_mcp_tool_by_its_own_name() {
+        assert_eq!(
+            waiting_on("mcp__horadric__browser_click"),
+            "waiting on browser_click"
+        );
+        assert_eq!(
+            waiting_on("mcp__claude_ai_Slack__slack_send_message"),
+            "waiting on slack_send_message"
+        );
+        assert_eq!(waiting_on("Bash"), "waiting on Bash");
+        assert_eq!(waiting_on("mcp__odd"), "waiting on mcp__odd");
+    }
+
+    #[test]
+    fn the_permission_notification_keeps_the_tool_it_waits_on() {
+        // As Claude Code 2.1.296 sends them: the request names the tool,
+        // the notification that follows only says so in words.
+        let mut s = Session::new("g1", "x", "");
+        s.apply(&ev("UserPromptSubmit"), now());
+        let mut p = ev("PermissionRequest");
+        p.tool_name = Some("mcp__pinger__ping_box".into());
+        s.apply(&p, now());
+        let mut n = ev("Notification");
+        n.notification_type = Some("permission_prompt".into());
+        n.message = Some("Claude needs your permission to use Ping the box".into());
+        assert!(!s.apply(&n, now()));
+        assert_eq!(s.last_line, "waiting on ping_box");
+        assert_eq!(s.waits_on.as_deref(), Some("mcp__pinger__ping_box"));
+
+        // With no tool known, the message is the best there is.
+        let mut s = Session::new("g2", "x", "");
+        s.apply(&ev("UserPromptSubmit"), now());
+        assert!(s.apply(&n, now()));
+        assert_eq!(
+            s.last_line,
+            "Claude needs your permission to use Ping the box"
+        );
+        assert_eq!(s.waits_on, None);
+
+        // An agent that names the tool in the notification itself.
+        let mut s = Session::new("g3", "x", "");
+        s.apply(&ev("UserPromptSubmit"), now());
+        n.tool_name = Some("bash".into());
+        s.apply(&n, now());
+        assert_eq!(s.last_line, "waiting on bash");
+        s.apply(&ev("Stop"), now());
+        assert_eq!(s.waits_on, None);
     }
 
     #[test]
