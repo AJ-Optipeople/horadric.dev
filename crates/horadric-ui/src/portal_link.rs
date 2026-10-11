@@ -398,7 +398,7 @@ mod tests {
         assert_eq!(incoming(false, &frame(BROADCAST, b"short"), &key), None);
     }
 
-    /// Against a relay on 127.0.0.1:43201 and a phone that says hello,
+    /// Against a relay at `PORTAL_RELAY` (127.0.0.1:43201 by default) and a phone that says hello,
     /// see `docs/PORTAL.md`. Run by hand: `cargo test -p horadric-ui
     /// portal_link -- --ignored`, with `PORTAL_SECRET` and `PORTAL_KEY`
     /// set to what the phone script uses.
@@ -411,7 +411,8 @@ mod tests {
             .try_into()
             .unwrap();
         let (tx, rx) = mpsc::channel();
-        let link = Link::start("ws://127.0.0.1:43201", &secret, key, tx, Box::new(|| {}));
+        let relay = std::env::var("PORTAL_RELAY").unwrap_or("ws://127.0.0.1:43201".into());
+        let link = Link::start(&relay, &secret, key, tx, Box::new(|| {}));
         let wait = Duration::from_secs(20);
         assert_eq!(rx.recv_timeout(wait).unwrap(), Incoming::Connected(true));
         let ch = loop {

@@ -22,6 +22,8 @@ mod install;
 #[cfg(windows)]
 mod mcp;
 #[cfg(windows)]
+mod portal;
+#[cfg(windows)]
 mod release;
 mod reload;
 mod run;
@@ -81,6 +83,10 @@ Usage:
                                through: reads one on stdin and passes it to the app
   horadric mcp                   The MCP server Horadric gives its sessions: the tools
                                that open, drive and close the project's browser pane
+  horadric portal [off|rekey|link|relay URL]
+                               Town Portal, Horadric from your phone: turn it on and show
+                               the pairing link and QR code, turn it off, unpair every
+                               phone, print the link, or use your own relay
   horadric reload [--now]        Swap the running Horadric for this build once no session
                                is working (a build from before session hosts waits),
                                and carry the running sessions over to it.
@@ -161,6 +167,8 @@ fn main() -> ExitCode {
         Some("hook") => hook::run(&args[1..]),
         #[cfg(windows)]
         Some("mcp") => mcp::run(),
+        #[cfg(windows)]
+        Some("portal") => portal::run(&args[1..]),
         Some("swap") => reload::swap(&args[1..]),
         Some("install") => install_command(),
         Some("uninstall") => uninstall_command(),
