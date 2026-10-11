@@ -8,11 +8,14 @@ use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::Term;
+use alacritty_terminal::vte::ansi::{NamedColor, Rgb};
 // The frame crypto is Windows CNG, so the Mac build has no portal yet.
 #[cfg(windows)]
 use horadric_core::portal::{key32, Config};
 use horadric_core::{Phase, Session};
 use serde_json::{json, Value};
+
+use crate::palette;
 
 /// The protocol version this side speaks. 2 brought a key per phone and
 /// the per-connection `s` and `n`.
@@ -98,50 +101,120 @@ pub fn identify(config: &Config, sealed: &[u8], now: u64) -> Option<(Sender, Val
     Some((Sender::Pairing(key), read(&key)?))
 }
 
+/// A run of characters drawn alike: how many, foreground and background
+/// as 0xRRGGBB (`None` for the terminal's own, so the page uses its own),
+/// and [`BOLD`], [`ITALIC`], [`UNDERLINE`] and [`STRIKE`].
+pub type Run = (usize, Option<u32>, Option<u32>, u8);
+
+pub const BOLD: u8 = 1;
+pub const ITALIC: u8 = 2;
+pub const UNDERLINE: u8 = 4;
+pub const STRIKE: u8 = 8;
+
+/// What a phone is sent of a terminal.
+pub struct Screen {
+    pub lines: Vec<String>,
+    /// One per line. Characters past a line's runs are plain, so a plain
+    /// line has none.
+    pub styles: Vec<Vec<Run>>,
+    pub cursor: (usize, usize),
+}
+
 /// A terminal's text: up to [`HISTORY`] lines of scrollback, then the
-/// screen, each without trailing spaces, and the cursor as (row, col)
-/// counted from the first line given.
-pub fn screen_text<T: EventListener>(term: &Term<T>) -> (Vec<String>, (usize, usize)) {
+/// screen, each without trailing spaces, their colours, and the cursor as
+/// (row, col) counted from the first line given.
+pub fn screen_text<T: EventListener>(term: &Term<T>) -> Screen {
     let grid = term.grid();
+    let colors = term.colors();
+    let plain_fg = palette::rgb_at(NamedColor::Foreground as usize, colors);
+    let plain_bg = palette::rgb_at(NamedColor::Background as usize, colors);
+    let hex = |c: Rgb, plain: Rgb| (c != plain).then_some(u32::from_be_bytes([0, c.r, c.g, c.b]));
     let history = grid.history_size().min(HISTORY);
     let rows = term.screen_lines();
     let cols = term.columns();
     let mut lines = Vec::with_capacity(history + rows);
+    let mut styles = Vec::with_capacity(history + rows);
     for line in -(history as i32)..rows as i32 {
         let row = &grid[Line(line)];
         let mut text = String::with_capacity(cols);
+        let mut runs: Vec<Run> = Vec::new();
         for col in 0..cols {
             let cell = &row[Column(col)];
             if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
                 continue;
             }
+            let before = text.chars().count();
             text.push(cell.c);
             if let Some(zero) = cell.zerowidth() {
                 text.extend(zero);
             }
+            let n = text.chars().count() - before;
+            let (fg, bg) = palette::cell_colors(cell.fg, cell.bg, cell.flags, colors);
+            let mut f = 0;
+            if cell.flags.contains(Flags::BOLD) {
+                f |= BOLD;
+            }
+            if cell.flags.contains(Flags::ITALIC) {
+                f |= ITALIC;
+            }
+            if cell.flags.intersects(Flags::ALL_UNDERLINES) {
+                f |= UNDERLINE;
+            }
+            if cell.flags.contains(Flags::STRIKEOUT) {
+                f |= STRIKE;
+            }
+            let style = (hex(fg, plain_fg), hex(bg, plain_bg), f);
+            match runs.last_mut() {
+                Some(last) if (last.1, last.2, last.3) == style => last.0 += n,
+                _ => runs.push((n, style.0, style.1, style.2)),
+            }
         }
-        lines.push(text.trim_end().to_string());
+        let text = text.trim_end().to_string();
+        styles.push(trim_runs(runs, text.chars().count()));
+        lines.push(text);
     }
     let cursor = grid.cursor.point;
     let row = (cursor.line.0 + history as i32).max(0) as usize;
-    (lines, (row, cursor.column.0))
+    Screen {
+        lines,
+        styles,
+        cursor: (row, cursor.column.0),
+    }
+}
+
+/// Runs cut to a trimmed line's length, with the plain tail dropped.
+fn trim_runs(mut runs: Vec<Run>, len: usize) -> Vec<Run> {
+    let mut left = len;
+    runs.retain_mut(|r| {
+        let keep = left > 0;
+        r.0 = r.0.min(left);
+        left -= r.0;
+        keep
+    });
+    while runs
+        .last()
+        .is_some_and(|r| r.1.is_none() && r.2.is_none() && r.3 == 0)
+    {
+        runs.pop();
+    }
+    runs
 }
 
 /// The screen message for a session.
-pub fn screen_message(
-    id: &str,
-    cols: usize,
-    rows: usize,
-    lines: &[String],
-    cursor: (usize, usize),
-) -> Value {
+pub fn screen_message(id: &str, cols: usize, rows: usize, screen: &Screen) -> Value {
+    let styles: Vec<Value> = screen
+        .styles
+        .iter()
+        .map(|runs| runs.iter().map(|r| json!([r.0, r.1, r.2, r.3])).collect())
+        .collect();
     json!({
         "t": "screen",
         "id": id,
         "cols": cols,
         "rows": rows,
-        "lines": lines,
-        "cursor": [cursor.0, cursor.1],
+        "lines": screen.lines,
+        "styles": styles,
+        "cursor": [screen.cursor.0, screen.cursor.1],
     })
 }
 
@@ -285,24 +358,56 @@ mod tests {
     #[test]
     fn the_screen_is_its_lines_without_trailing_spaces() {
         let t = term(10, 3, b"hi  \r\nthere");
-        let (lines, cursor) = screen_text(&t);
-        assert_eq!(lines, vec!["hi", "there", ""]);
-        assert_eq!(cursor, (1, 5));
+        let s = screen_text(&t);
+        assert_eq!(s.lines, vec!["hi", "there", ""]);
+        assert_eq!(s.cursor, (1, 5));
     }
 
     #[test]
     fn scrollback_comes_first_and_the_cursor_counts_it() {
         let t = term(10, 2, b"a\r\nb\r\nc\r\nd");
-        let (lines, cursor) = screen_text(&t);
-        assert_eq!(lines, vec!["a", "b", "c", "d"]);
-        assert_eq!(cursor, (3, 1));
+        let s = screen_text(&t);
+        assert_eq!(s.lines, vec!["a", "b", "c", "d"]);
+        assert_eq!(s.cursor, (3, 1));
     }
 
     #[test]
     fn wide_characters_are_one_character() {
         let t = term(10, 1, "日本".as_bytes());
-        let (lines, _) = screen_text(&t);
-        assert_eq!(lines, vec!["日本"]);
+        assert_eq!(screen_text(&t).lines, vec!["日本"]);
+    }
+
+    #[test]
+    fn plain_text_has_no_runs() {
+        let t = term(10, 2, b"hi");
+        assert_eq!(screen_text(&t).styles, vec![vec![], vec![]]);
+    }
+
+    #[test]
+    fn colours_and_bold_are_runs_and_the_plain_tail_is_dropped() {
+        let t = term(20, 1, b"ab[1;38;2;255;0;0mred[0m end  ");
+        let s = screen_text(&t);
+        assert_eq!(s.lines, vec!["abred end"]);
+        assert_eq!(
+            s.styles[0],
+            vec![(2, None, None, 0), (3, Some(0xFF0000), None, BOLD)]
+        );
+    }
+
+    #[test]
+    fn a_coloured_background_on_trailing_spaces_is_cut_with_the_line() {
+        let t = term(10, 1, b"x[44m    ");
+        let s = screen_text(&t);
+        assert_eq!(s.lines, vec!["x"]);
+        assert_eq!(s.styles[0], vec![]);
+    }
+
+    #[test]
+    fn the_message_carries_a_style_list_per_line() {
+        let t = term(10, 1, b"[3mi");
+        let m = screen_message("a1", 10, 1, &screen_text(&t));
+        assert_eq!(m["styles"], json!([[[1, null, null, ITALIC]]]));
+        assert_eq!(m["lines"], json!(["i"]));
     }
 
     #[test]

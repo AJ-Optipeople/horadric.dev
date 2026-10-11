@@ -5581,8 +5581,13 @@ use what is new. Each part is a quest in the log.
   changed by alpha, not committed"), nothing when it is empty or
   Horadric is closed. A shared file also goes to Claude as context on the
   next prompt, once per change. Verified on screen with two sessions on
-  one file. The theme colours (`warning`, `subtle`) are not drawn in
-  Horadric's terminal yet; the text is plain.
+  one file. The theme colours (`warning`, `subtle`) come as truecolour
+  and Horadric's terminal draws them. They looked plain only because the
+  dev instance was started from Claude Code's PowerShell tool, which sets
+  `NO_COLOR=1`, and every tile inherited it: Claude's whole screen was
+  colourless. A Horadric running under Claude Code (`CLAUDECODE` set) now
+  drops `NO_COLOR` from its terminals with the parent session's
+  variables; a person's own `NO_COLOR` stays (2026-10-11).
 - **Subagents on the tile.** Today a tile counts subagents by `agent_id`
   and calls one finished after 30 quiet seconds. With the mod's reports
   the tile can show each by type, and when it really ends. **Built (2026-10-11).** `Session::subagent_types` uses the mod roster (running, waiting or pending) where it has reported this turn, and the 30 second quiet guess only for ids the roster lacks. A working tile's last line lists the types, "Explore x2, Plan".

@@ -107,6 +107,29 @@ pub(crate) const PARENT_SESSION_ENV: [&str; 11] = [
     "AI_AGENT",
 ];
 
+/// Set by Claude Code's shell tools for the commands they run, not by the
+/// person. A Horadric started from one (a dev instance, or the `reload` of
+/// an agent shipping) would hand `NO_COLOR=1` to every tile, and Claude there
+/// draws its whole screen, a mod's theme colours too, without colour.
+const TOOL_SHELL_ENV: [&str; 1] = ["NO_COLOR"];
+
+/// What a terminal Horadric starts must not inherit from it. The tool
+/// shell's variables go only when Horadric itself runs under Claude Code,
+/// so a person's own `NO_COLOR` is kept.
+pub(crate) fn inherited_env(under_claude: bool) -> Vec<&'static str> {
+    let tool = if under_claude {
+        &TOOL_SHELL_ENV[..]
+    } else {
+        &[]
+    };
+    [&PARENT_SESSION_ENV[..], tool].concat()
+}
+
+/// Whether Horadric was started from inside a Claude Code session.
+pub(crate) fn under_claude() -> bool {
+    std::env::var_os("CLAUDECODE").is_some()
+}
+
 /// The exit code of a session whose host went away without saying how the
 /// program ended: a crashed host, or one killed by hand. Not zero, so the
 /// session pauses and a click resumes it.
@@ -509,9 +532,13 @@ impl Console {
             // A Horadric started from inside a session would hand its own tag
             // down, and a `claude` in the shell would report as that session.
             env_remove: if launch.shell {
-                [&PARENT_SESSION_ENV[..], &[SESSION_ENV, OWNER_ENV]].concat()
+                [
+                    &inherited_env(under_claude())[..],
+                    &[SESSION_ENV, OWNER_ENV],
+                ]
+                .concat()
             } else {
-                PARENT_SESSION_ENV.to_vec()
+                inherited_env(under_claude())
             }
             .into_iter()
             .map(String::from)
@@ -1233,6 +1260,16 @@ impl EventListener for Events {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn no_color_is_dropped_only_when_horadric_runs_under_claude() {
+        let under = inherited_env(true);
+        assert!(under.contains(&"NO_COLOR"));
+        assert!(under.contains(&"CLAUDECODE"));
+        let mine = inherited_env(false);
+        assert!(!mine.contains(&"NO_COLOR"));
+        assert_eq!(mine, PARENT_SESSION_ENV);
+    }
 
     #[cfg(windows)]
     #[test]
