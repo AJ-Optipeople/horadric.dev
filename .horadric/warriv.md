@@ -4,6 +4,7 @@
 - Do not wait for main's checks before casting a ship stone: nothing runs them between landings, and the ship session runs all three first (RELEASING.md step 2) and stops on red.
 
 ## Lately
+- 2026-10-11 Hourly round (main at ab5ef41): "OSC 7501: plain terminals" silent 11 hours after two nudges, worktree empty, so handed it to the human (restart the session). CSI c fence queued (opus), cloud tiles still with the human.
 - 2026-10-11 Hourly round (main at cf3d0f3): "OSC 7501: plain terminals" still silent 10 hours after a nudge, worktree empty. Narrowed it to the plain terminal tile and split Codex and Grok into a new quest after it (sonnet).
 - 2026-10-11 Hourly round (main at 7b182d9): "OSC 7501: plain terminals" under way 7 hours with no commit, so told it to commit what works or name its blocker. CSI c fence queued (opus), cloud tiles still with the human.
 - 2026-10-11 Hourly round (main at 9984581): OSC 7501 plain terminals under way, CSI c fence queued (opus), cloud tiles still with the human, nothing landed since the last ship. Nothing to do.
@@ -92,4 +93,4 @@
 
 ## Open
 - "Propose tiles for Claude Code cloud sessions": waits on the human's pick of option in PLAN.md "Cloud session tiles" (recommended: attach with claude --cloud, OSC 7501, list later). Once picked, file the build quests.
-- "OSC 7501: plain terminals": narrowed and split at 10 hours silent, worktree empty. Next round, if still no commit or report, hand to the human (the session may be dead; I can not start one).
+- "OSC 7501: plain terminals": handed to the human to restart its dead session (silent 11 hours). Once it moves, its Codex and Grok follow-up can start.
