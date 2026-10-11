@@ -34,7 +34,9 @@ use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::{Config, Term};
 use alacritty_terminal::vte::ansi::{CursorShape, CursorStyle, Processor};
 use horadric_core::agent::Agent;
+use horadric_core::program_status::{self, Records, Scanner, Sequence};
 use horadric_core::worktree::SETUP_ENV;
+use horadric_core::Phase;
 use horadric_hooks::{OWNER_ENV, SESSION_ENV};
 use horadric_pty::host::{Attached, Incoming, Remote, Spec};
 use horadric_pty::wire::{self, Message};
@@ -158,6 +160,10 @@ pub struct Console {
     dirty: AtomicBool,
     exit: Mutex<Option<u32>>,
     title: Arc<Mutex<Option<String>>>,
+    /// What the program says about itself with OSC 7501, and whether that
+    /// changed since the app last looked.
+    program: Mutex<Records>,
+    program_news: AtomicBool,
     /// What the agent was started with, kept so a restart can start it the
     /// same way.
     pub args: Vec<String>,
@@ -182,6 +188,9 @@ struct Meta {
     shell: bool,
     claude: bool,
     cwd: Option<PathBuf>,
+    /// Attached to a host that ran on without a UI, whose first output is
+    /// a replay of what was shown before.
+    reattached: bool,
 }
 
 /// The file a view shows, and how it is laid out in the grid now.
@@ -519,6 +528,7 @@ impl Console {
             shell: launch.shell,
             claude,
             cwd: Some(cwd),
+            reattached: false,
         };
         Ok(Console::hosted(attached, meta, notify))
     }
@@ -545,6 +555,7 @@ impl Console {
                 && agent == Agent::Claude
                 && agent_program(agent).is_some_and(|p| is_claude(&p)),
             cwd: Some(cwd),
+            reattached: true,
         };
         Ok(Console::hosted(attached, meta, notify))
     }
@@ -589,6 +600,8 @@ impl Console {
             size: Mutex::new(size),
             dirty: AtomicBool::new(false),
             exit: Mutex::new(None),
+            program: Mutex::new(Records::default()),
+            program_news: AtomicBool::new(false),
             title,
             args: meta.args,
             shell: meta.shell,
@@ -598,16 +611,35 @@ impl Console {
         });
         let notify = waker(notify);
         let reader = Arc::clone(&console);
-        thread::spawn(move || reader.read(incoming, notify));
+        let reattached = meta.reattached;
+        thread::spawn(move || reader.read(incoming, notify, reattached));
         console
     }
 
     /// Parses output into the grid until the host says the program ended,
     /// or goes away without saying.
-    fn read(&self, mut incoming: Incoming, notify: Waker) {
+    fn read(&self, mut incoming: Incoming, notify: Waker, reattached: bool) {
+        let mut scanner = Scanner::default();
+        // Queries in a replay were asked long ago. An answer now would be
+        // typed into whatever reads the input today, a shell's prompt
+        // perhaps.
+        let mut replay = reattached;
+        let mut seqs = Vec::new();
         let code = loop {
             match incoming.recv() {
                 Some(Message::Output(bytes)) => {
+                    // Before the grid: Claude Code fences its OSC 7501
+                    // query with a `CSI c` the grid answers, and takes an
+                    // answer to the fence first as no to the query. On
+                    // Windows the pseudo console answers the fence itself,
+                    // before the query even reaches here, so Claude Code
+                    // there mostly hears no (see the plan).
+                    scanner.feed(&bytes, &mut seqs);
+                    if replay {
+                        seqs.retain(|s| *s != Sequence::Query);
+                        replay = false;
+                    }
+                    self.hear_program(seqs.drain(..));
                     if let Ok(mut s) = self.screen.lock() {
                         let Screen { term, parser } = &mut *s;
                         parser.advance(term, &bytes);
@@ -625,6 +657,34 @@ impl Console {
             *e = Some(code);
         }
         post(notify, Note::Exit, self.serial);
+    }
+
+    /// Takes the OSC 7501 sequences in output. The grid's parser passes them
+    /// by, so they are read here, from the same bytes.
+    fn hear_program(&self, seqs: impl Iterator<Item = Sequence>) {
+        for seq in seqs {
+            if seq == Sequence::Query {
+                if let Some(remote) = &self.remote {
+                    let reply = program_status::QUERY_REPLY;
+                    #[cfg(windows)]
+                    let reply = &program_status::as_key_presses(reply);
+                    remote.write(reply.to_vec());
+                }
+            } else if self.program.lock().is_ok_and(|mut r| r.hear(&seq)) {
+                self.program_news.store(true, Ordering::Release);
+            }
+        }
+    }
+
+    /// What the program said with OSC 7501 since the last call, if it said
+    /// anything new: the phase and line of its most urgent record, or
+    /// `Some(None)` when it cleared them all.
+    pub fn take_program(&self) -> Option<Option<(Phase, Option<String>)>> {
+        if !self.program_news.swap(false, Ordering::AcqRel) {
+            return None;
+        }
+        let records = self.program.lock().ok()?;
+        Some(records.summary().map(|r| (r.phase(), r.line())))
     }
 
     /// A console with no program, showing the file at `path` read only.
@@ -671,6 +731,8 @@ impl Console {
             size: Mutex::new(size),
             dirty: AtomicBool::new(false),
             exit: Mutex::new(None),
+            program: Mutex::new(Records::default()),
+            program_news: AtomicBool::new(false),
             title,
             args: Vec::new(),
             shell: false,
@@ -711,6 +773,8 @@ impl Console {
             size: Mutex::new(size),
             dirty: AtomicBool::new(false),
             exit: Mutex::new(None),
+            program: Mutex::new(Records::default()),
+            program_news: AtomicBool::new(false),
             title,
             args: Vec::new(),
             shell: false,
