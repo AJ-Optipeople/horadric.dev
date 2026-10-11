@@ -445,7 +445,7 @@ impl UsageWindow {
     fn tip(&self, hot: UsageHit) -> Option<&'static str> {
         let row = match hot {
             UsageHit::Setting(i) => rows(self.screen.get()).get(i).map(|r| match r {
-                Row::Setting(Setting::Model) => tip::Row::Model,
+                Row::Setting(Setting::Model | Setting::Workflow) => tip::Row::Model,
                 Row::Setting(Setting::Effort) => tip::Row::Effort,
                 Row::Setting(Setting::Permissions) => tip::Row::Permissions,
                 Row::Account => tip::Row::Account,

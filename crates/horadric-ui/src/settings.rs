@@ -286,7 +286,9 @@ pub fn lines(section: Section, v: &Values) -> Vec<Line> {
         }
         Section::Sessions => {
             let mut rows = vec![line(Field::Agent, "Agent", v.agent.label(), Control::List)];
-            rows.extend(v.agent.settings().iter().map(|s| {
+            // Workflows are Claude Code's alone.
+            let workflow = (v.agent == Agent::Claude).then_some(&Setting::Workflow);
+            rows.extend(v.agent.settings().iter().chain(workflow).map(|s| {
                 let value = s.name_of(v.agent, v.defaults.get(*s));
                 line(Field::Default(*s), s.label(), value, Control::List)
             }));
@@ -1102,6 +1104,7 @@ mod tests {
                 Field::Default(Setting::Model),
                 Field::Default(Setting::Effort),
                 Field::Default(Setting::Permissions),
+                Field::Default(Setting::Workflow),
                 Field::Offered,
             ]
         );
@@ -1199,9 +1202,16 @@ mod tests {
         let values: Vec<&str> = rows.iter().map(|l| l.value.as_str()).collect();
         assert_eq!(
             values,
-            ["Claude Code", "Default", "Extra high", "Default", "Always"]
+            [
+                "Claude Code",
+                "Default",
+                "Extra high",
+                "Default",
+                "Default",
+                "Always"
+            ]
         );
-        assert_eq!(rows[4].control, Control::Fixed);
+        assert_eq!(rows[5].control, Control::Fixed);
         v.agent = Agent::Codex;
         v.defaults = Defaults {
             model: Some("gpt-5.5".into()),
@@ -1219,7 +1229,7 @@ mod tests {
             ]
         );
         assert_eq!(rows[1].value, "GPT-5.5");
-        assert!(tallest(&v) >= 5);
+        assert!(tallest(&v) >= 6);
         assert_eq!(rows[3].control, Control::Switch(false));
         v.offered = Some(None);
         let rows = lines(Section::Sessions, &v);
