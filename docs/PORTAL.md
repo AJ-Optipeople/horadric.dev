@@ -100,3 +100,47 @@ PC to phone:
 
 A phone that gets a `v` it does not know tells the human to update
 Horadric on the PC.
+
+## Added in 0.21
+
+Still `v: 1`: a page that does not know a message ignores it, and so
+does a PC.
+
+Starting and resuming:
+
+- PC to phone, `{"t":"projects","list":[{"path","name"}]}`: on hello and
+  whenever it changes. The projects the tiles show, the same order.
+- Phone to PC, `{"t":"start","project":"<path>"}`: a new session in that
+  project, started exactly like `horadric new` there. The PC answers
+  `{"t":"started","project","id"}` once the session exists (it is then
+  in `sessions` too), or `error`. The page then watches it.
+- `sessions` entries gain `"paused": true` for a session with no live
+  host (one Horadric paused or that ended its process). Phone to PC,
+  `{"t":"resume","id"}` resumes it the way a click on its tile does;
+  the screen follows once it is up. `watch` on a paused session answers
+  `error` with "paused", and the page offers Resume.
+
+Push, sent by the PC itself, so no server of ours holds subscriptions:
+
+- PC hello gains `"vapid":"<b64url uncompressed P-256 public key, 65 bytes>"`.
+  The PC makes the key pair once and keeps it in `portal.json`
+  (`vapid_d`, `vapid_pub`).
+- Phone to PC, `{"t":"push","sub":{"endpoint","keys":{"p256dh","auth"}}}`:
+  the PC stores it in `<data dir>/portal-push.json`, one per endpoint.
+  `{"t":"unpush","endpoint"}` removes it.
+- When a session turns `waiting`, the PC POSTs to every stored endpoint:
+  no body, `TTL: 3600`, `Urgency: high`, `Authorization: vapid t=<JWT>,
+  k=<vapid_pub>`, the JWT ES256 with `aud` the endpoint's origin, `exp`
+  12 hours on, `sub` `mailto:portal@horadric.dev`. At most one push a
+  minute per PC. An endpoint answering 404 or 410 is dropped. With no
+  body the push carries nothing, so the service worker shows "A session
+  waits for you" and opens the page on a click.
+- `rekey` also clears `portal-push.json`.
+
+Liveness:
+
+- PC to relay, text `{"ping":1}` every 25 seconds; the relay answers
+  text `{"pong":1}`. A PC that has heard nothing from the relay for 70
+  seconds drops the socket and reconnects. The page does the same with
+  its own text ping, and reconnects when it comes back to the
+  foreground.
