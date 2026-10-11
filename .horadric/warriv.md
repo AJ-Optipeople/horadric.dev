@@ -4,6 +4,7 @@
 - Do not wait for main's checks before casting a ship stone: nothing runs them between landings, and the ship session runs all three first (RELEASING.md step 2) and stops on red.
 
 ## Lately
+- 2026-10-11 Round after "Horadric's own Claude mod" landed (a7987f4): OSC 7501 reading and subagents by type still mid work in the shared tree, so the ship stays held. Cloud tiles still with the human. Nothing else to do.
 - 2026-10-11 Round after "A waiting tile names what it waits on" landed (8427c03): OSC 7501 reading and the mod still under way, so the ship stays held. Gave the three queued 2.1.287 to 2.1.296 quests models (sonnet for plain terminals and subagents by type, opus for the mod band). Cloud tiles still with the human.
 - 2026-10-11 Round after "Sessions default for the workflow agents' model" landed (268858a): OSC 7501 reading, the mod and the waiting tile still mid work in the shared tree, so the ship stays held. Cloud tiles still with the human. Nothing else to do.
 - 2026-10-11 Round after "Keep onFailure block off Horadric's hooks" landed (72561f8): a small defensive fix, and four 2.1.287 to 2.1.296 quests are mid work in the shared tree, so a release build now would take their half done files. Held the ship until the series lands.
@@ -71,5 +72,5 @@
 - 2026-10-06 Daily look back: the day was clean (24 quests completed, all 24 merged by themselves).
 
 ## Open
-- Ship Local once the OSC 7501 reading and the mod quests land (waiting tile and workflow model are in); held since 72561f8.
+- Ship Local once the OSC 7501 reading and subagents by type land (mod, waiting tile and workflow model are in); held since 72561f8.
 - "Propose tiles for Claude Code cloud sessions": waits on the human's pick of option in PLAN.md "Cloud session tiles" (recommended: attach with claude --cloud, OSC 7501, list later). Once picked, file the build quests.
