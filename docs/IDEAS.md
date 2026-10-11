@@ -116,8 +116,8 @@ clients.
   decisions for this on 2026-10-01.
 - **The page is hosted, not served by the PC.** The goal is any browser
   anywhere, with nothing installed first (decided 2026-10-02). So the
-  page lives on a public site of ours, such as `app.horadric.dev`, and
-  reaches the PC through the relay. The site sends only the HTML and
+  page lives on a public site of ours, `portal.horadric.dev`, served by
+  the relay itself, and reaches the PC through the relay. The site sends only the HTML and
   JS; sessions never pass through it. One fixed HTTPS address also
   makes "add to home screen" and Web Push simple. The page and the
   relay live in a repo of their own, since both are deployed to the
@@ -138,21 +138,33 @@ clients.
   users, and it does by having no centre: each Horadric serves its own
   few phones, so a thousand users is a thousand small servers we never
   run. Nothing we host holds sessions or state.
-- **Reaching the PC: a relay of ours.** Tailscale only works on a
-  device where it is installed, so it cannot give "any browser
-  anywhere". The PC connects out to the relay, so no port is opened on
-  the PC or the router. The relay is stateless: it only joins a browser
-  to its PC, and the two encrypt end to end so it never reads a
-  session. A relay like that scales sideways, more instances behind a
-  load balancer. Tailscale can still be a way in for development.
+- **Reaching the PC: a relay of ours, on our own VPS.** Tailscale only
+  works on a device where it is installed, so it cannot give "any
+  browser anywhere". WebRTC was weighed and dropped (2026-10-11): phones
+  on mobile data often sit behind NAT that blocks a direct connection,
+  and the TURN relay that fixes it is the part that costs money. So the
+  PC and the phone both open a WebSocket out to a relay of ours, and it
+  joins them. No port is opened on the PC or the router, and it always
+  connects. The relay runs on the Frankfurt VPS we already pay for, a
+  flat monthly price: terminal traffic is a few KB a second, so one box
+  carries thousands of users and the project stays free. The relay is
+  stateless (a PC's id is the hash of its secret, so nothing is stored),
+  and the two ends encrypt end to end, so it never reads a session. The
+  protocol is in [PORTAL.md](PORTAL.md).
+- **Anyone can run their own relay.** The relay's address is a setting,
+  and the relay is open source beside the page. We host one for
+  convenience; nobody depends on it. That is what keeps an open source
+  app honest about a hosted part.
 - **Push needs one small service of ours.** Web Push the PC can send by
   itself, but an iOS app's APNs key is a secret no install can carry, so
   native push goes through a sender we host. It forwards a "session waits"
   with no content in it, so it holds nothing worth stealing.
 - **Off by default.** This is remote control of a machine whose agents
-  may run with permissions bypassed. Each phone is paired by a device
-  token the human approves on the PC, and the PC listens on no port: its
-  only way in is its own outgoing connection to the relay.
+  may run with permissions bypassed. A phone is paired by a link (a QR
+  code) whose key lives only in the URL's fragment, which browsers never
+  send to a server. Whoever holds the key can control the PC, so a new
+  key revokes every paired phone. The PC listens on no port: its only
+  way in is its own outgoing connection to the relay.
 - **An inbox first, not a terminal.** Typing into a terminal on a phone
   is slow. Away from the desk the need is "2 sessions wait for you":
   approve a permission, answer a question, send a short prompt, and a
