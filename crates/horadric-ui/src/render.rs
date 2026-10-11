@@ -67,6 +67,7 @@ use crate::layout::{
     SuggestLayout, TasksLayout, ToastLayout, TomeLayout, UsageHit, UsageLayout, KNOB_R,
 };
 use crate::motion::{self, ORBIT};
+use crate::portal_key::Look as PortalLook;
 use crate::settings::Control;
 use crate::theme::{self, Color};
 
@@ -517,6 +518,11 @@ pub struct CaptionScene<'a> {
     pub maximized: bool,
     pub hot: Option<CaptionHit>,
     pub pressed: Option<CaptionHit>,
+    /// Town Portal's key: what it shows, how far the scroll has become
+    /// the portal (0 to 1), and how far its light has turned.
+    pub portal: PortalLook,
+    pub opened: f32,
+    pub spin: f32,
 }
 
 /// Everything one frame of a notification needs.
@@ -662,6 +668,8 @@ pub struct TransmuteLook<'a> {
 
 /// The red of the portal to the cow level.
 const PORTAL_RED: Color = Color::rgb(0xE8323C);
+/// The blue of a town portal.
+const PORTAL_BLUE: Color = Color::rgb(0x3FA2FF);
 
 /// Everything one frame of the cube needs.
 pub struct CubeScene<'a> {
@@ -1499,10 +1507,24 @@ impl Painter<'_> {
     unsafe fn portal(&self, mouth: (f32, f32), s: f32, spread: f32, bright: f32, spin: f32) {
         let (cx, cy) = (mouth.0, mouth.1 - s * 0.6);
         let (rx, ry) = (s * 0.7 * spread, s * 1.25 * spread);
+        self.portal_oval((cx, cy), (rx, ry), PORTAL_RED, bright, spin, 2.5);
+    }
+
+    /// A portal of `c` centred on `at` with radii `r`: an oval with light
+    /// turning inward on rings inside it, `speck` the size of that light.
+    unsafe fn portal_oval(
+        &self,
+        (cx, cy): (f32, f32),
+        (rx, ry): (f32, f32),
+        c: Color,
+        bright: f32,
+        spin: f32,
+        speck: f32,
+    ) {
         if rx <= 0.5 {
             return;
         }
-        self.glow_dot(cx, cy, ry * 1.6, PORTAL_RED, 0.8 * bright);
+        self.glow_dot(cx, cy, ry * 1.6, c, 0.8 * bright);
         let oval = |k: f32, c: Color| {
             self.brush.SetColor(&color(c));
             self.rt.FillEllipse(
@@ -1515,9 +1537,9 @@ impl Painter<'_> {
             );
         };
         let black = Color::rgb(0);
-        oval(1.0, PORTAL_RED.fade(bright));
-        oval(0.82, PORTAL_RED.mix(black, 0.45).fade(bright));
-        oval(0.5, PORTAL_RED.mix(black, 0.75).fade(bright));
+        oval(1.0, c.fade(bright));
+        oval(0.82, c.mix(black, 0.45).fade(bright));
+        oval(0.5, c.mix(black, 0.75).fade(bright));
         // Specks on three rings, each ring turning faster than the one
         // outside it, as into a whirlpool.
         for ring in 0..3 {
@@ -1526,7 +1548,7 @@ impl Painter<'_> {
             for i in 0..6 {
                 let a = i as f32 * std::f32::consts::TAU / 6.0 + turn + ring as f32;
                 let (x, y) = (cx + rx * k * a.cos(), cy + ry * k * a.sin());
-                self.glow_dot(x, y, 2.5, PORTAL_RED.mix(Color::rgb(0xFFFFFF), 0.4), bright);
+                self.glow_dot(x, y, speck, c.mix(Color::rgb(0xFFFFFF), 0.4), bright);
             }
         }
     }
@@ -2000,6 +2022,8 @@ impl Painter<'_> {
             self.text(&gpu.small, quiet(theme::text_dim()), scene.detail, rest);
         }
 
+        self.portal_key(gpu, scene, &quiet);
+
         let restore = if scene.maximized {
             '\u{E923}'
         } else {
@@ -2031,6 +2055,81 @@ impl Painter<'_> {
             }
             self.icon(&gpu.icon_small, ink, glyph, r);
         }
+    }
+
+    /// Town Portal's key: a pill with the art and a word. Closed, a rolled
+    /// scroll on the plate's own grey; open, a blue portal on blue glass,
+    /// swirling while a phone is through.
+    unsafe fn portal_key(&self, gpu: &Gpu, scene: &CaptionScene, quiet: &dyn Fn(Color) -> Color) {
+        let r = scene.layout.portal;
+        if r.x < scene.layout.title.x {
+            return;
+        }
+        let b = layout::button(Some(CaptionHit::Portal), scene.hot, scene.pressed.map(Some));
+        let open = scene.portal.is_open();
+        let o = if open { scene.opened } else { 0.0 };
+        let bright = match scene.portal {
+            PortalLook::Closed => 0.0,
+            PortalLook::Opening => 0.45,
+            PortalLook::Open => 0.85,
+            PortalLook::Phones(_) => 1.0,
+        };
+        let white = Color::rgb(0xFFFFFF);
+        let grey = theme::window_bg().mix(white, 0.06);
+        let glass = theme::window_bg().mix(PORTAL_BLUE, 0.12 + 0.1 * bright);
+        let mut fill = grey.mix(glass, o);
+        let mut rim = theme::text_dim()
+            .fade(0.35)
+            .mix(PORTAL_BLUE.fade(0.4 + 0.4 * bright), o);
+        match b {
+            Button::Hover => {
+                fill = fill.mix(white, 0.06);
+                rim = rim.mix(white, 0.2);
+            }
+            Button::Pressed => fill = fill.mix(Color::rgb(0), 0.2),
+            Button::Idle => {}
+        }
+        self.fill_rounded(&r, r.h / 2.0, quiet(fill));
+        self.stroke_rounded(&r.inset(0.5), r.h / 2.0, quiet(rim), 1.0);
+
+        let (cx, cy) = (r.x + 18.0, r.y + r.h / 2.0);
+        if o < 1.0 {
+            self.scroll_art((cx, cy), 1.0 - o);
+        }
+        if o > 0.0 {
+            let spin = if scene.portal.swirls() {
+                scene.spin
+            } else {
+                0.0
+            };
+            let c = quiet(PORTAL_BLUE);
+            self.portal_oval((cx, cy), (6.5 * o, 10.0 * o), c, bright * o, spin, 1.6);
+        }
+
+        let ink = match (b, open) {
+            (Button::Idle, false) => quiet(theme::text_dim()),
+            (Button::Idle, true) => quiet(theme::text().mix(PORTAL_BLUE, 0.35)),
+            _ => theme::text(),
+        };
+        let left = r.x + 34.0;
+        let text = Rect::new(left, r.y, r.right() - 10.0 - left, r.h);
+        self.text(&gpu.small, ink, &scene.portal.label(), text);
+    }
+
+    /// A town portal scroll, rolled, `k` of it showing: parchment between
+    /// two rolls, tied with a blue band.
+    unsafe fn scroll_art(&self, (cx, cy): (f32, f32), k: f32) {
+        let w = 8.0 * k;
+        let ink = |c: u32| Color::rgb(c).fade(k);
+        let roll = 2.0 + 2.0 * k;
+        let body = Rect::new(cx - w, cy - 4.0, w * 2.0, 8.0);
+        self.fill_rounded(&body, 1.5, ink(0xD9C59C));
+        let left = Rect::new(cx - w - roll + 1.0, cy - 6.0, roll, 12.0);
+        let right = Rect::new(cx + w - 1.0, cy - 6.0, roll, 12.0);
+        self.fill_rounded(&left, 2.0, ink(0xA4865A));
+        self.fill_rounded(&right, 2.0, ink(0xA4865A));
+        let band = Rect::new(cx - 1.5, cy - 4.5, 3.0, 9.0);
+        self.fill_rounded(&band, 1.0, ink(0x3D7DDB));
     }
 
     /// A notification: a lamp in its tone by the title, the text under it,

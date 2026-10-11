@@ -62,6 +62,7 @@ pub mod paste;
 pub mod paths;
 pub mod plist;
 pub mod portal;
+pub mod portal_key;
 pub mod rain;
 pub mod screens;
 pub mod shell;

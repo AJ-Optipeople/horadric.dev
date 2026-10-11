@@ -48,6 +48,12 @@ instance. b64url is base64url without padding. Times are Unix seconds.
   every one; a phone connected at that moment is cut off within 2
   seconds. `horadric portal off` turns it off. The UI looks at
   `portal.json` every 2 seconds and connects or disconnects to match.
+- The stage's caption has a Town Portal key beside the window's keys: a
+  rolled scroll while the portal is off, a blue portal once it is on,
+  swirling while a paired phone is connected. Clicked while off, it does
+  what `horadric portal` does without the wait; while on, it offers
+  "Pair a phone..." and "Close the portal" (off, and the open ticket
+  dropped).
 
 Trading the ticket, sealed with the ticket's key:
 

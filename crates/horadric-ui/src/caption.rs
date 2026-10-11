@@ -10,6 +10,7 @@
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::rc::Rc;
+use std::time::Instant;
 
 use windows::core::{w, Result, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
@@ -17,18 +18,25 @@ use windows::Win32::Graphics::Gdi::{InvalidateRect, ValidateRect};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, GetWindowLongPtrW, RegisterClassW, SetWindowLongPtrW,
-    SetWindowPos, CREATESTRUCTW, GWLP_USERDATA, HTTRANSPARENT, SWP_NOACTIVATE, SWP_NOZORDER,
-    WINDOW_EX_STYLE, WM_ERASEBKGND, WM_NCCREATE, WM_NCDESTROY, WM_NCHITTEST, WM_PAINT, WNDCLASSW,
-    WS_CHILD, WS_CLIPSIBLINGS, WS_VISIBLE,
+    CreateWindowExW, DefWindowProcW, GetWindowLongPtrW, KillTimer, RegisterClassW, SetTimer,
+    SetWindowLongPtrW, SetWindowPos, CREATESTRUCTW, GWLP_USERDATA, HTTRANSPARENT, SWP_NOACTIVATE,
+    SWP_NOZORDER, WINDOW_EX_STYLE, WM_ERASEBKGND, WM_NCCREATE, WM_NCDESTROY, WM_NCHITTEST,
+    WM_PAINT, WM_TIMER, WNDCLASSW, WS_CHILD, WS_CLIPSIBLINGS, WS_VISIBLE,
 };
 
 use crate::layout::{self, CaptionHit, CaptionLayout};
+use crate::portal_key::{self, Look};
 use crate::render::{CaptionScene, Target};
 use crate::theme::{self, Color};
 use crate::window::Shared;
 
 pub(crate) const CLASS: PCWSTR = w!("HoradricCaption");
+
+/// Moves Town Portal's key on while it opens or swirls.
+const PORTAL_FRAME: usize = 1;
+/// Twenty frames a second: smooth enough for a slow swirl on a key this
+/// small, and cheap.
+const PORTAL_FRAME_MS: u32 = 50;
 
 pub fn register_class() -> Result<()> {
     unsafe {
@@ -58,6 +66,13 @@ pub struct Caption {
     maximized: Cell<bool>,
     hot: Cell<Option<CaptionHit>>,
     pressed: Cell<Option<CaptionHit>>,
+    portal: Cell<Look>,
+    /// When the portal last opened, for the scroll becoming it, and when
+    /// its swirl began.
+    opened_at: Cell<Option<Instant>>,
+    swirl_at: Cell<Instant>,
+    /// The frame timer runs.
+    ticking: Cell<bool>,
     /// How far in the plate's seam is cut, in DIPs.
     seam: f32,
 }
@@ -77,6 +92,10 @@ impl Caption {
             maximized: Cell::new(false),
             hot: Cell::new(None),
             pressed: Cell::new(None),
+            portal: Cell::new(Look::Closed),
+            opened_at: Cell::new(None),
+            swirl_at: Cell::new(Instant::now()),
+            ticking: Cell::new(false),
             seam,
         });
         unsafe {
@@ -179,6 +198,53 @@ impl Caption {
         }
     }
 
+    /// What Town Portal's key shows. Opening, the scroll becomes the
+    /// portal.
+    pub fn set_portal(&self, look: Look) {
+        let was = self.portal.replace(look);
+        if was == look {
+            return;
+        }
+        if look.is_open() && !was.is_open() {
+            self.opened_at.set(Some(Instant::now()));
+        }
+        if look.swirls() && !was.swirls() {
+            self.swirl_at.set(Instant::now());
+        }
+        self.tick();
+        self.invalidate();
+    }
+
+    pub fn portal(&self) -> Look {
+        self.portal.get()
+    }
+
+    /// Whether the key is moving, so the frame timer is needed.
+    fn moving(&self) -> bool {
+        let look = self.portal.get();
+        let opening = look.is_open()
+            && self
+                .opened_at
+                .get()
+                .is_some_and(|t| t.elapsed() < portal_key::OPENING);
+        opening || look.swirls()
+    }
+
+    /// Starts or stops the frame timer to match.
+    fn tick(&self) {
+        let moving = self.moving();
+        if self.ticking.replace(moving) == moving {
+            return;
+        }
+        unsafe {
+            if moving {
+                SetTimer(Some(self.hwnd.get()), PORTAL_FRAME, PORTAL_FRAME_MS, None);
+            } else {
+                let _ = KillTimer(Some(self.hwnd.get()), PORTAL_FRAME);
+            }
+        }
+    }
+
     pub fn pressed(&self) -> Option<CaptionHit> {
         self.pressed.get()
     }
@@ -231,6 +297,12 @@ impl Caption {
             maximized: self.maximized.get(),
             hot: self.hot.get(),
             pressed: self.pressed.get(),
+            portal: self.portal.get(),
+            opened: self
+                .opened_at
+                .get()
+                .map_or(1.0, |t| portal_key::opened(t.elapsed())),
+            spin: portal_key::spin(self.swirl_at.get().elapsed()),
         };
         let failed = slot
             .as_ref()
@@ -253,6 +325,11 @@ impl Caption {
                 Some(LRESULT(0))
             }
             WM_ERASEBKGND => Some(LRESULT(1)),
+            WM_TIMER => {
+                self.tick();
+                self.invalidate();
+                Some(LRESULT(0))
+            }
             _ => None,
         }
     }

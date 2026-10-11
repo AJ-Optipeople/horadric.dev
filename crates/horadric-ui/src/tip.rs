@@ -249,7 +249,8 @@ pub fn caption(hit: CaptionHit, zoomed: bool) -> Option<&'static str> {
         CaptionHit::Max if zoomed => "Restore down",
         CaptionHit::Max => "Maximize",
         CaptionHit::Close => "Close the stage. The sessions keep running",
-        CaptionHit::Bar => return None,
+        // Its line depends on the portal, see `portal_key::Look::tip`.
+        CaptionHit::Portal | CaptionHit::Bar => return None,
     })
 }
 

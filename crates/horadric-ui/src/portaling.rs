@@ -395,8 +395,6 @@ impl App {
 impl Portal {
     /// What the portal's key in the stage shows: whether the relay is
     /// connected, and how many paired phones said hello on it.
-    // Until the stage's portal key, being built beside this, reads it.
-    #[allow(dead_code)]
     pub(super) fn look(&self) -> (bool, usize) {
         let phones = self
             .phones

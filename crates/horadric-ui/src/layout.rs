@@ -1451,13 +1451,16 @@ pub fn dialog_place(size: (i32, i32), work: [i32; 4]) -> (i32, i32) {
 pub const CAPTION_H: f32 = 38.0;
 const CAPTION_KEY_W: f32 = 42.0;
 const CAPTION_KEY_H: f32 = 28.0;
+/// Town Portal's key is wider than the window's: art and a word.
+const PORTAL_KEY_W: f32 = 112.0;
 
 /// The geometry of the stage's caption: the project's lamp and title on
-/// the left, the window's three keys on the right.
+/// the left, Town Portal's key and the window's three keys on the right.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CaptionLayout {
     pub lamp: (f32, f32),
     pub title: Rect,
+    pub portal: Rect,
     pub min: Rect,
     pub max: Rect,
     pub close: Rect,
@@ -1466,6 +1469,8 @@ pub struct CaptionLayout {
 /// What a point on the caption is over.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CaptionHit {
+    /// Town Portal's key.
+    Portal,
     Min,
     Max,
     Close,
@@ -1494,11 +1499,18 @@ pub fn caption(width: f32) -> CaptionLayout {
         CAPTION_KEY_W,
         CAPTION_KEY_H,
     );
+    let portal = Rect::new(
+        min.x - 12.0 - PORTAL_KEY_W,
+        top,
+        PORTAL_KEY_W,
+        CAPTION_KEY_H,
+    );
     let lamp = (20.0, CAPTION_H / 2.0 + 1.0);
     let x = 32.0;
     CaptionLayout {
         lamp,
-        title: Rect::new(x, 1.0, (min.x - 16.0 - x).max(0.0), CAPTION_H),
+        title: Rect::new(x, 1.0, (portal.x - 16.0 - x).max(0.0), CAPTION_H),
+        portal,
         min,
         max,
         close,
@@ -1516,6 +1528,8 @@ pub fn caption_hit(l: &CaptionLayout, x: f32, y: f32) -> Option<CaptionHit> {
         CaptionHit::Max
     } else if l.min.contains(x, y) {
         CaptionHit::Min
+    } else if l.portal.contains(x, y) {
+        CaptionHit::Portal
     } else {
         CaptionHit::Bar
     })
@@ -2428,12 +2442,14 @@ mod tests {
         let l = caption(800.0);
         assert!(l.close.right() < 800.0);
         assert!(l.max.right() < l.close.x && l.min.right() < l.max.x);
-        assert!(l.title.right() < l.min.x);
+        assert!(l.portal.right() < l.min.x);
+        assert!(l.title.right() < l.portal.x);
         assert!(l.close.bottom() <= CAPTION_H);
         let hit = |r: Rect| caption_hit(&l, r.x + 1.0, r.y + 1.0);
         assert_eq!(hit(l.close), Some(CaptionHit::Close));
         assert_eq!(hit(l.max), Some(CaptionHit::Max));
         assert_eq!(hit(l.min), Some(CaptionHit::Min));
+        assert_eq!(hit(l.portal), Some(CaptionHit::Portal));
         assert_eq!(caption_hit(&l, 100.0, 10.0), Some(CaptionHit::Bar));
         assert_eq!(caption_hit(&l, 100.0, CAPTION_H + 1.0), None);
         assert_eq!(caption(100.0).title.w, 0.0);

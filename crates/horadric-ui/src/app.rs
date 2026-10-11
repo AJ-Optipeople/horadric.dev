@@ -118,6 +118,7 @@ use crate::keys::{self, FontStep};
 use crate::layout::{self, Metrics};
 use crate::loot::Loot;
 use crate::menu::{self, Item};
+use crate::portal_key;
 use crate::questlog::{self, QuestLog};
 use crate::render::{Gpu, StashLook};
 use crate::screens::{self, Screen};
@@ -225,6 +226,10 @@ const WM_HORADRIC_SETTINGS_LIST: u32 = WM_APP + 31;
 const WM_HORADRIC_SETTINGS_ASK: u32 = WM_APP + 36;
 /// Town Portal's link heard something from the relay.
 const WM_HORADRIC_PORTAL: u32 = WM_APP + 40;
+/// Town Portal's key on the stage clicked: open it, or offer what can be
+/// done with it, outside the app's borrow since a menu runs a loop of its
+/// own.
+const WM_HORADRIC_PORTAL_KEY: u32 = WM_APP + 41;
 
 /// What the list of a row of the Settings window offers.
 struct SettingsList {
@@ -415,6 +420,8 @@ pub(crate) enum Input {
     SettingMenu(Agent, Setting, RECT),
     /// The usage window right clicked: its own menu.
     UsageMenu,
+    /// Town Portal's key on the stage's caption clicked.
+    PortalKey,
     /// The usage window's Account row clicked: the agent's accounts to
     /// switch to.
     AccountMenu(Agent),
@@ -1122,6 +1129,10 @@ unsafe extern "system" fn app_proc(
         }
         WM_HORADRIC_USAGE_MENU => {
             usage_menu();
+            return LRESULT(0);
+        }
+        WM_HORADRIC_PORTAL_KEY => {
+            portal_key();
             return LRESULT(0);
         }
         WM_HORADRIC_WEB => {
@@ -2382,6 +2393,61 @@ fn history_items(past: &[Past], first: usize) -> Vec<Item> {
     items
 }
 
+/// Town Portal's key clicked. Closed, it opens the portal and shows the
+/// code a phone scans; open, it offers another code or closing it.
+fn portal_key() {
+    const PAIR: usize = 1;
+    const CLOSE: usize = 2;
+    let Some(dir) = horadric_hooks::state_dir() else {
+        return;
+    };
+    let config = horadric_core::portal::Config::load(&dir).filter(|c| c.enabled);
+    let Some(config) = config else {
+        portal_pair(&dir);
+        return;
+    };
+    let host = config
+        .relay
+        .trim_start_matches("wss://")
+        .trim_start_matches("ws://")
+        .to_string();
+    let items = [
+        Item::Disabled(format!("Town Portal, through {host}")),
+        Item::Separator,
+        Item::action(PAIR, "Pair a phone..."),
+        Item::action(CLOSE, "Close the portal"),
+    ];
+    match menu::popup(&items) {
+        Some(PAIR) => portal_pair(&dir),
+        Some(CLOSE) => {
+            if let Some(mut c) = horadric_core::portal::Config::load(&dir) {
+                c.enabled = false;
+                c.ticket = None;
+                if let Err(e) = c.save(&dir) {
+                    eprintln!("horadric: cannot close the portal: {e}");
+                }
+            }
+            with_app(|app| app.portal_soon());
+        }
+        _ => {}
+    }
+}
+
+/// Opens the portal if it is closed and shows a new code to pair with.
+fn portal_pair(dir: &std::path::Path) {
+    if let Err(e) = crate::portal_pair::pair_a_phone(dir) {
+        ask(&Dialog {
+            tone: Tone::Error,
+            title: "Town Portal did not open",
+            text: &e,
+            buttons: &["OK"],
+            default: 0,
+            check: None,
+        });
+    }
+    with_app(|app| app.portal_soon());
+}
+
 /// The usage window's menu, for what the settings rows do not hold.
 fn usage_menu() {
     const CUBE: usize = 1;
@@ -3031,7 +3097,10 @@ impl App {
             }
             WM_TIMER if wparam == SPECTATE_TIMER => self.watch_return(),
             WM_TIMER if wparam == PORTAL_TIMER => self.portal_push(),
-            WM_HORADRIC_PORTAL => self.portal_drain(),
+            WM_HORADRIC_PORTAL => {
+                self.portal_drain();
+                self.portal_show();
+            }
             WM_TIMER if wparam == BREATH_TIMER => {
                 self.tray.step();
                 self.breathe_stage();
@@ -3056,6 +3125,7 @@ impl App {
                 self.tick_tasks();
                 self.reload_when_ready();
                 self.portal_check();
+                self.portal_show();
                 if self
                     .last_check
                     .is_none_or(|t| t.elapsed() >= release::CHECK_EVERY)
@@ -3065,6 +3135,23 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// Shows Town Portal as it stands on the stage's key.
+    fn portal_show(&self) {
+        let Some(stage) = &self.stage else {
+            return;
+        };
+        let (connected, phones) = self.portal.as_ref().map_or((false, 0), |p| p.look());
+        stage.set_portal(portal_key::look(self.portal.is_some(), connected, phones));
+    }
+
+    /// Reads `portal.json` again at the next tick rather than in two
+    /// seconds, so the key answers a click at once.
+    fn portal_soon(&mut self) {
+        self.portal_checked = Default::default();
+        self.portal_check();
+        self.portal_show();
     }
 
     fn console_by_serial(&self, serial: usize) -> Option<&Arc<Console>> {
@@ -5465,6 +5552,7 @@ impl App {
         if let Some(stage) = &self.stage {
             stage.show(key, &project_name(key), sessions);
         }
+        self.portal_show();
         self.mark_staged();
         if switched {
             self.browsers_follow(key);
@@ -6912,6 +7000,7 @@ impl App {
                     }
                 }
                 Input::UsageMenu => post(self.notify.0 as isize, WM_HORADRIC_USAGE_MENU, 0),
+                Input::PortalKey => post(self.notify.0 as isize, WM_HORADRIC_PORTAL_KEY, 0),
                 Input::AccountMenu(a) => {
                     let i = Agent::ALL.iter().position(|x| *x == a).unwrap_or(0);
                     post(self.notify.0 as isize, WM_HORADRIC_ACCOUNT_MENU, i);

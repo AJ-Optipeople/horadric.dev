@@ -41,12 +41,12 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetForegroundWindow, GetSystemMetrics, GetWindowLongPtrW, GetWindowRect, IsChild, IsIconic,
     IsZoomed, LoadCursorW, LoadIconW, RegisterClassW, SendMessageW, SetCursor, SetForegroundWindow,
     SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow, CREATESTRUCTW, CW_USEDEFAULT,
-    GWLP_USERDATA, HICON, HTCAPTION, HTCLIENT, HTCLOSE, HTMAXBUTTON, HTMINBUTTON, HTTOP, HTTOPLEFT,
-    HTTOPRIGHT, ICON_BIG, IDC_ARROW, IDC_SIZEALL, IDC_SIZENS, IDC_SIZEWE, NCCALCSIZE_PARAMS,
-    SC_KEYMENU, SIZE_MINIMIZED, SM_CXMINTRACK, SM_CXPADDEDBORDER, SM_CYFRAME, SM_CYMINTRACK,
-    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_MAXIMIZE,
-    SW_MINIMIZE, SW_RESTORE, SW_SHOWNOACTIVATE, SW_SHOWNORMAL, WINDOW_EX_STYLE, WMSZ_BOTTOM,
-    WMSZ_BOTTOMLEFT, WMSZ_BOTTOMRIGHT, WMSZ_LEFT, WMSZ_RIGHT, WMSZ_TOP, WMSZ_TOPLEFT,
+    GWLP_USERDATA, HICON, HTCAPTION, HTCLIENT, HTCLOSE, HTHELP, HTMAXBUTTON, HTMINBUTTON, HTTOP,
+    HTTOPLEFT, HTTOPRIGHT, ICON_BIG, IDC_ARROW, IDC_SIZEALL, IDC_SIZENS, IDC_SIZEWE,
+    NCCALCSIZE_PARAMS, SC_KEYMENU, SIZE_MINIMIZED, SM_CXMINTRACK, SM_CXPADDEDBORDER, SM_CYFRAME,
+    SM_CYMINTRACK, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+    SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOWNOACTIVATE, SW_SHOWNORMAL, WINDOW_EX_STYLE,
+    WMSZ_BOTTOM, WMSZ_BOTTOMLEFT, WMSZ_BOTTOMRIGHT, WMSZ_LEFT, WMSZ_RIGHT, WMSZ_TOP, WMSZ_TOPLEFT,
     WMSZ_TOPRIGHT, WM_CAPTURECHANGED, WM_CLOSE, WM_DPICHANGED, WM_ENTERSIZEMOVE, WM_ERASEBKGND,
     WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOVING, WM_NCACTIVATE, WM_NCCALCSIZE,
     WM_NCCREATE, WM_NCDESTROY, WM_NCHITTEST, WM_NCLBUTTONDBLCLK, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP,
@@ -950,12 +950,25 @@ impl TerminalWindow {
         }
         let hit = self.caption.borrow().as_ref().and_then(|c| c.hit(p.x, p.y));
         match hit {
+            // Windows does nothing of its own for a help key, which leaves
+            // the portal's press and its hover to the caption like the
+            // other keys.
+            Some(CaptionHit::Portal) => HTHELP,
             Some(CaptionHit::Min) => HTMINBUTTON,
             Some(CaptionHit::Max) => HTMAXBUTTON,
             Some(CaptionHit::Close) => HTCLOSE,
             Some(CaptionHit::Bar) => HTCAPTION,
             None => HTCLIENT,
         }
+    }
+
+    fn with_caption_r<T>(&self, f: impl FnOnce(&Caption) -> T) -> Option<T> {
+        self.caption.borrow().as_ref().map(|c| f(c))
+    }
+
+    /// What Town Portal's key shows.
+    pub fn set_portal(&self, look: crate::portal_key::Look) {
+        self.with_caption(|c| c.set_portal(look));
     }
 
     fn with_caption(&self, f: impl FnOnce(&Caption)) {
@@ -967,6 +980,7 @@ impl TerminalWindow {
     /// The caption's key under a hit test's answer.
     fn key_of(hit: u32) -> Option<CaptionHit> {
         match hit {
+            HTHELP => Some(CaptionHit::Portal),
             HTMINBUTTON => Some(CaptionHit::Min),
             HTMAXBUTTON => Some(CaptionHit::Max),
             HTCLOSE => Some(CaptionHit::Close),
@@ -977,6 +991,7 @@ impl TerminalWindow {
     fn press_key(&self, key: CaptionHit) {
         unsafe {
             match key {
+                CaptionHit::Portal => app::push(Input::PortalKey),
                 CaptionHit::Min => {
                     let _ = ShowWindow(self.hwnd, SW_MINIMIZE);
                 }
@@ -1388,7 +1403,10 @@ impl TerminalWindow {
                 }
                 let key = Self::key_of(wparam.0 as u32);
                 let zoomed = unsafe { IsZoomed(self.hwnd) }.as_bool();
-                let line = key.and_then(|k| tip::caption(k, zoomed));
+                let line = match key {
+                    Some(CaptionHit::Portal) => self.with_caption_r(|c| c.portal().tip()),
+                    k => k.and_then(|k| tip::caption(k, zoomed)),
+                };
                 tip::over(&self.shared, self.hwnd, line);
                 self.with_caption(|c| {
                     c.set_hot(key);
