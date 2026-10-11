@@ -336,11 +336,10 @@ impl App {
             let Ok(s) = console.screen.lock() else {
                 continue;
             };
-            let (lines, cursor) = portal::screen_text(&s.term);
+            let screen = portal::screen_text(&s.term);
             let size = console.size();
             drop(s);
-            let msg =
-                portal::screen_message(&id, size.cols as usize, size.rows as usize, &lines, cursor);
+            let msg = portal::screen_message(&id, size.cols as usize, size.rows as usize, &screen);
             let print = fingerprint(&msg);
             if phone.screen != Some(print) {
                 phone.screen = Some(print);

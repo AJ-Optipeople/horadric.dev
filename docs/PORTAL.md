@@ -140,11 +140,18 @@ PC to phone:
   hello and whenever the list or a phase changes. `phase` is `working`,
   `waiting` (needs the human: a permission, a question), `idle` or
   `ended`. `line` is what it waits for or last did, may be empty.
-- `{"t":"screen","id","cols","rows","lines":["..."],"cursor":[row,col]}`:
+- `{"t":"screen","id","cols","rows","lines":["..."],"styles":[[[n,fg,bg,f]]],"cursor":[row,col]}`:
   the watched session's text, up to 500 lines of scrollback first, then
-  the visible screen, plain text without colour. On watch and whenever
-  it changes, at most 4 times a second. `cursor` counts from the first
-  line sent.
+  the visible screen, each line without trailing spaces. On watch and
+  whenever it changes, at most 4 times a second. `cursor` counts from
+  the first line sent.
+- `styles` has one list of runs per line. A run covers the next `n`
+  characters (code points). `fg` and `bg` are `0xRRGGBB` numbers, or
+  `null` for the terminal's own colours, which the page picks itself.
+  `f` adds 1 bold, 2 italic, 4 underline, 8 strikethrough. Characters
+  past a line's runs are plain, so a plain line has `[]`. Dim, inverse
+  and hidden are already applied to the colours. A PC before 0.23 sends
+  no `styles`, and its text draws plain.
 - `{"t":"error","text":"..."}`.
 
 A phone that gets a `v` it does not know tells the human to update

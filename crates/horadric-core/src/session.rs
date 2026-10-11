@@ -180,7 +180,29 @@ pub struct Session {
     /// answer to a question it handed on. Gone with the process.
     #[serde(skip)]
     pub last_prompt: Option<String>,
+    /// When a hook from the agent itself was last heard. None for a shell,
+    /// or an agent that has no hooks, whose phase comes from what the
+    /// program says with OSC 7501 instead.
+    #[serde(skip)]
+    pub hooked: Option<SystemTime>,
+    /// What the program last said with OSC 7501, and since when.
+    #[serde(skip)]
+    pub program: Option<Heard>,
 }
+
+/// What a program says about itself in its terminal (OSC 7501), as a tile
+/// would show it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Heard {
+    pub phase: Phase,
+    pub line: Option<String>,
+    pub since: SystemTime,
+}
+
+/// How long the program must say a hooked session's turn is over, with no
+/// hook since, before Horadric believes it: a hook went missing, or there
+/// is none for it (Claude Code's Esc).
+pub const LOST_HOOK: Duration = Duration::from_secs(10);
 
 /// A subagent not heard from this long has finished.
 pub const SUBAGENT_QUIET: Duration = Duration::from_secs(30);
@@ -224,6 +246,8 @@ impl Session {
             roster: None,
             prompted_at: None,
             last_prompt: None,
+            hooked: None,
+            program: None,
         }
     }
 
@@ -332,6 +356,7 @@ impl Session {
                 return false;
             }
             self.claude_session_id = Some(event.session_id.clone());
+            self.hooked = Some(now);
         }
         // An event's cwd follows the agent's shell, so a `cd` into a subfolder
         // would move the tile to a cluster of its own. The project is where
@@ -455,6 +480,67 @@ impl Session {
             self.waits_on = None;
         }
         changed
+    }
+
+    /// Takes what the program says about itself with OSC 7501: its most
+    /// urgent record's phase and line, or `None` when it has cleared them
+    /// all. Returns true when the phase changed.
+    pub fn hear_program(&mut self, said: Option<(Phase, Option<String>)>, now: SystemTime) -> bool {
+        let (phase, line) = said.unwrap_or((Phase::Idle, None));
+        let same = self
+            .program
+            .as_ref()
+            .is_some_and(|h| h.phase == phase && h.line == line);
+        if !same {
+            let since = match &self.program {
+                Some(h) if h.phase == phase => h.since,
+                _ => now,
+            };
+            self.program = Some(Heard { phase, line, since });
+        }
+        self.weigh_program(now)
+    }
+
+    /// Whether what the program said moves the phase. Hooks win: a session
+    /// that has them takes the program's word only to end a turn its hooks
+    /// still call working, after [`LOST_HOOK`] with no hook since. One
+    /// without hooks takes it at once. Returns true when the phase changed.
+    pub fn weigh_program(&mut self, now: SystemTime) -> bool {
+        let Some(heard) = &self.program else {
+            return false;
+        };
+        if self.background.is_some() || matches!(self.phase, Phase::Ended | Phase::Paused) {
+            return false;
+        }
+        if let Some(hooked) = self.hooked {
+            let quiet = now
+                .duration_since(heard.since)
+                .is_ok_and(|d| d >= LOST_HOOK);
+            if self.phase != Phase::Working
+                || heard.phase == Phase::Working
+                || hooked >= heard.since
+                || !quiet
+            {
+                return false;
+            }
+        }
+        let (phase, line) = (heard.phase.clone(), heard.line.clone());
+        if let Some(line) = line {
+            self.last_line = line;
+        }
+        if phase == Phase::Working {
+            self.touch(now);
+        }
+        if phase == self.phase {
+            return false;
+        }
+        if !phase.mid_turn() {
+            self.tool = None;
+        }
+        self.unseen = phase == Phase::Done;
+        self.phase = phase;
+        self.since = now;
+        true
     }
 
     /// Whether the event's conversation is this tile's: the one it knows,
@@ -793,6 +879,71 @@ mod tests {
 
     fn now() -> SystemTime {
         SystemTime::now()
+    }
+
+    fn said(phase: Phase, line: &str) -> Option<(Phase, Option<String>)> {
+        Some((phase, Some(line.to_string())))
+    }
+
+    #[test]
+    fn a_session_without_hooks_takes_the_programs_word() {
+        let mut s = Session::new("t", "t", "C:/repo");
+        let t0 = now();
+        assert!(s.hear_program(said(Phase::Working, "build"), t0));
+        assert_eq!(
+            (s.phase.clone(), s.last_line.as_str()),
+            (Phase::Working, "build")
+        );
+        assert!(s.hear_program(said(Phase::Done, "built"), t0));
+        assert!(s.unseen);
+        // Cleared: back at rest.
+        assert!(s.hear_program(None, t0));
+        assert_eq!(s.phase, Phase::Idle);
+    }
+
+    #[test]
+    fn hooks_win_where_both_speak() {
+        let mut s = Session::new("t", "t", "C:/repo");
+        let t0 = now();
+        s.apply(&ev("UserPromptSubmit"), t0);
+        s.apply(&ev("Stop"), t0);
+        assert!(!s.hear_program(said(Phase::Working, "x"), t0));
+        assert_eq!(s.phase, Phase::Done);
+        s.apply(&ev("UserPromptSubmit"), t0);
+        assert!(!s.hear_program(said(Phase::Idle, "x"), t0));
+        assert_eq!(s.phase, Phase::Working);
+    }
+
+    #[test]
+    fn a_turn_the_program_ended_with_no_hook_ends_after_a_while() {
+        let mut s = Session::new("t", "t", "C:/repo");
+        let t0 = now();
+        s.apply(&ev("UserPromptSubmit"), t0);
+        let t1 = t0 + Duration::from_secs(1);
+        s.hear_program(said(Phase::Idle, "interrupted"), t1);
+        assert!(!s.weigh_program(t1 + LOST_HOOK - Duration::from_secs(1)));
+        assert!(s.weigh_program(t1 + LOST_HOOK));
+        assert_eq!(s.phase, Phase::Idle);
+    }
+
+    #[test]
+    fn a_hook_after_the_program_spoke_overrules_it() {
+        let mut s = Session::new("t", "t", "C:/repo");
+        let t0 = now();
+        s.apply(&ev("UserPromptSubmit"), t0);
+        let t1 = t0 + Duration::from_secs(1);
+        s.hear_program(said(Phase::Waiting(WaitReason::Permission), "x"), t1);
+        s.apply(&ev("PostToolUse"), t1 + Duration::from_secs(1));
+        assert!(!s.weigh_program(t1 + LOST_HOOK * 2));
+        assert_eq!(s.phase, Phase::Working);
+    }
+
+    #[test]
+    fn the_program_does_not_wake_a_paused_session() {
+        let mut s = Session::new("t", "t", "C:/repo");
+        s.apply(&HookEvent::synthetic(HookEvent::PAUSE), now());
+        assert!(!s.hear_program(said(Phase::Working, "x"), now()));
+        assert_eq!(s.phase, Phase::Paused);
     }
 
     #[test]

@@ -23,6 +23,7 @@ pub mod merge;
 pub mod overlap;
 pub mod portal;
 pub mod presence;
+pub mod program_status;
 pub mod rarity;
 pub mod registry;
 pub mod release;

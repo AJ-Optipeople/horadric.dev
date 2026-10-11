@@ -5495,6 +5495,58 @@ use what is new. Each part is a quest in the log.
   opinion when a hook is lost. The parser is pure and tested; it reads
   the sequence where the console already sees the bytes, and the grid
   never has to understand it.
+
+  **Built 2026-10-11.** The spec is revision 0.4 of 2026-10-10, at
+  superlogical.com/rex/docs/build/program-status (announced by Mitchell
+  Hashimoto on 2026-10-06; 0.1 was 2026-09-28). Its format:
+
+  > Report: `OSC 7501 ; pairs ST`. Feature detection: `OSC 7501 ; ? ST`.
+  > `pairs := pair (":" pair)*`, `pair := key "=" value`,
+  > `key := [a-z]+`, `value := [A-Za-z0-9_.,+/=-]*`. ST is `ESC \` or BEL.
+  > Keys: `state` (required: `idle`, `working`, `done`, `blocked`,
+  > `error` or `clear`; an unknown value discards the report), `id`
+  > (slash separated, omitted for the root record), `kind` (with
+  > `blocked` only: `permission`, `question` or `auth`), `progress`
+  > (0 to 100, for `working` or `blocked`), `app` (up to 32 characters),
+  > `title` and `msg` (base64 of one line of UTF-8, padding optional).
+  > Unknown keys are ignored; a repeated key's last value wins; each
+  > report replaces its record whole. `clear` removes the record and
+  > every record beneath it, or every record without an `id`. On process
+  > exit or a new prompt (OSC 133 A) `working` and `blocked` are
+  > dropped; `done` and `error` persist. A sequence is at most 4096
+  > bytes. A terminal that supports it answers `OSC 7501 ; ? ST`.
+
+  `program_status.rs` in core holds the scanner (finds the sequences in
+  output cut anywhere into chunks), the parser and the records, and maps
+  the most urgent record (blocked, error, working, done, idle) to a
+  phase: `blocked` by kind to permission, question or dialog, `error` to
+  the error wait. The console scans each chunk before the grid parses
+  it, answers the query, and keeps the records. The session takes the
+  phase at once when it has no hooks (`Session::hooked` is when a hook
+  from the agent itself was last heard). With hooks it takes it only to
+  end a turn its hooks still call working, after 10 seconds of the
+  program saying so with no hook since: a lost hook, or Claude Code's
+  Esc, which no hook reports. A query in the replay of a reattached host
+  is not answered, as the answer would be typed into today's prompt.
+
+  Verified on screen with a cmd.exe terminal running a script: the tile
+  went working with "Building the thing (40%)", lit as "needs
+  permission, Apply 3 to add?", turned done with its message, and went
+  idle on `clear`. **Claude Code on Windows mostly does not turn it on.**
+  It sends its status only after the terminal answers `?`, and it fences
+  the question with `CSI c`, taking an answer to the fence first as no.
+  The pseudo console answers `CSI c` itself, at once, while the query
+  has to go out through its output to Horadric and the answer back in,
+  so the fence wins nearly every time. Worse, the pseudo console drops
+  any OSC written to its input, so the answer is typed instead, as
+  win32-input-mode key presses, which carry each byte through. Claude
+  Code 2.1.296 heard yes in 4 of 12 starts in a bare pseudo console
+  harness, and in none of 3 through a dev instance, whose answer takes
+  longer.
+  On a Mac there is no pseudo console, and answering before the grid
+  puts the answer ahead of the fence's. Fixing Windows is a quest of
+  its own (the pseudo console's passthrough mode, or Claude Code
+  learning that a terminal speaks it some other way).
 - **Claude Mods** (2.1.287). Plugins can run TypeScript inside a
   session. Horadric ships a plugin with a mod, installed and removed with
   the hooks and refused by a dev instance as the hooks are. The mod

@@ -3366,17 +3366,33 @@ impl App {
         if let Some(t) = self.stage_showing(serial) {
             t.refresh(serial);
         }
-        // No hook reports on a shell, so its tile tells what it runs from
-        // the terminal's title and how busy it is from its output. The
-        // tiles redraw on the next tick.
-        if console.shell {
-            let title = console.title();
-            if let Ok(mut r) = self.shared.registry.lock() {
-                if let Some(s) = r.get_mut(&console.id).filter(|s| s.background.is_none()) {
-                    s.touch(SystemTime::now());
-                    s.last_line = title.or_else(|| s.ssh.clone()).unwrap_or_default();
+        let said = console.take_program();
+        let mut changed = false;
+        if let Ok(mut r) = self.shared.registry.lock() {
+            if let Some(s) = r.get_mut(&console.id).filter(|s| s.background.is_none()) {
+                let now = SystemTime::now();
+                if let Some(said) = said {
+                    if std::env::var_os("HORADRIC_DEBUG").is_some() {
+                        eprintln!("horadric: {} says {said:?} (OSC 7501)", console.id);
+                    }
+                    changed = s.hear_program(said, now);
+                }
+                // No hook reports on a shell, so its tile tells what it runs
+                // from the terminal's title and how busy it is from its
+                // output, unless the program says itself. The tiles redraw
+                // on the next tick.
+                if console.shell {
+                    s.touch(now);
+                    let said = s.program.as_ref().and_then(|h| h.line.clone());
+                    s.last_line = said
+                        .or_else(|| console.title())
+                        .or_else(|| s.ssh.clone())
+                        .unwrap_or_default();
                 }
             }
+        }
+        if changed {
+            post_event(APP_WINDOW.with(Cell::get), true);
         }
     }
 
@@ -6233,6 +6249,9 @@ impl App {
                             SystemTime::now(),
                         );
                     }
+                }
+                if r.weigh_programs(SystemTime::now()) {
+                    post_event(APP_WINDOW.with(Cell::get), true);
                 }
                 r.prune_ended(ENDED_LINGER, SystemTime::now())
             })

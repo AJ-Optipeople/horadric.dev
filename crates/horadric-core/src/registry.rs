@@ -121,6 +121,16 @@ impl Registry {
         v
     }
 
+    /// Weighs again what each program said with OSC 7501, for the turns it
+    /// ended that a hook has not. True when a phase changed.
+    pub fn weigh_programs(&mut self, now: SystemTime) -> bool {
+        let mut changed = false;
+        for s in self.sessions.values_mut() {
+            changed |= s.weigh_program(now);
+        }
+        changed
+    }
+
     /// Forgets sessions that ended more than `linger` ago. Returns how many.
     pub fn prune_ended(&mut self, linger: std::time::Duration, now: SystemTime) -> usize {
         let before = self.sessions.len();
