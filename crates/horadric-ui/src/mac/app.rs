@@ -1341,8 +1341,12 @@ impl App {
                 }
                 Command::Reload(r) => self.reload(r),
                 // The quest log, overlaps and the browser pane are not on
-                // the Mac yet.
-                Command::Tasks(_) | Command::Overlap(_) | Command::Browser(_) => {}
+                // the Mac yet. Dropping a Know call closes its reply, so
+                // the mod hears no answer at once instead of waiting.
+                Command::Tasks(_)
+                | Command::Overlap(_)
+                | Command::Browser(_)
+                | Command::Know(_) => {}
             }
         }
     }
