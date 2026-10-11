@@ -4,6 +4,7 @@
 - Do not wait for main's checks before casting a ship stone: nothing runs them between landings, and the ship session runs all three first (RELEASING.md step 2) and stops on red.
 
 ## Lately
+- 2026-10-11 Hourly round (main at 9984581): OSC 7501 plain terminals under way, CSI c fence queued (opus), cloud tiles still with the human, nothing landed since the last ship. Nothing to do.
 - 2026-10-11 Hourly round (main at ac123ee): OSC 7501 plain terminals under way, CSI c fence queued (opus), cloud tiles still with the human, nothing landed since the last ship. Nothing to do.
 - 2026-10-11 Hourly round (main at 40f0bc9): OSC 7501 plain terminals under way, CSI c fence queued (opus), cloud tiles still with the human, nothing landed since the last ship. Nothing to do.
 - 2026-10-11 Hourly round (main at 1d297fd): OSC 7501 plain terminals under way, CSI c fence queued (opus), cloud tiles still with the human, nothing landed since the last ship. Nothing to do.
