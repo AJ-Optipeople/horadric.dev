@@ -6,6 +6,13 @@
 //! drops the event. The installer only ever touches entries whose URL
 //! contains `/horadric/`, so a user's own hooks are left exactly as they were.
 //!
+//! Horadric's Claude mod goes in beside them: a plugin whose TypeScript
+//! runs inside the session and reports what no hook does, each subagent's
+//! type and when it ends. It is written to `~/.claude/horadric-mod` and
+//! named in the `CLAUDE_CODE_PLUGIN_DIRS` of the settings' `env`, the one
+//! way to load a plugin from a folder without a marketplace. It does
+//! nothing in a session Horadric did not start.
+//!
 //! Grok Build reads hooks from a folder of files, so it gets one of its own,
 //! `~/.grok/hooks/horadric.json`, a command hook for `horadric hook grok`.
 //! Grok refuses an `http` hook to loopback. The command does nothing for a
@@ -45,7 +52,9 @@ pub fn settings_path() -> Option<PathBuf> {
     Some(Path::new(&home).join(".claude").join("settings.json"))
 }
 
-/// The handler Claude Code runs. One shape for every event.
+/// The handler Claude Code runs. One shape for every event. It never
+/// carries `onFailure`: set to `"block"`, a closed Horadric would stop
+/// every prompt and tool call on the machine.
 fn handler(port: u16) -> Value {
     json!({
         "type": "http",
@@ -66,7 +75,9 @@ fn is_ours(handler: &Value) -> bool {
         .is_some_and(|u| u.contains(HOOK_PATH))
 }
 
-/// Adds or refreshes Horadric's hooks in a settings document.
+/// Adds or refreshes Horadric's hooks in a settings document. Ours are
+/// taken out and written fresh, so an `onFailure` someone put on one is
+/// dropped with it.
 pub fn install_into(settings: &mut Value, port: u16) {
     remove_from(settings);
     let root = ensure_object(settings);
@@ -108,7 +119,8 @@ pub fn remove_from(settings: &mut Value) {
     }
 }
 
-/// True when the document has a Horadric hook on every event we need.
+/// True when the document has a Horadric hook on every event we need,
+/// none of them with an `onFailure` that `install_into` would strip.
 pub fn is_installed(settings: &Value, port: u16) -> bool {
     let url = hook_url(port);
     EVENTS.iter().all(|event| {
@@ -118,8 +130,10 @@ pub fn is_installed(settings: &Value, port: u16) -> bool {
             .is_some_and(|groups| {
                 groups.iter().any(|g| {
                     g.get("hooks").and_then(Value::as_array).is_some_and(|l| {
-                        l.iter()
-                            .any(|h| h.get("url").and_then(Value::as_str) == Some(&url))
+                        l.iter().any(|h| {
+                            h.get("url").and_then(Value::as_str) == Some(&url)
+                                && h.get("onFailure").is_none()
+                        })
                     })
                 })
             })
@@ -156,18 +170,123 @@ fn write(path: &Path, settings: &Value) -> io::Result<()> {
     fs::rename(&tmp, path)
 }
 
-/// Installs the hooks into the user's settings file. Idempotent.
+/// Installs the hooks and the mod beside the user's settings file.
+/// Idempotent.
 pub fn install(path: &Path, port: u16) -> io::Result<()> {
     let mut settings = read(path)?;
     install_into(&mut settings, port);
+    let dir = mod_dir(path);
+    write_mod(&dir)?;
+    add_mod(&mut settings, &dir);
     write(path, &settings)
 }
 
-/// Removes the hooks from the user's settings file. Idempotent.
+/// Removes the hooks and the mod from beside the user's settings file.
+/// Idempotent.
 pub fn uninstall(path: &Path) -> io::Result<()> {
     let mut settings = read(path)?;
     remove_from(&mut settings);
-    write(path, &settings)
+    remove_mod(&mut settings);
+    write(path, &settings)?;
+    match fs::remove_dir_all(mod_dir(path)) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
+    }
+}
+
+/// The folder the mod is written to, beside the settings file.
+pub const MOD_DIR: &str = "horadric-mod";
+
+/// The variable Claude Code loads plugin folders from, as `--plugin-dir`
+/// does.
+pub const PLUGIN_DIRS: &str = "CLAUDE_CODE_PLUGIN_DIRS";
+
+/// The mod's files, by their path inside its folder.
+pub const MOD_FILES: &[(&str, &str)] = &[
+    (
+        ".claude-plugin/plugin.json",
+        include_str!("../mod/.claude-plugin/plugin.json"),
+    ),
+    ("hooks/hooks.json", include_str!("../mod/hooks/hooks.json")),
+    (
+        "hooks/register.tsx",
+        include_str!("../mod/hooks/register.tsx"),
+    ),
+    ("types/index.d.ts", include_str!("../mod/types/index.d.ts")),
+];
+
+const LIST_SEP: char = if cfg!(windows) { ';' } else { ':' };
+
+pub fn mod_dir(settings: &Path) -> PathBuf {
+    settings.parent().unwrap_or(Path::new(".")).join(MOD_DIR)
+}
+
+/// Writes the mod afresh, so a file an older build had and this one dropped
+/// does not stay behind. Left alone when it has not changed: every running
+/// session watches the folder and reloads the mod on a write.
+fn write_mod(dir: &Path) -> io::Result<()> {
+    let same = MOD_FILES
+        .iter()
+        .all(|(name, text)| fs::read_to_string(dir.join(name)).is_ok_and(|t| t == *text));
+    if same {
+        return Ok(());
+    }
+    match fs::remove_dir_all(dir) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+        _ => {}
+    }
+    for (name, text) in MOD_FILES {
+        let path = dir.join(name);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(path, text)?;
+    }
+    Ok(())
+}
+
+fn is_mod_entry(entry: &str) -> bool {
+    Path::new(entry.trim()).file_name() == Some(MOD_DIR.as_ref())
+}
+
+/// Names `dir` in the settings' plugin folders, after any of the user's own.
+pub fn add_mod(settings: &mut Value, dir: &Path) {
+    remove_mod(settings);
+    let env = ensure_object(settings)
+        .entry("env")
+        .or_insert_with(|| Value::Object(Map::new()));
+    let env = ensure_object(env);
+    let dir = dir.to_string_lossy();
+    let list = match env.get(PLUGIN_DIRS).and_then(Value::as_str) {
+        Some(theirs) if !theirs.trim().is_empty() => format!("{theirs}{LIST_SEP}{dir}"),
+        _ => dir.into_owned(),
+    };
+    env.insert(PLUGIN_DIRS.into(), Value::String(list));
+}
+
+/// Takes the mod out of the settings' plugin folders, leaving the user's.
+pub fn remove_mod(settings: &mut Value) {
+    let Some(env) = settings.get_mut("env").and_then(Value::as_object_mut) else {
+        return;
+    };
+    let Some(list) = env.get(PLUGIN_DIRS).and_then(Value::as_str) else {
+        return;
+    };
+    let rest: Vec<&str> = list
+        .split(LIST_SEP)
+        .filter(|e| !e.trim().is_empty() && !is_mod_entry(e))
+        .collect();
+    if rest.is_empty() {
+        env.remove(PLUGIN_DIRS);
+    } else {
+        env.insert(
+            PLUGIN_DIRS.into(),
+            Value::String(rest.join(&LIST_SEP.to_string())),
+        );
+    }
+    if env.is_empty() {
+        settings.as_object_mut().map(|o| o.remove("env"));
+    }
 }
 
 /// Reports whether the user's settings file has the hooks.
@@ -372,6 +491,74 @@ mod tests {
     }
 
     #[test]
+    fn the_mod_joins_the_users_plugin_folders_and_leaves_them_as_it_found_them() {
+        let sep = LIST_SEP;
+        let mine = "/plugins/mine";
+        let dir = Path::new("home").join(".claude").join(MOD_DIR);
+        let mut s = json!({ "env": { "FOO": "1", PLUGIN_DIRS: mine } });
+        add_mod(&mut s, &dir);
+        add_mod(&mut s, &dir);
+        assert_eq!(
+            s["env"][PLUGIN_DIRS],
+            format!("{mine}{sep}{}", dir.to_string_lossy())
+        );
+        remove_mod(&mut s);
+        assert_eq!(s, json!({ "env": { "FOO": "1", PLUGIN_DIRS: mine } }));
+
+        let mut s = json!({ "model": "opus" });
+        add_mod(&mut s, &dir);
+        assert_eq!(s["env"][PLUGIN_DIRS], dir.to_string_lossy().as_ref());
+        remove_mod(&mut s);
+        assert_eq!(s, json!({ "model": "opus" }));
+    }
+
+    #[test]
+    fn a_mod_folder_from_another_home_is_still_ours_to_remove() {
+        let old = Path::new("old").join(MOD_DIR);
+        let mut s = json!({ "env": { PLUGIN_DIRS: old.to_string_lossy() } });
+        remove_mod(&mut s);
+        assert_eq!(s, json!({}));
+    }
+
+    #[test]
+    fn install_writes_the_mod_and_uninstall_takes_it_away() {
+        let home = std::env::temp_dir().join(format!("horadric-mod-{}", std::process::id()));
+        let settings = home.join(".claude").join("settings.json");
+        let dir = mod_dir(&settings);
+        fs::create_dir_all(dir.join("stale")).unwrap();
+        install(&settings, 43117).unwrap();
+        assert!(!dir.join("stale").exists());
+        // Unchanged, it is not written again.
+        fs::create_dir_all(dir.join("kept")).unwrap();
+        install(&settings, 43117).unwrap();
+        assert!(dir.join("kept").exists());
+        for (name, text) in MOD_FILES {
+            assert_eq!(fs::read_to_string(dir.join(name)).unwrap(), *text);
+        }
+        let s = read(&settings).unwrap();
+        assert!(is_installed(&s, 43117));
+        assert_eq!(s["env"][PLUGIN_DIRS], dir.to_string_lossy().as_ref());
+
+        uninstall(&settings).unwrap();
+        assert!(!dir.exists());
+        assert_eq!(read(&settings).unwrap(), json!({}));
+        uninstall(&settings).unwrap();
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn the_mod_names_the_module_it_ships() {
+        let hooks = MOD_FILES
+            .iter()
+            .find(|(n, _)| *n == "hooks/hooks.json")
+            .unwrap();
+        let modules: Value = serde_json::from_str(hooks.1).unwrap();
+        let module = modules["modules"][0].as_str().unwrap();
+        let shipped = format!("hooks/{}", module.trim_start_matches("./"));
+        assert!(MOD_FILES.iter().any(|(n, _)| *n == shipped));
+    }
+
+    #[test]
     fn install_is_idempotent_and_removable() {
         let mut s = json!({
             "model": "opus",
@@ -395,6 +582,34 @@ mod tests {
         );
         assert!(s.pointer("/hooks/Notification").is_none());
         assert_eq!(s["model"], "opus");
+    }
+
+    #[test]
+    fn our_hooks_never_carry_on_failure() {
+        let mut s = json!({
+            "hooks": {
+                "Stop": [ { "hooks": [ { "type": "command", "command": "echo mine", "onFailure": "block" } ] } ]
+            }
+        });
+        install_into(&mut s, 43117);
+        let mut ours = 0;
+        for groups in s["hooks"].as_object().unwrap().values() {
+            for g in groups.as_array().unwrap() {
+                for h in g["hooks"].as_array().unwrap().iter().filter(|h| is_ours(h)) {
+                    assert!(h.get("onFailure").is_none());
+                    ours += 1;
+                }
+            }
+        }
+        assert_eq!(ours, EVENTS.len());
+        // A user's own hook may block if they chose that.
+        assert_eq!(s["hooks"]["Stop"][0]["hooks"][0]["onFailure"], "block");
+
+        s["hooks"]["Stop"][1]["hooks"][0]["onFailure"] = json!("block");
+        assert!(!is_installed(&s, 43117));
+        install_into(&mut s, 43117);
+        assert!(is_installed(&s, 43117));
+        assert!(s["hooks"]["Stop"][1]["hooks"][0].get("onFailure").is_none());
     }
 
     #[test]

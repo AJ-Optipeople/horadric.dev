@@ -241,7 +241,15 @@ pub enum Setting {
     Model,
     Effort,
     Permissions,
+    /// The model of every agent a workflow spawns, Claude Code's
+    /// `CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL`. Not in [`Setting::ALL`]:
+    /// it is no flag and no running session can switch it, so the usage
+    /// window leaves it to Settings.
+    Workflow,
 }
+
+/// What Claude Code reads the workflow agents' model from.
+pub const WORKFLOW_MODEL_ENV: &str = "CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL";
 
 impl Setting {
     pub const ALL: [Setting; 3] = [Setting::Model, Setting::Effort, Setting::Permissions];
@@ -251,6 +259,7 @@ impl Setting {
             Setting::Model => "Model",
             Setting::Effort => "Effort",
             Setting::Permissions => "Permissions",
+            Setting::Workflow => "Workflow agents' model",
         }
     }
 
@@ -282,8 +291,8 @@ impl Setting {
                 ("high", "High"),
                 ("xhigh", "Extra high"),
             ],
-            (Agent::Codex | Agent::Grok, Setting::Permissions) => &[],
-            (Agent::Claude, Setting::Model) => &[
+            (Agent::Codex | Agent::Grok, Setting::Permissions | Setting::Workflow) => &[],
+            (Agent::Claude, Setting::Model | Setting::Workflow) => &[
                 ("claude-fable-5-1", "Fable 5.1"),
                 ("claude-opus-5-5", "Opus 5.5"),
                 ("claude-opus-5-5[1m]", "Opus 5.5 1M"),
@@ -322,7 +331,7 @@ impl Setting {
         match self {
             Setting::Model => Some(format!("/model {}", value.unwrap_or("default"))),
             Setting::Effort => Some(format!("/effort {}", value.unwrap_or("auto"))),
-            Setting::Permissions => None,
+            Setting::Permissions | Setting::Workflow => None,
         }
     }
 
@@ -355,6 +364,8 @@ pub struct Defaults {
     pub effort: Option<String>,
     #[serde(default)]
     pub permission_mode: Option<String>,
+    #[serde(default)]
+    pub workflow_model: Option<String>,
 }
 
 impl Defaults {
@@ -363,6 +374,7 @@ impl Defaults {
             Setting::Model => self.model.as_deref(),
             Setting::Effort => self.effort.as_deref(),
             Setting::Permissions => self.permission_mode.as_deref(),
+            Setting::Workflow => self.workflow_model.as_deref(),
         }
     }
 
@@ -371,6 +383,17 @@ impl Defaults {
             Setting::Model => self.model = value,
             Setting::Effort => self.effort = value,
             Setting::Permissions => self.permission_mode = value,
+            Setting::Workflow => self.workflow_model = value,
+        }
+    }
+
+    /// The environment a session of `agent` starts with. Only Claude Code
+    /// has workflows, and none set leaves the variable to whatever the
+    /// user's own environment says.
+    pub fn env(&self, agent: Agent) -> Vec<(String, String)> {
+        match (agent, &self.workflow_model) {
+            (Agent::Claude, Some(m)) => vec![(WORKFLOW_MODEL_ENV.into(), m.clone())],
+            _ => Vec::new(),
         }
     }
 
@@ -645,6 +668,8 @@ mod tests {
             model: Some("opus".into()),
             effort: Some("high".into()),
             permission_mode: Some("plan".into()),
+            // An environment variable, never a flag.
+            workflow_model: Some("claude-sonnet-5".into()),
         };
         assert_eq!(
             d.flags(Agent::Claude, &[]),
@@ -665,11 +690,31 @@ mod tests {
     }
 
     #[test]
+    fn the_workflow_model_goes_in_claudes_environment_when_set() {
+        let d = Defaults {
+            workflow_model: Some("claude-haiku-4-5-20251001".into()),
+            ..Defaults::default()
+        };
+        assert_eq!(
+            d.env(Agent::Claude),
+            vec![(
+                WORKFLOW_MODEL_ENV.to_string(),
+                "claude-haiku-4-5-20251001".to_string()
+            )]
+        );
+        assert!(d.env(Agent::Codex).is_empty());
+        assert!(Defaults::default().env(Agent::Claude).is_empty());
+        assert_eq!(Setting::Workflow.command(Some("x")), None);
+        assert!(!Setting::ALL.contains(&Setting::Workflow));
+    }
+
+    #[test]
     fn a_bypass_takes_the_place_of_the_mode_picked() {
         let d = Defaults {
             model: Some("opus".into()),
             effort: None,
             permission_mode: Some("plan".into()),
+            workflow_model: None,
         };
         assert_eq!(
             d.flags_for(Agent::Claude, &[], true),

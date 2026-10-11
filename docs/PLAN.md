@@ -5555,9 +5555,37 @@ use what is new. Each part is a quest in the log.
   agents with their run. Through the band above the prompt it can tell
   Claude and the human what Horadric knows: another session editing the
   same file (`overlap.rs`), the quest this session holds.
+  **Built (2026-10-11), the reporting half.** The mod's source is
+  `crates/horadric-hooks/mod`, embedded in the binary and written to
+  `~/.claude/horadric-mod` by `horadric_hooks::install::install`, which
+  every install, `hooks install` and ship local calls; `uninstall` takes
+  it away. It is loaded by naming that folder in `CLAUDE_CODE_PLUGIN_DIRS`
+  in the settings' `env`, after any folders of the user's own, since a
+  marketplace would need `claude plugin install`. The folder is rewritten
+  only when its files changed, because every running session reloads the
+  mod on a write. Without `HORADRIC_SESSION` and `HORADRIC_OWNER_PORT` it
+  does nothing; with them it posts to the owner's `/horadric/hook` with
+  the tag: `HoradricSpawn` (`agent_id`, `agent_type`, `model`,
+  `workflow_run`) as a subagent starts, and `HoradricAgents` (the whole
+  `$.agent.list()`, each `agent_id`, `agent_type`, `status`) whenever it
+  changes, looked at every 2 seconds. Neither moves a phase yet.
+  `claude plugin test crates/horadric-hooks/mod` runs its tests.
+  **The band, built (2026-10-11).** Every 3 seconds the mod posts to the
+  owner's `/horadric/know` with the tag (refused without one or from a web
+  page). The listener adds the files the session shares with others from
+  its claims (`Claims::shared`, the same claims the `PostToolUse` reply
+  warns from), the app adds the quest the session holds and names the
+  others as their tiles are, and answers `{quest, overlaps: [{file, path,
+  others}]}`, empty when there is nothing to say. The mod keeps it in
+  `$.state` and draws it above the prompt ("Quest ...", "overlap.rs also
+  changed by alpha, not committed"), nothing when it is empty or
+  Horadric is closed. A shared file also goes to Claude as context on the
+  next prompt, once per change. Verified on screen with two sessions on
+  one file. The theme colours (`warning`, `subtle`) are not drawn in
+  Horadric's terminal yet; the text is plain.
 - **Subagents on the tile.** Today a tile counts subagents by `agent_id`
   and calls one finished after 30 quiet seconds. With the mod's reports
-  the tile can show each by type, and when it really ends.
+  the tile can show each by type, and when it really ends. **Built (2026-10-11).** `Session::subagent_types` uses the mod roster (running, waiting or pending) where it has reported this turn, and the 30 second quiet guess only for ids the roster lacks. A working tile's last line lists the types, "Explore x2, Plan".
 - **What a waiting tile waits on** (2.1.295). A session waiting on a
   permission prompt now names the MCP tool. The tile says "waiting on
   browser_click", not just waiting.
@@ -5571,6 +5599,89 @@ use what is new. Each part is a quest in the log.
 - **Cloud sessions.** Claude Code runs on its own cloud machine now
   (blog, 2026-10-06). Tiles for them beside the local ones are a new
   kind of session with no terminal here. Proposed first, not built.
+  The proposal is below, under Cloud session tiles.
+
+#### Cloud session tiles (proposal, 2026-10-11)
+
+Not built. Written for the human to choose an option.
+
+**What this machine can see today**, checked with Claude Code 2.1.296:
+
+- `claude agents --json --all` lists only local sessions: `kind` is
+  `interactive` or `background`, nothing else. No cloud session appears
+  and no flag asks for them. Horadric already polls this list for
+  background sessions (see Background sessions above).
+- `claude --cloud [description|session_id|url]` creates a cloud session
+  or attaches this terminal to one, by id or by its claude.ai/code URL.
+  `--environment <ccpool_...>` runs a new one on a self-hosted pool.
+  `--teleport [session]` pulls a cloud session down to run here.
+- `claude --remote-control [name]` makes a local session reachable from
+  claude.ai and the phone. It goes the other way: it publishes this
+  machine's sessions, it does not list the cloud's.
+- Claude Code's own agent listing (the one a session uses to message
+  peers) can show "your Claude sessions running in the cloud" and Remote
+  Control sessions on other machines, so the account does expose such a
+  list. It is not a documented command or API that Horadric can call.
+- `claude -p "msg" --cloud <id> --output-format json` queues a message
+  to a cloud session and exits with `{ok, session_id, url}`. It does not
+  wait for the reply. So a tile could answer a cloud session without a
+  pane, but not follow it.
+- The docs (code.claude.com, agent-view) say outright that cloud
+  sessions are not in `claude agents`. They document no command, local
+  API or event stream that lists cloud sessions or their state.
+- HTTP APIs, per platform.claude.com: routines' `/fire` starts a run and
+  returns its id, nothing more. The Managed Agents Sessions API (list,
+  get, stream) is for API key agents and does not say it covers
+  claude.ai/code sessions. The Compliance API lists remote sessions with
+  a status, but needs an org admin's key. None is the user's own list
+  under their claude.ai login.
+- Hooks run inside the cloud machine, and only those committed in the
+  repository's `.claude/settings.json` (not `~/.claude/settings.json`,
+  where Horadric's live). They would post to the cloud machine's
+  localhost. To reach anything outside, the environment's network must
+  be Full or list the host under Custom; the default, Trusted, answers
+  `403 host_not_allowed`.
+
+**Options.**
+
+1. **Attach on click, list nothing.** A cloud session the human starts
+   or attaches from Horadric (`claude --cloud <id or URL>` in a pane,
+   `Run::Cloud`, like `Run::Attach`) gets a tile with a cloud mark. Its
+   phase comes from OSC 7501 in the attached pane, since hooks do not
+   reach us. Closing the pane leaves the tile dimmed, "in the cloud",
+   until clicked again. Cheap, uses only documented commands, and needs
+   the OSC 7501 parser from the quest beside this one. It misses
+   sessions started on the web or the phone until the human pastes
+   their URL ("Follow a cloud session..." in the tray).
+2. **Poll the account's session list.** Call whatever the CLI calls to
+   list cloud sessions, with the CLI's own login, every minute. Sees
+   every cloud session, including ones started elsewhere, with a phase.
+   But it is undocumented, would mean reading Claude Code's OAuth token
+   and an HTTPS client (a new dependency, or WinHTTP by hand), and can
+   break on any release. If Claude Code adds `kind: "cloud"` to `claude
+   agents --json`, this becomes free and safe, and Horadric already
+   reads that list.
+3. **Hooks out of the cloud.** The repository's committed
+   `.claude/settings.json` carries a hook that posts to Horadric through
+   the Town Portal relay. Real hook phases, same as local. But it means
+   committing Horadric hooks into every repository, setting each cloud
+   environment's network to reach the relay, and a key on a machine
+   Horadric does not own. Most work, most moving parts.
+4. **Wait.** Do nothing until Claude Code lists cloud sessions locally.
+
+**Recommendation: 1 now, 2 only through `claude agents`.** Option 1 is
+small, uses documented commands, and the OSC 7501 parser lands anyway.
+It gives the tile, the stage pane and a phase while attached. For the
+list, do not reach into private APIs: file a request upstream for cloud
+sessions in `claude agents --json`, and when they appear there, the
+feeder that finds background sessions picks them up with a new `kind`.
+Option 3 stays a note for if a phase is wanted while nothing is attached.
+
+**Questions for the human.** Is a cloud tile only worth having if it
+shows sessions started on the web or phone (then option 1 is not
+enough, and the choice is between 2 and waiting)? And does attaching
+a pane cost anything on the cloud side (it keeps a connection open, but
+the session runs either way)?
 
 ## Not in any step yet, but needed before daily use
 

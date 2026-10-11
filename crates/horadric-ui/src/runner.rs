@@ -445,12 +445,18 @@ impl App {
 
     /// Whether session `id` holds an item of a list, alone or in a tomb.
     pub(super) fn holds_quest(&self, id: &str) -> bool {
+        self.held_quest(id).is_some()
+    }
+
+    /// The title of the item session `id` holds, alone or in a tomb.
+    pub(super) fn held_quest(&self, id: &str) -> Option<String> {
         self.shared
             .boards
             .borrow()
             .values()
             .flat_map(|b| &b.tasks)
-            .any(|t| t.mark.held() && t.holder.as_deref().is_some_and(|h| tombs::holds(h, id)))
+            .find(|t| t.mark.held() && t.holder.as_deref().is_some_and(|h| tombs::holds(h, id)))
+            .map(|t| t.title.clone())
     }
 
     /// What a Claude Code session started with `args` is given for its

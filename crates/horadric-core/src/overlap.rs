@@ -36,6 +36,8 @@ pub struct Overlap {
 struct Claim {
     session: String,
     at: SystemTime,
+    /// The file as this session last named it.
+    file: String,
     /// The others this session was last told about for this file, so an
     /// agent editing a file ten times hears it once.
     told: Vec<String>,
@@ -84,6 +86,32 @@ impl Claims {
         }
     }
 
+    /// Every file `session` changed that another session changed too, and
+    /// neither has committed, for the band above its prompt. Unlike
+    /// [`Claims::hear`] this says it each time it is asked.
+    pub fn shared(&self, session: &str, now: SystemTime) -> Vec<Overlap> {
+        let fresh = |c: &Claim| now.duration_since(c.at).unwrap_or_default() < CLAIM_LIFE;
+        let mut shared: Vec<Overlap> = self
+            .files
+            .values()
+            .filter_map(|claims| {
+                let mine = claims.iter().find(|c| c.session == session && fresh(c))?;
+                let others: Vec<String> = claims
+                    .iter()
+                    .filter(|c| c.session != session && fresh(c))
+                    .map(|c| c.session.clone())
+                    .collect();
+                (!others.is_empty()).then(|| Overlap {
+                    session: session.to_string(),
+                    file: mine.file.clone(),
+                    others,
+                })
+            })
+            .collect();
+        shared.sort_by(|a, b| a.file.cmp(&b.file));
+        shared
+    }
+
     fn claim(&mut self, session: &str, file: &str, cwd: &str, now: SystemTime) -> Option<Overlap> {
         let claims = self.files.entry(key(file, cwd)).or_default();
         let others: Vec<String> = claims
@@ -97,12 +125,14 @@ impl Claims {
                 claims.push(Claim {
                     session: session.to_string(),
                     at: now,
+                    file: file.to_string(),
                     told: Vec::new(),
                 });
                 claims.last_mut()?
             }
         };
         mine.at = now;
+        mine.file = file.to_string();
         if others.is_empty() || mine.told == others {
             return None;
         }
@@ -209,6 +239,32 @@ mod tests {
             c.hear("a", &edit("C:\\app\\x.rs"), at(3)).unwrap().others,
             ["b"]
         );
+    }
+
+    #[test]
+    fn both_sessions_on_a_file_see_it_shared_until_one_commits() {
+        let mut c = Claims::default();
+        c.hear("a", &edit(r"C:\app\x.rs"), at(0));
+        c.hear("a", &edit(r"C:\app\y.rs"), at(0));
+        assert!(c.shared("a", at(0)).is_empty());
+        c.hear("b", &edit("c:/app/x.rs"), at(1));
+        let a = c.shared("a", at(2));
+        assert_eq!(a.len(), 1);
+        assert_eq!(a[0].file, r"C:\app\x.rs");
+        assert_eq!(a[0].others, ["b"]);
+        assert_eq!(c.shared("b", at(2))[0].others, ["a"]);
+        assert_eq!(c.shared("b", at(3)).len(), 1, "asked again, said again");
+        c.hear("b", &bash("git commit -am x"), at(4));
+        assert!(c.shared("a", at(5)).is_empty());
+        assert!(c.shared("b", at(5)).is_empty());
+    }
+
+    #[test]
+    fn a_stale_claim_is_shared_with_no_one() {
+        let mut c = Claims::default();
+        c.hear("a", &edit(r"C:\app\x.rs"), at(0));
+        c.hear("b", &edit(r"C:\app\x.rs"), at(200));
+        assert!(c.shared("b", at(250)).is_empty());
     }
 
     #[test]

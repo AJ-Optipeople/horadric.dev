@@ -157,6 +157,7 @@ impl Agent {
             (Agent::Grok, Setting::Model) => pair("-m"),
             (Agent::Grok, Setting::Effort) => pair("--effort"),
             (Agent::Codex | Agent::Grok, Setting::Permissions) => None,
+            (_, Setting::Workflow) => None,
         }
     }
 
@@ -181,6 +182,7 @@ impl Agent {
                 "--dangerously-bypass-approvals-and-sandbox",
             ],
             (Agent::Grok, Setting::Permissions) => &["--always-approve"],
+            (_, Setting::Workflow) => &[],
         };
         flags.iter().any(|f| has_flag(args, f))
     }

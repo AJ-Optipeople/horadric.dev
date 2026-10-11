@@ -1,9 +1,9 @@
-//! A minimal HTTP/1.1 server for six purposes: accept `POST /horadric/hook`
+//! A minimal HTTP/1.1 server for seven purposes: accept `POST /horadric/hook`
 //! from Claude Code, `POST /horadric/status` from its status line,
 //! `POST /horadric/new` from `horadric new`, `POST /horadric/reload` from
-//! `horadric reload`, `POST /horadric/tasks` from `horadric quest`, and
-//! `POST /horadric/browser` from `horadric mcp`, the one that waits for the
-//! app's answer.
+//! `horadric reload`, `POST /horadric/tasks` from `horadric quest`,
+//! `POST /horadric/browser` from `horadric mcp` and `POST /horadric/know`
+//! from Horadric's Claude mod, the two that wait for the app's answer.
 //!
 //! Hand rolled on `std::net` because the whole protocol we need is a request
 //! line, a handful of headers, a `Content-Length` body and a fixed reply. A
@@ -21,7 +21,7 @@ use horadric_core::{Agent, HookEvent, Limits, Status};
 use serde_json::{json, Value};
 
 use crate::{
-    client, transcript, AGENT_HEADER, BROWSER_PATH, COMMAND_HEADER, HOOK_PATH, NEW_PATH,
+    client, transcript, AGENT_HEADER, BROWSER_PATH, COMMAND_HEADER, HOOK_PATH, KNOW_PATH, NEW_PATH,
     OWNER_HEADER, RELOAD_PATH, SESSION_HEADER, STATE_HEADER, STATUS_PATH, TASKS_PATH,
 };
 
@@ -165,6 +165,16 @@ pub struct BrowserCall {
     pub reply: Reply,
 }
 
+/// Horadric's Claude mod asks what Horadric knows about its session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowCall {
+    pub session: String,
+    /// The files it shares with other sessions, which only the listener
+    /// knows, by session id.
+    pub overlaps: Vec<Overlap>,
+    pub reply: Reply,
+}
+
 /// Where the app sends its answer, a JSON body. It is not part of what was
 /// asked, so any two are equal.
 #[derive(Debug, Clone)]
@@ -188,6 +198,10 @@ impl Eq for Reply {}
 /// or a script that runs long.
 const BROWSER_WAIT: Duration = Duration::from_secs(90);
 
+/// The mod asks again in a few seconds, so an app busy for longer than
+/// this is not worth waiting on.
+const KNOW_WAIT: Duration = Duration::from_secs(2);
+
 /// What the command line can ask the running app for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
@@ -198,6 +212,7 @@ pub enum Command {
     /// committed, in the same working tree.
     Overlap(Overlap),
     Browser(BrowserCall),
+    Know(KnowCall),
 }
 
 /// Starts listening on 127.0.0.1 and forwards every tagged event on `tx`,
@@ -296,6 +311,7 @@ fn handle(
         RELOAD_PATH,
         TASKS_PATH,
         BROWSER_PATH,
+        KNOW_PATH,
     ];
     if method != "POST" || !paths.contains(&path) {
         return respond(&mut stream, "404 Not Found");
@@ -334,6 +350,17 @@ fn handle(
             });
         }
         return Ok(());
+    }
+
+    if path == KNOW_PATH {
+        // Read only, but what sessions are doing is not a web page's.
+        if from_browser || horadric_id.is_empty() {
+            return respond(&mut stream, "403 Forbidden");
+        }
+        let Some(commands) = commands else {
+            return respond(&mut stream, "503 Service Unavailable");
+        };
+        return know(&mut stream, horadric_id, commands);
     }
 
     if path != HOOK_PATH {
@@ -461,6 +488,28 @@ fn browser(
     }
     let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
     match rx.recv_timeout(BROWSER_WAIT) {
+        Ok(answer) => respond_with(stream, "200 OK", &answer),
+        Err(_) => respond(stream, "504 Gateway Timeout"),
+    }
+}
+
+/// Hands the mod's question to the app with the files its session shares,
+/// and answers with what the app answers.
+fn know(stream: &mut TcpStream, session: String, commands: &Sender<Command>) -> io::Result<()> {
+    let overlaps = claims()
+        .lock()
+        .map(|c| c.shared(&session, SystemTime::now()))
+        .unwrap_or_default();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let call = KnowCall {
+        session,
+        overlaps,
+        reply: Reply(tx),
+    };
+    if commands.send(Command::Know(call)).is_err() {
+        return respond(stream, "503 Service Unavailable");
+    }
+    match rx.recv_timeout(KNOW_WAIT) {
         Ok(answer) => respond_with(stream, "200 OK", &answer),
         Err(_) => respond(stream, "504 Gateway Timeout"),
     }
@@ -733,6 +782,36 @@ X-Horadric-Port: {dev}
             rx.recv_timeout(Duration::from_secs(2)).unwrap(),
             Command::Tasks(want)
         );
+    }
+
+    #[test]
+    fn the_mod_is_answered_what_the_app_knows_of_its_session() {
+        let (port, rx) = start_with_new();
+        let app = thread::spawn(move || match rx.recv_timeout(Duration::from_secs(2)) {
+            Ok(Command::Know(call)) => {
+                assert_eq!(call.session, "tile-know");
+                assert!(call.overlaps.is_empty());
+                call.reply.send(json!({ "quest": "Serve the API" }));
+            }
+            other => panic!("{other:?}"),
+        });
+        let reply = post_to(port, KNOW_PATH, "X-Horadric-Session: tile-know\r\n", "{}");
+        app.join().unwrap();
+        assert!(reply.starts_with("HTTP/1.1 200"), "{reply}");
+        assert!(reply.contains("Serve the API"), "{reply}");
+    }
+
+    #[test]
+    fn the_mod_must_name_its_session_and_not_be_a_web_page() {
+        let (port, rx) = start_with_new();
+        for headers in [
+            "",
+            "X-Horadric-Session: tile-know\r\nOrigin: https://example.com\r\n",
+        ] {
+            let reply = post_to(port, KNOW_PATH, headers, "{}");
+            assert!(reply.starts_with("HTTP/1.1 403"), "{headers}: {reply}");
+        }
+        assert!(rx.recv_timeout(Duration::from_millis(200)).is_err());
     }
 
     #[test]

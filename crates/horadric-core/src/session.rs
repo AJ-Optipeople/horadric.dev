@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::agent::Agent;
 use crate::diff::Diff;
-use crate::event::HookEvent;
+use crate::event::{HookEvent, ModAgent};
 use crate::rarity::{self, Loot, Rarity};
 use crate::runeword::Runeword;
 use crate::title::Title;
@@ -152,6 +152,10 @@ pub struct Session {
     /// ends. Only for the tile's icon, so it is not saved.
     #[serde(skip)]
     pub tool: Option<String>,
+    /// The tool a permission prompt asks about, while the session waits
+    /// on it. A phase is not saved, so neither is this.
+    #[serde(skip)]
+    pub waits_on: Option<String>,
     /// When the agent last did something, newest last, going back at most
     /// [`ACTIVITY_SPAN`]. The tile draws it as a trace of the last minutes.
     #[serde(skip)]
@@ -160,6 +164,14 @@ pub struct Session {
     /// last heard. For the sparks round the tile's lamp, so not saved.
     #[serde(skip)]
     pub agents: Vec<(String, SystemTime)>,
+    /// The type of each subagent the mod saw start, by id.
+    #[serde(skip)]
+    pub agent_types: Vec<(String, String)>,
+    /// The whole roster as the mod last reported it this turn. Where it is
+    /// present it says when a subagent ends, so the quiet guess is only
+    /// the fallback.
+    #[serde(skip)]
+    pub roster: Option<Vec<ModAgent>>,
     /// When the last prompt went in. Anything typed into the terminal
     /// after it may still sit in the prompt box as a draft.
     #[serde(skip)]
@@ -227,8 +239,11 @@ impl Session {
             created: now,
             status: None,
             tool: None,
+            waits_on: None,
             activity: Vec::new(),
             agents: Vec::new(),
+            agent_types: Vec::new(),
+            roster: None,
             prompted_at: None,
             last_prompt: None,
             hooked: None,
@@ -394,7 +409,8 @@ impl Session {
             }
             "PermissionRequest" => {
                 if let Some(t) = &event.tool_name {
-                    self.last_line = format!("allow {t}?");
+                    self.waits_on = Some(t.clone());
+                    self.last_line = waiting_on(t);
                 }
                 Some(Phase::Waiting(WaitReason::Permission))
             }
@@ -451,7 +467,7 @@ impl Session {
             self.title = Some(t.clone());
         }
 
-        match next {
+        let changed = match next {
             Some(phase) if phase != self.phase => {
                 self.unseen = phase == Phase::Done;
                 self.phase = phase;
@@ -459,7 +475,11 @@ impl Session {
                 true
             }
             _ => false,
+        };
+        if self.phase != Phase::Waiting(WaitReason::Permission) {
+            self.waits_on = None;
         }
+        changed
     }
 
     /// Takes what the program says about itself with OSC 7501: its most
@@ -551,8 +571,19 @@ impl Session {
             {
                 self.tool = None;
                 self.agents.clear();
+                self.agent_types.clear();
+                self.roster = None;
             }
+            HookEvent::AGENTS => self.roster = event.agents.clone(),
             _ => {}
+        }
+        if let (HookEvent::SPAWN, Some(id), Some(t)) = (
+            event.hook_event_name.as_str(),
+            event.agent_id.as_deref(),
+            event.agent_type.as_deref(),
+        ) {
+            self.agent_types.retain(|(a, _)| a != id);
+            self.agent_types.push((id.to_string(), t.to_string()));
         }
         if let Some(id) = event.agent_id.as_deref().filter(|id| !id.is_empty()) {
             match self.agents.iter_mut().find(|(a, _)| a == id) {
@@ -590,14 +621,48 @@ impl Session {
         self.activity.push(now);
     }
 
-    /// How many subagents are at work: heard from within [`SUBAGENT_QUIET`]
-    /// in this turn. No hook says a subagent finished, so one that has been
-    /// quiet that long counts as done.
+    /// The type of each subagent at work, in the order they started. With
+    /// the mod's roster, the ones it says are running; without it (or for
+    /// one the roster has not caught up with), those heard from within
+    /// [`SUBAGENT_QUIET`], since no hook says a subagent finished. A type
+    /// not known is "agent".
+    pub fn subagent_types(&self, now: SystemTime) -> Vec<String> {
+        let known = |id: &str| {
+            self.agent_types
+                .iter()
+                .find(|(a, _)| a == id)
+                .map_or("agent", |(_, t)| t.as_str())
+                .to_string()
+        };
+        let mut out = Vec::new();
+        if let Some(roster) = &self.roster {
+            for a in roster
+                .iter()
+                .filter(|a| matches!(a.status.as_str(), "pending" | "running" | "waiting"))
+            {
+                out.push(if a.agent_type.is_empty() {
+                    known(&a.agent_id)
+                } else {
+                    a.agent_type.clone()
+                });
+            }
+        }
+        for (id, t) in &self.agents {
+            let listed = self
+                .roster
+                .as_ref()
+                .is_some_and(|r| r.iter().any(|a| a.agent_id == *id));
+            let quiet = now.duration_since(*t).is_ok_and(|d| d < SUBAGENT_QUIET);
+            if !listed && quiet {
+                out.push(known(id));
+            }
+        }
+        out
+    }
+
+    /// How many subagents are at work, see [`Session::subagent_types`].
     pub fn subagents(&self, now: SystemTime) -> usize {
-        self.agents
-            .iter()
-            .filter(|(_, t)| now.duration_since(*t).is_ok_and(|d| d < SUBAGENT_QUIET))
-            .count()
+        self.subagent_types(now).len()
     }
 
     /// How much the agent did in each of `buckets` equal slices of the last
@@ -669,8 +734,17 @@ impl Session {
             "elicitation_complete" | "elicitation_response" => Phase::Working,
             _ => return None,
         };
-        if let Some(m) = &event.message {
-            self.last_line = first_line(m);
+        // Claude Code's `PermissionRequest` named the tool before this; other
+        // agents may name it here. The tool says more than the message.
+        if kind == "permission_prompt" {
+            if let Some(t) = &event.tool_name {
+                self.waits_on = Some(t.clone());
+            }
+        }
+        match (&self.waits_on, &event.message) {
+            (Some(t), _) if kind == "permission_prompt" => self.last_line = waiting_on(t),
+            (_, Some(m)) => self.last_line = first_line(m),
+            _ => {}
         }
         Some(next)
     }
@@ -723,9 +797,52 @@ fn first_line(s: &str) -> String {
     s.lines().next().unwrap_or("").trim().to_string()
 }
 
+/// What a tile says while a permission prompt waits on `tool`. An MCP
+/// tool's id, `mcp__server__tool`, is long and mostly prefix: the tool's
+/// own name is what the human recognises.
+pub fn waiting_on(tool: &str) -> String {
+    let short = tool
+        .strip_prefix("mcp__")
+        .and_then(|rest| rest.split_once("__"))
+        .map_or(tool, |(_, name)| name);
+    format!("waiting on {short}")
+}
+
+/// The tile's line while subagents run: each type once, with a count when
+/// it runs more than one, such as "Explore x2, Plan".
+pub fn subagent_line(types: &[String]) -> String {
+    let mut seen: Vec<(&str, usize)> = Vec::new();
+    for t in types {
+        match seen.iter_mut().find(|(n, _)| n == t) {
+            Some(e) => e.1 += 1,
+            None => seen.push((t, 1)),
+        }
+    }
+    seen.iter()
+        .map(|(n, c)| {
+            if *c > 1 {
+                format!("{n} x{c}")
+            } else {
+                n.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn subagent_types_are_grouped_for_the_tile() {
+        let v = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(subagent_line(&v(&[])), "");
+        assert_eq!(
+            subagent_line(&v(&["Explore", "Plan", "Explore"])),
+            "Explore x2, Plan"
+        );
+    }
 
     #[test]
     fn an_id_is_made_from_its_base_and_a_number() {
@@ -827,6 +944,50 @@ mod tests {
         s.apply(&HookEvent::synthetic(HookEvent::PAUSE), now());
         assert!(!s.hear_program(said(Phase::Working, "x"), now()));
         assert_eq!(s.phase, Phase::Paused);
+    }
+
+    #[test]
+    fn the_mods_roster_says_which_subagents_run_and_their_type() {
+        let mut s = Session::new("t", "t", "C:/repo");
+        let t0 = now();
+        s.apply(&ev("UserPromptSubmit"), t0);
+        s.apply(
+            &HookEvent {
+                agent_id: Some("a1".into()),
+                agent_type: Some("Explore".into()),
+                ..ev(HookEvent::SPAWN)
+            },
+            t0,
+        );
+        // Spawned, roster not caught up: counted, with its type.
+        assert_eq!(s.subagent_types(t0), vec!["Explore"]);
+        let agent = |id: &str, ty: &str, status: &str| ModAgent {
+            agent_id: id.into(),
+            agent_type: ty.into(),
+            status: status.into(),
+            ..Default::default()
+        };
+        let roster = |agents| HookEvent {
+            agents: Some(agents),
+            ..ev(HookEvent::AGENTS)
+        };
+        s.apply(
+            &roster(vec![
+                agent("a1", "Explore", "running"),
+                agent("a2", "general-purpose", "waiting"),
+                agent("a3", "Plan", "completed"),
+            ]),
+            t0,
+        );
+        // Long past the quiet guess, the roster still holds them.
+        let later = t0 + Duration::from_secs(300);
+        assert_eq!(s.subagent_types(later), vec!["Explore", "general-purpose"]);
+        // It ends when the mod says so, however recently it was heard.
+        s.apply(&roster(vec![agent("a1", "Explore", "completed")]), later);
+        assert_eq!(s.subagents(later), 0);
+        // A new turn forgets the roster and the types.
+        s.apply(&ev("Stop"), later);
+        assert!(s.roster.is_none() && s.agent_types.is_empty());
     }
 
     #[test]
@@ -950,9 +1111,61 @@ Always."
         p.tool_name = Some("Edit".into());
         assert!(s.apply(&p, now()));
         assert_eq!(s.phase, Phase::Waiting(WaitReason::Permission));
-        assert_eq!(s.last_line, "allow Edit?");
+        assert_eq!(s.last_line, "waiting on Edit");
+        assert_eq!(s.waits_on.as_deref(), Some("Edit"));
         assert!(s.apply(&ev("PostToolUse"), now()));
         assert_eq!(s.phase, Phase::Working);
+        assert_eq!(s.waits_on, None);
+    }
+
+    #[test]
+    fn a_waiting_line_names_the_mcp_tool_by_its_own_name() {
+        assert_eq!(
+            waiting_on("mcp__horadric__browser_click"),
+            "waiting on browser_click"
+        );
+        assert_eq!(
+            waiting_on("mcp__claude_ai_Slack__slack_send_message"),
+            "waiting on slack_send_message"
+        );
+        assert_eq!(waiting_on("Bash"), "waiting on Bash");
+        assert_eq!(waiting_on("mcp__odd"), "waiting on mcp__odd");
+    }
+
+    #[test]
+    fn the_permission_notification_keeps_the_tool_it_waits_on() {
+        // As Claude Code 2.1.296 sends them: the request names the tool,
+        // the notification that follows only says so in words.
+        let mut s = Session::new("g1", "x", "");
+        s.apply(&ev("UserPromptSubmit"), now());
+        let mut p = ev("PermissionRequest");
+        p.tool_name = Some("mcp__pinger__ping_box".into());
+        s.apply(&p, now());
+        let mut n = ev("Notification");
+        n.notification_type = Some("permission_prompt".into());
+        n.message = Some("Claude needs your permission to use Ping the box".into());
+        assert!(!s.apply(&n, now()));
+        assert_eq!(s.last_line, "waiting on ping_box");
+        assert_eq!(s.waits_on.as_deref(), Some("mcp__pinger__ping_box"));
+
+        // With no tool known, the message is the best there is.
+        let mut s = Session::new("g2", "x", "");
+        s.apply(&ev("UserPromptSubmit"), now());
+        assert!(s.apply(&n, now()));
+        assert_eq!(
+            s.last_line,
+            "Claude needs your permission to use Ping the box"
+        );
+        assert_eq!(s.waits_on, None);
+
+        // An agent that names the tool in the notification itself.
+        let mut s = Session::new("g3", "x", "");
+        s.apply(&ev("UserPromptSubmit"), now());
+        n.tool_name = Some("bash".into());
+        s.apply(&n, now());
+        assert_eq!(s.last_line, "waiting on bash");
+        s.apply(&ev("Stop"), now());
+        assert_eq!(s.waits_on, None);
     }
 
     #[test]
@@ -1070,6 +1283,25 @@ Always."
         stop.agent_id = Some("sub-1".into());
         assert!(!s.apply(&stop, now()));
         assert_eq!(s.phase, Phase::Working);
+    }
+
+    #[test]
+    fn the_mods_reports_never_move_the_phase() {
+        let mut s = Session::new("g1", "x", "");
+        s.apply(&ev("UserPromptSubmit"), now());
+        s.apply(&ev("Stop"), now());
+        let spawn = HookEvent {
+            agent_id: Some("a1".into()),
+            agent_type: Some("Explore".into()),
+            ..ev(HookEvent::SPAWN)
+        };
+        assert!(!s.apply(&spawn, now()));
+        let roster = HookEvent {
+            agents: Some(vec![]),
+            ..ev(HookEvent::AGENTS)
+        };
+        assert!(!s.apply(&roster, now()));
+        assert_eq!(s.phase, Phase::Done);
     }
 
     #[test]
