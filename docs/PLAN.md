@@ -5533,7 +5533,7 @@ use what is new. Each part is a quest in the log.
   Horadric's terminal yet; the text is plain.
 - **Subagents on the tile.** Today a tile counts subagents by `agent_id`
   and calls one finished after 30 quiet seconds. With the mod's reports
-  the tile can show each by type, and when it really ends.
+  the tile can show each by type, and when it really ends. **Built (2026-10-11).** `Session::subagent_types` uses the mod roster (running, waiting or pending) where it has reported this turn, and the 30 second quiet guess only for ids the roster lacks. A working tile's last line lists the types, "Explore x2, Plan".
 - **What a waiting tile waits on** (2.1.295). A session waiting on a
   permission prompt now names the MCP tool. The tile says "waiting on
   browser_click", not just waiting.

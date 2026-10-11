@@ -3454,7 +3454,14 @@ impl Painter<'_> {
         self.text_tabular(gpu, &gpu.small_right, age_c.fade(presence), &age, top);
 
         // Last line, and what the agent did lately beside it.
-        let last = if s.last_line.is_empty() {
+        let at_work = if phase == &Phase::Working {
+            horadric_core::session::subagent_line(&s.subagent_types(scene.now))
+        } else {
+            String::new()
+        };
+        let last = if !at_work.is_empty() {
+            &at_work
+        } else if s.last_line.is_empty() {
             &s.cwd
         } else {
             &s.last_line
