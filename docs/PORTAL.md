@@ -144,3 +144,25 @@ Liveness:
   seconds drops the socket and reconnects. The page does the same with
   its own text ping, and reconnects when it comes back to the
   foreground.
+
+## Added in 0.22: projects the PC has not opened
+
+A project does not have to be on the tiles to start a session in it
+from the phone, and a phone can make a new one.
+
+- Phone to PC, `{"t":"folders"}`. The PC answers
+  `{"t":"folders","roots":[{"path","name","list":[{"path","name","git"}]}]}`.
+  The roots are the folders the human's projects live in: the parent of
+  every project on the tiles, in the recent list and in session history,
+  without duplicates. Each root lists its subfolders one level down,
+  hidden ones and dot folders left out, most recently changed first, at
+  most 300. `git` says whether it has a `.git`.
+- `start` accepts any folder from that answer as well as a tile project.
+  Anything else answers `error`. A session started this way puts the
+  project on the tiles like any other.
+- Phone to PC, `{"t":"create","root":"<root path>","name":"<folder name>"}`.
+  The root must be one of the roots above. The name is 1 to 64
+  characters of letters, digits, space, `.`, `-` and `_`, not starting
+  with `.`, and must not exist yet. The PC makes the folder, runs `git
+  init` in it (skipped if git is missing), starts a session there and
+  answers `started` as for `start`, or `error` with the reason.
