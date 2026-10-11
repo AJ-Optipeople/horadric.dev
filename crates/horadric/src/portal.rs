@@ -2,7 +2,7 @@
 //! off and shows the pairing link. The running app looks at `portal.json`
 //! and connects to the relay to match. See `docs/PORTAL.md`.
 
-use horadric_core::portal::Config;
+use horadric_core::portal::{Config, Subs};
 use windows::core::{w, HSTRING, PCWSTR};
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
@@ -35,6 +35,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
             let mut c = config.ok_or("Town Portal was never turned on")?;
             c.key = fresh().key;
             save(&c)?;
+            Subs::clear(&dir).map_err(|e| format!("cannot forget the phones' push: {e}"))?;
             println!("A new key: every phone is unpaired. Pair again with:\n");
             println!("{}", c.link(&pc_name()));
         }

@@ -133,6 +133,8 @@ mod picker;
 pub mod portal_crypto;
 #[cfg(windows)]
 pub mod portal_link;
+#[cfg(windows)]
+pub mod portal_push;
 mod project;
 #[cfg(windows)]
 mod questlog;

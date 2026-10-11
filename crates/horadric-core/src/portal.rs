@@ -23,6 +23,13 @@ pub struct Config {
     pub relay: String,
     pub secret: String,
     pub key: String,
+    /// The Web Push signing key's private scalar, b64url, made on first
+    /// use. Older files have none, hence the defaults.
+    #[serde(default)]
+    pub vapid_d: String,
+    /// Its public key as an uncompressed point, `04 || x || y`, b64url.
+    #[serde(default)]
+    pub vapid_pub: String,
 }
 
 impl Config {
@@ -34,6 +41,8 @@ impl Config {
             relay: DEFAULT_RELAY.to_string(),
             secret: b64url(&random[..32]),
             key: b64url(&random[32..]),
+            vapid_d: String::new(),
+            vapid_pub: String::new(),
         }
     }
 
@@ -78,6 +87,103 @@ impl Config {
             uri_encode(pc_name)
         )
     }
+}
+
+/// The file of phones' push subscriptions, beside `portal.json`.
+const PUSH_FILE: &str = "portal-push.json";
+
+/// One phone's Web Push subscription, as the page's `PushSubscription`
+/// gives it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PushSub {
+    pub endpoint: String,
+    pub p256dh: String,
+    pub auth: String,
+}
+
+/// Every stored subscription, one per endpoint.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Subs(pub Vec<PushSub>);
+
+impl Subs {
+    pub fn load(dir: &Path) -> Subs {
+        std::fs::read_to_string(dir.join(PUSH_FILE))
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn save(&self, dir: &Path) -> io::Result<()> {
+        std::fs::create_dir_all(dir)?;
+        let text = serde_json::to_string_pretty(self).map_err(io::Error::other)?;
+        std::fs::write(dir.join(PUSH_FILE), text)
+    }
+
+    /// Forgets every phone's subscription, as a new key unpairs them.
+    pub fn clear(dir: &Path) -> io::Result<()> {
+        match std::fs::remove_file(dir.join(PUSH_FILE)) {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        }
+    }
+
+    /// Adds `sub`, replacing one with the same endpoint.
+    pub fn add(&mut self, sub: PushSub) {
+        self.remove(&sub.endpoint);
+        self.0.push(sub);
+    }
+
+    pub fn remove(&mut self, endpoint: &str) {
+        self.0.retain(|s| s.endpoint != endpoint);
+    }
+
+    /// A subscription from the phone's `{"endpoint","keys":{"p256dh","auth"}}`.
+    pub fn parse(sub: &serde_json::Value) -> Option<PushSub> {
+        let text = |v: Option<&serde_json::Value>| v?.as_str().map(str::to_string);
+        let endpoint = text(sub.get("endpoint"))?;
+        if !endpoint.starts_with("https://") {
+            return None;
+        }
+        let keys = sub.get("keys")?;
+        Some(PushSub {
+            endpoint,
+            p256dh: text(keys.get("p256dh"))?,
+            auth: text(keys.get("auth"))?,
+        })
+    }
+}
+
+/// Who a VAPID token is for: the push service's origin, `https://host`
+/// with any port, without the path.
+pub fn push_audience(endpoint: &str) -> Option<String> {
+    let rest = endpoint.strip_prefix("https://")?;
+    let host = rest.split('/').next().filter(|h| !h.is_empty())?;
+    Some(format!("https://{host}"))
+}
+
+/// The part of a VAPID JWT that is signed: header and claims, b64url,
+/// joined by a dot. `exp` is in Unix seconds.
+pub fn vapid_signing_input(aud: &str, exp: u64) -> String {
+    let header = br#"{"typ":"JWT","alg":"ES256"}"#;
+    let claims = serde_json::json!({
+        "aud": aud,
+        "exp": exp,
+        "sub": "mailto:portal@horadric.dev",
+    });
+    format!(
+        "{}.{}",
+        b64url(header),
+        b64url(claims.to_string().as_bytes())
+    )
+}
+
+/// The `Authorization` header of a push: the JWT, its signature (`r || s`)
+/// appended, and the public key.
+pub fn vapid_authorization(signing_input: &str, signature: &[u8], vapid_pub: &str) -> String {
+    format!(
+        "vapid t={signing_input}.{}, k={vapid_pub}",
+        b64url(signature)
+    )
 }
 
 /// The relay's page, which shares its host: `wss://x` is `https://x`.
@@ -311,6 +417,8 @@ mod tests {
             relay: "wss://portal.horadric.dev".into(),
             secret: "abc".into(),
             key: "KEY".into(),
+            vapid_d: String::new(),
+            vapid_pub: String::new(),
         };
         assert_eq!(
             c.link("MY PC"),
@@ -334,5 +442,89 @@ mod tests {
         assert_eq!(Config::load(&dir), Some(c));
         std::fs::remove_dir_all(&dir).unwrap();
         assert_eq!(Config::load(&dir), None);
+    }
+
+    #[test]
+    fn subs_add_replace_remove_and_persist() {
+        let sub = |e: &str, k: &str| PushSub {
+            endpoint: e.into(),
+            p256dh: k.into(),
+            auth: "a".into(),
+        };
+        let mut s = Subs::default();
+        s.add(sub("https://p/1", "x"));
+        s.add(sub("https://p/2", "x"));
+        s.add(sub("https://p/1", "y"));
+        assert_eq!(s.0.len(), 2);
+        assert_eq!(s.0[1], sub("https://p/1", "y"));
+        s.remove("https://p/2");
+        assert_eq!(s.0, vec![sub("https://p/1", "y")]);
+        let dir = std::env::temp_dir().join(format!("horadric-push-{}", std::process::id()));
+        s.save(&dir).unwrap();
+        assert_eq!(Subs::load(&dir), s);
+        Subs::clear(&dir).unwrap();
+        Subs::clear(&dir).unwrap();
+        assert_eq!(Subs::load(&dir), Subs::default());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn subs_parse_the_page_json() {
+        let v = serde_json::json!({"endpoint":"https://fcm.googleapis.com/fcm/send/abc",
+            "keys":{"p256dh":"P","auth":"A"}});
+        assert_eq!(
+            Subs::parse(&v),
+            Some(PushSub {
+                endpoint: "https://fcm.googleapis.com/fcm/send/abc".into(),
+                p256dh: "P".into(),
+                auth: "A".into(),
+            })
+        );
+        assert_eq!(
+            Subs::parse(
+                &serde_json::json!({"endpoint":"http://x/1","keys":{"p256dh":"P","auth":"A"}})
+            ),
+            None
+        );
+        assert_eq!(
+            Subs::parse(&serde_json::json!({"endpoint":"https://x/1"})),
+            None
+        );
+    }
+
+    #[test]
+    fn audience_is_the_endpoint_origin() {
+        assert_eq!(
+            push_audience("https://fcm.googleapis.com/fcm/send/abc").as_deref(),
+            Some("https://fcm.googleapis.com")
+        );
+        assert_eq!(
+            push_audience("https://web.push.apple.com:443/QX").as_deref(),
+            Some("https://web.push.apple.com:443")
+        );
+        assert_eq!(push_audience("http://x/1"), None);
+        assert_eq!(push_audience("https:///1"), None);
+    }
+
+    #[test]
+    fn vapid_jwt_is_header_claims_signature() {
+        let input = vapid_signing_input("https://push.example", 1_700_000_000);
+        let (h, c) = input.split_once('.').unwrap();
+        assert_eq!(unb64url(h).unwrap(), br#"{"typ":"JWT","alg":"ES256"}"#);
+        let claims: serde_json::Value = serde_json::from_slice(&unb64url(c).unwrap()).unwrap();
+        assert_eq!(claims["aud"], "https://push.example");
+        assert_eq!(claims["exp"], 1_700_000_000u64);
+        assert_eq!(claims["sub"], "mailto:portal@horadric.dev");
+        assert_eq!(
+            vapid_authorization("H.C", &[0xfb, 0xff], "PUB"),
+            "vapid t=H.C.-_8, k=PUB"
+        );
+    }
+
+    #[test]
+    fn old_configs_load_without_vapid() {
+        let c: Config =
+            serde_json::from_str(r#"{"enabled":true,"relay":"r","secret":"s","key":"k"}"#).unwrap();
+        assert!(c.vapid_d.is_empty() && c.vapid_pub.is_empty());
     }
 }

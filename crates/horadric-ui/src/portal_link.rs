@@ -5,10 +5,10 @@
 //! The protocol is in `docs/PORTAL.md`.
 
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use horadric_core::portal::{frame, unframe, uri_encode};
 use horadric_core::release::split_url;
@@ -44,6 +44,18 @@ const MAX_FRAME: usize = 1 << 20;
 
 /// The longest wait between attempts to reach the relay, in seconds.
 const MAX_BACKOFF: u64 = 30;
+
+/// How often the PC pings the relay, so a dead connection shows, in
+/// seconds.
+const PING_SECS: u64 = 25;
+
+/// Silence from the relay this long, in seconds, means the connection is
+/// dead even if TCP has not said so: drop it and connect again. It also
+/// ends a send stuck on such a connection.
+const SILENT_SECS: u64 = 70;
+
+/// A frame for the writer: (is text, bytes).
+type Out = (bool, Vec<u8>);
 
 /// A WinHTTP handle that may cross threads. Whoever takes it out of the
 /// shared slot closes it, so it is closed exactly once.
@@ -91,7 +103,7 @@ type Slot = Arc<Mutex<Option<Arc<Socket>>>>;
 pub struct Link {
     stop: Arc<AtomicBool>,
     slot: Slot,
-    out: Option<Sender<Vec<u8>>>,
+    out: Option<Sender<Out>>,
     key: [u8; 32],
 }
 
@@ -108,7 +120,10 @@ impl Link {
     ) -> Link {
         let stop = Arc::new(AtomicBool::new(false));
         let slot: Slot = Arc::new(Mutex::new(None));
-        let (out, rx) = mpsc::channel::<Vec<u8>>();
+        let (out, rx) = mpsc::channel::<Out>();
+        // Milliseconds since `origin` when the relay last said anything.
+        let origin = Instant::now();
+        let heard = Arc::new(AtomicU64::new(0));
         let url = format!(
             "{}/pc?secret={}",
             relay.trim_end_matches('/'),
@@ -122,10 +137,20 @@ impl Link {
                 .ok();
         }
         {
-            let (stop, slot) = (stop.clone(), slot.clone());
+            let (stop, slot, heard) = (stop.clone(), slot.clone(), heard.clone());
             std::thread::Builder::new()
                 .name("portal-read".into())
-                .spawn(move || read_loop(&url, key, &stop, &slot, &tx, &*wake))
+                .spawn(move || {
+                    let hear = || heard.store(ms(origin), Ordering::SeqCst);
+                    read_loop(&url, key, &stop, &slot, &tx, &*wake, &hear)
+                })
+                .ok();
+        }
+        {
+            let (stop, slot, out) = (stop.clone(), slot.clone(), out.clone());
+            std::thread::Builder::new()
+                .name("portal-ping".into())
+                .spawn(move || ping_loop(&stop, &slot, &out, &heard, origin))
                 .ok();
         }
         Link {
@@ -142,7 +167,7 @@ impl Link {
     pub fn send(&self, ch: u32, msg: &serde_json::Value) {
         let sealed = seal(&self.key, msg.to_string().as_bytes());
         if let Some(out) = &self.out {
-            let _ = out.send(frame(ch, &sealed));
+            let _ = out.send((false, frame(ch, &sealed)));
         }
     }
 }
@@ -159,19 +184,56 @@ impl Drop for Link {
     }
 }
 
-fn write_loop(rx: Receiver<Vec<u8>>, slot: Slot) {
-    for frame in rx {
+fn ms(origin: Instant) -> u64 {
+    origin.elapsed().as_millis() as u64
+}
+
+fn write_loop(rx: Receiver<Out>, slot: Slot) {
+    for (text, frame) in rx {
         let socket = slot.lock().unwrap().clone();
         if let Some(s) = socket.filter(|s| !s.closed.load(Ordering::SeqCst)) {
+            let kind = if text {
+                WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE
+            } else {
+                WINHTTP_WEB_SOCKET_BINARY_MESSAGE_BUFFER_TYPE
+            };
             unsafe {
-                WinHttpWebSocketSend(
-                    s.ws,
-                    WINHTTP_WEB_SOCKET_BINARY_MESSAGE_BUFFER_TYPE,
-                    Some(&frame),
-                );
+                WinHttpWebSocketSend(s.ws, kind, Some(&frame));
             }
         }
     }
+}
+
+/// Pings the relay while connected, and closes a connection that has gone
+/// quiet, which sends the reader round to connect again.
+fn ping_loop(
+    stop: &AtomicBool,
+    slot: &Slot,
+    out: &Sender<Out>,
+    heard: &AtomicU64,
+    origin: Instant,
+) {
+    let mut since_ping = 0;
+    while !stop.load(Ordering::SeqCst) {
+        std::thread::sleep(Duration::from_secs(1));
+        let Some(socket) = slot.lock().unwrap().clone() else {
+            since_ping = 0;
+            continue;
+        };
+        since_ping += 1;
+        if since_ping >= PING_SECS {
+            since_ping = 0;
+            let _ = out.send((true, br#"{"ping":1}"#.to_vec()));
+        }
+        if silent(ms(origin), heard.load(Ordering::SeqCst)) {
+            socket.close();
+        }
+    }
+}
+
+/// Whether the relay has been quiet too long, both in milliseconds.
+fn silent(now: u64, heard: u64) -> bool {
+    now.saturating_sub(heard) > SILENT_SECS * 1000
 }
 
 fn read_loop(
@@ -181,6 +243,7 @@ fn read_loop(
     slot: &Slot,
     tx: &Sender<Incoming>,
     wake: &dyn Fn(),
+    hear: &dyn Fn(),
 ) {
     let deliver = |i: Incoming| {
         if tx.send(i).is_ok() {
@@ -198,8 +261,10 @@ fn read_loop(
                     return;
                 }
                 backoff = 1;
+                hear();
                 deliver(Incoming::Connected(true));
                 while let Some((text, data)) = receive(&socket) {
+                    hear();
                     if let Some(i) = incoming(text, &data, &key) {
                         deliver(i);
                     }
@@ -297,8 +362,8 @@ fn connect(url: &str) -> Result<Socket, String> {
             ),
             "WinHttpOpen",
         )?;
-        // No receive timeout: a quiet relay is normal, and a dead one
-        // shows as an error when the connection drops.
+        // No receive timeout here: the ping thread closes a connection
+        // that has been quiet too long.
         WinHttpSetTimeouts(session.0, 10_000, 10_000, 30_000, 0)
             .map_err(|e| format!("WinHttpSetTimeouts: {e}"))?;
         let connection = handle(
@@ -378,6 +443,13 @@ mod tests {
     use horadric_core::portal::{frame, BROADCAST};
 
     #[test]
+    fn a_quiet_relay_is_dead_after_seventy_seconds() {
+        assert!(!silent(70_000, 0));
+        assert!(silent(70_001, 0));
+        assert!(!silent(5, 10));
+    }
+
+    #[test]
     fn relay_control_and_sealed_frames_read() {
         let key = [5; 32];
         assert_eq!(
@@ -389,6 +461,7 @@ mod tests {
             Some(Incoming::Close(7))
         );
         assert_eq!(incoming(true, br#"{"what":1}"#, &key), None);
+        assert_eq!(incoming(true, br#"{"pong":1}"#, &key), None);
         let sealed = seal(&key, br#"{"t":"hello","v":1}"#);
         assert_eq!(
             incoming(false, &frame(3, &sealed), &key),
