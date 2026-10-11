@@ -4,6 +4,7 @@
 - Do not wait for main's checks before casting a ship stone: nothing runs them between landings, and the ship session runs all three first (RELEASING.md step 2) and stops on red.
 
 ## Lately
+- 2026-10-11 Round after "Claude Code's OSC 7501 on Windows: the pseudo console answers its CSI c fence first" landed (e1427d8): shared tree clean apart from Horadric's own files, so cast "Ship Local". Plain terminals still with the human (dead session), cloud tiles still with the human.
 - 2026-10-11 Hourly round (main at ab5ef41): "OSC 7501: plain terminals" silent 11 hours after two nudges, worktree empty, so handed it to the human (restart the session). CSI c fence queued (opus), cloud tiles still with the human.
 - 2026-10-11 Hourly round (main at cf3d0f3): "OSC 7501: plain terminals" still silent 10 hours after a nudge, worktree empty. Narrowed it to the plain terminal tile and split Codex and Grok into a new quest after it (sonnet).
 - 2026-10-11 Hourly round (main at 7b182d9): "OSC 7501: plain terminals" under way 7 hours with no commit, so told it to commit what works or name its blocker. CSI c fence queued (opus), cloud tiles still with the human.
