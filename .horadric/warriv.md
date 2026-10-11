@@ -4,6 +4,8 @@
 - Do not wait for main's checks before casting a ship stone: nothing runs them between landings, and the ship session runs all three first (RELEASING.md step 2) and stops on red.
 
 ## Lately
+- 2026-10-11 Wake with no new event: two OSC quests under way, the CSI c fence quest queued (opus), cloud tiles still with the human. Nothing to do.
+- 2026-10-11 Wake: "Propose tiles for Claude Code cloud sessions" blocked again, same report. Still the human's pick (options in PLAN.md, Cloud session tiles), so nothing new to do.
 - 2026-10-11 Round after "OSC 7501: read the Program Status Protocol" landed (1b663c0): the shared tree is clean (the three under way quests work elsewhere), so cast "Ship Local". Gave the new CSI c fence quest "Model: opus" (a hard ConPTY bug). Cloud tiles still with the human.
 - 2026-10-11 Round after "The mod tells Claude what Horadric knows" landed (b34c4a7): last ship reloaded fine. Held this one: "Theme colours in the mod's band" just started from b34c4a7 to fix how that band looks, and OSC 7501 reading is still under way. Cloud tiles still with the human.
 - 2026-10-11 Wake: "Propose tiles for Claude Code cloud sessions" blocked again, same report (pick an option in PLAN.md). Already settled as the human's pick, no human answer yet, so nothing new to do.
