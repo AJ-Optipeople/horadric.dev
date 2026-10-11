@@ -477,14 +477,18 @@ impl Console {
             None => [&launch.extra[..], &launch.args[..]].concat(),
         };
         let mut env_set = if launch.shell {
-            vec![("COLORTERM".into(), "truecolor".into())]
+            vec![]
         } else {
             vec![
                 (SESSION_ENV.into(), launch.id.clone()),
                 (OWNER_ENV.into(), horadric_hooks::port().to_string()),
-                ("COLORTERM".into(), "truecolor".into()),
             ]
         };
+        env_set.push(("COLORTERM".into(), "truecolor".into()));
+        // Programs pick a light or dark theme from it when OSC 11 goes
+        // unanswered, which on Windows it always does.
+        let fgbg = palette::colorfgbg(palette::background());
+        env_set.push(("COLORFGBG".into(), fgbg.into()));
         env_set.extend(agent.map(Agent::env).unwrap_or_default());
         env_set.extend(launch.env);
         // The setup runs in the pane, where its output can be read, and
@@ -1202,6 +1206,8 @@ impl EventListener for Events {
                 }
             }
             // Programs ask for the background to pick a light or dark theme.
+            // Only off Windows: the pseudo console keeps these queries to
+            // itself, and COLORFGBG answers there instead.
             Event::ColorRequest(index, format) => {
                 if let Some(remote) = &self.remote {
                     remote.write(format(palette::default_rgb(index)).into_bytes());

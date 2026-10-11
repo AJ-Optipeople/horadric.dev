@@ -67,6 +67,19 @@ const ANSI: [Rgb; 16] = [
     rgb(0xFFFFFF),
 ];
 
+/// `COLORFGBG` for a terminal on `bg`: white on black, or black on white.
+/// On Windows it is the only way a program learns the background: the
+/// pseudo console swallows OSC 10 and 11 queries and answers the `CSI c`
+/// fence behind them itself, so a program asking never hears back.
+pub fn colorfgbg(bg: Rgb) -> &'static str {
+    let luminance = 0.2126 * bg.r as f32 + 0.7152 * bg.g as f32 + 0.0722 * bg.b as f32;
+    if luminance > 127.5 {
+        "0;15"
+    } else {
+        "15;0"
+    }
+}
+
 /// The colour at a palette index before any program override. Indices past
 /// 255 are the named extras, in `NamedColor` order.
 pub fn default_rgb(index: usize) -> Rgb {
@@ -141,6 +154,15 @@ fn dim(c: Rgb) -> Rgb {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn colorfgbg_says_dark_or_light_by_the_background() {
+        assert_eq!(colorfgbg(rgb(0x101114)), "15;0");
+        assert_eq!(colorfgbg(rgb(0xF4F4F0)), "0;15");
+        // Pure blue is dark to the eye, however bright its channel.
+        assert_eq!(colorfgbg(rgb(0x0000FF)), "15;0");
+        assert_eq!(colorfgbg(rgb(0x00FF00)), "0;15");
+    }
 
     #[test]
     fn cube_and_grey_ramp_follow_xterm() {
