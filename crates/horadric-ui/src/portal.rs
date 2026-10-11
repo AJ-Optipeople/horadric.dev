@@ -8,6 +8,8 @@ use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::Term;
+// The frame crypto is Windows CNG, so the Mac build has no portal yet.
+#[cfg(windows)]
 use horadric_core::portal::{key32, Config};
 use horadric_core::{Phase, Session};
 use serde_json::{json, Value};
@@ -68,6 +70,7 @@ pub fn newly_waiting(
 }
 
 /// Whose key opened a phone's first frame on a channel.
+#[cfg(windows)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Sender {
     /// A paired phone: its id and key.
@@ -79,6 +82,7 @@ pub enum Sender {
 /// Opens a frame from a channel not yet known: with each paired phone's
 /// key, then with the ticket's while it lasts. `None` when no key opens
 /// it, which is every frame from a phone that was forgotten.
+#[cfg(windows)]
 pub fn identify(config: &Config, sealed: &[u8], now: u64) -> Option<(Sender, Value)> {
     let read = |key: &[u8; 32]| -> Option<Value> {
         serde_json::from_slice(&crate::portal_crypto::open(key, sealed)?).ok()
@@ -347,6 +351,7 @@ mod tests {
         assert!(!newly_waiting(&set(&["a", "b"]), &set(&["b"])));
     }
 
+    #[cfg(windows)]
     #[test]
     fn a_frame_is_known_by_the_key_that_opens_it() {
         let mut c = horadric_core::portal::Config::fresh(&[0; 32]);
