@@ -1,8 +1,9 @@
 //! The app's side of Town Portal: a phone, through the relay, pairs with a
 //! one-time code, sees the sessions and projects, watches one's terminal
-//! and types into it, starts and resumes sessions, and is pushed when one
-//! starts waiting. What the messages say is [`crate::portal`]; the
-//! connection is [`crate::portal_link`].
+//! and types into it, starts, resumes, renames and ends sessions, copies
+//! one's last reply, and is pushed when one starts waiting. What the
+//! messages say is [`crate::portal`]; the connection is
+//! [`crate::portal_link`].
 //!
 //! Everything here runs on the UI thread, woken by the link's thread with
 //! [`WM_HORADRIC_PORTAL`] and by [`PORTAL_TIMER`] while the link is up, so
@@ -13,7 +14,8 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
-use horadric_core::portal::{b64url, fresh_message, Config, Paired};
+use horadric_core::portal::{b64url, fresh_message, unb64url, Config, Paired};
+use horadric_core::webpush;
 use horadric_core::Phase;
 use serde_json::{json, Value};
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
@@ -74,6 +76,10 @@ struct Phone {
     watch: Option<String>,
     /// The screen last sent, so an unchanged one is not sent again.
     screen: Option<u64>,
+    /// It asked for the quest logs, so it hears them again when they change.
+    quests: bool,
+    /// The quests message last sent to it.
+    quests_sent: Option<u64>,
 }
 
 impl Phone {
@@ -99,6 +105,16 @@ struct Asked {
     folders: Vec<u32>,
     /// New projects: channel, root, folder name.
     creates: Vec<(u32, String, String)>,
+    /// New quests: channel, project path, title, notes.
+    quest_adds: Vec<(u32, String, String, String)>,
+    /// Sessions named from a long press: channel, session, name.
+    renames: Vec<(u32, String, String)>,
+    /// Sessions ended from a long press, after the page's confirm.
+    stops: Vec<(u32, String)>,
+    /// Phones that asked for a session's last reply, to copy it.
+    replies: Vec<(u32, String)>,
+    /// Photos from the phone: channel, session, file name, base64url bytes.
+    attaches: Vec<(u32, String, String, String)>,
     /// Pairing attempts: channel, the name the phone gave, the ticket key.
     pairs: Vec<(u32, String, [u8; 32])>,
 }
@@ -226,6 +242,15 @@ impl App {
                 p.send(ch, &reply);
             }
         }
+        for (ch, project, title, notes) in asked.quest_adds {
+            let reply = match self.portal_quest_add(&project, &title, &notes) {
+                Ok(title) => json!({"t": "quest_added", "project": project, "title": title}),
+                Err(e) => json!({"t": "error", "text": e}),
+            };
+            if let Some(p) = &self.portal {
+                p.send(ch, &reply);
+            }
+        }
         for (ch, id) in asked.resumes {
             let result = if self.paused.contains_key(&id) {
                 self.resume(&id, false)
@@ -242,6 +267,47 @@ impl App {
             }
             if let Some(phone) = p.phones.get_mut(&ch) {
                 phone.screen = None;
+            }
+        }
+        for (ch, id, name) in asked.renames {
+            let known = self
+                .shared
+                .registry
+                .lock()
+                .is_ok_and(|r| r.get(&id).is_some());
+            if known {
+                self.rename(&id, &name);
+            } else if let Some(p) = &self.portal {
+                p.send(ch, &json!({"t": "error", "text": "That session is gone."}));
+            }
+        }
+        for (ch, id) in asked.stops {
+            let known = self.consoles.contains_key(&id)
+                || self.paused.contains_key(&id)
+                || self
+                    .shared
+                    .registry
+                    .lock()
+                    .is_ok_and(|r| r.get(&id).is_some());
+            if known {
+                self.end(&id);
+            } else if let Some(p) = &self.portal {
+                p.send(ch, &json!({"t": "error", "text": "That session is gone."}));
+            }
+        }
+        for (ch, id) in asked.replies {
+            let text = self.portal_reply(&id);
+            if let Some(p) = &self.portal {
+                p.send(ch, &json!({"t": "reply", "id": id, "text": text}));
+            }
+        }
+        for (ch, id, name, data) in asked.attaches {
+            let reply = match self.portal_attach(&id, &name, &data, now) {
+                Ok(path) => json!({"t": "attached", "id": id, "name": name, "path": path}),
+                Err(e) => json!({"t": "error", "text": e}),
+            };
+            if let Some(p) = &self.portal {
+                p.send(ch, &reply);
             }
         }
         let pc = std::env::var("COMPUTERNAME").unwrap_or_else(|_| "PC".to_string());
@@ -293,9 +359,29 @@ impl App {
         let list = self.portal_sessions();
         let projects = self.portal_projects();
         let waiting = self.portal_waiting();
+        let quests = self
+            .portal
+            .as_ref()
+            .is_some_and(|p| p.phones.values().any(|ph| ph.quests))
+            .then(|| self.portal_quests());
         let Some(p) = self.portal.as_mut() else {
             return;
         };
+        if let Some(quests) = quests {
+            let print = fingerprint(&quests);
+            let to: Vec<u32> = p
+                .phones
+                .iter_mut()
+                .filter(|(_, ph)| ph.quests && ph.quests_sent != Some(print))
+                .map(|(&ch, ph)| {
+                    ph.quests_sent = Some(print);
+                    ch
+                })
+                .collect();
+            for ch in to {
+                p.send(ch, &quests);
+            }
+        }
         let anyone = p.phones.values().any(Phone::hello);
         let print = fingerprint(&list);
         if p.sent != Some(print) && anyone {
@@ -310,12 +396,20 @@ impl App {
         let edge = p
             .waiting
             .as_ref()
-            .is_some_and(|before| portal::newly_waiting(before, &waiting));
+            .and_then(|before| portal::newly_waiting(before, &waiting));
+        let count = waiting.len();
         p.waiting = Some(waiting);
-        if edge && p.pushed.is_none_or(|at| at.elapsed() >= PUSH_GAP) {
+        if let Some(id) = edge.filter(|_| p.pushed.is_none_or(|at| at.elapsed() >= PUSH_GAP)) {
             p.pushed = Some(Instant::now());
-            portal_push::send_all(&p.dir, &p.config);
+            let payload = self.portal_push_payload(&id, count);
+            let Some(p) = self.portal.as_ref() else {
+                return;
+            };
+            portal_push::send_all(&p.dir, &p.config, payload);
         }
+        let Some(p) = self.portal.as_mut() else {
+            return;
+        };
         let mut out = Vec::new();
         for (&ch, phone) in p.phones.iter_mut() {
             let Some(id) = phone.watch.clone() else {
@@ -381,6 +475,86 @@ impl App {
             })
             .collect();
         portal::projects_message(&projects)
+    }
+
+    /// What a push about session `id` says, as JSON, with `waiting`
+    /// sessions waiting in all. Empty when the session is gone, which
+    /// pushes as older PCs did.
+    fn portal_push_payload(&self, id: &str, waiting: usize) -> Vec<u8> {
+        let Some(p) = self.portal.as_ref() else {
+            return Vec::new();
+        };
+        let pc = horadric_core::portal::id(&p.config.secret);
+        self.shared
+            .registry
+            .lock()
+            .ok()
+            .and_then(|r| {
+                let s = r.all().find(|s| s.id == id)?;
+                let project = project_name(&project_key(s));
+                Some(webpush::payload(&pc, s, &project, waiting).to_string())
+            })
+            .unwrap_or_default()
+            .into_bytes()
+    }
+
+    /// The quests message: each tile project's log, and what Warriv does
+    /// there.
+    fn portal_quests(&self) -> Value {
+        let boards = self.shared.boards.borrow();
+        let lines = self.shared.warriv_line.borrow();
+        let projects: Vec<(String, String, String)> = self
+            .clusters
+            .iter()
+            .filter_map(|c| {
+                let dir = self.project_dir(&c.key)?;
+                Some((
+                    c.key.clone(),
+                    dir.to_string_lossy().into_owned(),
+                    project_name(&c.key),
+                ))
+            })
+            .collect();
+        let logs: Vec<portal::QuestLog> = projects
+            .iter()
+            .map(|(key, path, name)| portal::QuestLog {
+                path,
+                name,
+                board: boards.get(key),
+                drives: self.drives.contains_key(key),
+                warriv_line: lines.get(key).map(|(words, _)| words.as_str()),
+            })
+            .collect();
+        portal::quests_message(&logs, unix_now())
+    }
+
+    /// Adds a quest to the end of a tile project's log, as the quests
+    /// tile's plus does. Answers the title as written.
+    fn portal_quest_add(
+        &mut self,
+        project: &str,
+        title: &str,
+        notes: &str,
+    ) -> Result<String, String> {
+        let title = portal::new_quest(title, notes).map_err(str::to_string)?;
+        let key = folder_key(project);
+        if !self.clusters.iter().any(|c| c.key == key) {
+            return Err(format!("{project} is not one of the PC's projects."));
+        }
+        self.add_task(&key, &title, notes);
+        Ok(title)
+    }
+
+    /// A session's last reply: what its last Stop hook said, or, when this
+    /// UI did not hear that one (it started since), the transcript's.
+    fn portal_reply(&self, id: &str) -> Option<String> {
+        let (heard, cwd, claude) = {
+            let r = self.shared.registry.lock().ok()?;
+            let s = r.get(id)?;
+            let claude = s.claude_session_id.clone().filter(|_| !s.shell);
+            (s.last_turn.clone(), s.cwd.clone(), claude)
+        };
+        heard.or_else(|| horadric_hooks::transcript::last_reply(&cwd, &claude?))
     }
 
     /// The ids of the sessions waiting for the human now.
@@ -449,6 +623,31 @@ impl App {
                 (root, list)
             })
             .collect()
+    }
+
+    /// Saves a photo the phone sent for a session under the data dir's
+    /// `portal-attach\<session>`, clearing out week old ones first, and
+    /// answers where it went for the phone to put in its message.
+    fn portal_attach(&self, id: &str, name: &str, data: &str, now: u64) -> Result<String, String> {
+        let known = self
+            .shared
+            .registry
+            .lock()
+            .map(|r| r.all().any(|s| s.id == id))
+            .unwrap_or(false);
+        let folder = portal::attach_folder(id).filter(|_| known);
+        let (Some(folder), Some(p)) = (folder, &self.portal) else {
+            return Err("That session is not on the PC.".to_string());
+        };
+        let bytes = unb64url(data).ok_or("The photo did not arrive whole.")?;
+        let root = p.dir.join("portal-attach");
+        sweep_attachments(&root, now);
+        let dir = root.join(folder);
+        let path = dir.join(portal::attach_file_name(name, now));
+        std::fs::create_dir_all(&dir)
+            .and_then(|_| std::fs::write(&path, bytes))
+            .map_err(|e| format!("The PC could not save the photo: {e}"))?;
+        Ok(path.to_string_lossy().into_owned())
     }
 
     /// Makes a new project folder in one of the roots, with git, and
@@ -641,6 +840,37 @@ fn heard_from(p: &mut Portal, ch: u32, sealed: &[u8], now: u64, asked: &mut Aske
             }
         }
         Some("folders") => asked.folders.push(ch),
+        Some("quests") => {
+            phone.quests = true;
+            phone.quests_sent = None;
+        }
+        Some("quest_add") => {
+            if let (Some(project), Some(title)) = (text("project"), text("title")) {
+                let notes = text("notes").unwrap_or_default();
+                asked.quest_adds.push((ch, project, title, notes));
+            }
+        }
+        Some("rename") => {
+            if let (Some(id), Some(name)) = (text("id"), text("name")) {
+                asked.renames.push((ch, id, portal::session_name(&name)));
+            }
+        }
+        Some("stop") => {
+            if let Some(id) = text("id") {
+                asked.stops.push((ch, id));
+            }
+        }
+        Some("reply") => {
+            if let Some(id) = text("id") {
+                asked.replies.push((ch, id));
+            }
+        }
+        Some("attach") => {
+            if let (Some(id), Some(data)) = (text("id"), text("data")) {
+                let name = text("name").unwrap_or_default();
+                asked.attaches.push((ch, id, name, data));
+            }
+        }
         Some("create") => {
             if let (Some(root), Some(name)) = (text("root"), text("name")) {
                 asked.creates.push((ch, root, name));
@@ -697,6 +927,32 @@ fn subfolders(root: &Path) -> Vec<portal::Folder> {
         })
         .collect();
     portal::order_folders(list)
+}
+
+/// Removes attachments older than a week, and the session folders that
+/// leaves empty.
+fn sweep_attachments(root: &Path, now: u64) {
+    let Ok(sessions) = std::fs::read_dir(root) else {
+        return;
+    };
+    for dir in sessions.flatten().map(|e| e.path()).filter(|p| p.is_dir()) {
+        let Ok(files) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for file in files.flatten() {
+            let modified = file
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(now, |d| d.as_secs());
+            if portal::attach_stale(modified, now) {
+                let _ = std::fs::remove_file(file.path());
+            }
+        }
+        // Fails while anything is left, which is what is wanted.
+        let _ = std::fs::remove_dir(&dir);
+    }
 }
 
 /// No one at the PC answers Claude Code's "Do you trust this folder?" for

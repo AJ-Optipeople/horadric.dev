@@ -91,6 +91,35 @@ pub fn mid_turn(transcript: &[u8]) -> Option<bool> {
     None
 }
 
+/// The text of the newest reply in a stretch of transcript: the last
+/// assistant record that says something, its text blocks joined. Records
+/// that only call a tool or think say nothing. None when the stretch has
+/// no such reply. The Stop hook carries the same text, but only to a UI
+/// that was up to hear it.
+pub fn last_reply(transcript: &[u8]) -> Option<String> {
+    transcript.rsplit(|&b| b == b'\n').find_map(|line| {
+        if !contains(line, br#""type":"assistant""#) {
+            return None;
+        }
+        let v = serde_json::from_slice::<serde_json::Value>(line).ok()?;
+        if v["type"] != "assistant" {
+            return None;
+        }
+        let content = &v["message"]["content"];
+        let text = match content.as_str() {
+            Some(t) => t.to_string(),
+            None => content
+                .as_array()?
+                .iter()
+                .filter(|b| b["type"] == "text")
+                .filter_map(|b| b["text"].as_str())
+                .collect::<Vec<_>>()
+                .join("\n\n"),
+        };
+        Some(text.trim().to_string()).filter(|t| !t.is_empty())
+    })
+}
+
 fn contains(hay: &[u8], needle: &[u8]) -> bool {
     hay.windows(needle.len()).any(|w| w == needle)
 }
@@ -162,6 +191,31 @@ mod tests {
         let t = |lines: &[&str]| mid_turn(lines.join("\n").as_bytes());
         assert_eq!(t(&[done, meta, command]), Some(false));
         assert_eq!(t(&[done, stopped]), Some(false));
+    }
+
+    #[test]
+    fn the_last_reply_is_the_newest_record_that_says_something() {
+        let first =
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Looking."}]}}"#;
+        let tool =
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash"}]}}"#;
+        let result = r#"{"type":"user","message":{"content":[{"type":"tool_result"}]}}"#;
+        let last = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"All green.\nDone."},{"type":"text","text":"Ship?"}]}}"#;
+        let after = r#"{"type":"system","subtype":"turn_duration"}"#;
+        let t = |lines: &[&str]| last_reply(lines.join("\n").as_bytes());
+        assert_eq!(t(&[first, tool, result]).as_deref(), Some("Looking."));
+        assert_eq!(
+            t(&[first, tool, result, last, after, ""]).as_deref(),
+            Some("All green.\nDone.\n\nShip?")
+        );
+        assert_eq!(t(&[tool, result]), None);
+        assert_eq!(t(&[]), None);
+    }
+
+    #[test]
+    fn a_prompt_quoting_an_assistant_record_is_not_a_reply() {
+        let t = br#"{"type":"user","message":{"content":"\"type\":\"assistant\" what is this"}}"#;
+        assert_eq!(last_reply(t), None);
     }
 
     #[test]

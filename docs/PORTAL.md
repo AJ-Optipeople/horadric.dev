@@ -247,3 +247,98 @@ from the phone, and a phone can make a new one.
     but Claude Code, whose prompts number their choices differently.
   - `since` is when it began waiting, Unix seconds.
 - A page that does not know `ask` shows the session as before.
+
+## Added in 0.24: a photo from the phone
+
+- Phone to PC, `{"t":"attach","id":"<session id>","name":"<file name>","data":"<b64url bytes>"}`.
+  The page shrinks the picture to a JPEG of at most 700 KB first, so the
+  sealed frame stays under the relay's 1 MB.
+- The PC saves it as `<data dir>\portal-attach\<session id>\<unix
+  time>-<name>`, the name cut to its last part and to letters, digits,
+  `.`, `-` and `_`, and answers
+  `{"t":"attached","id","name","path":"<the full path>"}`, or `error`
+  when the session is not on the PC or the file cannot be written. The
+  page puts the path into the message being typed, for the agent to
+  read.
+- Each attach first removes files in `portal-attach` older than a week,
+  and the session folders that leaves empty.
+- A PC before 0.24 ignores `attach`; the page gives up after 30 seconds
+  and says the PC may need a newer Horadric.
+
+## Added in 0.24: quests and Warriv
+
+A phone sees each project's quest log and can add to it. Read and add
+only: nothing drives Warriv or takes a quest from the phone yet.
+
+- Phone to PC, `{"t":"quests"}`. The PC answers
+  `{"t":"quests","list":[{"project","name","mode","warriv":{"on","drives","line"},"done","quests":[{"title","state","session","why","notes"}]}]}`,
+  one entry per project on the tiles, in their order, and sends it to
+  that phone again whenever it changes, for as long as it stays
+  connected.
+  - `mode` is the log's mode: `manual`, `review`, `warriv` or `auto`.
+  - `warriv.on` says Warriv hears the project's events, `drives` that
+    it drives it (starts and lands quests by itself), `line` what the
+    quests tile's Warriv line says now, may be empty.
+  - `done` counts the finished quests, which are not listed.
+  - `quests` are the rest, in the log's order. `state` is `open`,
+    `after` (waits for another quest), `tangled` (its `After:` lines
+    name no quest, several, or itself), `working`, `review` or
+    `blocked`. `session` is the id of the session that holds it, or
+    `null`. `why` is what it waits for or why it is blocked, may be
+    empty. `notes` are its first 12 notes lines.
+- Phone to PC, `{"t":"quest_add","project":"<path>","title","notes"}`:
+  adds an open quest at the end of that project's log, with the notes
+  under it, as the quests tile's plus does. The project must be one of
+  the tiles'. The title is put on one line, at most 200 characters;
+  notes at most 8000, blank lines dropped. The PC answers
+  `{"t":"quest_added","project","title"}` or `error`, and the new
+  `quests` follows.
+
+## Added in 0.24: long press a session
+
+A long press on a session in the list, or on the watched session's
+title, offers Rename, Copy last reply and Stop.
+
+- Phone to PC, `{"t":"rename","id","name"}`: names the session as its
+  tile menu's Rename does. The PC makes the name one line of at most 80
+  characters; an empty name gives the naming back to Claude's own
+  title. The new name arrives in `sessions`.
+- Phone to PC, `{"t":"stop","id"}`: ends the session as closing its pane
+  does: the agent's process, its tile and its saved place. The page asks
+  first. The session leaves `sessions`.
+- Phone to PC, `{"t":"reply","id"}`. The PC answers
+  `{"t":"reply","id","text"}`: the agent's last message, as its last Stop
+  hook carried it, or, when this Horadric was not up to hear that hook,
+  the newest reply in the transcript's tail. `text` is `null` when the
+  session has none yet. The page shows it and copies it.
+- Any of the three for a session the PC does not know answers `error`.
+  An older PC ignores them; the page says so when nothing changes in a
+  few seconds.
+
+## Added in 0.24: pushes that say what waits
+
+The push still goes from the PC straight to the phone's push service, now
+with a body only the phone can read.
+
+- The body is the JSON `{"pc","id","project","title","body","waiting"}`,
+  encrypted for each subscription apart as RFC 8291 says: `aes128gcm`
+  (RFC 8188), one record of size 4096, a fresh ECDH P-256 key pair and
+  salt per push, the subscription's `p256dh` and `auth`. The POST gains
+  `Content-Encoding: aes128gcm` and `Content-Type:
+  application/octet-stream`. The push service sees only ciphertext.
+- `pc` is the PC's id, `id` the session that started waiting (of several
+  at once, the least id), `project` its project's name. `title` is short
+  enough for a lock screen: "Allow Bash?" for a permission, "Waiting for
+  you" for a question or an idle prompt, "A dialog waits", "The turn
+  failed". `body` is "project · session", then on a second line what it
+  said when the title does not say it already. `waiting` counts every
+  session of that PC waiting now. The JSON stays under 4079 bytes.
+- The service worker shows `title` and `body` with the session as the
+  tag, so a second push about the same session replaces the first, and
+  sets the app badge to `waiting`. A click opens the page at
+  `/#s=<session id>&pc=<pc id>`, or tells a page already open, and the
+  page shows that session. While open, the page sets the badge to the
+  sessions waiting and clears it at none.
+- A push without a body (a PC before 0.24, or a subscription whose keys
+  will not encrypt) shows "A session waits for you" as before. A page
+  before 0.24 ignores the body and shows the same.

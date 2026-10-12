@@ -1,6 +1,7 @@
 //! Town Portal's end to end encryption: AES-256-GCM through Windows CNG,
 //! so the relay carries frames it cannot read. A payload is 12 bytes of
 //! nonce, then the ciphertext with its 16 byte tag, as WebCrypto makes it.
+//! Web Push's AES-128-GCM goes through here too.
 
 use windows::Win32::Security::Cryptography::{
     BCryptDecrypt, BCryptDestroyKey, BCryptEncrypt, BCryptGenRandom, BCryptGenerateSymmetricKey,
@@ -21,7 +22,7 @@ pub fn random(buf: &mut [u8]) {
 struct Key(BCRYPT_KEY_HANDLE);
 
 impl Key {
-    fn new(key: &[u8; 32]) -> Option<Key> {
+    fn new(key: &[u8]) -> Option<Key> {
         let mut handle = BCRYPT_KEY_HANDLE::default();
         // The GCM pseudo handle needs no provider opened and closed.
         let status = unsafe {
@@ -59,6 +60,14 @@ pub fn seal(key: &[u8; 32], plain: &[u8]) -> Vec<u8> {
 }
 
 fn seal_with(key: &[u8; 32], nonce: &[u8; NONCE], plain: &[u8]) -> Vec<u8> {
+    let mut sealed = nonce.to_vec();
+    sealed.extend_from_slice(&gcm(key, nonce, plain));
+    sealed
+}
+
+/// AES-GCM under a 16 or 32 byte key, giving the ciphertext with its tag
+/// and no nonce, which the other side works out for itself.
+pub fn gcm(key: &[u8], nonce: &[u8; NONCE], plain: &[u8]) -> Vec<u8> {
     let k = Key::new(key).expect("AES key");
     let mut tag = [0u8; TAG];
     let info = info(nonce, &mut tag);
@@ -76,14 +85,13 @@ fn seal_with(key: &[u8; 32], nonce: &[u8; NONCE], plain: &[u8]) -> Vec<u8> {
         )
     };
     assert!(status.is_ok(), "BCryptEncrypt failed: {status:?}");
-    let mut sealed = nonce.to_vec();
-    sealed.extend_from_slice(&out[..written as usize]);
-    sealed.extend_from_slice(&tag);
-    sealed
+    out.truncate(written as usize);
+    out.extend_from_slice(&tag);
+    out
 }
 
 /// Decrypts, `None` when the frame is short, forged or under another key.
-pub fn open(key: &[u8; 32], sealed: &[u8]) -> Option<Vec<u8>> {
+pub fn open(key: &[u8], sealed: &[u8]) -> Option<Vec<u8>> {
     if sealed.len() < NONCE + TAG {
         return None;
     }
