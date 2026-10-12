@@ -342,3 +342,24 @@ with a body only the phone can read.
 - A push without a body (a PC before 0.24, or a subscription whose keys
   will not encrypt) shows "A session waits for you" as before. A page
   before 0.24 ignores the body and shows the same.
+
+## Added in 0.24: answer from the notification
+
+- The push's JSON gains `options`, at most two `{"label","keys"}` taken
+  from the session's `ask`: Yes and No for a permission (never Always,
+  which a lock screen tap should not grant), the first two choices for a
+  question, none when the `ask` has none. Labels are cut to 40 bytes. It
+  gains `since` too, the `ask`'s `since` in Unix seconds, 0 without one.
+- Where the browser has notification actions (Android, desktop), the
+  service worker shows the options as buttons. A tap opens the page at
+  `/#s=<session>&pc=<pc>&a=<keys>&l=<label>&w=<since>`, or posts
+  `{"t":"open","id","pc","answer":{"keys","label","since"}}` to a page
+  already open.
+- The page wipes the fragment, then sends the answer once as an `input`,
+  when that PC's sessions list the session as still waiting, its `ask`'s
+  `since` the same as `w` and its options holding the keys. Anything else
+  drops the answer unsent, as does a wait of over five minutes for the
+  list. Either way the page shows the session.
+- iOS has no actions: there a tap opens the session as before. A PC that
+  sends no `options` gets no buttons, and a page that does not know them
+  ignores them.

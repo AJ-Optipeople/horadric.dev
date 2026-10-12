@@ -4,8 +4,11 @@
 //! through CNG in the UI crate. The push service carries the body but
 //! cannot read it: only the phone's browser holds the private key.
 
+use std::time::UNIX_EPOCH;
+
 use serde_json::{json, Value};
 
+use crate::ask::{Ask, Choice, Kind};
 use crate::portal::sha256;
 use crate::session::{waiting_on, Phase, Session, WaitReason};
 
@@ -122,10 +125,25 @@ pub fn wait_text(s: &Session, project: &str) -> (String, String) {
     (title, body)
 }
 
-/// The push's JSON: the PC and session to open, what to show, and how many
-/// sessions wait in all, for the app badge.
+/// The push's JSON: the PC and session to open, what to show, how many
+/// sessions wait in all, for the app badge, and the answers a notification
+/// can offer as buttons, with when the wait began so a late tap cannot
+/// answer a later one.
 pub fn payload(pc: &str, s: &Session, project: &str, waiting: usize) -> Value {
     let (title, body) = wait_text(s, project);
+    let options: Vec<Value> = s
+        .ask
+        .as_ref()
+        .map(buttons)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|c| json!({"label": cut(&c.label, 40), "keys": c.keys}))
+        .collect();
+    let since = s
+        .ask
+        .as_ref()
+        .and_then(|a| a.since.duration_since(UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_secs());
     json!({
         "pc": pc,
         "id": s.id,
@@ -133,7 +151,20 @@ pub fn payload(pc: &str, s: &Session, project: &str, waiting: usize) -> Value {
         "title": cut(&title, 120),
         "body": cut(&body, 600),
         "waiting": waiting,
+        "options": options,
+        "since": since,
     })
+}
+
+/// The two answers a notification has room for. A permission keeps Yes and
+/// No and leaves Always to the page, since a tap on a lock screen should
+/// not change what is allowed from then on. A question keeps its first two.
+pub fn buttons(ask: &Ask) -> Vec<&Choice> {
+    let all = &ask.options;
+    match (&ask.kind, all.as_slice()) {
+        (Kind::Permission, [first, .., last]) => vec![first, last],
+        _ => all.iter().take(2).collect(),
+    }
 }
 
 /// At most `max` bytes, cut on a character boundary, so a long question
@@ -274,5 +305,51 @@ mod tests {
         let body = p["body"].as_str().unwrap();
         assert!(body.len() <= 600 && body.ends_with('…'));
         assert!(p.to_string().len() <= MAX_PLAIN);
+    }
+
+    fn asking(kind: Kind, labels: &[&str]) -> Ask {
+        Ask {
+            kind,
+            tool: None,
+            detail: String::new(),
+            options: labels
+                .iter()
+                .enumerate()
+                .map(|(i, l)| Choice {
+                    label: l.to_string(),
+                    keys: (i + 1).to_string(),
+                })
+                .collect(),
+            since: UNIX_EPOCH + std::time::Duration::from_secs(1_760_000_000),
+        }
+    }
+
+    #[test]
+    fn a_permission_offers_yes_and_no_but_never_always() {
+        let labels =
+            |a: &Ask| -> Vec<String> { buttons(a).iter().map(|c| c.label.clone()).collect() };
+        let a = asking(Kind::Permission, &["Yes", "Always", "No"]);
+        assert_eq!(labels(&a), ["Yes", "No"]);
+        let a = asking(Kind::Permission, &["Yes", "No"]);
+        assert_eq!(labels(&a), ["Yes", "No"]);
+        let a = asking(Kind::Question, &["SQLite", "Postgres", "Both"]);
+        assert_eq!(labels(&a), ["SQLite", "Postgres"]);
+        assert!(buttons(&asking(Kind::Permission, &[])).is_empty());
+        assert!(buttons(&asking(Kind::Input, &[])).is_empty());
+    }
+
+    #[test]
+    fn the_payload_carries_the_buttons_and_when_the_wait_began() {
+        let mut s = session(Phase::Waiting(WaitReason::Permission), Some("Bash"), "");
+        let p = payload("0123", &s, "horadric", 1);
+        assert_eq!(p["options"], json!([]));
+        assert_eq!(p["since"], 0);
+        let long = "a".repeat(100);
+        s.ask = Some(asking(Kind::Question, &[&long, "Postgres", "Both"]));
+        let p = payload("0123", &s, "horadric", 1);
+        assert_eq!(p["since"], 1_760_000_000);
+        assert_eq!(p["options"][1], json!({"label": "Postgres", "keys": "2"}));
+        assert_eq!(p["options"].as_array().unwrap().len(), 2);
+        assert!(p["options"][0]["label"].as_str().unwrap().len() <= 40);
     }
 }
