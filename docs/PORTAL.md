@@ -225,6 +225,23 @@ from the phone, and a phone can make a new one.
   init` in it (skipped if git is missing), starts a session there and
   answers `started` as for `start`, or `error` with the reason.
 
+## Added in 0.24: a photo from the phone
+
+- Phone to PC, `{"t":"attach","id":"<session id>","name":"<file name>","data":"<b64url bytes>"}`.
+  The page shrinks the picture to a JPEG of at most 700 KB first, so the
+  sealed frame stays under the relay's 1 MB.
+- The PC saves it as `<data dir>\portal-attach\<session id>\<unix
+  time>-<name>`, the name cut to its last part and to letters, digits,
+  `.`, `-` and `_`, and answers
+  `{"t":"attached","id","name","path":"<the full path>"}`, or `error`
+  when the session is not on the PC or the file cannot be written. The
+  page puts the path into the message being typed, for the agent to
+  read.
+- Each attach first removes files in `portal-attach` older than a week,
+  and the session folders that leaves empty.
+- A PC before 0.24 ignores `attach`; the page gives up after 30 seconds
+  and says the PC may need a newer Horadric.
+
 ## Added in 0.24: quests and Warriv
 
 A phone sees each project's quest log and can add to it. Read and add
