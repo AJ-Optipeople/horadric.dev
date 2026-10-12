@@ -12,7 +12,8 @@ pub fn post(port: u16, path: &str, headers: &[(&str, &str)], body: &str) -> io::
 }
 
 /// Posts like [`post`] and waits up to `wait` for the reply, whose status
-/// and body it returns.
+/// and body it returns. An error once the request is out is [`sent`]: the
+/// app may have acted on it.
 pub fn ask(
     port: u16,
     path: &str,
@@ -34,14 +35,33 @@ pub fn ask(
     stream.write_all(req.as_bytes())?;
 
     let mut reply = String::new();
-    stream.read_to_string(&mut reply)?;
-    let code = status(&reply)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "not an HTTP reply"))?;
+    let read = stream.read_to_string(&mut reply).and_then(|_| {
+        status(&reply)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "not an HTTP reply"))
+    });
+    let code = read.map_err(|e| io::Error::new(e.kind(), Sent(e)))?;
     let body = reply
         .split_once("\r\n\r\n")
         .map_or("", |(_, b)| b)
         .to_string();
     Ok((code, body))
+}
+
+/// An error reading the reply to a request that went out whole.
+#[derive(Debug)]
+struct Sent(io::Error);
+
+impl std::fmt::Display for Sent {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl std::error::Error for Sent {}
+
+/// Whether an error from [`ask`] came after its request was sent.
+pub fn sent(e: &io::Error) -> bool {
+    e.get_ref().is_some_and(|inner| inner.is::<Sent>())
 }
 
 /// What a Horadric answers a command from a caller keeping its state in
@@ -64,6 +84,22 @@ fn status(reply: &str) -> Option<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_error_after_sending_says_so() {
+        use std::net::TcpListener;
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || drop(listener.accept()));
+        let e = ask(port, "/x", &[], "{}", Duration::from_millis(100)).unwrap_err();
+        server.join().unwrap();
+        assert!(sent(&e), "{e:?}");
+        let nobody = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let free = nobody.local_addr().unwrap().port();
+        drop(nobody);
+        let e = ask(free, "/x", &[], "{}", Duration::from_millis(100)).unwrap_err();
+        assert!(!sent(&e), "{e:?}");
+    }
 
     #[test]
     fn reads_status_code() {
