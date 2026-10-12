@@ -363,3 +363,22 @@ with a body only the phone can read.
 - iOS has no actions: there a tap opens the session as before. A PC that
   sends no `options` gets no buttons, and a page that does not know them
   ignores them.
+
+## Added in 0.24: what a session changed
+
+- Phone to PC, `{"t":"changes","id"}`. The PC answers
+  `{"t":"changes","id","files":[{"path","added","removed"}]}`: each file
+  the session changed, with the lines it added and removed, both `null`
+  for a binary file. Paths are relative to the top of the session's
+  tree, with forward slashes. Changes count from the session's last
+  commit, or for a session in a worktree of its own from where its
+  branch left the main tree, so its commits count too. Files git does
+  not track yet count as all added. A session outside a git repository
+  answers an empty list.
+- Phone to PC, `{"t":"diff","id","path"}`, for a path from that answer.
+  The PC answers `{"t":"diff","id","path","text","cut"}`: the file's
+  `git diff` from the same commit, without colour, cut at the end of a
+  line before 200 KB, `cut` true when it was. Any other path answers
+  `error`, so a phone reads only what the session changed.
+- Both run git away from the UI, so the answer may come after other
+  messages. A PC before 0.24 ignores both, and the page shows no list.

@@ -9,8 +9,9 @@ use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::Term;
 use alacritty_terminal::vte::ansi::{NamedColor, Rgb};
-// The frame crypto is Windows CNG, so the Mac build has no portal yet.
 use horadric_core::ask::Ask;
+use horadric_core::diff::FileDiff;
+// The frame crypto is Windows CNG, so the Mac build has no portal yet.
 #[cfg(windows)]
 use horadric_core::portal::{key32, Config};
 use horadric_core::tasks::{Mark, Mode, Ready, Task};
@@ -439,6 +440,50 @@ pub fn bad_project_name(name: &str) -> Option<&'static str> {
     None
 }
 
+/// The most of one file's diff a phone is sent. A generated file or a
+/// lock file can be megabytes, and a frame is at most 1 MB.
+pub const DIFF_MAX: usize = 200 * 1024;
+
+/// The changes message: each file the session changed, with the lines it
+/// added and removed, `null` for both in a binary file.
+pub fn changes_message(id: &str, files: &[FileDiff]) -> Value {
+    let list: Vec<Value> = files
+        .iter()
+        .map(|f| {
+            let (added, removed) = f.lines.unzip();
+            json!({"path": f.path, "added": added, "removed": removed})
+        })
+        .collect();
+    json!({"t": "changes", "id": id, "files": list})
+}
+
+/// The diff message for one file: its diff, cut at [`DIFF_MAX`] at the end
+/// of a line, and whether it was cut.
+pub fn diff_message(id: &str, path: &str, text: &str) -> Value {
+    let (text, cut) = cut_diff(text, DIFF_MAX);
+    json!({"t": "diff", "id": id, "path": path, "text": text, "cut": cut})
+}
+
+/// `text` whole when it fits in `max` bytes, else up to the last line that
+/// does, so the phone never draws half a line or half a character.
+pub fn cut_diff(text: &str, max: usize) -> (&str, bool) {
+    if text.len() <= max {
+        return (text, false);
+    }
+    let mut end = max;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let end = text[..end].rfind('\n').map_or(end, |i| i + 1);
+    (&text[..end], true)
+}
+
+/// Whether a phone may see `path`'s diff: only a file the session changed,
+/// so a path the phone makes up reads nothing else on the PC.
+pub fn listed(files: &[FileDiff], path: &str) -> bool {
+    files.iter().any(|f| f.path == path)
+}
+
 /// The longest name a phone may give a session, in characters.
 pub const NAME_MAX: usize = 80;
 
@@ -842,6 +887,51 @@ mod tests {
             assert!(bad_project_name(bad).is_some(), "{bad}");
         }
         assert!(bad_project_name(&"a".repeat(65)).is_some());
+    }
+
+    fn changed(path: &str, lines: Option<(u32, u32)>) -> FileDiff {
+        FileDiff {
+            path: path.into(),
+            lines,
+        }
+    }
+
+    #[test]
+    fn changes_message_counts_lines_and_leaves_binaries_blank() {
+        let m = changes_message(
+            "s1",
+            &[
+                changed("src/a.rs", Some((12, 3))),
+                changed("logo.png", None),
+            ],
+        );
+        assert_eq!(m["t"], "changes");
+        assert_eq!(m["id"], "s1");
+        assert_eq!(m["files"][0]["path"], "src/a.rs");
+        assert_eq!(m["files"][0]["added"], 12);
+        assert_eq!(m["files"][0]["removed"], 3);
+        assert!(m["files"][1]["added"].is_null());
+        assert!(m["files"][1]["removed"].is_null());
+    }
+
+    #[test]
+    fn a_long_diff_is_cut_at_the_end_of_a_line() {
+        assert_eq!(cut_diff("+a\n+b\n", 100), ("+a\n+b\n", false));
+        assert_eq!(cut_diff("+a\n+bcd\n", 5), ("+a\n", true));
+        // No line ends in reach: cut at a character, never inside one.
+        assert_eq!(cut_diff("+\u{e6}\u{e6}", 2), ("+", true));
+        let m = diff_message("s1", "a", &"+x\n".repeat(DIFF_MAX));
+        assert_eq!(m["cut"], true);
+        assert!(m["text"].as_str().unwrap().len() <= DIFF_MAX);
+        assert_eq!(m["path"], "a");
+    }
+
+    #[test]
+    fn only_a_changed_file_may_be_diffed() {
+        let files = [changed("src/a.rs", Some((1, 0)))];
+        assert!(listed(&files, "src/a.rs"));
+        assert!(!listed(&files, "../secret.txt"));
+        assert!(!listed(&files, "src/b.rs"));
     }
 
     #[test]
