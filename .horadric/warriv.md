@@ -4,6 +4,7 @@
 - Do not wait for main's checks before casting a ship stone: nothing runs them between landings, and the ship session runs all three first (RELEASING.md step 2) and stops on red.
 
 ## Lately
+- 2026-10-12 Round (main at 89bc9a5): the landing counted is the iOS keyboard quest in horadric.portal, and only my memory commits since the 2a119ee ship (reloaded fine), so no ship. Plain terminals and cloud tiles still with the human. Nothing to do.
 - 2026-10-12 Round: the iOS keyboard quest landed in horadric.portal (c2295ed), a page change with no horadric.dev code, so no ship local; the portal waits on the human to deploy. Cloud tiles and plain terminals still with the human. Nothing else to do.
 - 2026-10-12 Wake: "Propose tiles for Claude Code cloud sessions" blocked again, same report, no human answer in its notes. Still the human's pick, nothing new to do.
 - 2026-10-12 Wake: "Propose tiles for Claude Code cloud sessions" blocked again, same report, no human answer in its notes. Still the human's pick, nothing new to do.
