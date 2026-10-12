@@ -3,8 +3,10 @@
 use std::time::{Duration, SystemTime};
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::agent::Agent;
+use crate::ask::{self, Ask};
 use crate::diff::Diff;
 use crate::event::{HookEvent, ModAgent};
 use crate::rarity::{self, Loot, Rarity};
@@ -62,6 +64,11 @@ impl Phase {
 
     pub fn is_waiting(&self) -> bool {
         matches!(self, Phase::Waiting(_))
+    }
+
+    /// Waits on an answer from the human, not on an error to be dealt with.
+    pub fn asks(&self) -> bool {
+        self.is_waiting() && !matches!(self, Phase::Waiting(WaitReason::Error(_)))
     }
 
     /// Claude is in the middle of a turn, so stopping it now would cut the
@@ -156,6 +163,10 @@ pub struct Session {
     /// on it. A phase is not saved, so neither is this.
     #[serde(skip)]
     pub waits_on: Option<String>,
+    /// What it asks while it waits, for a phone to show and answer. Gone
+    /// when the phase moves on.
+    #[serde(skip)]
+    pub ask: Option<Ask>,
     /// When the agent last did something, newest last, going back at most
     /// [`ACTIVITY_SPAN`]. The tile draws it as a trace of the last minutes.
     #[serde(skip)]
@@ -240,6 +251,7 @@ impl Session {
             status: None,
             tool: None,
             waits_on: None,
+            ask: None,
             activity: Vec::new(),
             agents: Vec::new(),
             agent_types: Vec::new(),
@@ -411,10 +423,16 @@ impl Session {
                 if let Some(t) = &event.tool_name {
                     self.waits_on = Some(t.clone());
                     self.last_line = waiting_on(t);
+                    let always = event
+                        .permission_suggestions
+                        .as_ref()
+                        .and_then(Value::as_array)
+                        .is_some_and(|s| !s.is_empty());
+                    self.ask = Some(Ask::permission(t, event.tool_input.as_ref(), always, now));
                 }
                 Some(Phase::Waiting(WaitReason::Permission))
             }
-            "Notification" => self.apply_notification(event),
+            "Notification" => self.apply_notification(event, now),
             // Grok's last `Stop` comes after its `SessionEnd`, as it quits.
             "Stop" if event.reason.as_deref() == Some("shutdown") => None,
             "Stop" => {
@@ -478,6 +496,12 @@ impl Session {
         };
         if self.phase != Phase::Waiting(WaitReason::Permission) {
             self.waits_on = None;
+        }
+        if !self.phase.asks() {
+            self.ask = None;
+        }
+        if self.agent != Agent::Claude {
+            self.ask = self.ask.take().map(Ask::without_keys);
         }
         changed
     }
@@ -719,7 +743,7 @@ impl Session {
         (bars, (now_at - newest) as f32)
     }
 
-    fn apply_notification(&mut self, event: &HookEvent) -> Option<Phase> {
+    fn apply_notification(&mut self, event: &HookEvent, now: SystemTime) -> Option<Phase> {
         let kind = event.notification_type.as_deref().unwrap_or("");
         let next = match kind {
             "permission_prompt" => Phase::Waiting(WaitReason::Permission),
@@ -745,6 +769,26 @@ impl Session {
             (Some(t), _) if kind == "permission_prompt" => self.last_line = waiting_on(t),
             (_, Some(m)) => self.last_line = first_line(m),
             _ => {}
+        }
+        // The `PermissionRequest` before it said more, and when it began.
+        let asked = kind == "permission_prompt"
+            && self
+                .ask
+                .as_ref()
+                .is_some_and(|a| a.kind != ask::Kind::Input);
+        if next.asks() && !asked {
+            let words = event.message.as_deref().unwrap_or(&self.last_line);
+            self.ask = Some(match (kind, &self.waits_on) {
+                ("permission_prompt", Some(t)) => {
+                    Ask::permission(t, event.tool_input.as_ref(), false, now)
+                }
+                ("permission_prompt", None) => Ask {
+                    tool: None,
+                    detail: words.to_string(),
+                    ..Ask::permission("", None, false, now)
+                },
+                _ => Ask::input(words, now),
+            });
         }
         Some(next)
     }
@@ -1166,6 +1210,98 @@ Always."
         assert_eq!(s.last_line, "waiting on bash");
         s.apply(&ev("Stop"), now());
         assert_eq!(s.waits_on, None);
+    }
+
+    #[test]
+    fn a_permission_request_says_what_it_asks_until_answered() {
+        let mut s = Session::new("g1", "x", "");
+        s.apply(&ev("UserPromptSubmit"), now());
+        let mut p = ev("PermissionRequest");
+        p.tool_name = Some("Bash".into());
+        p.tool_input = Some(serde_json::json!({"command": "cargo test"}));
+        p.permission_suggestions = Some(serde_json::json!([{"type": "addRules"}]));
+        let asked = now();
+        s.apply(&p, asked);
+        let a = s.ask.clone().unwrap();
+        assert_eq!(
+            (a.kind.word(), a.detail.as_str()),
+            ("permission", "cargo test")
+        );
+        assert_eq!(a.options.len(), 3);
+        assert_eq!(a.since, asked);
+        // The notification after it changes nothing about the ask.
+        let mut n = ev("Notification");
+        n.notification_type = Some("permission_prompt".into());
+        n.message = Some("Claude needs your permission to use Bash".into());
+        s.apply(&n, now());
+        assert_eq!(s.ask, Some(a));
+        s.apply(&ev("PostToolUse"), now());
+        assert_eq!(s.ask, None);
+    }
+
+    #[test]
+    fn claude_code_2_1_296s_own_payloads_make_the_asks() {
+        // As a real Haiku session sent them, ids and paths cut.
+        let hook = |json: &str| HookEvent::from_json(json.as_bytes()).unwrap();
+        let mut s = Session::new("g1", "x", "");
+        s.apply(&ev("UserPromptSubmit"), now());
+        s.apply(&hook(r#"{"session_id":"c1","hook_event_name":"PermissionRequest","permission_mode":"default","tool_name":"Bash","tool_input":{"command":"echo hello > out.txt","description":"Write \"hello\" to out.txt"},"permission_suggestions":[{"type":"addDirectories","directories":["C:/p"],"destination":"session"}]}"#), now());
+        s.apply(&hook(r#"{"session_id":"c1","hook_event_name":"Notification","message":"Claude needs your permission","notification_type":"permission_prompt"}"#), now());
+        let a = s.ask.clone().unwrap();
+        assert_eq!(a.detail, "echo hello > out.txt");
+        let keys: Vec<_> = a.options.iter().map(|c| c.keys.as_str()).collect();
+        assert_eq!(keys, ["1", "2", "\u{1b}"]);
+
+        s.apply(&hook(r#"{"session_id":"c1","hook_event_name":"PermissionRequest","tool_name":"AskUserQuestion","tool_input":{"questions":[{"question":"Tabs or spaces?","header":"Indentation","options":[{"label":"Tabs","description":"Use tab characters"},{"label":"Spaces","description":"Use space characters"}],"multiSelect":false}]}}"#), now());
+        let a = s.ask.clone().unwrap();
+        assert_eq!(
+            (a.kind.word(), a.detail.as_str()),
+            ("question", "Tabs or spaces?")
+        );
+        assert_eq!(a.options[1].label, "Spaces");
+    }
+
+    #[test]
+    fn an_ask_user_question_is_a_question() {
+        let mut s = Session::new("g1", "x", "");
+        s.apply(&ev("UserPromptSubmit"), now());
+        let mut p = ev("PermissionRequest");
+        p.tool_name = Some("AskUserQuestion".into());
+        p.tool_input = Some(serde_json::json!({"questions": [
+            {"question": "Tabs or spaces?", "options": [{"label": "Tabs"}, {"label": "Spaces"}]}
+        ]}));
+        s.apply(&p, now());
+        let a = s.ask.clone().unwrap();
+        assert_eq!(
+            (a.kind.word(), a.detail.as_str()),
+            ("question", "Tabs or spaces?")
+        );
+        assert_eq!(a.options[1].keys, "2");
+    }
+
+    #[test]
+    fn waiting_without_a_tool_asks_in_the_notifications_words() {
+        let mut s = Session::new("g1", "x", "");
+        s.apply(&ev("UserPromptSubmit"), now());
+        let mut n = ev("Notification");
+        n.notification_type = Some("permission_prompt".into());
+        n.message = Some("Claude needs your permission".into());
+        s.apply(&n, now());
+        let a = s.ask.clone().unwrap();
+        assert_eq!((a.kind.word(), a.tool.clone()), ("permission", None));
+        assert_eq!(a.detail, "Claude needs your permission");
+
+        let mut s = Session::new("g2", "x", "");
+        s.apply(&ev("UserPromptSubmit"), now());
+        n.notification_type = Some("elicitation_dialog".into());
+        n.message = Some("Pick a server".into());
+        s.apply(&n, now());
+        assert_eq!(s.ask.as_ref().map(|a| a.kind.word()), Some("input"));
+        // A failed turn waits too, but asks nothing.
+        let mut f = ev("StopFailure");
+        f.error_type = Some("rate_limit".into());
+        s.apply(&f, now());
+        assert_eq!(s.ask, None);
     }
 
     #[test]

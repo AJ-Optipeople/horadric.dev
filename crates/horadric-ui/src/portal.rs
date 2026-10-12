@@ -9,8 +9,9 @@ use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::Term;
 use alacritty_terminal::vte::ansi::{NamedColor, Rgb};
-// The frame crypto is Windows CNG, so the Mac build has no portal yet.
+use horadric_core::ask::Ask;
 use horadric_core::diff::FileDiff;
+// The frame crypto is Windows CNG, so the Mac build has no portal yet.
 #[cfg(windows)]
 use horadric_core::portal::{key32, Config};
 use horadric_core::tasks::{Mark, Mode, Ready, Task};
@@ -39,7 +40,9 @@ pub fn phase_word(phase: &Phase) -> &'static str {
 }
 
 /// One session as the list on a phone shows it. `paused` is a session with
-/// no live host, which the phone offers to resume.
+/// no live host, which the phone offers to resume. A session that waits on
+/// the human says what it asks; one whose program said it waits, with no
+/// hook to say on what, asks for input in its own words.
 pub fn session_entry(s: &Session, project: &str, paused: bool) -> Value {
     let paused = paused || matches!(s.phase, Phase::Paused);
     let line = if paused && s.last_line.is_empty() {
@@ -47,14 +50,22 @@ pub fn session_entry(s: &Session, project: &str, paused: bool) -> Value {
     } else {
         s.last_line.clone()
     };
-    json!({
+    let mut entry = json!({
         "id": s.id,
         "name": s.label(),
         "project": project,
         "phase": phase_word(&s.phase),
         "line": line,
         "paused": paused,
-    })
+    });
+    if !paused && s.phase.asks() {
+        let ask = s
+            .ask
+            .clone()
+            .unwrap_or_else(|| Ask::input(&s.last_line, s.since));
+        entry["ask"] = ask.to_json();
+    }
+    entry
 }
 
 /// The projects message: each as (path, name), in the tiles' order.
@@ -644,6 +655,36 @@ mod tests {
         let s = Session::new("a1", "fix", "C:/p/x");
         assert_eq!(session_entry(&s, "x", true)["paused"], true);
         assert_eq!(session_entry(&s, "x", false)["paused"], false);
+    }
+
+    #[test]
+    fn a_waiting_session_says_what_it_asks() {
+        let mut s = Session::new("a1", "fix", "C:/p/x");
+        assert!(session_entry(&s, "x", false).get("ask").is_none());
+        s.phase = Phase::Waiting(WaitReason::Permission);
+        s.ask = Some(Ask::permission(
+            "Bash",
+            Some(&json!({"command": "ls"})),
+            false,
+            s.since,
+        ));
+        let e = session_entry(&s, "x", false);
+        assert_eq!(e["ask"]["kind"], "permission");
+        assert_eq!(e["ask"]["detail"], "ls");
+        assert!(session_entry(&s, "x", true).get("ask").is_none());
+    }
+
+    #[test]
+    fn a_wait_no_hook_explained_asks_for_input_in_its_own_words() {
+        let mut s = Session::new("a1", "fix", "C:/p/x");
+        s.phase = Phase::Waiting(WaitReason::Input);
+        s.last_line = "Which branch?".into();
+        let e = session_entry(&s, "x", false);
+        assert_eq!(e["ask"]["kind"], "input");
+        assert_eq!(e["ask"]["detail"], "Which branch?");
+        assert_eq!(e["ask"]["options"], json!([]));
+        s.phase = Phase::Waiting(WaitReason::Error("rate_limit".into()));
+        assert!(session_entry(&s, "x", false).get("ask").is_none());
     }
 
     #[test]
