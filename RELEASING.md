@@ -119,6 +119,7 @@ and only reloads this machine.
    instance (see CLAUDE.md). Tests prove it compiles and signs; they do
    not prove the tiles appear.
 9. Publish the draft (below).
+10. Bump the Chocolatey package (below).
 
 ## 3. Publishing is shipping
 
@@ -144,7 +145,37 @@ The fix is a new release with a higher version. Deleting or turning a
 published release back into a draft only stops installs that have not
 updated yet.
 
-## 4. This machine
+## 4. Chocolatey
+
+Horadric is on Chocolatey as
+[`horadric`](https://community.chocolatey.org/packages/horadric). The
+package lives in the socialsandbox repo, in
+`products/horadric/chocolatey/horadric`, and downloads
+`horadric-x64.zip` from the release. After each published release:
+
+1. In `horadric.nuspec`, set `version` and the tag in `releaseNotes`.
+2. In `tools/chocolateyInstall.ps1`, set `url64bit` to the new tag and
+   `checksum64` to the zip's SHA-256:
+
+   ```powershell
+   gh release download v0.2.0 --repo Mopra/horadric.dev --pattern horadric-x64.zip --dir $env:TEMP\choco
+   (Get-FileHash $env:TEMP\choco\horadric-x64.zip -Algorithm SHA256).Hash
+   ```
+
+3. From the package folder, pack and push:
+
+   ```powershell
+   choco pack
+   choco push horadric.0.2.0.nupkg --source https://push.chocolatey.org/
+   ```
+
+Every version is moderated, so it shows on Chocolatey hours or days
+after the release. Installs from Chocolatey update themselves like any
+other, which is why the README says the app can run ahead of the
+Chocolatey version. A skipped bump costs nothing but a staler first
+install.
+
+## 5. This machine
 
 The Horadric on this machine ships from the checkout with `horadric
 reload`, as CLAUDE.md says, and does not need the release. After a

@@ -164,6 +164,17 @@ You need Windows 10 or 11 and at least one of
 [Claude Code](https://docs.anthropic.com/en/docs/claude-code),
 [Codex](https://github.com/openai/codex) or Grok Build.
 
+With [Chocolatey](https://community.chocolatey.org/packages/horadric):
+
+```
+choco install horadric
+```
+
+Horadric updates itself once installed, so it can run ahead of the
+version Chocolatey lists.
+
+Or by hand:
+
 1. Download `horadric.exe` and `horadricw.exe` from the
    [latest release](https://github.com/Mopra/horadric.dev/releases/latest)
    into the same folder.
