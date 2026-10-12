@@ -406,6 +406,7 @@ impl App {
             let dir = self
                 .project_dir(&key)
                 .ok_or_else(|| format!("{project} is not there any more."))?;
+            trust_for_phone(&dir);
             return self.start(None, dir, Vec::new());
         }
         let offered = self
@@ -416,7 +417,9 @@ impl App {
         if !offered {
             return Err(format!("{project} is not one of the PC's projects."));
         }
-        self.start(None, PathBuf::from(project), Vec::new())
+        let dir = PathBuf::from(project);
+        trust_for_phone(&dir);
+        self.start(None, dir, Vec::new())
     }
 
     /// The folders projects live in, each with its subfolders: the
@@ -465,6 +468,7 @@ impl App {
         }
         std::fs::create_dir(&dir).map_err(|e| format!("Could not make {name}: {e}"))?;
         git_init(&dir);
+        trust_for_phone(&dir);
         let project = dir.to_string_lossy().into_owned();
         let id = self.start(None, dir, Vec::new())?;
         Ok((project, id))
@@ -693,6 +697,16 @@ fn subfolders(root: &Path) -> Vec<portal::Folder> {
         })
         .collect();
     portal::order_folders(list)
+}
+
+/// No one at the PC answers Claude Code's "Do you trust this folder?" for
+/// a session the phone started, and the phone's human picked the folder.
+fn trust_for_phone(dir: &Path) {
+    if let Err(e) = crate::accounts::trust(dir) {
+        if std::env::var_os("HORADRIC_DEBUG").is_some() {
+            eprintln!("horadric: could not trust {}: {e}", dir.display());
+        }
+    }
 }
 
 /// `git init` in a new project, without a console window. A PC without

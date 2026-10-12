@@ -14,6 +14,7 @@ use std::time::SystemTime;
 
 use horadric_core::accounts::{self, Account, Accounts};
 use horadric_core::agent::Agent;
+use horadric_core::trust;
 use serde_json::Value;
 use windows::Win32::Foundation::{LocalFree, HLOCAL};
 use windows::Win32::Security::Cryptography::{
@@ -96,6 +97,24 @@ fn write_json(path: &Path, value: &Value) -> io::Result<()> {
     text.push('\n');
     fs::write(&tmp, text)?;
     fs::rename(&tmp, path)
+}
+
+/// Tells Claude Code it may trust `dir`, so a session started where no one
+/// sits at the PC does not wait on its trust prompt.
+pub fn trust(dir: &Path) -> io::Result<()> {
+    let path =
+        config_path().ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no home folder"))?;
+    let mut config = match read_json(&path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Value::Null,
+        // A file being written is not ours to replace with less.
+        Err(e) => return Err(e),
+    };
+    let key = trust::project_key(&dir.to_string_lossy());
+    match trust::trust(&mut config, &key) {
+        true => write_json(&path, &config),
+        false => Ok(()),
+    }
 }
 
 /// Who `agent` is logged in as now, by id. Claude's from `.claude.json`
