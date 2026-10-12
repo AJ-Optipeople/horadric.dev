@@ -326,6 +326,23 @@ pub fn bad_project_name(name: &str) -> Option<&'static str> {
     None
 }
 
+/// The longest name a phone may give a session, in characters.
+pub const NAME_MAX: usize = 80;
+
+/// A name a phone gave a session, made fit for a tile: one line, at
+/// most [`NAME_MAX`] characters. Empty gives the naming back to Claude.
+pub fn session_name(raw: &str) -> String {
+    let line: String = raw
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(NAME_MAX)
+        .collect();
+    line.trim_end().to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -547,5 +564,15 @@ mod tests {
             assert!(bad_project_name(bad).is_some(), "{bad}");
         }
         assert!(bad_project_name(&"a".repeat(65)).is_some());
+    }
+
+    #[test]
+    fn a_name_from_the_phone_is_one_short_line() {
+        assert_eq!(session_name("  Fix\nthe   login\t"), "Fix the login");
+        assert_eq!(session_name("a\u{7}b"), "ab");
+        assert_eq!(session_name("   "), "");
+        assert_eq!(session_name(&"x".repeat(200)).chars().count(), NAME_MAX);
+        let cut = format!("{} y", "x".repeat(NAME_MAX - 1));
+        assert_eq!(session_name(&cut), "x".repeat(NAME_MAX - 1));
     }
 }
