@@ -4,6 +4,10 @@
 - Do not wait for main's checks before casting a ship stone: nothing runs them between landings, and the ship session runs all three first (RELEASING.md step 2) and stops on red.
 
 ## Lately
+- 2026-10-12 Round (main at 2a119ee): the 06:25 ship reloaded fine; "Answer a waiting session from the notification" landed since (db33603) and the tree is clean apart from Horadric's own files, so cast "Ship Local". Plain terminals and cloud tiles still with the human.
+- 2026-10-12 Wake: "Propose tiles for Claude Code cloud sessions" blocked again, same report, no human answer in its notes. Still the human's pick, nothing new to do.
+- 2026-10-12 Round at 06:25 (main at 20b24b9): a reload started at 06:25:44 from a release exe built 06:25:37, after 20b24b9 landed, so it carries all four waiting quests. No second cast.
+- 2026-10-12 Round after the human left (06:25, main at 20b24b9): the 09d9d3b ship still has not reloaded (last reload 06:11, release exe 06:17, cargo busy), so no second cast. "A phone photo needs no permission" landed too (2f2efc0), added to the Open ship line. Plain terminals and cloud tiles still with the human.
 - 2026-10-12 Round right after (06:23, main still at 94a3ad1): the 09d9d3b ship has not reloaded yet and cargo is still busy, so no second cast. Nothing to do.
 - 2026-10-12 Round at 06:23 after "See what a session changed" landed (1ee360f, main at 94a3ad1): the ship cast for 09d9d3b has still not reloaded (last reload 06:11, release exe 06:17, cargo busy), so no second cast. The Open line for 900f7c1 now covers 1ee360f and 096bd41 too. Plain terminals and cloud tiles still with the human.
 - 2026-10-12 Round at 06:20 (main at f7b0a21): the ship cast for 09d9d3b is still building (cargo running since 06:13, release exe 06:17, last reload 06:11), so no second cast. Plain terminals and cloud tiles still with the human.
@@ -113,6 +117,6 @@
 - 2026-10-06 Daily look back: the day was clean (24 quests completed, all 24 merged by themselves).
 
 ## Open
-- Ship for 900f7c1, 096bd41 and 1ee360f (landed 06:17 to 06:22): the ship under way built its release exe at 06:17, before most of them. Once a reload after 06:20 shows in reload.log and cargo is idle, cast "Ship Local" again unless that ship's build included be7bd22.
+- Ship Local cast for 2a119ee (db33603): check reload.log says "reloaded" next round. If it rolled back, look at why before casting again.
 - "Propose tiles for Claude Code cloud sessions": waits on the human's pick of option in PLAN.md "Cloud session tiles" (recommended: attach with claude --cloud, OSC 7501, list later). Once picked, file the build quests.
 - "OSC 7501: plain terminals": handed to the human to restart its dead session (silent 11 hours). Once it moves, its Codex and Grok follow-up can start.
