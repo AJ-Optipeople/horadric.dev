@@ -14,6 +14,7 @@ use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
 use horadric_core::portal::{b64url, fresh_message, Config, Paired};
+use horadric_core::worktree::Worktree;
 use horadric_core::Phase;
 use serde_json::{json, Value};
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
@@ -25,6 +26,7 @@ use crate::portal_crypto;
 use crate::portal_link::{Incoming, Link};
 use crate::portal_push::{self, Subs};
 use crate::project::{folder_key, project_key, project_name};
+use crate::worktree;
 
 /// How often `portal.json` is read, so `horadric portal` takes hold soon.
 const CHECK_EVERY: Duration = Duration::from_secs(2);
@@ -99,6 +101,10 @@ struct Asked {
     folders: Vec<u32>,
     /// New projects: channel, root, folder name.
     creates: Vec<(u32, String, String)>,
+    /// What a session changed: channel, session.
+    changes: Vec<(u32, String)>,
+    /// One changed file's diff: channel, session, path.
+    diffs: Vec<(u32, String, String)>,
     /// Pairing attempts: channel, the name the phone gave, the ticket key.
     pairs: Vec<(u32, String, [u8; 32])>,
 }
@@ -244,6 +250,12 @@ impl App {
                 phone.screen = None;
             }
         }
+        for (ch, id) in asked.changes {
+            self.portal_changes(ch, &id, None);
+        }
+        for (ch, id, path) in asked.diffs {
+            self.portal_changes(ch, &id, Some(path));
+        }
         let pc = std::env::var("COMPUTERNAME").unwrap_or_else(|_| "PC".to_string());
         let list = self.portal_sessions();
         let projects = self.portal_projects();
@@ -349,6 +361,30 @@ impl App {
         for (ch, msg) in out {
             p.send(ch, &msg);
         }
+    }
+
+    /// Answers a phone's `changes`, or with `path` its `diff`, from a
+    /// thread of its own, since git can take a while in a big tree.
+    fn portal_changes(&self, ch: u32, id: &str, path: Option<String>) {
+        let Some(p) = &self.portal else {
+            return;
+        };
+        let Some((_, key)) = p.phones.get(&ch).and_then(|ph| ph.who.clone()) else {
+            return;
+        };
+        let session = self.shared.registry.lock().ok().and_then(|r| {
+            r.get(id)
+                .map(|s| (PathBuf::from(&s.cwd), s.worktree.clone()))
+        });
+        let outbox = p.link.outbox();
+        let id = id.to_string();
+        std::thread::spawn(move || {
+            let reply = match session {
+                Some((cwd, tree)) => changes_reply(&id, &cwd, tree.as_ref(), path.as_deref()),
+                None => json!({"t": "error", "text": "That session is not on the PC."}),
+            };
+            outbox.send(ch, &key, &reply);
+        });
     }
 
     /// The sessions message, from the registry. A session with no live
@@ -641,6 +677,16 @@ fn heard_from(p: &mut Portal, ch: u32, sealed: &[u8], now: u64, asked: &mut Aske
             }
         }
         Some("folders") => asked.folders.push(ch),
+        Some("changes") => {
+            if let Some(id) = text("id") {
+                asked.changes.push((ch, id));
+            }
+        }
+        Some("diff") => {
+            if let (Some(id), Some(path)) = (text("id"), text("path")) {
+                asked.diffs.push((ch, id, path));
+            }
+        }
         Some("create") => {
             if let (Some(root), Some(name)) = (text("root"), text("name")) {
                 asked.creates.push((ch, root, name));
@@ -663,6 +709,29 @@ fn heard_from(p: &mut Portal, ch: u32, sealed: &[u8], now: u64, asked: &mut Aske
             }
         }
         _ => {}
+    }
+}
+
+/// The answer to `changes`, or to `diff` for `path`. A session outside a
+/// repository has changed nothing a phone can see; a path that is not one
+/// of its changed files gets an error, not the file.
+fn changes_reply(id: &str, cwd: &Path, tree: Option<&Worktree>, path: Option<&str>) -> Value {
+    let Some((top, base)) = worktree::changes_base(cwd, tree) else {
+        return match path {
+            None => portal::changes_message(id, &[]),
+            Some(_) => json!({"t": "error", "text": "That session is not in a git repository."}),
+        };
+    };
+    let files = worktree::changed_files(&top, &base).unwrap_or_default();
+    let Some(path) = path else {
+        return portal::changes_message(id, &files);
+    };
+    if !portal::listed(&files, path) {
+        return json!({"t": "error", "text": "That file has no changes now."});
+    }
+    match worktree::file_diff(&top, &base, path) {
+        Some(text) => portal::diff_message(id, path, &text),
+        None => json!({"t": "error", "text": "git could not diff that file."}),
     }
 }
 

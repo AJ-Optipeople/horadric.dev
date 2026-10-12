@@ -163,8 +163,23 @@ impl Link {
     /// the network: the frame is queued for the writer, and dropped if
     /// the relay is not connected by the time it is sent.
     pub fn send(&self, ch: u32, key: &[u8; 32], msg: &serde_json::Value) {
+        self.outbox().send(ch, key, msg);
+    }
+
+    /// A way to send that another thread can keep, for an answer that
+    /// takes a while to find. Sends nothing once the link is gone.
+    pub fn outbox(&self) -> Outbox {
+        Outbox(self.out.clone())
+    }
+}
+
+/// Sends to phones from any thread, as [`Link::send`] does.
+pub struct Outbox(Option<Sender<Out>>);
+
+impl Outbox {
+    pub fn send(&self, ch: u32, key: &[u8; 32], msg: &serde_json::Value) {
         let sealed = seal(key, msg.to_string().as_bytes());
-        if let Some(out) = &self.out {
+        if let Some(out) = &self.0 {
             let _ = out.send((false, frame(ch, &sealed)));
         }
     }
