@@ -4,6 +4,8 @@
 - Do not wait for main's checks before casting a ship stone: nothing runs them between landings, and the ship session runs all three first (RELEASING.md step 2) and stops on red.
 
 ## Lately
+- 2026-10-12 Round right after (main still at 09d9d3b): the "Ship Local" cast a minute earlier has not reloaded yet, so no second cast. Nothing to do.
+- 2026-10-12 Round (main at 09d9d3b): the quests and Warriv ship reloaded fine at 06:11, and push encryption (048ede6) landed on main after it, tree clean apart from Horadric's own files, so cast "Ship Local". Plain terminals and cloud tiles still with the human.
 - 2026-10-12 Round right after "Quests and Warriv on the phone" landed (main at 1bcbaba): "Ship Local" was cast for it a minute earlier and has not reloaded yet, so no second cast. Plain terminals and cloud tiles still with the human. Nothing to do.
 - 2026-10-12 Round (main at 248a2ed): the long press ship reloaded fine; "Quests and Warriv on the phone" landed since (bd49f10) and the shared tree is clean apart from Horadric's own files, so cast "Ship Local". Plain terminals and cloud tiles still with the human.
 - 2026-10-12 Wake: "Propose tiles for Claude Code cloud sessions" blocked again, same report, no human answer in its notes. Still the human's pick, nothing new to do.
