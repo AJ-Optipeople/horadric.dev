@@ -4,6 +4,9 @@
 - Do not wait for main's checks before casting a ship stone: nothing runs them between landings, and the ship session runs all three first (RELEASING.md step 2) and stops on red.
 
 ## Lately
+- 2026-10-12 Round (main at 248a2ed): the long press ship reloaded fine; "Quests and Warriv on the phone" landed since (bd49f10) and the shared tree is clean apart from Horadric's own files, so cast "Ship Local". Plain terminals and cloud tiles still with the human.
+- 2026-10-12 Wake: "Propose tiles for Claude Code cloud sessions" blocked again, same report, no human answer in its notes. Still the human's pick, nothing new to do.
+- 2026-10-12 Round after "Long press a session to rename, stop or copy" landed (4f6f3dc, merged at 9ab9f69): the photos ship reloaded fine and the shared tree is clean apart from Horadric's own files, so cast "Ship Local". Plain terminals and cloud tiles still with the human.
 - 2026-10-12 Round (main at f70d853): the photos ship reloaded fine and only memory commits since, so no new ship. Town Portal quests under way, plain terminals and cloud tiles still with the human. Nothing to do.
 - 2026-10-12 Round right after the photos landing (main at af075d7): "Ship Local" was cast for it a minute earlier and has not reloaded yet, so no second cast. Plain terminals and cloud tiles still with the human. Nothing to do.
 - 2026-10-12 Round after "Save photos a phone attaches" landed (fa585c7, merged at 672dae3): code since the last ship and the shared tree clean apart from Horadric's own files, so cast "Ship Local". Nine Town Portal quests under way in their worktrees. Plain terminals and cloud tiles still with the human.
