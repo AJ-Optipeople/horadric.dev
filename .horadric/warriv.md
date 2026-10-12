@@ -4,6 +4,9 @@
 - Do not wait for main's checks before casting a ship stone: nothing runs them between landings, and the ship session runs all three first (RELEASING.md step 2) and stops on red.
 
 ## Lately
+- 2026-10-12 Round: the iOS keyboard quest landed in horadric.portal (c2295ed), a page change with no horadric.dev code, so no ship local; the portal waits on the human to deploy. Cloud tiles and plain terminals still with the human. Nothing else to do.
+- 2026-10-12 Wake: "Propose tiles for Claude Code cloud sessions" blocked again, same report, no human answer in its notes. Still the human's pick, nothing new to do.
+- 2026-10-12 Wake: "Propose tiles for Claude Code cloud sessions" blocked again, same report, no human answer in its notes. Still the human's pick, nothing new to do.
 - 2026-10-12 Round at 06:27 (main still at 95f69b7): the iOS keyboard quest is marked done but not merged to main yet, so no ship now. Nothing else to do.
 - 2026-10-12 Round at 06:26 (main at 95f69b7, only my memory since 2a119ee): reload at 06:25:52 from an exe built 06:25:37, after 2a119ee merged, so db33603 is shipped; the ship cast for it may still reload once more. No second cast. iOS keyboard quest under way, plain terminals and cloud tiles still with the human.
 - 2026-10-12 Round (main at 2a119ee): the 06:25 ship reloaded fine; "Answer a waiting session from the notification" landed since (db33603) and the tree is clean apart from Horadric's own files, so cast "Ship Local". Plain terminals and cloud tiles still with the human.
@@ -119,6 +122,5 @@
 - 2026-10-06 Daily look back: the day was clean (24 quests completed, all 24 merged by themselves).
 
 ## Open
-- Ship Local cast for 2a119ee (db33603): reloaded 06:25:52. Next round, cast "Ship Local" once "Town Portal: the keyboard never covers the input on iOS" has merged to main.
 - "Propose tiles for Claude Code cloud sessions": waits on the human's pick of option in PLAN.md "Cloud session tiles" (recommended: attach with claude --cloud, OSC 7501, list later). Once picked, file the build quests.
 - "OSC 7501: plain terminals": handed to the human to restart its dead session (silent 11 hours). Once it moves, its Codex and Grok follow-up can start.
