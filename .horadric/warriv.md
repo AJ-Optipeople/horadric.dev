@@ -4,6 +4,7 @@
 - Do not wait for main's checks before casting a ship stone: nothing runs them between landings, and the ship session runs all three first (RELEASING.md step 2) and stops on red.
 
 ## Lately
+- 2026-10-12 Round after "Trust the folder before a phone starts a session in it" landed (1885070, plus the choco README d05962b): shared tree clean apart from Horadric's own files, so cast "Ship Local". Plain terminals and cloud tiles still with the human.
 - 2026-10-12 Round after the human left (main at 74c9770): plain terminals and cloud tiles both still with the human, Codex and Grok waits on plain terminals, nothing landed since the last ship. Nothing to do.
 - 2026-10-12 Daily look back: the day was clean (10 quests completed, all 10 merged by themselves, nothing repeated).
 - 2026-10-11 Woken again for "Propose tiles for Claude Code cloud sessions" blocked: already handed to the human with the proposal merged, so left it as it is.
