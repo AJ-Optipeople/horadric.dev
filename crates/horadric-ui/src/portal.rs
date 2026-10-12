@@ -63,13 +63,14 @@ pub fn projects_message(projects: &[(String, String)]) -> Value {
     json!({"t": "projects", "list": list})
 }
 
-/// Whether a session in `now` waits that did not in `before`: the edge a
-/// push is sent on, so one already waiting does not push again.
+/// A session in `now` that waits and did not in `before`: the edge a push
+/// is sent on, so one already waiting does not push again. The push is
+/// about this one. Of several, the same one every time.
 pub fn newly_waiting(
     before: &std::collections::HashSet<String>,
     now: &std::collections::HashSet<String>,
-) -> bool {
-    now.iter().any(|id| !before.contains(id))
+) -> Option<String> {
+    now.iter().filter(|id| !before.contains(*id)).min().cloned()
 }
 
 /// Whose key opened a phone's first frame on a channel.
@@ -451,9 +452,16 @@ mod tests {
     #[test]
     fn only_a_session_that_starts_waiting_pushes() {
         let set = |ids: &[&str]| ids.iter().map(|s| s.to_string()).collect();
-        assert!(!newly_waiting(&set(&["a"]), &set(&["a"])));
-        assert!(newly_waiting(&set(&["a"]), &set(&["a", "b"])));
-        assert!(!newly_waiting(&set(&["a", "b"]), &set(&["b"])));
+        assert_eq!(newly_waiting(&set(&["a"]), &set(&["a"])), None);
+        assert_eq!(
+            newly_waiting(&set(&["a"]), &set(&["a", "b"])),
+            Some("b".into())
+        );
+        assert_eq!(
+            newly_waiting(&set(&["a"]), &set(&["d", "a", "c"])),
+            Some("c".into())
+        );
+        assert_eq!(newly_waiting(&set(&["a", "b"]), &set(&["b"])), None);
     }
 
     #[cfg(windows)]

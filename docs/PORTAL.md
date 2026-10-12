@@ -224,3 +224,31 @@ from the phone, and a phone can make a new one.
   with `.`, and must not exist yet. The PC makes the folder, runs `git
   init` in it (skipped if git is missing), starts a session there and
   answers `started` as for `start`, or `error` with the reason.
+
+## Added in 0.24: pushes that say what waits
+
+The push still goes from the PC straight to the phone's push service, now
+with a body only the phone can read.
+
+- The body is the JSON `{"pc","id","project","title","body","waiting"}`,
+  encrypted for each subscription apart as RFC 8291 says: `aes128gcm`
+  (RFC 8188), one record of size 4096, a fresh ECDH P-256 key pair and
+  salt per push, the subscription's `p256dh` and `auth`. The POST gains
+  `Content-Encoding: aes128gcm` and `Content-Type:
+  application/octet-stream`. The push service sees only ciphertext.
+- `pc` is the PC's id, `id` the session that started waiting (of several
+  at once, the least id), `project` its project's name. `title` is short
+  enough for a lock screen: "Allow Bash?" for a permission, "Waiting for
+  you" for a question or an idle prompt, "A dialog waits", "The turn
+  failed". `body` is "project · session", then on a second line what it
+  said when the title does not say it already. `waiting` counts every
+  session of that PC waiting now. The JSON stays under 4079 bytes.
+- The service worker shows `title` and `body` with the session as the
+  tag, so a second push about the same session replaces the first, and
+  sets the app badge to `waiting`. A click opens the page at
+  `/#s=<session id>&pc=<pc id>`, or tells a page already open, and the
+  page shows that session. While open, the page sets the badge to the
+  sessions waiting and clears it at none.
+- A push without a body (a PC before 0.24, or a subscription whose keys
+  will not encrypt) shows "A session waits for you" as before. A page
+  before 0.24 ignores the body and shows the same.

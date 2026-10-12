@@ -14,6 +14,7 @@ use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
 use horadric_core::portal::{b64url, fresh_message, Config, Paired};
+use horadric_core::webpush;
 use horadric_core::Phase;
 use serde_json::{json, Value};
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
@@ -310,12 +311,20 @@ impl App {
         let edge = p
             .waiting
             .as_ref()
-            .is_some_and(|before| portal::newly_waiting(before, &waiting));
+            .and_then(|before| portal::newly_waiting(before, &waiting));
+        let count = waiting.len();
         p.waiting = Some(waiting);
-        if edge && p.pushed.is_none_or(|at| at.elapsed() >= PUSH_GAP) {
+        if let Some(id) = edge.filter(|_| p.pushed.is_none_or(|at| at.elapsed() >= PUSH_GAP)) {
             p.pushed = Some(Instant::now());
-            portal_push::send_all(&p.dir, &p.config);
+            let payload = self.portal_push_payload(&id, count);
+            let Some(p) = self.portal.as_ref() else {
+                return;
+            };
+            portal_push::send_all(&p.dir, &p.config, payload);
         }
+        let Some(p) = self.portal.as_mut() else {
+            return;
+        };
         let mut out = Vec::new();
         for (&ch, phone) in p.phones.iter_mut() {
             let Some(id) = phone.watch.clone() else {
@@ -381,6 +390,27 @@ impl App {
             })
             .collect();
         portal::projects_message(&projects)
+    }
+
+    /// What a push about session `id` says, as JSON, with `waiting`
+    /// sessions waiting in all. Empty when the session is gone, which
+    /// pushes as older PCs did.
+    fn portal_push_payload(&self, id: &str, waiting: usize) -> Vec<u8> {
+        let Some(p) = self.portal.as_ref() else {
+            return Vec::new();
+        };
+        let pc = horadric_core::portal::id(&p.config.secret);
+        self.shared
+            .registry
+            .lock()
+            .ok()
+            .and_then(|r| {
+                let s = r.all().find(|s| s.id == id)?;
+                let project = project_name(&project_key(s));
+                Some(webpush::payload(&pc, s, &project, waiting).to_string())
+            })
+            .unwrap_or_default()
+            .into_bytes()
     }
 
     /// The ids of the sessions waiting for the human now.
