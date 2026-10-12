@@ -4,6 +4,7 @@
 - Do not wait for main's checks before casting a ship stone: nothing runs them between landings, and the ship session runs all three first (RELEASING.md step 2) and stops on red.
 
 ## Lately
+- 2026-10-12 Round after "Browser tools drop connections and replay input on x.com" landed (900f7c1, merged at be7bd22): the "Ship Local" cast for 09d9d3b has not reloaded yet (last reload 06:11), so no second cast now. Next round ships 900f7c1 if that ship did not take it. Plain terminals and cloud tiles still with the human.
 - 2026-10-12 Round (main at 055f9e7, only my memory since 09d9d3b): the "Ship Local" cast for 09d9d3b has not reloaded yet (last reload before it), so no second cast. Plain terminals and cloud tiles still with the human. Nothing to do.
 - 2026-10-12 Round right after (main still at 09d9d3b): the "Ship Local" cast a minute earlier has not reloaded yet, so no second cast. Nothing to do.
 - 2026-10-12 Round (main at 09d9d3b): the quests and Warriv ship reloaded fine at 06:11, and push encryption (048ede6) landed on main after it, tree clean apart from Horadric's own files, so cast "Ship Local". Plain terminals and cloud tiles still with the human.
@@ -109,5 +110,6 @@
 - 2026-10-06 Daily look back: the day was clean (24 quests completed, all 24 merged by themselves).
 
 ## Open
+- Ship for 900f7c1 (browser tools fix): check the next reload in reload.log came after 06:18; if not, cast "Ship Local".
 - "Propose tiles for Claude Code cloud sessions": waits on the human's pick of option in PLAN.md "Cloud session tiles" (recommended: attach with claude --cloud, OSC 7501, list later). Once picked, file the build quests.
 - "OSC 7501: plain terminals": handed to the human to restart its dead session (silent 11 hours). Once it moves, its Codex and Grok follow-up can start.

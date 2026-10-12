@@ -879,6 +879,16 @@ settled "no web view" for web pages only: Horadric's own UI stays Direct2D.
   Tested: a script through every tool against a test page and
   example.com, and a Haiku session told to fill in a form, which opened,
   typed, ticked, clicked, looked and closed by itself.
+- **A call that fails did not act, or says it may have** (2026-10-12).
+  On x.com most calls failed with os error 10054 or 10060 though they
+  had run, and the agent's retries posted text twice. The listener read
+  through a `try_clone` of the socket, which on Windows is an
+  inheritable handle, so every git or session the app started during a
+  call kept the connection open past the reply: the caller waited until
+  that child exited, then was reset. It reads through a borrow now. A
+  call the listener gave up on (90 s) is marked so the app does not
+  start it late, and an error after the call reached Horadric says it
+  may have run, so the agent looks before trying again.
 - **Chosen over Chrome** (2026-10-07). Users saw agents start Chrome,
   Playwright or a headless browser while the pane sat unused. Claude
   Code defers MCP tools behind a search, so an agent that thinks of

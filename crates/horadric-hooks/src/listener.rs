@@ -11,8 +11,9 @@
 
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::mpsc::Sender;
-use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{Receiver, Sender};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, SystemTime};
 
@@ -178,11 +179,32 @@ pub struct KnowCall {
 /// Where the app sends its answer, a JSON body. It is not part of what was
 /// asked, so any two are equal.
 #[derive(Debug, Clone)]
-pub struct Reply(Sender<String>);
+pub struct Reply {
+    to: Sender<String>,
+    /// Set when the caller stopped waiting.
+    gone: Arc<AtomicBool>,
+}
 
 impl Reply {
+    fn new() -> (Reply, Receiver<String>) {
+        let (to, rx) = std::sync::mpsc::channel();
+        let gone = Arc::new(AtomicBool::new(false));
+        (Reply { to, gone }, rx)
+    }
+
     pub fn send(&self, body: Value) {
-        let _ = self.0.send(body.to_string());
+        let _ = self.to.send(body.to_string());
+    }
+
+    /// Whether the caller still waits. One that gave up was told the call
+    /// failed and may make it again, so a call not begun by then must not
+    /// begin late: it would act twice.
+    pub fn wanted(&self) -> bool {
+        !self.gone.load(Ordering::Relaxed)
+    }
+
+    fn give_up(&self) {
+        self.gone.store(true, Ordering::Relaxed);
     }
 }
 
@@ -196,7 +218,7 @@ impl Eq for Reply {}
 
 /// The longest an agent waits on its browser: a page that is slow to load,
 /// or a script that runs long.
-const BROWSER_WAIT: Duration = Duration::from_secs(90);
+const BROWSER_WAIT: Duration = Duration::from_secs(if cfg!(test) { 1 } else { 90 });
 
 /// The mod asks again in a few seconds, so an app busy for longer than
 /// this is not worth waiting on.
@@ -259,12 +281,16 @@ fn bind(port: u16) -> io::Result<TcpListener> {
 }
 
 fn handle(
-    mut stream: TcpStream,
+    stream: TcpStream,
     port: u16,
     tx: &Sender<Tagged>,
     commands: Option<&Sender<Command>>,
 ) -> io::Result<()> {
-    let mut reader = BufReader::new(stream.try_clone()?);
+    // Read through a borrow, never a `try_clone`: on Windows the clone is
+    // an inheritable handle, so a git or a session the app starts meanwhile
+    // keeps the connection open after the reply. The caller then waits on
+    // it, or is reset when that child exits, though its call ran.
+    let mut reader = BufReader::new(&stream);
 
     let mut request_line = String::new();
     reader.read_line(&mut request_line)?;
@@ -314,12 +340,12 @@ fn handle(
         KNOW_PATH,
     ];
     if method != "POST" || !paths.contains(&path) {
-        return respond(&mut stream, "404 Not Found");
+        return respond(&stream, "404 Not Found");
     }
     // A megabyte is far more than any hook payload. Anything bigger is not
     // Claude Code and is not worth reading.
     if content_length > 1 << 20 {
-        return respond(&mut stream, "413 Payload Too Large");
+        return respond(&stream, "413 Payload Too Large");
     }
 
     let mut body = vec![0u8; content_length];
@@ -328,7 +354,7 @@ fn handle(
     if path == STATUS_PATH {
         // Like a hook: answered at once, dropped without a session. Always
         // posted straight to the owner, so there is nothing to pass on.
-        respond(&mut stream, "200 OK")?;
+        respond(&stream, "200 OK")?;
         if let (false, Some(status)) = (horadric_id.is_empty(), Status::from_json(&body)) {
             // The id lets the tile tell its own status line from one a
             // background session sends under its tag.
@@ -355,12 +381,12 @@ fn handle(
     if path == KNOW_PATH {
         // Read only, but what sessions are doing is not a web page's.
         if from_browser || horadric_id.is_empty() {
-            return respond(&mut stream, "403 Forbidden");
+            return respond(&stream, "403 Forbidden");
         }
         let Some(commands) = commands else {
-            return respond(&mut stream, "503 Service Unavailable");
+            return respond(&stream, "503 Service Unavailable");
         };
-        return know(&mut stream, horadric_id, commands);
+        return know(&stream, horadric_id, commands);
     }
 
     if path != HOOK_PATH {
@@ -372,22 +398,22 @@ fn handle(
             _ => "reload",
         };
         if from_browser || command != wanted {
-            return respond(&mut stream, "403 Forbidden");
+            return respond(&stream, "403 Forbidden");
         }
         let ours = crate::state_header();
         if !crate::same_state(&ours, &state) {
             let why = crate::refusal(port, &ours, &state);
             return respond_with(
-                &mut stream,
+                &stream,
                 "409 Conflict",
                 &json!({ "error": why }).to_string(),
             );
         }
         let Some(commands) = commands else {
-            return respond(&mut stream, "503 Service Unavailable");
+            return respond(&stream, "503 Service Unavailable");
         };
         if path == BROWSER_PATH {
-            return browser(&mut stream, horadric_id, &body, commands);
+            return browser(&stream, horadric_id, &body, commands);
         }
         let request = match path {
             NEW_PATH => NewSession::from_json(&body).map(Command::New),
@@ -395,16 +421,16 @@ fn handle(
             _ => Reload::from_json(&body).map(Command::Reload),
         };
         let Some(request) = request else {
-            return respond(&mut stream, "400 Bad Request");
+            return respond(&stream, "400 Bad Request");
         };
         let _ = commands.send(request);
-        return respond(&mut stream, "200 OK");
+        return respond(&stream, "200 OK");
     }
 
     // Grok runs Claude's hooks as well as its own. Should it ever reach
     // Claude's `http` hook, its command hook has sent the event already.
     if agent.unwrap_or_default() == Agent::Claude && Agent::is_grok_shaped(&body) {
-        return respond(&mut stream, "200 OK");
+        return respond(&stream, "200 OK");
     }
 
     // Parsing is all that happens before the reply, which tells an agent
@@ -418,8 +444,8 @@ fn handle(
         None => None,
     };
     match &overlap {
-        Some(o) => respond_with(&mut stream, "200 OK", &overlap::reply(&overlap::context(o)))?,
-        None => respond(&mut stream, "200 OK")?,
+        Some(o) => respond_with(&stream, "200 OK", &overlap::reply(&overlap::context(o)))?,
+        None => respond(&stream, "200 OK")?,
     }
     if let (Some(o), Some(commands)) = (overlap, commands) {
         let _ = commands.send(Command::Overlap(o));
@@ -466,7 +492,7 @@ fn handle(
 /// Hands an agent's browser call to the app and answers with what the app
 /// answers. Only a session's: the page is its project's.
 fn browser(
-    stream: &mut TcpStream,
+    stream: &TcpStream,
     session: String,
     body: &[u8],
     commands: &Sender<Command>,
@@ -477,11 +503,11 @@ fn browser(
     if session.is_empty() {
         return respond(stream, "400 Bad Request");
     }
-    let (tx, rx) = std::sync::mpsc::channel();
+    let (reply, rx) = Reply::new();
     let call = BrowserCall {
         session,
         body,
-        reply: Reply(tx),
+        reply: reply.clone(),
     };
     if commands.send(Command::Browser(call)).is_err() {
         return respond(stream, "503 Service Unavailable");
@@ -489,22 +515,25 @@ fn browser(
     let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
     match rx.recv_timeout(BROWSER_WAIT) {
         Ok(answer) => respond_with(stream, "200 OK", &answer),
-        Err(_) => respond(stream, "504 Gateway Timeout"),
+        Err(_) => {
+            reply.give_up();
+            respond(stream, "504 Gateway Timeout")
+        }
     }
 }
 
 /// Hands the mod's question to the app with the files its session shares,
 /// and answers with what the app answers.
-fn know(stream: &mut TcpStream, session: String, commands: &Sender<Command>) -> io::Result<()> {
+fn know(stream: &TcpStream, session: String, commands: &Sender<Command>) -> io::Result<()> {
     let overlaps = claims()
         .lock()
         .map(|c| c.shared(&session, SystemTime::now()))
         .unwrap_or_default();
-    let (tx, rx) = std::sync::mpsc::channel();
+    let (reply, rx) = Reply::new();
     let call = KnowCall {
         session,
         overlaps,
-        reply: Reply(tx),
+        reply,
     };
     if commands.send(Command::Know(call)).is_err() {
         return respond(stream, "503 Service Unavailable");
@@ -521,11 +550,11 @@ fn claims() -> &'static Mutex<Claims> {
     CLAIMS.get_or_init(Default::default)
 }
 
-fn respond(stream: &mut TcpStream, status: &str) -> io::Result<()> {
+fn respond(stream: &TcpStream, status: &str) -> io::Result<()> {
     respond_with(stream, status, "{}")
 }
 
-fn respond_with(stream: &mut TcpStream, status: &str, body: &str) -> io::Result<()> {
+fn respond_with(mut stream: &TcpStream, status: &str, body: &str) -> io::Result<()> {
     let reply = format!(
         "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
@@ -830,6 +859,59 @@ X-Horadric-Port: {dev}
         app.join().unwrap();
         assert!(reply.starts_with("HTTP/1.1 200"), "{reply}");
         assert!(reply.ends_with(r#"{"open":false}"#), "{reply}");
+    }
+
+    /// The app starts gits and sessions while a call waits on it. None of
+    /// them may hold the caller's connection open: the caller would wait
+    /// past its answer, or be reset when the child exits, with its call
+    /// done all the same.
+    #[cfg(windows)]
+    #[test]
+    fn a_child_the_app_starts_meanwhile_does_not_hold_the_reply() {
+        let (port, rx) = start_with_new();
+        let app = thread::spawn(move || match rx.recv_timeout(Duration::from_secs(2)) {
+            Ok(Command::Browser(call)) => {
+                let child = std::process::Command::new("ping")
+                    .args(["-n", "4", "127.0.0.1"])
+                    .stdout(std::process::Stdio::null())
+                    .spawn()
+                    .unwrap();
+                call.reply.send(json!({ "ok": true }));
+                child
+            }
+            other => panic!("{other:?}"),
+        });
+        let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        let body = r#"{"op":"info"}"#;
+        let req = format!(
+            "POST {BROWSER_PATH} HTTP/1.1\r\nX-Horadric-Command: browser\r\n\
+             X-Horadric-Session: tile-2\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        s.write_all(req.as_bytes()).unwrap();
+        let started = std::time::Instant::now();
+        let mut out = String::new();
+        let read = s.read_to_string(&mut out);
+        let waited = started.elapsed();
+        let _ = app.join().unwrap().kill();
+        read.unwrap();
+        assert!(out.ends_with(r#"{"ok":true}"#), "{out}");
+        assert!(waited < Duration::from_secs(2), "waited {waited:?}");
+    }
+
+    #[test]
+    fn a_browser_call_given_up_on_is_no_longer_wanted() {
+        let (port, rx) = start_with_new();
+        let headers = "X-Horadric-Command: browser
+X-Horadric-Session: tile-2
+";
+        let reply = post_to(port, BROWSER_PATH, headers, r#"{"op":"info"}"#);
+        assert!(reply.starts_with("HTTP/1.1 504"), "{reply}");
+        match rx.recv_timeout(Duration::from_secs(2)) {
+            Ok(Command::Browser(call)) => assert!(!call.reply.wanted()),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
