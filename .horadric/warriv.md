@@ -4,6 +4,7 @@
 - Do not wait for main's checks before casting a ship stone: nothing runs them between landings, and the ship session runs all three first (RELEASING.md step 2) and stops on red.
 
 ## Lately
+- 2026-10-12 Round (main at f70d853): the photos ship reloaded fine and only memory commits since, so no new ship. Town Portal quests under way, plain terminals and cloud tiles still with the human. Nothing to do.
 - 2026-10-12 Round right after the photos landing (main at af075d7): "Ship Local" was cast for it a minute earlier and has not reloaded yet, so no second cast. Plain terminals and cloud tiles still with the human. Nothing to do.
 - 2026-10-12 Round after "Save photos a phone attaches" landed (fa585c7, merged at 672dae3): code since the last ship and the shared tree clean apart from Horadric's own files, so cast "Ship Local". Nine Town Portal quests under way in their worktrees. Plain terminals and cloud tiles still with the human.
 - 2026-10-12 Round after "Plan Town Portal's second round on the phone" landed (4d2c672, PLAN.md only): no code since the last ship, so no ship. Gave models to the four waiting Town Portal quests (inbox, terminal keys, swipe: sonnet; answer from the notification: opus, as it spans pushes and the inbox). Plain terminals and cloud tiles still with the human.
