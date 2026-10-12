@@ -25,6 +25,10 @@ use crate::window::project_name;
 impl App {
     pub(super) fn browser_call(&mut self, call: BrowserCall) {
         let reply = call.reply;
+        // Its agent heard it fail while it waited behind something slow.
+        if !reply.wanted() {
+            return;
+        }
         let Some(key) = self.project_of(&call.session) else {
             return reply.send(error("this session has no project in Horadric"));
         };
@@ -96,13 +100,22 @@ impl App {
                     return reply.send(closed());
                 };
                 let params = body.get("params").cloned().unwrap_or_else(|| json!({}));
-                web::devtools(&key, id, &method, &params.to_string(), move |r| {
-                    reply.send(match r {
-                        Ok(text) => json!({
-                            "result": serde_json::from_str::<Value>(&text).unwrap_or(Value::Null)
-                        }),
-                        Err(e) => error(&e),
-                    })
+                // A tab still being made holds the call until it is, which
+                // may be after its agent gave up on it.
+                let k = key.clone();
+                web::with_view(&key, id, move |_| {
+                    if !reply.wanted() {
+                        return;
+                    }
+                    web::devtools(&k, id, &method, &params.to_string(), move |r| {
+                        reply.send(match r {
+                            Ok(text) => json!({
+                                "result": serde_json::from_str::<Value>(&text)
+                                    .unwrap_or(Value::Null)
+                            }),
+                            Err(e) => error(&e),
+                        })
+                    });
                 });
             }
             _ => reply.send(error("unknown browser call")),

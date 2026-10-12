@@ -26,6 +26,10 @@ const PROTOCOL: &str = "2025-06-18";
 /// than the listener waits, so its timeout is the one heard.
 const APP_WAIT: Duration = Duration::from_secs(100);
 
+/// Said of a call that failed after it reached the page, so the agent looks
+/// before it makes the call again and does not act twice.
+const MAY_HAVE_RUN: &str = "It may still have run in the page: look (browser_snapshot or browser_evaluate) before you make it again.";
+
 /// The most text a tool answers with, so one call can not fill the context.
 const MOST_TEXT: usize = 60_000;
 
@@ -70,10 +74,20 @@ fn ask_app(port: u16, session: Option<&str>, body: &Value) -> Result<Value, Stri
         session.ok_or("this session was not started by Horadric, so it has no browser")?;
     let headers = [(COMMAND_HEADER, "browser"), (SESSION_HEADER, session)];
     let (status, text) = client::ask(port, BROWSER_PATH, &headers, &body.to_string(), APP_WAIT)
-        .map_err(|e| format!("Horadric did not answer: {e}"))?;
+        .map_err(|e| {
+            if client::sent(&e) {
+                format!("the answer was lost ({e}), but the call reached Horadric. {MAY_HAVE_RUN}")
+            } else {
+                format!("Horadric did not answer: {e}")
+            }
+        })?;
     match status {
         200 => {}
-        504 => return Err("the browser did not answer in time".into()),
+        504 => {
+            return Err(format!(
+                "the browser did not answer in time. {MAY_HAVE_RUN}"
+            ))
+        }
         s => return Err(format!("Horadric refused the call ({s})")),
     }
     let answer: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
