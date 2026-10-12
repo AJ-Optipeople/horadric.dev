@@ -46,6 +46,10 @@ pub struct HookEvent {
     /// `command`. Kept whole, since each tool gives its own shape.
     #[serde(default)]
     pub tool_input: Option<Value>,
+    /// `PermissionRequest` only: the rules Claude Code offers to add so it
+    /// stops asking. Present means the prompt has an "always" choice.
+    #[serde(default)]
+    pub permission_suggestions: Option<Value>,
     /// `Stop` only: the final assistant text of the turn.
     #[serde(default)]
     pub last_assistant_message: Option<String>,

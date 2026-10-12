@@ -225,6 +225,29 @@ from the phone, and a phone can make a new one.
   init` in it (skipped if git is missing), starts a session there and
   answers `started` as for `start`, or `error` with the reason.
 
+## Added in 0.24: what a waiting session asks
+
+- `sessions` entries of a session that waits on the human (`phase`
+  `waiting`, not paused, not a failed turn) gain `ask`:
+  `{"kind","tool","detail","options":[{"label","keys"}],"since"}`.
+  - `kind` is `permission` (may it run a tool), `question` (Claude
+    Code's AskUserQuestion) or `input` (anything else, answered by
+    typing).
+  - `tool` is the tool's name, or `null`.
+  - `detail` is what to decide on: the command for a shell, the path
+    for an edit or a write, the address for a fetch, the plan for
+    ExitPlanMode, the question's text, or the agent's own words. At
+    most 2000 characters, cut with `…`.
+  - `options` are the choices on the agent's prompt, each with the
+    `keys` to send as `input` to pick it. A permission has `Yes` (`1`),
+    `Always` (`2`, only when Claude Code offers one) and `No` (Escape).
+    A question has its choices, `1` for the first and so on. Empty when
+    the answer has to be given on the terminal: several questions at
+    once, several answers to one, ExitPlanMode, `input`, and any agent
+    but Claude Code, whose prompts number their choices differently.
+  - `since` is when it began waiting, Unix seconds.
+- A page that does not know `ask` shows the session as before.
+
 ## Added in 0.24: a photo from the phone
 
 - Phone to PC, `{"t":"attach","id":"<session id>","name":"<file name>","data":"<b64url bytes>"}`.
@@ -319,3 +342,22 @@ with a body only the phone can read.
 - A push without a body (a PC before 0.24, or a subscription whose keys
   will not encrypt) shows "A session waits for you" as before. A page
   before 0.24 ignores the body and shows the same.
+
+## Added in 0.24: what a session changed
+
+- Phone to PC, `{"t":"changes","id"}`. The PC answers
+  `{"t":"changes","id","files":[{"path","added","removed"}]}`: each file
+  the session changed, with the lines it added and removed, both `null`
+  for a binary file. Paths are relative to the top of the session's
+  tree, with forward slashes. Changes count from the session's last
+  commit, or for a session in a worktree of its own from where its
+  branch left the main tree, so its commits count too. Files git does
+  not track yet count as all added. A session outside a git repository
+  answers an empty list.
+- Phone to PC, `{"t":"diff","id","path"}`, for a path from that answer.
+  The PC answers `{"t":"diff","id","path","text","cut"}`: the file's
+  `git diff` from the same commit, without colour, cut at the end of a
+  line before 200 KB, `cut` true when it was. Any other path answers
+  `error`, so a phone reads only what the session changed.
+- Both run git away from the UI, so the answer may come after other
+  messages. A PC before 0.24 ignores both, and the page shows no list.

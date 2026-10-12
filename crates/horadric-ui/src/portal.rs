@@ -9,6 +9,8 @@ use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::Term;
 use alacritty_terminal::vte::ansi::{NamedColor, Rgb};
+use horadric_core::ask::Ask;
+use horadric_core::diff::FileDiff;
 // The frame crypto is Windows CNG, so the Mac build has no portal yet.
 #[cfg(windows)]
 use horadric_core::portal::{key32, Config};
@@ -38,7 +40,9 @@ pub fn phase_word(phase: &Phase) -> &'static str {
 }
 
 /// One session as the list on a phone shows it. `paused` is a session with
-/// no live host, which the phone offers to resume.
+/// no live host, which the phone offers to resume. A session that waits on
+/// the human says what it asks; one whose program said it waits, with no
+/// hook to say on what, asks for input in its own words.
 pub fn session_entry(s: &Session, project: &str, paused: bool) -> Value {
     let paused = paused || matches!(s.phase, Phase::Paused);
     let line = if paused && s.last_line.is_empty() {
@@ -46,14 +50,22 @@ pub fn session_entry(s: &Session, project: &str, paused: bool) -> Value {
     } else {
         s.last_line.clone()
     };
-    json!({
+    let mut entry = json!({
         "id": s.id,
         "name": s.label(),
         "project": project,
         "phase": phase_word(&s.phase),
         "line": line,
         "paused": paused,
-    })
+    });
+    if !paused && s.phase.asks() {
+        let ask = s
+            .ask
+            .clone()
+            .unwrap_or_else(|| Ask::input(&s.last_line, s.since));
+        entry["ask"] = ask.to_json();
+    }
+    entry
 }
 
 /// The projects message: each as (path, name), in the tiles' order.
@@ -428,6 +440,50 @@ pub fn bad_project_name(name: &str) -> Option<&'static str> {
     None
 }
 
+/// The most of one file's diff a phone is sent. A generated file or a
+/// lock file can be megabytes, and a frame is at most 1 MB.
+pub const DIFF_MAX: usize = 200 * 1024;
+
+/// The changes message: each file the session changed, with the lines it
+/// added and removed, `null` for both in a binary file.
+pub fn changes_message(id: &str, files: &[FileDiff]) -> Value {
+    let list: Vec<Value> = files
+        .iter()
+        .map(|f| {
+            let (added, removed) = f.lines.unzip();
+            json!({"path": f.path, "added": added, "removed": removed})
+        })
+        .collect();
+    json!({"t": "changes", "id": id, "files": list})
+}
+
+/// The diff message for one file: its diff, cut at [`DIFF_MAX`] at the end
+/// of a line, and whether it was cut.
+pub fn diff_message(id: &str, path: &str, text: &str) -> Value {
+    let (text, cut) = cut_diff(text, DIFF_MAX);
+    json!({"t": "diff", "id": id, "path": path, "text": text, "cut": cut})
+}
+
+/// `text` whole when it fits in `max` bytes, else up to the last line that
+/// does, so the phone never draws half a line or half a character.
+pub fn cut_diff(text: &str, max: usize) -> (&str, bool) {
+    if text.len() <= max {
+        return (text, false);
+    }
+    let mut end = max;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let end = text[..end].rfind('\n').map_or(end, |i| i + 1);
+    (&text[..end], true)
+}
+
+/// Whether a phone may see `path`'s diff: only a file the session changed,
+/// so a path the phone makes up reads nothing else on the PC.
+pub fn listed(files: &[FileDiff], path: &str) -> bool {
+    files.iter().any(|f| f.path == path)
+}
+
 /// The longest name a phone may give a session, in characters.
 pub const NAME_MAX: usize = 80;
 
@@ -599,6 +655,36 @@ mod tests {
         let s = Session::new("a1", "fix", "C:/p/x");
         assert_eq!(session_entry(&s, "x", true)["paused"], true);
         assert_eq!(session_entry(&s, "x", false)["paused"], false);
+    }
+
+    #[test]
+    fn a_waiting_session_says_what_it_asks() {
+        let mut s = Session::new("a1", "fix", "C:/p/x");
+        assert!(session_entry(&s, "x", false).get("ask").is_none());
+        s.phase = Phase::Waiting(WaitReason::Permission);
+        s.ask = Some(Ask::permission(
+            "Bash",
+            Some(&json!({"command": "ls"})),
+            false,
+            s.since,
+        ));
+        let e = session_entry(&s, "x", false);
+        assert_eq!(e["ask"]["kind"], "permission");
+        assert_eq!(e["ask"]["detail"], "ls");
+        assert!(session_entry(&s, "x", true).get("ask").is_none());
+    }
+
+    #[test]
+    fn a_wait_no_hook_explained_asks_for_input_in_its_own_words() {
+        let mut s = Session::new("a1", "fix", "C:/p/x");
+        s.phase = Phase::Waiting(WaitReason::Input);
+        s.last_line = "Which branch?".into();
+        let e = session_entry(&s, "x", false);
+        assert_eq!(e["ask"]["kind"], "input");
+        assert_eq!(e["ask"]["detail"], "Which branch?");
+        assert_eq!(e["ask"]["options"], json!([]));
+        s.phase = Phase::Waiting(WaitReason::Error("rate_limit".into()));
+        assert!(session_entry(&s, "x", false).get("ask").is_none());
     }
 
     #[test]
@@ -801,6 +887,51 @@ mod tests {
             assert!(bad_project_name(bad).is_some(), "{bad}");
         }
         assert!(bad_project_name(&"a".repeat(65)).is_some());
+    }
+
+    fn changed(path: &str, lines: Option<(u32, u32)>) -> FileDiff {
+        FileDiff {
+            path: path.into(),
+            lines,
+        }
+    }
+
+    #[test]
+    fn changes_message_counts_lines_and_leaves_binaries_blank() {
+        let m = changes_message(
+            "s1",
+            &[
+                changed("src/a.rs", Some((12, 3))),
+                changed("logo.png", None),
+            ],
+        );
+        assert_eq!(m["t"], "changes");
+        assert_eq!(m["id"], "s1");
+        assert_eq!(m["files"][0]["path"], "src/a.rs");
+        assert_eq!(m["files"][0]["added"], 12);
+        assert_eq!(m["files"][0]["removed"], 3);
+        assert!(m["files"][1]["added"].is_null());
+        assert!(m["files"][1]["removed"].is_null());
+    }
+
+    #[test]
+    fn a_long_diff_is_cut_at_the_end_of_a_line() {
+        assert_eq!(cut_diff("+a\n+b\n", 100), ("+a\n+b\n", false));
+        assert_eq!(cut_diff("+a\n+bcd\n", 5), ("+a\n", true));
+        // No line ends in reach: cut at a character, never inside one.
+        assert_eq!(cut_diff("+\u{e6}\u{e6}", 2), ("+", true));
+        let m = diff_message("s1", "a", &"+x\n".repeat(DIFF_MAX));
+        assert_eq!(m["cut"], true);
+        assert!(m["text"].as_str().unwrap().len() <= DIFF_MAX);
+        assert_eq!(m["path"], "a");
+    }
+
+    #[test]
+    fn only_a_changed_file_may_be_diffed() {
+        let files = [changed("src/a.rs", Some((1, 0)))];
+        assert!(listed(&files, "src/a.rs"));
+        assert!(!listed(&files, "../secret.txt"));
+        assert!(!listed(&files, "src/b.rs"));
     }
 
     #[test]
