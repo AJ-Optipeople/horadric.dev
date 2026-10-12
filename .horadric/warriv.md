@@ -4,6 +4,8 @@
 - Do not wait for main's checks before casting a ship stone: nothing runs them between landings, and the ship session runs all three first (RELEASING.md step 2) and stops on red.
 
 ## Lately
+- 2026-10-12 Round after the human left (main at 74c9770): plain terminals and cloud tiles both still with the human, Codex and Grok waits on plain terminals, nothing landed since the last ship. Nothing to do.
+- 2026-10-12 Daily look back: the day was clean (10 quests completed, all 10 merged by themselves, nothing repeated).
 - 2026-10-11 Woken again for "Propose tiles for Claude Code cloud sessions" blocked: already handed to the human with the proposal merged, so left it as it is.
 - 2026-10-11 Round after "Claude Code's OSC 7501 on Windows: the pseudo console answers its CSI c fence first" landed (e1427d8): shared tree clean apart from Horadric's own files, so cast "Ship Local". Plain terminals still with the human (dead session), cloud tiles still with the human.
 - 2026-10-11 Hourly round (main at ab5ef41): "OSC 7501: plain terminals" silent 11 hours after two nudges, worktree empty, so handed it to the human (restart the session). CSI c fence queued (opus), cloud tiles still with the human.
