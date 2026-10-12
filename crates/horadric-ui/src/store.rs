@@ -57,6 +57,8 @@ fn set_aside(path: &Path) {
 /// `--settings`: `horadric status` as the status line, run from `exe`, and
 /// the reviews folder open without a prompt, since a runeword's reviewer
 /// writes there and the session it reviewed reads it back, both unattended.
+/// Photos the phone sends land in `portal-attach`, outside the project, and
+/// the agent reads them without asking: the phone sent them to be read.
 /// Only those sessions get it, so a `claude` started anywhere else keeps
 /// its own. Written on every start, since `exe` moves with an install or a
 /// reload.
@@ -64,13 +66,21 @@ pub fn write_status_settings(exe: &Path) -> Option<PathBuf> {
     let dir = dir()?;
     fs::create_dir_all(&dir).ok()?;
     let path = dir.join("claude-settings.json");
-    let reviews = rule_path(&dir.join("reviews"));
-    let body = serde_json::json!({
-        "statusLine": { "type": "command", "command": exe_command(exe, "status"), "padding": 0 },
-        "permissions": { "allow": [format!("Read({reviews})"), format!("Edit({reviews})")] }
-    });
-    fs::write(&path, body.to_string()).ok()?;
+    fs::write(&path, status_settings(exe, &dir).to_string()).ok()?;
     Some(path)
+}
+
+fn status_settings(exe: &Path, dir: &Path) -> serde_json::Value {
+    let reviews = rule_path(&dir.join("reviews"));
+    let attach = rule_path(&dir.join("portal-attach"));
+    serde_json::json!({
+        "statusLine": { "type": "command", "command": exe_command(exe, "status"), "padding": 0 },
+        "permissions": { "allow": [
+            format!("Read({reviews})"),
+            format!("Edit({reviews})"),
+            format!("Read({attach})"),
+        ] }
+    })
 }
 
 /// Writes the MCP config Horadric hands each `claude` it starts with
@@ -218,6 +228,21 @@ mod tests {
             rule_path(Path::new(r"D:\My Data\reviews\")),
             "//d/My Data/reviews/**"
         );
+    }
+
+    #[test]
+    fn sessions_read_phone_photos_without_asking() {
+        let s = status_settings(
+            Path::new(r"C:\h\horadric.exe"),
+            Path::new(r"C:\Users\me\AppData\Roaming\Horadric"),
+        );
+        let allow = s["permissions"]["allow"].as_array().unwrap();
+        assert!(allow
+            .iter()
+            .any(|r| r == "Read(//c/Users/me/AppData/Roaming/Horadric/portal-attach/**)"));
+        assert!(!allow.iter().any(|r| r
+            .as_str()
+            .is_some_and(|r| r.starts_with("Edit") && r.contains("portal-attach"))));
     }
 
     #[test]
