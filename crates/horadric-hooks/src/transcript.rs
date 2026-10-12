@@ -43,6 +43,14 @@ pub fn mid_turn(cwd: &str, id: &str) -> Option<bool> {
     })
 }
 
+/// The newest reply in the conversation `id`, held in `cwd`, see
+/// [`title::last_reply`]. None when there is none or no transcript.
+pub fn last_reply(cwd: &str, id: &str) -> Option<String> {
+    let mut file = File::open(path(cwd, id)?).ok()?;
+    let len = file.metadata().ok()?.len();
+    title::last_reply(&read_from(&mut file, len.saturating_sub(TAIL))?)
+}
+
 /// The transcript of the conversation `id` held in `cwd`, if it is on
 /// disk. A quest's worktree may be long gone, and with it the spelling of
 /// its folder, so failing that every folder is looked in.
