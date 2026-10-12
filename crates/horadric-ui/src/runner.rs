@@ -938,7 +938,7 @@ impl App {
         self.run_tasks();
     }
 
-    fn add_task(&mut self, key: &str, title: &str, notes: &str) {
+    pub(super) fn add_task(&mut self, key: &str, title: &str, notes: &str) {
         let title = tasks::one_line(title);
         let Some(dir) = self.project_dir(key).filter(|_| !title.is_empty()) else {
             return;

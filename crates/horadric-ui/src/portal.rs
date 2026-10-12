@@ -12,9 +12,11 @@ use alacritty_terminal::vte::ansi::{NamedColor, Rgb};
 // The frame crypto is Windows CNG, so the Mac build has no portal yet.
 #[cfg(windows)]
 use horadric_core::portal::{key32, Config};
+use horadric_core::tasks::{Mark, Mode, Ready, Task};
 use horadric_core::{Phase, Session};
 use serde_json::{json, Value};
 
+use crate::board::Board;
 use crate::palette;
 
 /// The protocol version this side speaks. 2 brought a key per phone and
@@ -61,6 +63,105 @@ pub fn projects_message(projects: &[(String, String)]) -> Value {
         .map(|(path, name)| json!({"path": path, "name": name}))
         .collect();
     json!({"t": "projects", "list": list})
+}
+
+/// One project's quest log as a phone sees it: what Warriv is about, the
+/// quests not done in the log's order, and how many are done.
+pub struct QuestLog<'a> {
+    pub path: &'a str,
+    pub name: &'a str,
+    pub board: Option<&'a Board>,
+    /// Warriv drives the project: it starts and lands quests by itself.
+    pub drives: bool,
+    /// The words of the quests tile's Warriv line, when it has one.
+    pub warriv_line: Option<&'a str>,
+}
+
+/// The most notes lines a quest carries to a phone, so one long plan
+/// does not swell every quests message.
+pub const QUEST_NOTES_MAX: usize = 12;
+
+/// The quests message: every project's log, in the tiles' order.
+pub fn quests_message(logs: &[QuestLog], now: u64) -> Value {
+    let list: Vec<Value> = logs.iter().map(|l| quest_log(l, now)).collect();
+    json!({"t": "quests", "list": list})
+}
+
+fn quest_log(l: &QuestLog, now: u64) -> Value {
+    let (quests, done, mode, on) = match l.board {
+        Some(b) => {
+            let ready = horadric_core::tasks::readiness(&b.tasks);
+            let quests: Vec<Value> = b
+                .tasks
+                .iter()
+                .zip(&ready)
+                .filter(|(t, _)| t.mark != Mark::Done && !t.title.trim().is_empty())
+                .map(|(t, r)| quest_entry(t, r, now))
+                .collect();
+            let done = b.tasks.iter().filter(|t| t.mark == Mark::Done).count();
+            (quests, done, b.mode, b.orchestrator)
+        }
+        None => (Vec::new(), 0, Mode::default(), false),
+    };
+    json!({
+        "project": l.path,
+        "name": l.name,
+        "mode": mode.name(),
+        "warriv": {
+            "on": horadric_core::warriv::orchestrates(on, l.drives),
+            "drives": l.drives,
+            "line": l.warriv_line.unwrap_or_default(),
+        },
+        "done": done,
+        "quests": quests,
+    })
+}
+
+fn quest_entry(t: &Task, ready: &Ready, now: u64) -> Value {
+    let state = match t.mark {
+        Mark::Open | Mark::Blocked if ready.tangled() => "tangled",
+        Mark::Open if *ready != Ready::Yes => "after",
+        Mark::Open => "open",
+        Mark::Working => "working",
+        Mark::Review => "review",
+        Mark::Blocked => "blocked",
+        Mark::Done => "done",
+    };
+    let why = t
+        .reason
+        .clone()
+        .filter(|_| t.mark == Mark::Blocked)
+        .or_else(|| crate::board::note(t, ready, now))
+        .unwrap_or_default();
+    let notes: Vec<&str> = t
+        .notes
+        .iter()
+        .take(QUEST_NOTES_MAX)
+        .map(String::as_str)
+        .collect();
+    json!({
+        "title": t.title,
+        "state": state,
+        "session": t.holder.clone().filter(|_| t.mark.held()),
+        "why": why,
+        "notes": notes,
+    })
+}
+
+/// The title of a quest a phone adds, on one line, or why it will not do.
+/// The log drops blank notes lines itself.
+pub fn new_quest(title: &str, notes: &str) -> Result<String, &'static str> {
+    let title = horadric_core::tasks::one_line(title);
+    if title.is_empty() {
+        return Err("Say what the quest is.");
+    }
+    if title.chars().count() > 200 {
+        return Err("A quest's title must be at most 200 characters.");
+    }
+    if notes.chars().count() > 8000 {
+        return Err("The notes must be at most 8000 characters.");
+    }
+    Ok(title)
 }
 
 /// Whether a session in `now` waits that did not in `before`: the edge a
@@ -446,6 +547,92 @@ mod tests {
         assert_eq!(m["t"], "projects");
         assert_eq!(m["list"][1]["name"], "b");
         assert_eq!(m["list"][0]["path"], "C:/a");
+    }
+
+    fn log_of(text: &str) -> Board {
+        Board {
+            tasks: horadric_core::tasks::parse(text),
+            mode: Mode::Warriv,
+            ..Board::default()
+        }
+    }
+
+    #[test]
+    fn a_quest_log_lists_what_is_not_done_with_its_state() {
+        let b = log_of(
+            "- [x] Old\n\
+             - [/] Build it @s1\n  Do it well\n\
+             - [ ] Then this\n  After: Build it\n\
+             - [!] Stuck @s2: which colour?\n\
+             - [ ] Free\n",
+        );
+        let m = quests_message(
+            &[QuestLog {
+                path: "C:/p",
+                name: "p",
+                board: Some(&b),
+                drives: true,
+                warriv_line: Some("reads Build it"),
+            }],
+            0,
+        );
+        assert_eq!(m["t"], "quests");
+        let log = &m["list"][0];
+        assert_eq!(log["project"], "C:/p");
+        assert_eq!(log["mode"], "warriv");
+        assert_eq!(log["done"], 1);
+        assert_eq!(log["warriv"]["on"], true);
+        assert_eq!(log["warriv"]["drives"], true);
+        assert_eq!(log["warriv"]["line"], "reads Build it");
+        let q = log["quests"].as_array().unwrap();
+        let states: Vec<&str> = q.iter().map(|q| q["state"].as_str().unwrap()).collect();
+        assert_eq!(states, ["working", "after", "blocked", "open"]);
+        assert_eq!(q[0]["session"], "s1");
+        assert_eq!(q[0]["notes"][0], "Do it well");
+        assert_eq!(q[1]["why"], "after Build it");
+        assert_eq!(q[2]["why"], "which colour?");
+        assert_eq!(q[3]["session"], Value::Null);
+    }
+
+    #[test]
+    fn a_project_without_a_log_has_no_quests_and_no_warriv() {
+        let m = quests_message(
+            &[QuestLog {
+                path: "C:/p",
+                name: "p",
+                board: None,
+                drives: false,
+                warriv_line: None,
+            }],
+            0,
+        );
+        assert_eq!(m["list"][0]["quests"].as_array().unwrap().len(), 0);
+        assert_eq!(m["list"][0]["warriv"]["on"], false);
+        assert_eq!(m["list"][0]["mode"], "manual");
+    }
+
+    #[test]
+    fn long_notes_are_cut() {
+        let notes: String = (0..30).map(|i| format!("  line {i}\n")).collect();
+        let b = log_of(&format!("- [ ] Long\n{notes}"));
+        let log = QuestLog {
+            path: "",
+            name: "",
+            board: Some(&b),
+            drives: false,
+            warriv_line: None,
+        };
+        let m = quests_message(&[log], 0);
+        let n = m["list"][0]["quests"][0]["notes"].as_array().unwrap().len();
+        assert_eq!(n, QUEST_NOTES_MAX);
+    }
+
+    #[test]
+    fn a_new_quest_needs_a_title_on_one_line() {
+        assert_eq!(new_quest("  Fix\n the  bug ", ""), Ok("Fix the bug".into()));
+        assert!(new_quest("  ", "notes").is_err());
+        assert!(new_quest(&"x".repeat(201), "").is_err());
+        assert!(new_quest("ok", &"x".repeat(8001)).is_err());
     }
 
     #[test]
