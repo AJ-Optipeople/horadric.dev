@@ -76,6 +76,10 @@ struct Phone {
     watch: Option<String>,
     /// The screen last sent, so an unchanged one is not sent again.
     screen: Option<u64>,
+    /// It asked for the quest logs, so it hears them again when they change.
+    quests: bool,
+    /// The quests message last sent to it.
+    quests_sent: Option<u64>,
 }
 
 impl Phone {
@@ -101,6 +105,8 @@ struct Asked {
     folders: Vec<u32>,
     /// New projects: channel, root, folder name.
     creates: Vec<(u32, String, String)>,
+    /// New quests: channel, project path, title, notes.
+    quest_adds: Vec<(u32, String, String, String)>,
     /// Sessions named from a long press: channel, session, name.
     renames: Vec<(u32, String, String)>,
     /// Sessions ended from a long press, after the page's confirm.
@@ -236,6 +242,15 @@ impl App {
                 p.send(ch, &reply);
             }
         }
+        for (ch, project, title, notes) in asked.quest_adds {
+            let reply = match self.portal_quest_add(&project, &title, &notes) {
+                Ok(title) => json!({"t": "quest_added", "project": project, "title": title}),
+                Err(e) => json!({"t": "error", "text": e}),
+            };
+            if let Some(p) = &self.portal {
+                p.send(ch, &reply);
+            }
+        }
         for (ch, id) in asked.resumes {
             let result = if self.paused.contains_key(&id) {
                 self.resume(&id, false)
@@ -344,9 +359,29 @@ impl App {
         let list = self.portal_sessions();
         let projects = self.portal_projects();
         let waiting = self.portal_waiting();
+        let quests = self
+            .portal
+            .as_ref()
+            .is_some_and(|p| p.phones.values().any(|ph| ph.quests))
+            .then(|| self.portal_quests());
         let Some(p) = self.portal.as_mut() else {
             return;
         };
+        if let Some(quests) = quests {
+            let print = fingerprint(&quests);
+            let to: Vec<u32> = p
+                .phones
+                .iter_mut()
+                .filter(|(_, ph)| ph.quests && ph.quests_sent != Some(print))
+                .map(|(&ch, ph)| {
+                    ph.quests_sent = Some(print);
+                    ch
+                })
+                .collect();
+            for ch in to {
+                p.send(ch, &quests);
+            }
+        }
         let anyone = p.phones.values().any(Phone::hello);
         let print = fingerprint(&list);
         if p.sent != Some(print) && anyone {
@@ -461,6 +496,53 @@ impl App {
             })
             .unwrap_or_default()
             .into_bytes()
+    }
+
+    /// The quests message: each tile project's log, and what Warriv does
+    /// there.
+    fn portal_quests(&self) -> Value {
+        let boards = self.shared.boards.borrow();
+        let lines = self.shared.warriv_line.borrow();
+        let projects: Vec<(String, String, String)> = self
+            .clusters
+            .iter()
+            .filter_map(|c| {
+                let dir = self.project_dir(&c.key)?;
+                Some((
+                    c.key.clone(),
+                    dir.to_string_lossy().into_owned(),
+                    project_name(&c.key),
+                ))
+            })
+            .collect();
+        let logs: Vec<portal::QuestLog> = projects
+            .iter()
+            .map(|(key, path, name)| portal::QuestLog {
+                path,
+                name,
+                board: boards.get(key),
+                drives: self.drives.contains_key(key),
+                warriv_line: lines.get(key).map(|(words, _)| words.as_str()),
+            })
+            .collect();
+        portal::quests_message(&logs, unix_now())
+    }
+
+    /// Adds a quest to the end of a tile project's log, as the quests
+    /// tile's plus does. Answers the title as written.
+    fn portal_quest_add(
+        &mut self,
+        project: &str,
+        title: &str,
+        notes: &str,
+    ) -> Result<String, String> {
+        let title = portal::new_quest(title, notes).map_err(str::to_string)?;
+        let key = folder_key(project);
+        if !self.clusters.iter().any(|c| c.key == key) {
+            return Err(format!("{project} is not one of the PC's projects."));
+        }
+        self.add_task(&key, &title, notes);
+        Ok(title)
     }
 
     /// A session's last reply: what its last Stop hook said, or, when this
@@ -758,6 +840,16 @@ fn heard_from(p: &mut Portal, ch: u32, sealed: &[u8], now: u64, asked: &mut Aske
             }
         }
         Some("folders") => asked.folders.push(ch),
+        Some("quests") => {
+            phone.quests = true;
+            phone.quests_sent = None;
+        }
+        Some("quest_add") => {
+            if let (Some(project), Some(title)) = (text("project"), text("title")) {
+                let notes = text("notes").unwrap_or_default();
+                asked.quest_adds.push((ch, project, title, notes));
+            }
+        }
         Some("rename") => {
             if let (Some(id), Some(name)) = (text("id"), text("name")) {
                 asked.renames.push((ch, id, portal::session_name(&name)));

@@ -242,6 +242,35 @@ from the phone, and a phone can make a new one.
 - A PC before 0.24 ignores `attach`; the page gives up after 30 seconds
   and says the PC may need a newer Horadric.
 
+## Added in 0.24: quests and Warriv
+
+A phone sees each project's quest log and can add to it. Read and add
+only: nothing drives Warriv or takes a quest from the phone yet.
+
+- Phone to PC, `{"t":"quests"}`. The PC answers
+  `{"t":"quests","list":[{"project","name","mode","warriv":{"on","drives","line"},"done","quests":[{"title","state","session","why","notes"}]}]}`,
+  one entry per project on the tiles, in their order, and sends it to
+  that phone again whenever it changes, for as long as it stays
+  connected.
+  - `mode` is the log's mode: `manual`, `review`, `warriv` or `auto`.
+  - `warriv.on` says Warriv hears the project's events, `drives` that
+    it drives it (starts and lands quests by itself), `line` what the
+    quests tile's Warriv line says now, may be empty.
+  - `done` counts the finished quests, which are not listed.
+  - `quests` are the rest, in the log's order. `state` is `open`,
+    `after` (waits for another quest), `tangled` (its `After:` lines
+    name no quest, several, or itself), `working`, `review` or
+    `blocked`. `session` is the id of the session that holds it, or
+    `null`. `why` is what it waits for or why it is blocked, may be
+    empty. `notes` are its first 12 notes lines.
+- Phone to PC, `{"t":"quest_add","project":"<path>","title","notes"}`:
+  adds an open quest at the end of that project's log, with the notes
+  under it, as the quests tile's plus does. The project must be one of
+  the tiles'. The title is put on one line, at most 200 characters;
+  notes at most 8000, blank lines dropped. The PC answers
+  `{"t":"quest_added","project","title"}` or `error`, and the new
+  `quests` follows.
+
 ## Added in 0.24: long press a session
 
 A long press on a session in the list, or on the watched session's
