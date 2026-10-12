@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
-use horadric_core::portal::{b64url, fresh_message, Config, Paired};
+use horadric_core::portal::{b64url, fresh_message, unb64url, Config, Paired};
 use horadric_core::Phase;
 use serde_json::{json, Value};
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
@@ -106,6 +106,8 @@ struct Asked {
     stops: Vec<(u32, String)>,
     /// Phones that asked for a session's last reply, to copy it.
     replies: Vec<(u32, String)>,
+    /// Photos from the phone: channel, session, file name, base64url bytes.
+    attaches: Vec<(u32, String, String, String)>,
     /// Pairing attempts: channel, the name the phone gave, the ticket key.
     pairs: Vec<(u32, String, [u8; 32])>,
 }
@@ -281,6 +283,15 @@ impl App {
             let text = self.portal_reply(&id);
             if let Some(p) = &self.portal {
                 p.send(ch, &json!({"t": "reply", "id": id, "text": text}));
+            }
+        }
+        for (ch, id, name, data) in asked.attaches {
+            let reply = match self.portal_attach(&id, &name, &data, now) {
+                Ok(path) => json!({"t": "attached", "id": id, "name": name, "path": path}),
+                Err(e) => json!({"t": "error", "text": e}),
+            };
+            if let Some(p) = &self.portal {
+                p.send(ch, &reply);
             }
         }
         let pc = std::env::var("COMPUTERNAME").unwrap_or_else(|_| "PC".to_string());
@@ -502,6 +513,31 @@ impl App {
             .collect()
     }
 
+    /// Saves a photo the phone sent for a session under the data dir's
+    /// `portal-attach\<session>`, clearing out week old ones first, and
+    /// answers where it went for the phone to put in its message.
+    fn portal_attach(&self, id: &str, name: &str, data: &str, now: u64) -> Result<String, String> {
+        let known = self
+            .shared
+            .registry
+            .lock()
+            .map(|r| r.all().any(|s| s.id == id))
+            .unwrap_or(false);
+        let folder = portal::attach_folder(id).filter(|_| known);
+        let (Some(folder), Some(p)) = (folder, &self.portal) else {
+            return Err("That session is not on the PC.".to_string());
+        };
+        let bytes = unb64url(data).ok_or("The photo did not arrive whole.")?;
+        let root = p.dir.join("portal-attach");
+        sweep_attachments(&root, now);
+        let dir = root.join(folder);
+        let path = dir.join(portal::attach_file_name(name, now));
+        std::fs::create_dir_all(&dir)
+            .and_then(|_| std::fs::write(&path, bytes))
+            .map_err(|e| format!("The PC could not save the photo: {e}"))?;
+        Ok(path.to_string_lossy().into_owned())
+    }
+
     /// Makes a new project folder in one of the roots, with git, and
     /// starts a session in it. Answers the project's path and the session.
     fn portal_create(&mut self, root: &str, name: &str) -> Result<(String, String), String> {
@@ -707,6 +743,12 @@ fn heard_from(p: &mut Portal, ch: u32, sealed: &[u8], now: u64, asked: &mut Aske
                 asked.replies.push((ch, id));
             }
         }
+        Some("attach") => {
+            if let (Some(id), Some(data)) = (text("id"), text("data")) {
+                let name = text("name").unwrap_or_default();
+                asked.attaches.push((ch, id, name, data));
+            }
+        }
         Some("create") => {
             if let (Some(root), Some(name)) = (text("root"), text("name")) {
                 asked.creates.push((ch, root, name));
@@ -763,6 +805,32 @@ fn subfolders(root: &Path) -> Vec<portal::Folder> {
         })
         .collect();
     portal::order_folders(list)
+}
+
+/// Removes attachments older than a week, and the session folders that
+/// leaves empty.
+fn sweep_attachments(root: &Path, now: u64) {
+    let Ok(sessions) = std::fs::read_dir(root) else {
+        return;
+    };
+    for dir in sessions.flatten().map(|e| e.path()).filter(|p| p.is_dir()) {
+        let Ok(files) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for file in files.flatten() {
+            let modified = file
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(now, |d| d.as_secs());
+            if portal::attach_stale(modified, now) {
+                let _ = std::fs::remove_file(file.path());
+            }
+        }
+        // Fails while anything is left, which is what is wanted.
+        let _ = std::fs::remove_dir(&dir);
+    }
 }
 
 /// No one at the PC answers Claude Code's "Do you trust this folder?" for

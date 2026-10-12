@@ -343,6 +343,48 @@ pub fn session_name(raw: &str) -> String {
     line.trim_end().to_string()
 }
 
+/// How long a photo sent from the phone is kept: long enough for the
+/// agent to read it, and the folder does not grow for ever.
+pub const ATTACH_KEEP_SECS: u64 = 7 * 24 * 3600;
+
+/// The folder a session's attachments go in, under `portal-attach`, or
+/// `None` for an id that could climb out of it.
+pub fn attach_folder(id: &str) -> Option<&str> {
+    let ok = !id.is_empty()
+        && id.len() <= 64
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'));
+    ok.then_some(id)
+}
+
+/// The file name a phone's attachment is saved as: the time first, so two
+/// photos called `image.jpg` do not overwrite each other, then the name
+/// the phone gave cut to its last part and to characters any folder takes.
+pub fn attach_file_name(name: &str, now: u64) -> String {
+    let last = name.rsplit(['/', '\\']).next().unwrap_or_default();
+    let clean: String = last
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .take(60)
+        .collect();
+    // Windows drops a trailing dot, and a leading one hides the file.
+    let clean = clean.trim_matches('.');
+    let clean = if clean.is_empty() { "photo.jpg" } else { clean };
+    format!("{now}-{clean}")
+}
+
+/// Whether an attachment last written at `modified` is old enough to go.
+pub fn attach_stale(modified: u64, now: u64) -> bool {
+    now.saturating_sub(modified) >= ATTACH_KEEP_SECS
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -574,5 +616,32 @@ mod tests {
         assert_eq!(session_name(&"x".repeat(200)).chars().count(), NAME_MAX);
         let cut = format!("{} y", "x".repeat(NAME_MAX - 1));
         assert_eq!(session_name(&cut), "x".repeat(NAME_MAX - 1));
+    }
+
+    #[test]
+    fn attach_folders_stay_inside() {
+        assert_eq!(attach_folder("3f2a-b_9"), Some("3f2a-b_9"));
+        for bad in ["", "..", "a/b", r"a\b", "a.b", "C:"] {
+            assert_eq!(attach_folder(bad), None, "{bad}");
+        }
+        assert_eq!(attach_folder(&"a".repeat(65)), None);
+    }
+
+    #[test]
+    fn attach_file_names_are_safe() {
+        assert_eq!(attach_file_name("IMG_1234.jpg", 7), "7-IMG_1234.jpg");
+        assert_eq!(attach_file_name(r"..\..\evil.exe", 7), "7-evil.exe");
+        assert_eq!(attach_file_name("../a b:c?.png", 7), "7-a_b_c_.png");
+        assert_eq!(attach_file_name("", 7), "7-photo.jpg");
+        assert_eq!(attach_file_name("...", 7), "7-photo.jpg");
+        assert_eq!(attach_file_name("con.", 7), "7-con");
+        assert_eq!(attach_file_name(&"x".repeat(200), 7).len(), 62);
+    }
+
+    #[test]
+    fn attachments_go_after_a_week() {
+        assert!(!attach_stale(100, 100 + ATTACH_KEEP_SECS - 1));
+        assert!(attach_stale(100, 100 + ATTACH_KEEP_SECS));
+        assert!(!attach_stale(200, 100));
     }
 }
