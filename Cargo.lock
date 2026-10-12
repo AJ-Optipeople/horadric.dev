@@ -211,7 +211,7 @@ dependencies = [
 
 [[package]]
 name = "horadric"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "horadric-core",
  "horadric-hooks",
@@ -224,7 +224,7 @@ dependencies = [
 
 [[package]]
 name = "horadric-core"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -232,7 +232,7 @@ dependencies = [
 
 [[package]]
 name = "horadric-hooks"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "horadric-core",
  "serde_json",
@@ -240,7 +240,7 @@ dependencies = [
 
 [[package]]
 name = "horadric-pty"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "libc",
  "serde",
@@ -250,7 +250,7 @@ dependencies = [
 
 [[package]]
 name = "horadric-ui"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "alacritty_terminal",
  "block2",
