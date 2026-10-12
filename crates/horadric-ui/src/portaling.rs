@@ -1,8 +1,9 @@
 //! The app's side of Town Portal: a phone, through the relay, pairs with a
 //! one-time code, sees the sessions and projects, watches one's terminal
-//! and types into it, starts and resumes sessions, and is pushed when one
-//! starts waiting. What the messages say is [`crate::portal`]; the
-//! connection is [`crate::portal_link`].
+//! and types into it, starts, resumes, renames and ends sessions, copies
+//! one's last reply, and is pushed when one starts waiting. What the
+//! messages say is [`crate::portal`]; the connection is
+//! [`crate::portal_link`].
 //!
 //! Everything here runs on the UI thread, woken by the link's thread with
 //! [`WM_HORADRIC_PORTAL`] and by [`PORTAL_TIMER`] while the link is up, so
@@ -100,6 +101,12 @@ struct Asked {
     folders: Vec<u32>,
     /// New projects: channel, root, folder name.
     creates: Vec<(u32, String, String)>,
+    /// Sessions named from a long press: channel, session, name.
+    renames: Vec<(u32, String, String)>,
+    /// Sessions ended from a long press, after the page's confirm.
+    stops: Vec<(u32, String)>,
+    /// Phones that asked for a session's last reply, to copy it.
+    replies: Vec<(u32, String)>,
     /// Photos from the phone: channel, session, file name, base64url bytes.
     attaches: Vec<(u32, String, String, String)>,
     /// Pairing attempts: channel, the name the phone gave, the ticket key.
@@ -245,6 +252,38 @@ impl App {
             }
             if let Some(phone) = p.phones.get_mut(&ch) {
                 phone.screen = None;
+            }
+        }
+        for (ch, id, name) in asked.renames {
+            let known = self
+                .shared
+                .registry
+                .lock()
+                .is_ok_and(|r| r.get(&id).is_some());
+            if known {
+                self.rename(&id, &name);
+            } else if let Some(p) = &self.portal {
+                p.send(ch, &json!({"t": "error", "text": "That session is gone."}));
+            }
+        }
+        for (ch, id) in asked.stops {
+            let known = self.consoles.contains_key(&id)
+                || self.paused.contains_key(&id)
+                || self
+                    .shared
+                    .registry
+                    .lock()
+                    .is_ok_and(|r| r.get(&id).is_some());
+            if known {
+                self.end(&id);
+            } else if let Some(p) = &self.portal {
+                p.send(ch, &json!({"t": "error", "text": "That session is gone."}));
+            }
+        }
+        for (ch, id) in asked.replies {
+            let text = self.portal_reply(&id);
+            if let Some(p) = &self.portal {
+                p.send(ch, &json!({"t": "reply", "id": id, "text": text}));
             }
         }
         for (ch, id, name, data) in asked.attaches {
@@ -422,6 +461,18 @@ impl App {
             })
             .unwrap_or_default()
             .into_bytes()
+    }
+
+    /// A session's last reply: what its last Stop hook said, or, when this
+    /// UI did not hear that one (it started since), the transcript's.
+    fn portal_reply(&self, id: &str) -> Option<String> {
+        let (heard, cwd, claude) = {
+            let r = self.shared.registry.lock().ok()?;
+            let s = r.get(id)?;
+            let claude = s.claude_session_id.clone().filter(|_| !s.shell);
+            (s.last_turn.clone(), s.cwd.clone(), claude)
+        };
+        heard.or_else(|| horadric_hooks::transcript::last_reply(&cwd, &claude?))
     }
 
     /// The ids of the sessions waiting for the human now.
@@ -707,6 +758,21 @@ fn heard_from(p: &mut Portal, ch: u32, sealed: &[u8], now: u64, asked: &mut Aske
             }
         }
         Some("folders") => asked.folders.push(ch),
+        Some("rename") => {
+            if let (Some(id), Some(name)) = (text("id"), text("name")) {
+                asked.renames.push((ch, id, portal::session_name(&name)));
+            }
+        }
+        Some("stop") => {
+            if let Some(id) = text("id") {
+                asked.stops.push((ch, id));
+            }
+        }
+        Some("reply") => {
+            if let Some(id) = text("id") {
+                asked.replies.push((ch, id));
+            }
+        }
         Some("attach") => {
             if let (Some(id), Some(data)) = (text("id"), text("data")) {
                 let name = text("name").unwrap_or_default();

@@ -242,6 +242,27 @@ from the phone, and a phone can make a new one.
 - A PC before 0.24 ignores `attach`; the page gives up after 30 seconds
   and says the PC may need a newer Horadric.
 
+## Added in 0.24: long press a session
+
+A long press on a session in the list, or on the watched session's
+title, offers Rename, Copy last reply and Stop.
+
+- Phone to PC, `{"t":"rename","id","name"}`: names the session as its
+  tile menu's Rename does. The PC makes the name one line of at most 80
+  characters; an empty name gives the naming back to Claude's own
+  title. The new name arrives in `sessions`.
+- Phone to PC, `{"t":"stop","id"}`: ends the session as closing its pane
+  does: the agent's process, its tile and its saved place. The page asks
+  first. The session leaves `sessions`.
+- Phone to PC, `{"t":"reply","id"}`. The PC answers
+  `{"t":"reply","id","text"}`: the agent's last message, as its last Stop
+  hook carried it, or, when this Horadric was not up to hear that hook,
+  the newest reply in the transcript's tail. `text` is `null` when the
+  session has none yet. The page shows it and copies it.
+- Any of the three for a session the PC does not know answers `error`.
+  An older PC ignores them; the page says so when nothing changes in a
+  few seconds.
+
 ## Added in 0.24: pushes that say what waits
 
 The push still goes from the PC straight to the phone's push service, now
