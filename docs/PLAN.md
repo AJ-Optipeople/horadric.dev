@@ -2696,6 +2696,19 @@ went from 8% to 5%.
   registry once, as `Rc`, and the tiles leaving and the `Still` it keeps
   share them.
 
+A third look on 2026-10-13, with nine sessions in three projects, found
+Horadric's own processes at about 260 MB. Each `claude` took 420 MB, a
+plugin's MCP server started once per session took 240 MB more, and the
+browser panes took 1.5 GB in nine renderers, most of them pages nobody
+could see.
+
+- **A page off the stage sleeps.** A tab behind the shown one, or in a
+  project not on the stage, gets the low memory target and `TrySuspend`
+  (`web::sleep`): its timers stop and Chromium gives back what it can.
+  Showing it, an agent's call (`wake`) or a navigation wakes it first
+  (`rouse`). Measured on a dev instance, a hidden tab ran 2 ticks of a
+  100 ms timer in 15 seconds where the shown one ran 149.
+
 ### The Runetome
 
 Asked for on 2026-10-01. Runewords become shortcuts: programmable

@@ -42,7 +42,9 @@ use webview2_com::Microsoft::Web::WebView2::Win32::{
     COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN, COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC,
 };
 use webview2_com::Microsoft::Web::WebView2::Win32::{
-    ICoreWebView2Environment15, ICoreWebView2_28, ICoreWebView2_9,
+    ICoreWebView2Environment15, ICoreWebView2_19, ICoreWebView2_28, ICoreWebView2_3,
+    ICoreWebView2_9, COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW,
+    COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL,
 };
 use webview2_com::{
     AcceleratorKeyPressedEventHandler, AddScriptToExecuteOnDocumentCreatedCompletedHandler,
@@ -54,6 +56,7 @@ use webview2_com::{
 };
 use webview2_com::{
     FaviconChangedEventHandler, FindStartCompletedHandler, GetFaviconCompletedHandler,
+    TrySuspendCompletedHandler,
 };
 use windows::core::{BOOL, HSTRING, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, RECT, WPARAM};
@@ -497,6 +500,7 @@ pub fn place_of(key: &str, id: u64) -> Option<(usize, usize, bool)> {
 }
 
 fn navigate_view(view: &ICoreWebView2, url: &str) {
+    rouse(view);
     if let Err(e) = unsafe { view.Navigate(&HSTRING::from(url)) } {
         eprintln!("horadric: cannot open {url}: {e}");
     }
@@ -660,6 +664,7 @@ fn wake(key: &str, view: &ICoreWebView2) -> Option<u64> {
         };
         Some((tab.id, parked))
     })?;
+    rouse(view);
     if let Some((c, bounds)) = parked {
         unsafe {
             let bounds = if bounds.right > bounds.left {
@@ -697,6 +702,39 @@ fn rest(key: &str, id: u64) {
     });
     if let Some(c) = idle {
         let _ = unsafe { c.SetIsVisible(false) };
+        sleep(&c);
+    }
+}
+
+/// A page off the stage sleeps: its scripts and timers stop and Chromium
+/// gives back the memory it can. Every tab of every project stays open,
+/// so without this a dozen pages nobody sees hold a renderer each at full
+/// size. Only a hidden page can be suspended; one playing sound refuses.
+fn sleep(c: &ICoreWebView2Controller) {
+    let Ok(view) = (unsafe { c.CoreWebView2() }) else {
+        return;
+    };
+    unsafe {
+        if let Ok(v) = view.cast::<ICoreWebView2_19>() {
+            let _ = v.SetMemoryUsageTargetLevel(COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW);
+        }
+        if let Ok(v) = view.cast::<ICoreWebView2_3>() {
+            let done = TrySuspendCompletedHandler::create(Box::new(|_, _| Ok(())));
+            let _ = v.TrySuspend(&done);
+        }
+    }
+}
+
+/// Wakes a page `sleep` put down. Showing it would too, but an agent's
+/// call or a navigation can come to a page that stays hidden.
+fn rouse(view: &ICoreWebView2) {
+    unsafe {
+        if let Ok(v) = view.cast::<ICoreWebView2_3>() {
+            let _ = v.Resume();
+        }
+        if let Ok(v) = view.cast::<ICoreWebView2_19>() {
+            let _ = v.SetMemoryUsageTargetLevel(COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL);
+        }
     }
 }
 
@@ -1092,6 +1130,7 @@ fn show(key: &str) {
             } else {
                 let _ = p.controller.SetIsVisible(false);
                 let _ = p.controller.SetParentWindow(pane.unwrap_or_else(park_hwnd));
+                sleep(&p.controller);
             }
         }
     }
@@ -1100,6 +1139,9 @@ fn show(key: &str) {
             let _ = p.controller.SetParentWindow(pane.unwrap_or_else(park_hwnd));
         }
         apply(&p.controller, bounds, p.zoom, fitted);
+        if let Ok(view) = unsafe { p.controller.CoreWebView2() } {
+            rouse(&view);
+        }
         unsafe {
             let _ = p.controller.SetIsVisible(true);
         }
@@ -1165,6 +1207,9 @@ pub fn detach(key: &str, hwnd: HWND) {
                 let _ = c.SetIsVisible(false);
             }
             let _ = c.SetParentWindow(park_hwnd());
+        }
+        if !driven {
+            sleep(&c);
         }
     }
 }
