@@ -150,7 +150,9 @@ again, so that go ahead covers only what they read.
 
 Shipping local is merging into `main` as above, `cargo build --release`
 from the merged code, then `target\release\horadric.exe
-reload`. The installed Horadric hands over to the new build at once, and
+reload`. Before `reload`, deploy the Town Portal page if it is behind
+(RELEASING.md, "The Town Portal page"), for ship local and ship public
+alike. The installed Horadric hands over to the new build at once, and
 the new build attaches to every session's host, including the agent's
 own, which keeps running through it. An installed Horadric from before
 session hosts waits until no session is mid turn and resumes them

@@ -120,6 +120,7 @@ and only reloads this machine.
    not prove the tiles appear.
 9. Publish the draft (below).
 10. Bump the Chocolatey package (below).
+11. Deploy the Town Portal page (below).
 
 ## 3. Publishing is shipping
 
@@ -181,3 +182,22 @@ The Horadric on this machine ships from the checkout with `horadric
 reload`, as CLAUDE.md says, and does not need the release. After a
 release it is at the same version, so its tray offers nothing. If it is
 behind, its tray offers the published release like any other install.
+
+## 6. The Town Portal page
+
+The phone page at `portal.horadric.dev` lives in `../horadric.portal` and
+ships on its own, so a PC feature for phones (colours, the inbox, push
+buttons) does nothing until the page is deployed too. Every ship, local
+or public, ends by checking it:
+
+```sh
+cd ../horadric.portal
+git log --oneline origin/main..main
+curl -s https://portal.horadric.dev/sw.js | grep "CACHE ="
+grep "CACHE =" public/sw.js
+```
+
+If there are unpushed commits or the live `CACHE` differs from the repo's,
+run `npm test`, then `sh deploy.sh`, then `git push`. Saying "ship" is the
+go ahead for this deploy, since the page only adds what the PC sends and
+still works against an older PC.
