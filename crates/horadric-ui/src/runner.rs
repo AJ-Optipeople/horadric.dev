@@ -487,7 +487,8 @@ impl App {
     }
 
     /// What to add to a session's command line started in `cwd`: what it
-    /// is told about the browser pane, about the task list when it holds an item, about its own
+    /// is told about the browser pane, about the quest log (all of it when
+    /// it holds an item, how to read and add to it otherwise), about its own
     /// worktree when it has one and about the project's hosts when it has
     /// some, as one system prompt since Claude
     /// Code takes only one, and, the first time only, the item as its
@@ -507,6 +508,9 @@ impl App {
             .ok()
             .and_then(|r| r.get(id)?.worktree.clone());
         let mut allowed = Vec::new();
+        let special = horadric_core::warriv::is_reviewer(id)
+            || horadric_core::warriv::is_warriv(id)
+            || horadric_core::runeword::is_errand(id);
         if horadric_core::warriv::is_reviewer(id) {
             let (flags, prompt) = self.reviewer_args(cwd);
             allowed = flags;
@@ -535,6 +539,12 @@ impl App {
             if let Some((batch, n)) = tombs::of(id) {
                 system.push(tombs::system_prompt(n, tombs::weight(batch)));
             }
+        } else if !special {
+            let main = folder_key(&cwd.to_string_lossy());
+            system.push(tasks::log_prompt(
+                &horadric_command(),
+                file::rel(Path::new(&main)),
+            ));
         }
         match &own_tree {
             Some(w) => system.push(worktree::system_prompt(w)),

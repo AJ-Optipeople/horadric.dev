@@ -1301,6 +1301,23 @@ pub fn system_prompt(horadric: &str, file: &str, list: Option<&str>) -> String {
     out
 }
 
+/// What a session that holds no quest is told about the log, so a human
+/// who speaks of quests in a new project, where no log exists yet, is
+/// understood. Short, since every such session carries it.
+pub fn log_prompt(horadric: &str, file: &str) -> String {
+    format!(
+        "Horadric keeps this project's quest log at {file}, a list of work for \
+         agent sessions that Horadric starts one per quest; it may not exist yet. \
+         When the human speaks of quests, they mean this log. Read it with \
+         `{horadric} quest list`. Add one with `{horadric} quest add \"<title>\"`, \
+         adding `--notes \"<what to do and why>\"` and `--after \"<other title>\"` \
+         when it can only start once another quest is done; the first add creates \
+         the log. `{horadric} quest` with no arguments shows every command. A quest \
+         you add is done by a session of its own, not by you, unless the human asks \
+         you to do it here."
+    )
+}
+
 /// What a quest's session is told besides, while Warriv drives: nobody
 /// is there to answer soon, so a choice that can be changed later is made
 /// and written down, and only what can not be undone waits for the human.
@@ -1420,6 +1437,17 @@ mod tests {
         let p = system_prompt("hx", QUESTS_FILE, None);
         assert!(p.contains("`--after \"<other title>\"`"));
         assert!(p.contains("an `After:` line for every quest it needs first"));
+    }
+
+    #[test]
+    fn a_session_without_a_quest_still_learns_the_log() {
+        let p = log_prompt("hx", QUESTS_FILE);
+        assert!(p.contains("quest log at .horadric/quests.md"));
+        assert!(p.contains("`hx quest list`"));
+        assert!(p.contains("`hx quest add \"<title>\"`"));
+        assert!(p.contains("the first add creates the log"));
+        assert!(!p.contains("quest done"));
+        assert!(!p.contains("  "));
     }
 
     #[test]
