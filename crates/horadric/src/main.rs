@@ -3,7 +3,8 @@
 //! it must not take every session with it. `app` runs the app in the
 //! foreground instead, for its log. `new` asks the running app for a session
 //! in a terminal of its own, `run` starts a tagged `claude` in the current
-//! terminal, `quest` reports on an item of the quest log, `runeword list` shows a
+//! terminal, `quest` reports on an item of the quest log, `heavy` runs a
+//! test suite or build in turn with the other sessions', `runeword list` shows a
 //! project's stones, `serve` shows the
 //! state stream as a table, `reload` hands the running app over to this
 //! build, `release` signs a build for the updater, and the rest set
@@ -13,6 +14,7 @@
 mod console;
 #[cfg(windows)]
 mod explorer;
+mod heavy;
 mod hook;
 #[cfg(windows)]
 mod install;
@@ -63,6 +65,8 @@ Usage:
                                Report on the quest this session works, or add to
                                the project's quest log (.horadric/quests.md).
                                `horadric task` is the same, from before the rename
+  horadric heavy -- COMMAND...    Run a test suite or build once no other session on this
+                               machine runs one; alone, say who runs one now
   horadric runeword list         Every stone of this project's Runetome: its runeword name,
                                label and steps, and why any does not parse
   horadric runeword cast NAME    Cast that stone of this project's Runetome, in a session
@@ -128,6 +132,7 @@ fn main() -> ExitCode {
         Some("serve") => console::serve(),
         Some("new") => run::new(&args[1..]),
         Some("run") => run::run(&args[1..]),
+        Some("heavy") => heavy::run(&args[1..]),
         // `task` is how sessions started before the rename report back.
         Some("quest" | "task") => task::run(&args[1..]),
         #[cfg(windows)]

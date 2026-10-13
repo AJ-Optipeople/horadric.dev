@@ -559,6 +559,7 @@ impl App {
                 }
             }
         }
+        system.push(horadric_core::heavy::system_prompt(&horadric_command()));
         // The config may be kept out of git, so a worktree reads its
         // project's from the main tree.
         system.extend(ssh_prompt(Path::new(&folder_key(&cwd.to_string_lossy()))));

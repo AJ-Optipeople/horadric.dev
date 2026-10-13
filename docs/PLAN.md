@@ -2708,6 +2708,16 @@ could see.
   Showing it, an agent's call (`wake`) or a navigation wakes it first
   (`rouse`). Measured on a dev instance, a hidden tab ran 2 ticks of a
   100 ms timer in 15 seconds where the shown one ran 149.
+- **Heavy commands take turns.** Several sessions running test suites at
+  once share the CPU many ways and all finish late. `horadric heavy --
+  <command>` runs one only while no other session on the machine runs
+  one, and tells a waiter whose command it waits for. The slot is a file
+  lock in the temp folder (`horadric-heavy\slot.lock`), which the system
+  frees when its holder ends however it ends, so a killed session holds
+  nobody up. The dev and installed Horadric share it. Every session is
+  told to wrap its test suites and full builds, and never a dev server
+  or a watcher. `horadric heavy` alone says who holds it. Not yet: the
+  tile does not show a session waiting, and the slot is always one.
 
 ### The Runetome
 
