@@ -5643,7 +5643,12 @@ use what is new. Each part is a quest in the log.
 
 #### Cloud session tiles (proposal, 2026-10-11)
 
-Not built. Written for the human to choose an option.
+Not built. **Decided 2026-10-13: option 4, wait.** The human chose to
+build nothing until Claude Code itself lists cloud sessions on this
+machine. When `claude agents --json` reports them (a `kind` such as
+`cloud`), the feeder that finds background sessions picks them up, and
+the tile work starts from there. Until then, no private APIs, no
+attach-only tiles and no hooks in the cloud.
 
 **What this machine can see today**, checked with Claude Code 2.1.296:
 
