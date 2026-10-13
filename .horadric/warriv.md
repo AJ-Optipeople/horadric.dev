@@ -2,8 +2,11 @@
 
 ## Rules
 - Do not wait for main's checks before casting a ship stone: nothing runs them between landings, and the ship session runs all three first (RELEASING.md step 2) and stops on red.
+- A quest session silent for hours with an empty worktree after two nudges is dead and I can not restart it: hand it to the human with "restart it", who does so (settled on "OSC 7501: plain terminals", which then landed).
 
 ## Lately
+- 2026-10-13 Daily look back: the day was clean (1 quest completed, 1 merged by itself, 2 Warriv sessions, nothing repeated).
+- 2026-10-13 Wake: "Propose tiles for Claude Code cloud sessions" blocked again, still the human's pick. Turned the plain terminals answer into a rule (that quest landed, its Codex and Grok follow-up is under way).
 - 2026-10-13 Wake: "Propose tiles for Claude Code cloud sessions" blocked again, same report, no human answer in its notes. Still the human's pick, nothing new to do.
 - 2026-10-12 Wake: "Propose tiles for Claude Code cloud sessions" blocked again, same report, no human answer in its notes. Still the human's pick, nothing new to do.
 - 2026-10-12 Round (main at 89bc9a5): the landing counted is the iOS keyboard quest in horadric.portal, and only my memory commits since the 2a119ee ship (reloaded fine), so no ship. Plain terminals and cloud tiles still with the human. Nothing to do.
@@ -126,4 +129,3 @@
 
 ## Open
 - "Propose tiles for Claude Code cloud sessions": waits on the human's pick of option in PLAN.md "Cloud session tiles" (recommended: attach with claude --cloud, OSC 7501, list later). Once picked, file the build quests.
-- "OSC 7501: plain terminals": handed to the human to restart its dead session (silent 11 hours). Once it moves, its Codex and Grok follow-up can start.
