@@ -5573,6 +5573,15 @@ use what is new. Each part is a quest in the log.
   behind Windows' own. Since the grid now sees `CSI c` and colour
   queries, a reattached host's replay is parsed with the grid's answers
   muted, as its OSC 7501 queries already were.
+  **Codex and Grok checked 2026-10-13.** Codex CLI 0.159.0 and Grok Build
+  1.0.46 (the installed builds) hold no OSC 7501 in their binaries at all,
+  so neither sends it yet, and nothing in Horadric needs to change for
+  them. The console scans every agent's output the same way, a session
+  without hooks (an unreviewed Codex hook) takes the program's phase at
+  once, and one with hooks takes it to end a turn its hooks still call
+  working, which is the gap they leave (Codex sends no `Stop` for a failed
+  turn). When either ships the protocol this works with no further code.
+  Recheck with `grep -a 7501` on the binary after an upgrade.
 - **Claude Mods** (2.1.287). Plugins can run TypeScript inside a
   session. Horadric ships a plugin with a mod, installed and removed with
   the hooks and refused by a dev instance as the hooks are. The mod
