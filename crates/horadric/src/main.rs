@@ -166,10 +166,13 @@ fn main() -> ExitCode {
             .map_err(|e| e.to_string())
             .and_then(|exe| launch(&exe)),
         #[cfg(windows)]
-        Some("app") => horadric_ui::app::run(
-            horadric_hooks::port(),
-            args.get(1).is_some_and(|a| a == "--reload"),
-        ),
+        Some("app") => {
+            horadric_ui::sanctuary::set_source(lore::graph_at);
+            horadric_ui::app::run(
+                horadric_hooks::port(),
+                args.get(1).is_some_and(|a| a == "--reload"),
+            )
+        }
         #[cfg(target_os = "macos")]
         Some("app") => horadric_ui::mac::run(
             horadric_hooks::port(),

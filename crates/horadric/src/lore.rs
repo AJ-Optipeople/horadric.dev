@@ -86,6 +86,11 @@ pub fn graph(place: &Place) -> Result<Graph, String> {
     Ok(Graph::build(&files, &calls, &notes, &quests))
 }
 
+/// The graph of the project `dir` is in, for the app's sanctuary pane.
+pub fn graph_at(dir: &Path) -> Result<Graph, String> {
+    graph(&Place::of(dir)?)
+}
+
 /// `horadric sanctuary`: lays the graph out from where it was left and
 /// keeps it, saying how large it is and how long that took, so the layout
 /// can be tried on a real project before the pane draws it.

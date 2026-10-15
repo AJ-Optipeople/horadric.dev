@@ -30,7 +30,7 @@
 //!
 //! [`anim`], [`art`], [`board`], [`columns`], [`field`], [`files`], [`find`], [`layout`], [`theme`], [`palette`], [`paste`],
 //! [`keys`], [`frame`], [`icon`], [`inbox`], [`loot`], [`motion`], [`paths`], [`viewer`],
-//! [`highlight`], [`history`], [`hotkey`], [`screens`] and [`shell`] are pure and tested, and so is
+//! [`highlight`], [`history`], [`hotkey`], [`screens`], [`shell`] and [`sky`] are pure and tested, and so is
 //! the list logic in `recent`.
 //! `update` is the updater's crypto through CNG, tested with keys made in
 //! the tests.
@@ -66,6 +66,7 @@ pub mod portal_key;
 pub mod rain;
 pub mod screens;
 pub mod shell;
+pub mod sky;
 pub mod spectator;
 pub mod symbols;
 pub mod theme;
@@ -148,6 +149,8 @@ mod questlog;
 mod recent;
 #[cfg(windows)]
 mod render;
+#[cfg(windows)]
+pub mod sanctuary;
 #[cfg(windows)]
 mod settings;
 #[cfg(windows)]

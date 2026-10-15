@@ -269,6 +269,7 @@ pub enum Shows {
     Shell,
     File,
     Browser,
+    Sanctuary,
 }
 
 /// What a key of a pane's header does, `zoomed` while the pane fills the
@@ -282,6 +283,7 @@ pub fn pane(key: Key, shows: Shows, zoomed: bool) -> &'static str {
         (Key::Close, Shows::Shell) => "Close this terminal",
         (Key::Close, Shows::File) => "Close this file",
         (Key::Close, Shows::Browser) => "Close the browser",
+        (Key::Close, Shows::Sanctuary) => "Close the Arcane Sanctuary",
     }
 }
 
@@ -769,7 +771,13 @@ mod tests {
 
     #[test]
     fn the_cross_says_what_it_closes() {
-        let all = [Shows::Agent, Shows::Shell, Shows::File, Shows::Browser];
+        let all = [
+            Shows::Agent,
+            Shows::Shell,
+            Shows::File,
+            Shows::Browser,
+            Shows::Sanctuary,
+        ];
         for (i, a) in all.iter().enumerate() {
             for b in &all[i + 1..] {
                 assert_ne!(pane(Key::Close, *a, false), pane(Key::Close, *b, false));
@@ -804,7 +812,13 @@ mod tests {
         lines.extend(cluster(Hit::File(0)));
         lines.push(STASHED);
         for k in [Key::Stash, Key::Zoom, Key::Close] {
-            for s in [Shows::Agent, Shows::Shell, Shows::File, Shows::Browser] {
+            for s in [
+                Shows::Agent,
+                Shows::Shell,
+                Shows::File,
+                Shows::Browser,
+                Shows::Sanctuary,
+            ] {
                 lines.push(pane(k, s, false));
                 lines.push(pane(k, s, true));
             }

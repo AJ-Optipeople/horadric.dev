@@ -56,15 +56,15 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetCaretBlinkTime, GetClientRect, GetCursorPos,
     GetParent, GetWindowLongPtrW, IsWindowVisible, KillTimer, LoadCursorW, PeekMessageW,
     RegisterClassW, SendMessageW, SetCursor, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
-    CREATESTRUCTW, CS_DBLCLKS, GWLP_USERDATA, HTCLIENT, IDC_ARROW, IDC_HAND, IDC_IBEAM, IDC_SIZENS,
-    IDC_SIZENWSE, IDC_SIZEWE, MSG, PM_NOREMOVE, PM_REMOVE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-    SWP_NOZORDER, SW_HIDE, SW_SHOWNA, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CAPTURECHANGED, WM_CHAR,
-    WM_DEADCHAR, WM_DESTROY, WM_DPICHANGED_AFTERPARENT, WM_DROPFILES, WM_ERASEBKGND,
-    WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL,
-    WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SETFOCUS,
-    WM_SIZE, WM_SYSCHAR, WM_SYSDEADCHAR, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WM_USER, WNDCLASSW,
-    WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_VISIBLE,
+    CREATESTRUCTW, CS_DBLCLKS, GWLP_USERDATA, HTCLIENT, IDC_ARROW, IDC_HAND, IDC_IBEAM,
+    IDC_SIZEALL, IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE, MSG, PM_NOREMOVE, PM_REMOVE, SWP_NOACTIVATE,
+    SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOWNA, WINDOW_EX_STYLE, WINDOW_STYLE,
+    WM_CAPTURECHANGED, WM_CHAR, WM_DEADCHAR, WM_DESTROY, WM_DPICHANGED_AFTERPARENT, WM_DROPFILES,
+    WM_ERASEBKGND, WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS, WM_LBUTTONDBLCLK,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE,
+    WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR,
+    WM_SETFOCUS, WM_SIZE, WM_SYSCHAR, WM_SYSDEADCHAR, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER,
+    WM_USER, WNDCLASSW, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_VISIBLE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowRect, SetParent, GWLP_HWNDPARENT, GWL_EXSTYLE, GWL_STYLE, HWND_TOP, SWP_FRAMECHANGED,
@@ -90,6 +90,7 @@ use crate::layout::Dir;
 use crate::links::{self, Target};
 use crate::motion::{self, REVEAL, SPOTLIGHT};
 use crate::paste::{self, Source};
+use crate::sanctuary;
 use crate::suggest::{self, Suggest};
 use crate::theme::{self, Color};
 use crate::viewer::Hit;
@@ -106,6 +107,8 @@ const ANIM_TIMER: usize = 2;
 const BLINK_TIMER: usize = 3;
 /// The next step of the Matrix rain behind a terminal's text.
 const RAIN_TIMER: usize = 4;
+/// The Arcane Sanctuary's next frame while its layout settles.
+const SKY_TIMER: usize = 5;
 /// How often the rain moves on, about as often as it did on the film's
 /// monitors.
 const RAIN_MS: u32 = 80;
@@ -272,6 +275,8 @@ pub struct Pane {
     link: RefCell<Option<Vec<Point>>>,
     /// Whether Windows was asked to say when the mouse leaves.
     tracking: Cell<bool>,
+    /// An Arcane Sanctuary's vsync clock runs.
+    sky_ticking: Cell<bool>,
 }
 
 /// The keys that make no character, which `WM_CHAR` never carries.
@@ -357,6 +362,7 @@ impl Pane {
             suggest: RefCell::new(None),
             typed: RefCell::new(String::new()),
             resizing: Cell::new(None),
+            sky_ticking: Cell::new(false),
         });
         // A browser pane's page is a window inside it, which its own
         // drawing must leave alone.
@@ -383,7 +389,7 @@ impl Pane {
             )?;
             pane.hwnd = hwnd;
             // A dropped path would have nowhere to go in a file.
-            DragAcceptFiles(hwnd, !pane.console.is_view());
+            DragAcceptFiles(hwnd, !pane.console.is_view() && pane.console.sky.is_none());
         }
         if let Some(key) = &pane.console.web {
             let (bounds, zoom) = pane.page_place();
@@ -718,9 +724,23 @@ impl Pane {
         Some((self.serial() as u64, t))
     }
 
-    /// A session's own pane, not a file view or a browser pane.
+    /// A session's own pane, not a file view, a browser pane or a
+    /// sanctuary.
     fn is_session(&self) -> bool {
-        !self.console.is_view() && self.console.web.is_none()
+        !self.console.is_view() && self.console.web.is_none() && self.console.sky.is_none()
+    }
+
+    /// Runs the vsync clock while the sanctuary's layout settles, and
+    /// stops it once it is still, so a still picture costs nothing.
+    fn sky_clock(&self, key: &str) {
+        let on = sanctuary::moving(key);
+        if self.sky_ticking.replace(on) != on {
+            if on {
+                crate::vsync::start(self.hwnd, SKY_TIMER);
+            } else {
+                crate::vsync::stop(self.hwnd, SKY_TIMER);
+            }
+        }
     }
 
     /// Has the button that stashes it: an agent's session, since a plain
@@ -753,6 +773,9 @@ impl Pane {
     /// Resizes the grid to fill the pane below its header, or a browser
     /// pane's page to fill its glass.
     fn fit_grid(&self) {
+        if self.console.sky.is_some() {
+            return;
+        }
         if let Some(key) = &self.console.web {
             let (bounds, zoom) = self.page_place();
             web::set_bounds(key, bounds, zoom);
@@ -844,6 +867,9 @@ impl Pane {
                 name = title;
             }
             detail = url;
+        }
+        if let Some(key) = &self.console.sky {
+            detail = sanctuary::detail(key);
         }
         let phase = self
             .shared
@@ -944,7 +970,7 @@ impl Pane {
         };
         // A browser pane's grid is empty and unseen, but a page smaller
         // than the glass, or the tab strip over it, would show its cursor.
-        if self.console.web.is_some() {
+        if self.console.web.is_some() || self.console.sky.is_some() {
             frame.caret = None;
             frame.fills.clear();
             frame.runs.clear();
@@ -1002,7 +1028,13 @@ impl Pane {
             font: (font.size(), font.family()),
             theme: theme::current(),
         };
+        let sky = self
+            .console
+            .sky
+            .as_deref()
+            .map(|key| sanctuary::frame(key, self.hwnd, self.glass()));
         let same = self.console.web.is_none()
+            && sky.is_none()
             && rain.is_none()
             && self.drawn.borrow().as_ref() == Some(&look);
         if same {
@@ -1024,6 +1056,7 @@ impl Pane {
                 veil,
                 plate,
                 rain,
+                sky.as_ref(),
             )
         });
         let drawn = matches!(result, Some(Ok(())));
@@ -1032,6 +1065,9 @@ impl Pane {
             self.stale.set(true);
         }
         *self.drawn.borrow_mut() = drawn.then_some(look);
+        if let Some(key) = &self.console.sky {
+            self.sky_clock(key);
+        }
     }
 
     /// Whether the cursor is lit in this paint, and a timer for the next
@@ -1347,6 +1383,15 @@ impl Pane {
             self.search_char(c, mods);
             return;
         }
+        if self.console.sky.is_some() {
+            match keys::char_action(c, mods) {
+                CharAction::NewShell => app::push(Input::Shell(None)),
+                CharAction::Browse => app::push(Input::Browse),
+                CharAction::Sanctuary => app::push(Input::Sanctuary),
+                _ => {}
+            }
+            return;
+        }
         if self.console.is_view() {
             match keys::char_action(c, mods) {
                 _ if c as u32 == 0x1b => self.close(),
@@ -1355,6 +1400,7 @@ impl Pane {
                 }
                 CharAction::NewShell => app::push(Input::Shell(None)),
                 CharAction::Browse => app::push(Input::Browse),
+                CharAction::Sanctuary => app::push(Input::Sanctuary),
                 _ => {}
             }
             return;
@@ -1372,6 +1418,7 @@ impl Pane {
             }
             CharAction::NewShell => app::push(Input::Shell(None)),
             CharAction::Browse => app::push(Input::Browse),
+            CharAction::Sanctuary => app::push(Input::Sanctuary),
         }
     }
 
@@ -1383,6 +1430,7 @@ impl Pane {
                 Chord::Zoom => self.tell_stage(WM_PANE_ZOOM),
                 Chord::Focus(dir) => self.move_focus(dir),
                 Chord::Font(step) => app::push(Input::Font(step)),
+                Chord::Find if self.console.sky.is_some() => {}
                 Chord::Find => self.open_search(),
             }
             return true;
@@ -1476,6 +1524,10 @@ impl Pane {
 
     /// The cross: a file view or a browser pane closes, a session ends.
     fn close(&self) {
+        if let Some(key) = &self.console.sky {
+            app::push(Input::CloseSky(key.clone()));
+            return;
+        }
         match &self.console.web {
             Some(key) => app::push(Input::CloseWeb(key.clone())),
             None if self.console.is_view() => app::push(Input::CloseView(self.serial())),
@@ -2231,7 +2283,9 @@ impl Pane {
 
     /// What the pane shows, for what its cross says.
     fn shows(&self) -> tip::Shows {
-        if self.console.web.is_some() {
+        if self.console.sky.is_some() {
+            tip::Shows::Sanctuary
+        } else if self.console.web.is_some() {
             tip::Shows::Browser
         } else if self.console.is_view() {
             tip::Shows::File
@@ -2385,6 +2439,21 @@ impl Pane {
 
     fn on_wheel(&self, wparam: WPARAM, lparam: LPARAM) {
         let raw = ((wparam.0 >> 16) & 0xffff) as i16 as i32;
+        if let Some(key) = &self.console.sky {
+            // The wheel's point is on the screen, the zoom's in the glass.
+            let mut p = POINT {
+                x: (lparam.0 & 0xffff) as i16 as i32,
+                y: ((lparam.0 >> 16) & 0xffff) as i16 as i32,
+            };
+            unsafe {
+                let _ = ScreenToClient(self.hwnd, &mut p);
+            }
+            let at = LPARAM(((p.y as u16 as isize) << 16) | p.x as u16 as isize);
+            sanctuary::wheel(key, self.dip(at), raw);
+            sanctuary::hover(key, Some(self.dip(at)));
+            self.invalidate();
+            return;
+        }
         if self.console.is_view() && Self::mods().shift {
             // Down goes right, as Shift and the wheel do in an editor.
             self.sideways(-raw);
@@ -2524,6 +2593,18 @@ impl Pane {
                 self.invalidate();
                 Some(LRESULT(0))
             }
+            WM_TIMER if wparam.0 == SKY_TIMER => {
+                crate::vsync::took(self.hwnd, SKY_TIMER);
+                if let Some(key) = &self.console.sky {
+                    sanctuary::step(key);
+                }
+                self.invalidate();
+                Some(LRESULT(0))
+            }
+            sanctuary::WM_SKY_READY => {
+                self.invalidate();
+                Some(LRESULT(0))
+            }
             WM_TIMER if wparam.0 == BLINK_TIMER => {
                 unsafe {
                     let _ = KillTimer(Some(self.hwnd), BLINK_TIMER);
@@ -2619,6 +2700,16 @@ impl Pane {
                         SetCursor(LoadCursorW(None, IDC_HAND).ok());
                     }
                     Some(LRESULT(1))
+                } else if let Some(key) = &self.console.sky {
+                    let cursor = if sanctuary::dragging(key) {
+                        IDC_SIZEALL
+                    } else {
+                        IDC_ARROW
+                    };
+                    unsafe {
+                        SetCursor(LoadCursorW(None, cursor).ok());
+                    }
+                    Some(LRESULT(1))
                 } else {
                     None
                 }
@@ -2707,6 +2798,17 @@ impl Pane {
                     } else {
                         self.tell_stage(WM_PANE_GRAB);
                     }
+                } else if let Some(key) = &self.console.sky {
+                    // A double click brings the whole picture back.
+                    if msg == WM_LBUTTONDBLCLK {
+                        sanctuary::refit(key);
+                        self.invalidate();
+                    } else {
+                        sanctuary::grab(key, self.dip(lparam));
+                        unsafe {
+                            SetCapture(self.hwnd);
+                        }
+                    }
                 } else if let Some((_, target)) = self.link_at(lparam) {
                     self.open_link(&target);
                 } else if self.report_press(Button::Left, lparam) {
@@ -2721,8 +2823,40 @@ impl Pane {
                 self.tracking.set(false);
                 tip::away(self.hwnd);
                 self.hover(None);
+                if let Some(key) = &self.console.sky {
+                    if sanctuary::hover(key, None) {
+                        self.invalidate();
+                    }
+                }
                 Some(LRESULT(0))
             }
+            WM_MOUSEMOVE if self.console.sky.is_some() => {
+                let line = self.tip_at(lparam);
+                tip::over(&self.shared, self.hwnd, line);
+                self.track();
+                if let Some(key) = &self.console.sky {
+                    let at = self.dip(lparam);
+                    let moved = sanctuary::drag(key, at);
+                    let glass = !self.in_header(lparam) && !sanctuary::dragging(key);
+                    let changed = sanctuary::hover(key, glass.then_some(at));
+                    if moved || changed {
+                        self.invalidate();
+                    }
+                }
+                Some(LRESULT(0))
+            }
+            WM_LBUTTONUP if self.console.sky.is_some() => {
+                if let Some(key) = &self.console.sky {
+                    if sanctuary::dragging(key) {
+                        sanctuary::release(key);
+                        unsafe {
+                            let _ = ReleaseCapture();
+                        }
+                    }
+                }
+                Some(LRESULT(0))
+            }
+            WM_RBUTTONUP if self.console.sky.is_some() => Some(LRESULT(0)),
             WM_MOUSEMOVE if self.resizing.get().is_some() => {
                 self.drag_grip(lparam);
                 Some(LRESULT(0))
@@ -2803,6 +2937,9 @@ impl Pane {
                 if self.resizing.take().is_some() {
                     self.invalidate();
                 }
+                if let Some(key) = &self.console.sky {
+                    sanctuary::release(key);
+                }
                 // Capture taken away mid press, by a menu or Alt+Tab: the
                 // program must not think the button is still down.
                 if let Some(held) = self.reported.take() {
@@ -2865,6 +3002,7 @@ impl Pane {
                 if let Some(key) = &self.console.web {
                     web::detach(key, self.hwnd);
                 }
+                crate::vsync::stop(self.hwnd, SKY_TIMER);
                 None
             }
             _ => None,

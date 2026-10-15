@@ -93,6 +93,17 @@ Each is a quest.
 2. The pane: drawn on the stage beside sessions and the browser, zoom
    to fill the stage, pan, wheel zoom, hover, opened from the header
    menu and a key, still when nothing moves.
+   Done 2026-10-16: a console of a third kind (`Console::sky`, id
+   `sky:<key>`) drawn by `GridTarget::draw` where the grid would be,
+   after the browser in the grid like it, not in the saved order.
+   `sanctuary.rs` keeps each project's graph, layout and view, reads the
+   graph on a thread through `lore::graph_at`, which the binary hands
+   the app with `sanctuary::set_source`, and keeps the positions once
+   still. `sky.rs` is the pure part: the view, zoom toward the cursor,
+   dot sizes, the node under the mouse, the named hubs, the frame.
+   Ctrl+Shift+G or "Arcane Sanctuary" in the project menu opens it; a
+   double click fits the picture again. Hover names a node in full; who
+   touched a file last waits for step 3, which hears the sessions.
 3. Lighting it up: reads, edits, new and deleted files, lore recalls,
    context packs and the sparks, in each session's colour.
 4. Tristram's sky: every project as a galaxy in the town's sanctuary,

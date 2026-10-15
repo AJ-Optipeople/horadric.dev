@@ -121,6 +121,7 @@ use crate::menu::{self, Item};
 use crate::portal_key;
 use crate::questlog::{self, QuestLog};
 use crate::render::{Gpu, StashLook};
+use crate::sanctuary;
 use crate::screens::{self, Screen};
 use crate::settings::{self, Field, SettingsWindow};
 use crate::sound;
@@ -330,6 +331,8 @@ const SWEEP_GAP: Duration = Duration::from_secs(10);
 const VIEW: &str = "view:";
 /// The start of a browser pane's id, before its project key.
 const WEB: &str = "web:";
+/// The start of an Arcane Sanctuary's id, before its project key.
+const SKY: &str = "sky:";
 pub(crate) const MARGIN_DIP: i32 = 12;
 pub(crate) const GAP_DIP: i32 = 12;
 /// The narrowest the stage gets when it gives way to a new column.
@@ -388,6 +391,11 @@ pub(crate) enum Input {
     /// Ctrl+Shift+B in a pane: the browser pane of the project on the
     /// stage, opened or given the keyboard.
     Browse,
+    /// Ctrl+Shift+G in a pane: the Arcane Sanctuary of the project on the
+    /// stage, opened or given the keyboard.
+    Sanctuary,
+    /// A sanctuary's cross: close the one of the project with this key.
+    CloseSky(String),
     /// A web address Ctrl+clicked in a pane: to the browser pane of the
     /// project on the stage when it has one, otherwise to the user's own
     /// browser.
@@ -813,6 +821,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             portal_checked: Default::default(),
             views: HashMap::new(),
             webs: HashMap::new(),
+            skies: HashMap::new(),
             web_ask: None,
             pane_ask: None,
             stage: None,
@@ -2142,6 +2151,7 @@ fn project_menu(key: &str) {
     const END_ALL: usize = 4;
     const SHELL: usize = 5;
     const BROWSE: usize = 14;
+    const SANCTUARY: usize = 16;
     const QUESTS: usize = 15;
     const CODE: usize = 7;
     const EXPLORE: usize = 8;
@@ -2212,6 +2222,7 @@ fn project_menu(key: &str) {
         Item::Separator,
         Item::action(SHELL, "New terminal\tCtrl+Shift+T"),
         Item::action(BROWSE, "Browser\tCtrl+Shift+B"),
+        Item::action(SANCTUARY, "Arcane Sanctuary\tCtrl+Shift+G"),
     ]);
     for (i, host) in listed.iter().enumerate() {
         items.push(Item::action(SSH + i, format!("SSH to {host}")));
@@ -2289,6 +2300,7 @@ fn project_menu(key: &str) {
         Some(HIDE_TOWN) => app.hide_town(true),
         Some(SHELL) => app.open_shell(key),
         Some(BROWSE) => app.open_web(key, None),
+        Some(SANCTUARY) => app.open_sky(key),
         Some(i) if (SSH..SSH_END).contains(&i) => app.open_ssh(key, &listed[i - SSH], None),
         Some(i) if (MERGE..MERGE_END).contains(&i) => {
             app.merge(&merges[i - MERGE]);
@@ -2851,6 +2863,9 @@ struct App {
     /// Browser panes, at most one per project, by project key. The page
     /// itself is `web`'s and outlives its pane.
     webs: HashMap<String, Arc<Console>>,
+    /// Arcane Sanctuaries, at most one per project, by project key. What
+    /// they show is `sanctuary`'s and outlives the pane.
+    skies: HashMap<String, Arc<Console>>,
     /// What to ask for which project's browser pane, once out of the borrow.
     web_ask: Option<(String, WebAsk)>,
     /// Which session pane's header button to act on, once out of the
@@ -3255,6 +3270,7 @@ impl App {
             .get(id)
             .or_else(|| self.views.values().find(|v| v.id == id))
             .or_else(|| self.webs.values().find(|v| v.id == id))
+            .or_else(|| self.skies.values().find(|v| v.id == id))
     }
 
     /// The stage, when it shows this console.
@@ -5647,6 +5663,9 @@ impl App {
         if let Some(page) = self.webs.get(key) {
             ids.push(page.id.clone());
         }
+        if let Some(sky) = self.skies.get(key) {
+            ids.push(sky.id.clone());
+        }
         ids
     }
 
@@ -6076,6 +6095,7 @@ impl App {
                 Some(path.file_name()?.to_string_lossy().into_owned())
             })
             .or_else(|| id.starts_with(WEB).then(|| "Browser".to_string()))
+            .or_else(|| id.starts_with(SKY).then(|| "Arcane Sanctuary".to_string()))
             .unwrap_or_else(|| id.to_string())
     }
 
@@ -6156,6 +6176,35 @@ impl App {
         self.webs.remove(key);
         self.sync_stage();
         web::close(key);
+    }
+
+    /// Shows the project's Arcane Sanctuary on the stage beside its
+    /// sessions, with the keyboard, opening it when it is not yet.
+    fn open_sky(&mut self, key: &str) {
+        let Some(dir) = self.project_dir(key) else {
+            return;
+        };
+        let id = format!("{SKY}{key}");
+        if !self.skies.contains_key(key) {
+            let serial = self.next_serial;
+            self.next_serial += 1;
+            self.skies.insert(
+                key.to_string(),
+                Console::sky(id.clone(), serial, key.to_string()),
+            );
+            sanctuary::open(key, &dir);
+        }
+        if self.fill_stage(key) {
+            if let Some(stage) = &self.stage {
+                stage.focus_session(&id);
+            }
+        }
+    }
+
+    fn close_sky(&mut self, key: &str) {
+        self.skies.remove(key);
+        self.sync_stage();
+        sanctuary::close(key);
     }
 
     /// A project's files changed: its view reads its file again, if that
@@ -6474,7 +6523,7 @@ impl App {
                 .stage
                 .as_ref()
                 .and_then(|s| s.active())
-                .filter(|id| !id.starts_with(VIEW) && !id.starts_with(WEB)),
+                .filter(|id| !id.starts_with(VIEW) && !id.starts_with(WEB) && !id.starts_with(SKY)),
             grids: self
                 .shared
                 .orders
@@ -7125,8 +7174,9 @@ impl App {
                         .find(|c| c.hwnd.0 as isize == hwnd && town::is(&c.key))
                         .map(|c| c.key.clone());
                     let sessionless = |grid: Vec<String>| {
-                        grid.iter()
-                            .all(|id| id.starts_with(WEB) || id.starts_with(VIEW))
+                        grid.iter().all(|id| {
+                            id.starts_with(WEB) || id.starts_with(VIEW) || id.starts_with(SKY)
+                        })
                     };
                     if let Some(key) = town.filter(|k| sessionless(self.grid_of(k))) {
                         self.open_web(&key, None);
@@ -7232,6 +7282,12 @@ impl App {
                     _ => watch::open_link(&crate::links::Target::Web(url), None),
                 },
                 Input::CloseWeb(key) => self.close_web(&key),
+                Input::Sanctuary => {
+                    if let Some(key) = self.stage.as_ref().map(|s| s.project()) {
+                        self.open_sky(&key);
+                    }
+                }
+                Input::CloseSky(key) => self.close_sky(&key),
                 Input::WebTab(key, step) => web::tab(&key, step),
                 Input::WebAsk(key, what) => {
                     self.web_ask = Some((key, what));
