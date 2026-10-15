@@ -94,7 +94,7 @@ Each is a quest.
    `town::brief` is the pure text, `town::write` keeps `CLAUDE.md` current
    and makes `NOTES.md`, rewritten by `refresh_town` when the recent
    folders change. A session in the town starts with `--add-dir` for each.
-3. `--project` on the quest CLI and `horadric projects`.
+3. `--project` on the quest CLI and `horadric projects`. **Done.** `town::resolve` matches a name or folder; sessions show as running or paused from the saved state, not live phases.
 4. "Found a project".
 
 ## Open

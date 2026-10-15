@@ -140,6 +140,111 @@ pub fn add_dir_args(projects: &[Project]) -> Vec<String> {
         .collect()
 }
 
+/// The folder `--project` names: a project's folder name, compared without
+/// case, or its whole folder. Several folders with one name are refused with
+/// the matches listed, since filing a quest in the wrong project is quiet.
+pub fn resolve(query: &str, dirs: &[String]) -> Result<String, String> {
+    let slashed = |d: &str| d.replace('\\', "/").trim_end_matches('/').to_string();
+    let q = slashed(query.trim());
+    if let Some(d) = dirs.iter().find(|d| slashed(d).eq_ignore_ascii_case(&q)) {
+        return Ok(d.clone());
+    }
+    let named: Vec<&String> = dirs
+        .iter()
+        .filter(|d| {
+            slashed(d)
+                .rsplit('/')
+                .next()
+                .is_some_and(|n| n.eq_ignore_ascii_case(&q))
+        })
+        .collect();
+    match named.as_slice() {
+        [] => Err(format!("no known project is called \"{query}\"")),
+        [one] => Ok((*one).clone()),
+        many => Err(format!(
+            "\"{query}\" matches more than one project, give the folder: {}",
+            many.iter()
+                .map(|d| d.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
+}
+
+/// The project folders Horadric knows from its saved state: the recent
+/// folders that still exist, once each, without the town.
+pub fn known_dirs() -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    crate::store::load()
+        .recent
+        .into_iter()
+        .filter(|p| Path::new(p).is_dir())
+        .filter(|p| {
+            let key = crate::project::folder_key(p);
+            !is(&key) && seen.insert(key)
+        })
+        .collect()
+}
+
+/// Every saved session as its folder, name and whether its process was
+/// running when the state was last written.
+pub fn saved_sessions() -> Vec<(String, String, bool)> {
+    crate::store::load()
+        .sessions
+        .into_iter()
+        .map(|s| (s.cwd, s.name, s.running))
+        .collect()
+}
+
+/// What `horadric projects` knows of one project.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Overview {
+    pub name: String,
+    pub dir: String,
+    /// Each session's name and whether it was running.
+    pub sessions: Vec<(String, bool)>,
+    pub open: usize,
+    pub working: usize,
+    pub last_commit: String,
+}
+
+/// The text of `horadric projects`, a pure function of what it gathered.
+pub fn overview(projects: &[Overview]) -> String {
+    if projects.is_empty() {
+        return "No projects known yet.\n".to_string();
+    }
+    let mut out = String::new();
+    for p in projects {
+        out.push_str(&format!("{}\n  folder: {}\n", p.name, p.dir));
+        if p.sessions.is_empty() {
+            out.push_str("  sessions: none\n");
+        } else {
+            // Many sessions share a name (Warriv's), so each kind is counted.
+            let mut kinds: Vec<(String, usize)> = Vec::new();
+            for (n, up) in &p.sessions {
+                let label = format!("{n} ({})", if *up { "running" } else { "paused" });
+                match kinds.iter_mut().find(|(l, _)| *l == label) {
+                    Some((_, c)) => *c += 1,
+                    None => kinds.push((label, 1)),
+                }
+            }
+            let list: Vec<String> = kinds
+                .into_iter()
+                .map(|(l, c)| if c > 1 { format!("{l} x{c}") } else { l })
+                .collect();
+            out.push_str(&format!("  sessions: {}\n", list.join(", ")));
+        }
+        out.push_str(&format!(
+            "  quests: {} open, {} working\n",
+            p.open, p.working
+        ));
+        if !p.last_commit.is_empty() {
+            out.push_str(&format!("  last commit: {}\n", p.last_commit));
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -196,5 +301,42 @@ mod tests {
             add_dir_args(&[proj("a", None, ""), proj("b", None, "")]),
             ["--add-dir", "C:/code/a", "--add-dir", "C:/code/b"]
         );
+    }
+
+    fn dirs() -> Vec<String> {
+        vec![
+            "C:/code/app".into(),
+            "D:/old/app".into(),
+            "C:/code/lib".into(),
+        ]
+    }
+
+    #[test]
+    fn a_project_is_found_by_name_or_folder() {
+        assert_eq!(resolve("LIB", &dirs()).unwrap(), "C:/code/lib");
+        assert_eq!(resolve("D:\\old\\app\\", &dirs()).unwrap(), "D:/old/app");
+    }
+
+    #[test]
+    fn an_ambiguous_or_unknown_project_is_refused() {
+        let e = resolve("app", &dirs()).unwrap_err();
+        assert!(e.contains("C:/code/app") && e.contains("D:/old/app"));
+        assert!(resolve("nope", &dirs()).is_err());
+    }
+
+    #[test]
+    fn the_overview_says_what_goes_on() {
+        let t = overview(&[Overview {
+            name: "app".into(),
+            dir: "C:/code/app".into(),
+            sessions: vec![("a".into(), true), ("b".into(), false), ("b".into(), false)],
+            open: 3,
+            working: 1,
+            last_commit: "abc fix".into(),
+        }]);
+        assert!(t.contains("a (running), b (paused) x2"));
+        assert!(t.contains("3 open, 1 working"));
+        assert!(t.contains("last commit: abc fix"));
+        assert!(overview(&[]).contains("No projects"));
     }
 }

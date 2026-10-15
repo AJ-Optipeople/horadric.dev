@@ -118,7 +118,7 @@ pub use store::exe_command;
 /// For `horadric quest`, which writes the chronicle from a session's shell
 /// under the same project key the app uses.
 pub use {
-    project::folder_key,
+    project::{folder_key, project_name},
     store::{chronicle, chronicle_all, spent},
 };
 #[cfg(windows)]

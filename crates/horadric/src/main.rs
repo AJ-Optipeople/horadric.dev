@@ -69,6 +69,8 @@ Usage:
                                Report on the quest this session works, or add to
                                the project's quest log (.horadric/quests.md).
                                `horadric task` is the same, from before the rename
+                               `quest add|list --project NAME` works on another project
+  horadric projects              Every known project: folder, sessions, open quests, last commit
   horadric heavy -- COMMAND...    Run a test suite or build once no other session on this
                                machine runs one; alone, say who runs one now
   horadric runeword list         Every stone of this project's Runetome: its runeword name,
@@ -139,6 +141,7 @@ fn main() -> ExitCode {
         Some("heavy") => heavy::run(&args[1..]),
         // `task` is how sessions started before the rename report back.
         Some("quest" | "task") => task::run(&args[1..]),
+        Some("projects") => task::projects(),
         #[cfg(windows)]
         Some("runeword") => runeword::run(&args[1..]),
         #[cfg(windows)]
