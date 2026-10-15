@@ -5,6 +5,7 @@
 - A quest session silent for hours with an empty worktree after two nudges is dead and I can not restart it: hand it to the human with "restart it", who does so (settled on "OSC 7501: plain terminals", which then landed).
 
 ## Lately
+- 2026-10-15 Stall wake (main at ee4604f): only the pack comparison waits, as expected. Ship Public landed as v0.26.0 (tagged, reloaded fine). Nothing to do.
 - 2026-10-15 Round (22:07, main at b10b665): the plus New label landed; Ship Public (cast 22:04, no tag yet) builds from main and should carry it. No cast, nothing else to do.
 - 2026-10-15 Stall wake (22:07, main at b10b665): only the pack comparison waits, expected until quests run with a pack. Ship Local reloaded; Ship Public (22:04) still under way, no v0.26.0 tag yet. Nothing to do.
 - 2026-10-15 Round (main at bfae2b1): nothing new to do. ship-local-71894 still building from bfae2b1 and Ship Public cast a minute earlier (last tag v0.25.0).
@@ -149,5 +150,4 @@
 - 2026-10-06 Daily look back: the day was clean (24 quests completed, all 24 merged by themselves).
 
 ## Open
-- Next round: check the Ship Public cast at 22:04 published a release and reloaded (reload.log, git tags). If it stopped, read its session and decide.
 - Once quests run with a pack, the pack comparison resumes by itself.
