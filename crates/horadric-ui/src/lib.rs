@@ -119,7 +119,7 @@ pub use store::exe_command;
 /// under the same project key the app uses.
 pub use {
     project::folder_key,
-    store::{chronicle, chronicle_all},
+    store::{chronicle, chronicle_all, spent},
 };
 #[cfg(windows)]
 mod dropdown;

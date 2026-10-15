@@ -48,6 +48,20 @@ impl Tokens {
         }
     }
 
+    /// Codex counts what came from the cache, and what went into it, as
+    /// part of the input.
+    fn from_codex(u: &Value) -> Self {
+        let n = |k: &str| u.get(k).and_then(Value::as_u64).unwrap_or(0);
+        let cache_read = n("cached_input_tokens");
+        let cache_write = n("cache_write_input_tokens");
+        Self {
+            input: n("input_tokens").saturating_sub(cache_read + cache_write),
+            cache_read,
+            cache_write,
+            output: n("output_tokens"),
+        }
+    }
+
     pub fn total(&self) -> u64 {
         self.input + self.cache_read + self.cache_write + self.output
     }
@@ -94,6 +108,19 @@ impl Spend {
         self.tokens.add(&o.tokens);
         for (tool, t) in &o.tools {
             self.tools.entry(tool.clone()).or_default().add(t);
+        }
+    }
+
+    /// One call of `tokens`, charged to the tools `by` in even shares.
+    fn charge(&mut self, tokens: &Tokens, by: &[String]) {
+        self.calls += 1;
+        self.tokens.add(tokens);
+        let n = by.len() as u64;
+        for (i, tool) in by.iter().enumerate() {
+            self.tools
+                .entry(tool.clone())
+                .or_default()
+                .add(&tokens.share(i as u64, n));
         }
     }
 
@@ -265,14 +292,60 @@ pub fn read(jsonl: &str, opened: &str) -> Spend {
     let mut out = Spend::default();
     for id in order {
         let (tokens, by) = &calls[&id];
-        out.calls += 1;
-        out.tokens.add(tokens);
-        let n = by.len() as u64;
-        for (i, tool) in by.iter().enumerate() {
-            out.tools
-                .entry(tool.clone())
-                .or_default()
-                .add(&tokens.share(i as u64, n));
+        out.charge(tokens, by);
+    }
+    out
+}
+
+/// What a Codex rollout spent. Each call's usage is a `token_count` event,
+/// said again unchanged when only the limits moved, and a call is charged
+/// to the tools whose outputs came since the last one, as in [`read`].
+pub fn read_codex(jsonl: &str) -> Spend {
+    let mut names: HashMap<String, String> = HashMap::new();
+    let mut cause: Vec<String> = Vec::new();
+    let mut last: Option<Value> = None;
+    let mut out = Spend::default();
+    for line in jsonl.lines() {
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let Some(p) = v.get("payload") else {
+            continue;
+        };
+        let call_id = p.get("call_id").and_then(Value::as_str).unwrap_or_default();
+        match p.get("type").and_then(Value::as_str) {
+            Some("function_call" | "custom_tool_call") => {
+                if let Some(name) = p.get("name").and_then(Value::as_str) {
+                    names.insert(call_id.to_string(), bucket(name));
+                }
+            }
+            Some("function_call_output" | "custom_tool_call_output") => {
+                cause.push(
+                    names
+                        .get(call_id)
+                        .cloned()
+                        .unwrap_or_else(|| "unknown".to_string()),
+                );
+            }
+            Some("token_count") => {
+                let Some(info) = p.get("info").filter(|i| !i.is_null()) else {
+                    continue;
+                };
+                let total = info.get("total_token_usage").cloned();
+                if total.is_some() && total == last {
+                    continue;
+                }
+                last = total;
+                let Some(usage) = info.get("last_token_usage") else {
+                    continue;
+                };
+                if cause.is_empty() {
+                    cause.push(PROMPT.to_string());
+                }
+                out.charge(&Tokens::from_codex(usage), &cause);
+                cause.clear();
+            }
+            _ => {}
         }
     }
     out
@@ -467,5 +540,45 @@ mod tests {
         );
         let back: Spend = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
         assert_eq!(back, s);
+    }
+
+    #[test]
+    fn a_codex_rollout_charges_each_call_to_the_outputs_before_it() {
+        let count = |total: u64, input: u64, cached: u64, output: u64| {
+            format!(
+                r#"{{"type":"event_msg","payload":{{"type":"token_count","info":{{"total_token_usage":{{"total_tokens":{total}}},"last_token_usage":{{"input_tokens":{input},"cached_input_tokens":{cached},"output_tokens":{output}}}}}}}}}"#
+            )
+        };
+        let call = |id: &str, name: &str| {
+            format!(
+                r#"{{"type":"response_item","payload":{{"type":"function_call","name":"{name}","call_id":"{id}"}}}}"#
+            )
+        };
+        let output = |id: &str| {
+            format!(
+                r#"{{"type":"response_item","payload":{{"type":"function_call_output","call_id":"{id}"}}}}"#
+            )
+        };
+        let lines = [
+            r#"{"type":"event_msg","payload":{"type":"token_count","info":null}}"#.to_string(),
+            count(110, 100, 0, 10),
+            call("c1", "shell"),
+            call("c2", "mcp__horadric__lore_recall"),
+            output("c1"),
+            output("c2"),
+            count(330, 210, 200, 10),
+            // Said again when only the limits moved.
+            count(330, 210, 200, 10),
+            "not json".to_string(),
+        ];
+        let s = read_codex(&lines.join(
+            "
+",
+        ));
+        assert_eq!(s.calls, 2);
+        assert_eq!(s.tokens, t(110, 200, 0, 20));
+        assert_eq!(s.tools[PROMPT], t(100, 0, 0, 10));
+        assert_eq!(s.tools["shell"], t(5, 100, 0, 5));
+        assert_eq!(s.tools["mcp horadric"], t(5, 100, 0, 5));
     }
 }

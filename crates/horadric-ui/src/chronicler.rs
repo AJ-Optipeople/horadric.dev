@@ -15,6 +15,7 @@ use horadric_core::journal;
 use horadric_core::runeword;
 use horadric_core::tasks::Task;
 use horadric_core::Agent;
+use horadric_hooks::tasks as file;
 
 use super::{past_in, App};
 use crate::questlog::{self, Ask, QuestLog};
@@ -65,7 +66,12 @@ impl App {
     /// The project's quests, oldest first, with its conversations no quest
     /// holds among them, and Warriv's wakes and errands' casts.
     fn log_of(&self, key: &str) -> (Vec<Quest>, Vec<WarrivWake>) {
-        let list = self.list_of(key);
+        // The done file's quests left the list days ago, so they go first.
+        let mut list = self
+            .project_dir(key)
+            .map(|d| file::read_done(&d))
+            .unwrap_or_default();
+        list.extend(self.list_of(key));
         let records = store::chronicle_all();
         let quests = chronicle::quests(&records, &store::journal_since(0), key, &list);
         let talks = self.talks_of(key, &quests);

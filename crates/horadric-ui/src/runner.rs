@@ -374,6 +374,7 @@ impl App {
                                 },
                             });
                         }
+                        self.keep_spend(key, &e.session, title, at);
                     }
                     store::journal(e);
                 }
@@ -412,6 +413,35 @@ impl App {
             .filter(|p| !p.as_os_str().is_empty())
             .unwrap_or_else(|| dir.to_path_buf());
         crate::worktree::commits_since(&tree, since)
+    }
+
+    /// Keeps what the item `title` that just finished spent, when `horadric
+    /// quest done` did not: the human or the runner marked it. Its
+    /// sessions still running are counted too, since a turn the human cut
+    /// short is in no turn record yet.
+    fn keep_spend(&self, key: &str, session: &str, title: &str, at: u64) {
+        if session.is_empty() {
+            return;
+        }
+        let records = store::chronicle_all();
+        if chronicle::spent_since_taken(&records, key, session) {
+            return;
+        }
+        let quest = chronicle::quest_of(session);
+        let live: Vec<(String, String)> = self
+            .shared
+            .registry
+            .lock()
+            .map(|r| {
+                r.all()
+                    .filter(|s| chronicle::quest_of(&s.id) == quest)
+                    .filter_map(|s| Some((s.claude_session_id.clone()?, s.cwd.clone())))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if let Some(r) = store::spent(&records, key, session, title, live, at) {
+            store::chronicle(&r);
+        }
     }
 
     /// The phase of a session, none when it is gone.
