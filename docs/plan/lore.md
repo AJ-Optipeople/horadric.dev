@@ -33,8 +33,13 @@ charged to the tools whose results started it, split evenly, or to
 `horadric quest done` and `blocked` sum every conversation the chronicle
 saw a turn of under the quest, with their subagents, and append a
 `spent` record of one sitting each; the last one is the quest's. The
-quest log's detail shows "Spent" and "Went on". Not yet: a quest marked
-done by hand has none, and Codex rollouts count nothing.
+quest log's detail shows "Spent" and "Went on". A quest marked done any
+other way (by the human, the runner or Warriv) gets its `spent` record
+from the app when it sees the mark, unless one came since the quest was
+last taken, with the quest's sessions still running counted too. A
+conversation with no Claude Code transcript is looked for among Codex's
+rollouts, whose `token_count` events give each call's usage, charged to
+the tool outputs before it the same way.
 
 ## 2. A context pack per quest
 

@@ -627,9 +627,10 @@ fn record_summary(project: &Path, id: &str, summary: &str) {
 }
 
 /// Keeps what the quest's [`conversations`] spent in tokens and which
-/// files they read and changed. Codex keeps no usage per message, so its
-/// conversations count nothing.
+/// files they read and changed. The app keeps the spend for a quest
+/// marked done any other way.
 fn record_spend(project: &Path, id: &str, cwd: &Path) {
+    let key = horadric_ui::folder_key(&project.to_string_lossy());
     let seen = conversations(project, id, cwd);
     let mut touched = Touched::default();
     for (conversation, cwd) in &seen {
@@ -637,27 +638,13 @@ fn record_spend(project: &Path, id: &str, cwd: &Path) {
             touched.add(&t);
         }
     }
-    let sittings: Vec<Sitting> = seen
-        .into_iter()
-        .filter_map(|(conversation, cwd)| {
-            let spend = transcript::spend(&cwd, &conversation)?;
-            (!spend.is_empty()).then_some(Sitting {
-                conversation,
-                spend,
-            })
-        })
-        .collect();
     let list = tasks::parse(&file::read(project));
     let title = chronicle::worked_by(&list, id)
         .map(|t| t.title.clone())
         .unwrap_or_default();
-    if !sittings.is_empty() {
-        record(
-            project,
-            id.to_string(),
-            &title,
-            Happened::Spent { sittings },
-        );
+    let records = horadric_ui::chronicle_all();
+    if let Some(r) = horadric_ui::spent(&records, &key, id, &title, seen, unix_now()) {
+        horadric_ui::chronicle(&r);
     }
     if !touched.is_empty() {
         let Touched { read, changed } = touched;
@@ -670,27 +657,18 @@ fn record_spend(project: &Path, id: &str, cwd: &Path) {
     }
 }
 
-/// The conversations of a quest, each with the folder it ran in: every
-/// one the chronicle saw a turn of, under this quest or a tomb of its
-/// batch, and this one, whose last turn has not ended yet.
+/// The conversations of a quest, each with the folder it ran in: this
+/// one, whose last turn has not ended yet, and every one the chronicle
+/// saw a turn of, under this quest or a tomb of its batch.
 fn conversations(project: &Path, id: &str, cwd: &Path) -> Vec<(String, String)> {
     let key = horadric_ui::folder_key(&project.to_string_lossy());
-    let quest = chronicle::quest_of(id);
     let mut seen: Vec<(String, String)> = Vec::new();
     if let Ok(now) = std::env::var("CLAUDE_CODE_SESSION_ID") {
         seen.push((now, cwd.to_string_lossy().into_owned()));
     }
-    for r in horadric_ui::chronicle_all() {
-        if r.project != key || chronicle::quest_of(&r.quest) != quest {
-            continue;
-        }
-        if let Happened::Turn {
-            conversation, cwd, ..
-        } = r.what
-        {
-            if !conversation.is_empty() && !seen.iter().any(|(c, _)| *c == conversation) {
-                seen.push((conversation, cwd));
-            }
+    for c in chronicle::conversations(&horadric_ui::chronicle_all(), &key, id) {
+        if !seen.iter().any(|(s, _)| *s == c.0) {
+            seen.push(c);
         }
     }
     seen

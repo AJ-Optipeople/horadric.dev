@@ -85,6 +85,27 @@ fn list_in(root: &Path, cwd: &str, skip: &[String], limit: usize) -> Vec<Past> {
         .collect()
 }
 
+/// What the Codex conversation `id` spent in tokens. None when it has no
+/// rollout on disk.
+pub fn spend(id: &str) -> Option<horadric_core::spend::Spend> {
+    let path = rollout_of(&codex_home()?, id)?;
+    Some(horadric_core::spend::read_codex(
+        &std::fs::read_to_string(path).ok()?,
+    ))
+}
+
+/// The rollout of the conversation `id`, whose name ends with it.
+fn rollout_of(root: &Path, id: &str) -> Option<PathBuf> {
+    if id.is_empty() {
+        return None;
+    }
+    let tail = format!("-{id}.jsonl");
+    rollouts(&root.join("sessions"))
+        .into_iter()
+        .map(|(path, ..)| path)
+        .find(|p| p.to_string_lossy().ends_with(&tail))
+}
+
 /// Every `rollout-*.jsonl` under `sessions`, with when it last changed and
 /// how long it is.
 fn rollouts(sessions: &Path) -> Vec<(PathBuf, SystemTime, u64)> {
@@ -255,6 +276,19 @@ mod tests {
         for l in lines {
             writeln!(f, "{l}").unwrap();
         }
+    }
+
+    #[test]
+    fn a_conversations_rollout_is_found_by_its_id() {
+        let root = std::env::temp_dir().join(format!("horadric-codex-of-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        rollout(&root, "2026/09/30", "abc-1", &[meta_line("abc-1", "x")]);
+        rollout(&root, "2026/10/01", "abc-12", &[meta_line("abc-12", "x")]);
+        let found = rollout_of(&root, "abc-1").unwrap();
+        assert!(found.to_string_lossy().ends_with("-abc-1.jsonl"));
+        assert_eq!(rollout_of(&root, "nope"), None);
+        assert_eq!(rollout_of(&root, ""), None);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

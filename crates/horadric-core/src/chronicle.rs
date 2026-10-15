@@ -291,6 +291,47 @@ pub fn worked_by<'a>(list: &'a [Task], session: &str) -> Option<&'a Task> {
         .find(|t| t.holder.as_deref().is_some_and(|h| quest_of(h) == quest))
 }
 
+/// The conversations the chronicle saw a turn of under the quest `id`
+/// of `project`, or a tomb of its batch, each with the folder it ran in,
+/// in the order they first showed up.
+pub fn conversations(records: &[Record], project: &str, id: &str) -> Vec<(String, String)> {
+    let quest = quest_of(id);
+    let mut out: Vec<(String, String)> = Vec::new();
+    for r in records {
+        if r.project != project || quest_of(&r.quest) != quest {
+            continue;
+        }
+        if let Happened::Turn {
+            conversation, cwd, ..
+        } = &r.what
+        {
+            if !conversation.is_empty() && !out.iter().any(|(c, _)| c == conversation) {
+                out.push((conversation.clone(), cwd.clone()));
+            }
+        }
+    }
+    out
+}
+
+/// Whether the quest `id` of `project` had its spend kept since it was
+/// last taken. `horadric quest done` keeps it before it marks the quest,
+/// so a quest marked done any other way is one that has not.
+pub fn spent_since_taken(records: &[Record], project: &str, id: &str) -> bool {
+    let quest = quest_of(id);
+    let mut spent = false;
+    for r in records {
+        if r.project != project || quest_of(&r.quest) != quest {
+            continue;
+        }
+        match r.what {
+            Happened::Accepted { .. } => spent = false,
+            Happened::Spent { .. } => spent = true,
+            _ => {}
+        }
+    }
+    spent
+}
+
 /// The records for what changed between two reads of a project's list:
 /// a quest accepted, marked, or put back. Like [`journal::marks`], items
 /// are matched by title, since lines move as the list is edited.
@@ -1620,6 +1661,51 @@ mod tests {
         assert_eq!(q[1].spend, None);
         let line = records[2].line();
         assert_eq!(parse(&line), vec![records[2].clone()]);
+    }
+
+    #[test]
+    fn a_quests_conversations_are_its_tombs_turns_once_each() {
+        let turn = |at, quest: &str, conversation: &str, cwd: &str| {
+            rec(
+                at,
+                quest,
+                "",
+                Happened::Turn {
+                    line: String::new(),
+                    conversation: conversation.into(),
+                    cwd: cwd.into(),
+                    name: String::new(),
+                },
+            )
+        };
+        let mut other = turn(5, "a-1.x2", "c9", "elsewhere");
+        other.project = "q".into();
+        let records = [
+            turn(1, "a-1.x2.1", "c1", "w1"),
+            turn(2, "a-1.x2.2", "c2", "w2"),
+            turn(3, "a-1.x2.1", "c1", "w1"),
+            turn(4, "b-1", "c3", "w3"),
+            turn(6, "a-1.x2", "", "w"),
+            other,
+        ];
+        assert_eq!(
+            conversations(&records, "p", "a-1.x2"),
+            vec![("c1".into(), "w1".into()), ("c2".into(), "w2".into())]
+        );
+        assert_eq!(conversations(&records, "p", "a-1.x2.2").len(), 2);
+    }
+
+    #[test]
+    fn a_spend_counts_only_until_the_quest_is_taken_again() {
+        let spent = |at, quest: &str| rec(at, quest, "", Happened::Spent { sittings: vec![] });
+        let mut records = vec![accepted(1, "a-1.x2", "A")];
+        assert!(!spent_since_taken(&records, "p", "a-1.x2"));
+        records.push(spent(2, "a-1.x2.1"));
+        records.push(marked(3, "a-1.x2", Outcome::Done));
+        assert!(spent_since_taken(&records, "p", "a-1.x2"));
+        assert!(!spent_since_taken(&records, "p", "b-1"));
+        records.push(accepted(4, "a-1.x2", "A"));
+        assert!(!spent_since_taken(&records, "p", "a-1.x2"));
     }
 
     #[test]
