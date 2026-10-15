@@ -7496,8 +7496,8 @@ impl App {
         if self.usage_window.is_some() && !self.columns.contains(columns::USAGE) {
             self.columns.add_first(columns::USAGE);
         }
-        if let Some(k) = town::key().filter(|k| is_present(k)) {
-            self.columns.pin_first(k);
+        if let Some(k) = town::key().filter(|k| is_present(k) && !self.columns.contains(k)) {
+            self.columns.add_first(k);
         }
         let mut fresh: Vec<(String, String, i32)> = self
             .clusters

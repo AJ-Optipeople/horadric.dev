@@ -80,12 +80,13 @@ The town session stays in town, ended or kept as the human likes.
 
 Each is a quest.
 
-1. The town folder, the pinned cluster that stays empty, its stage
+1. The town folder, the cluster that stays empty, its stage
    and browser pane. Useful on its own. **Done.** `town.rs` owns the
    folder and the key, `town::make` runs at start. The cluster is named
-   Tristram by `project_name`, drawn with a house mark, pinned by
-   `Columns::pin_first` above the usage window (dragging it away puts
-   it back), has no files watcher and no "Close project". A header
+   Tristram by `project_name`, drawn with a house mark, put on top of
+   the first column when it first appears (after that it drags like any
+   tile, so the usage window can go above it again), has no files
+   watcher and no "Close project". A header
    click while it is empty opens the stage with its browser pane; the
    plus under the header is the new session. The start window no
    longer counts the town as a project, so it still shows, under the
