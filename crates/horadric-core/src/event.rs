@@ -123,6 +123,11 @@ impl HookEvent {
     /// `agent_id` and `agent_type`.
     pub const SPAWN: &'static str = "HoradricSpawn";
 
+    /// Horadric's own event for what a lore tool or a context pack showed
+    /// a session, for the Arcane Sanctuary to light: `tool_input` holds the
+    /// nodes and the touch (see `glow::told`).
+    pub const GLOW: &'static str = "HoradricGlow";
+
     /// An event Horadric makes up itself, with every optional field empty.
     pub fn synthetic(hook_event_name: &str) -> Self {
         HookEvent {

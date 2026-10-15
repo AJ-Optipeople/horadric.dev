@@ -309,6 +309,10 @@ fn listen(port: u16, registry: Arc<Mutex<Registry>>, requests: Arc<Mutex<Vec<Com
     });
     thread::spawn(move || {
         for t in rx {
+            // The Mac has no sanctuary to light yet.
+            if t.event.hook_event_name == HookEvent::GLOW {
+                continue;
+            }
             let target =
                 registry
                     .lock()

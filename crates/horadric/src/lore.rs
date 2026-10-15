@@ -7,17 +7,21 @@
 //! What is read from a file and the questions asked of it are in
 //! `code.rs`.
 
+use std::cell::OnceCell;
 use std::collections::HashMap;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime};
 
-use horadric_core::lore;
-use horadric_core::sanctuary::{self, Graph, Kind, QuestFiles};
+use horadric_core::pack::Touched;
+use horadric_core::sanctuary::{self, Graph, Kind, Positions, QuestFiles};
+use horadric_core::sky::{Project, Sky};
+use horadric_core::{chronicle, lore};
 use horadric_hooks::lock::Lock;
 use horadric_hooks::lore::{now, Place};
+use horadric_hooks::tasks as tasks_file;
 use serde_json::Value;
 
 use crate::code::{self, FileIndex, Lang, Store};
@@ -71,6 +75,11 @@ fn find(args: &Value) -> Result<String, String> {
 /// of the tree, the calls between them from the code index, the notes and
 /// the done quests.
 pub fn graph(place: &Place) -> Result<Graph, String> {
+    graph_with(place, &crate::task::finished(&place.top))
+}
+
+/// The graph of `place` with its done quests already found.
+fn graph_with(place: &Place, done: &[(String, Touched)]) -> Result<Graph, String> {
     let calls = with_index(place, code::links)?;
     let files = place.listed().unwrap_or_else(|| {
         let mut found = Vec::new();
@@ -78,7 +87,6 @@ pub fn graph(place: &Place) -> Result<Graph, String> {
         found
     });
     let notes = place.read()?.notes;
-    let done = crate::task::finished(&place.top);
     let quests: Vec<QuestFiles> = done
         .iter()
         .map(|(title, touched)| QuestFiles { title, touched })
@@ -114,6 +122,189 @@ pub fn sanctuary() -> Result<(), String> {
     );
     println!("built in {built:?}, laid out in {laid:?}");
     println!("kept in {}", place.sanctuary_store().display());
+    Ok(())
+}
+
+/// One project of Tristram's sky: its graph and where its nodes were left.
+pub struct Charted {
+    pub key: String,
+    pub name: String,
+    pub graph: Graph,
+    pub at: Positions,
+}
+
+/// Tristram's sky: every project Horadric knows as a galaxy, `projects`
+/// in the galaxies' order so a star's node can be looked up, and the
+/// projects whose graph could not be built, with why.
+pub struct TownSky {
+    pub sky: Sky,
+    pub projects: Vec<Arc<Charted>>,
+    pub missed: Vec<(String, String)>,
+}
+
+/// A charted project as the cache keeps it: the files its graph is read
+/// out of and their times when it was built. Edits the code index has not
+/// read yet are not in them, so the sky shows a project as its index last
+/// saw it, which is close enough at that distance; its own sanctuary reads
+/// it fresh.
+struct Kept {
+    sources: Vec<PathBuf>,
+    stamp: Vec<Option<SystemTime>>,
+    charted: Arc<Charted>,
+}
+
+static CHARTED: Mutex<Option<HashMap<String, Kept>>> = Mutex::new(None);
+
+/// Tristram's sky as it is now, from the same projects `horadric projects`
+/// lists. A project whose sources have not changed since it was last
+/// charted in this process is taken as it was, so opening the town again
+/// costs only a look at a few file times per project.
+pub fn town_sky() -> TownSky {
+    let records = OnceCell::new();
+    let mut projects = Vec::new();
+    let mut missed = Vec::new();
+    for dir in horadric_ui::town::known_dirs() {
+        let key = horadric_ui::folder_key(&dir);
+        match chart(&dir, &key, &records) {
+            Ok(c) => projects.push(c),
+            Err(e) => missed.push((horadric_ui::project_name(&key), e)),
+        }
+    }
+    projects.sort_by(|a, b| a.key.cmp(&b.key));
+    let sky = Sky::build(
+        &projects
+            .iter()
+            .map(|c| Project {
+                key: &c.key,
+                name: &c.name,
+                graph: &c.graph,
+                at: &c.at,
+            })
+            .collect::<Vec<_>>(),
+    );
+    TownSky {
+        sky,
+        projects,
+        missed,
+    }
+}
+
+fn stamp(sources: &[PathBuf]) -> Vec<Option<SystemTime>> {
+    sources
+        .iter()
+        .map(|p| fs::metadata(p).and_then(|m| m.modified()).ok())
+        .collect()
+}
+
+/// One project of the sky, from the cache while its sources are as they
+/// were, else built, and laid out and kept when it has nodes never placed.
+fn chart(
+    dir: &str,
+    key: &str,
+    records: &OnceCell<Vec<chronicle::Record>>,
+) -> Result<Arc<Charted>, String> {
+    // Asking git where the project is costs a process start, more than
+    // the rest of a look at a charted project, so the cache is by key.
+    if let Some(k) = CHARTED
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .and_then(|m| m.get(key))
+    {
+        if stamp(&k.sources) == k.stamp {
+            return Ok(k.charted.clone());
+        }
+    }
+    let place = Place::of(Path::new(dir))?;
+    let log = tasks_file::find_list(&place.top);
+    let sources = vec![
+        place.code_store(),
+        place.notes_store().to_path_buf(),
+        place.sanctuary_store(),
+        place.top.join(".git").join("index"),
+        log.as_deref().map(tasks_file::file).unwrap_or_default(),
+        horadric_hooks::state_dir()
+            .unwrap_or_default()
+            .join(chronicle::FILE),
+    ];
+    let before = stamp(&sources);
+    let done = match &log {
+        Some(log) => crate::task::finished_in(log, records.get_or_init(horadric_ui::chronicle_all)),
+        None => Vec::new(),
+    };
+    let graph = graph_with(&place, &done)?;
+    let mut at = place.positions();
+    if graph.nodes.iter().any(|n| !at.at.contains_key(&n.id)) {
+        at = sanctuary::layout(&graph, &at);
+        place.keep_positions(&at)?;
+    }
+    // Building wrote the code index and keeping wrote the positions, so
+    // their times are taken again; the rest as they were before reading,
+    // so a change made meanwhile is seen next time.
+    let mut stamp = before;
+    let after = self::stamp(&sources);
+    stamp[0] = after[0];
+    stamp[2] = after[2];
+    let charted = Arc::new(Charted {
+        key: key.to_string(),
+        name: horadric_ui::project_name(key),
+        graph,
+        at,
+    });
+    CHARTED
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get_or_insert_with(HashMap::new)
+        .insert(
+            key.to_string(),
+            Kept {
+                sources,
+                stamp,
+                charted: charted.clone(),
+            },
+        );
+    Ok(charted)
+}
+
+/// `horadric sky`: charts every known project into Tristram's sky twice,
+/// cold and then from the cache, saying what each galaxy holds and how
+/// long it took, so the sky can be tried before the town's pane draws it.
+pub fn sky() -> Result<(), String> {
+    let t = Instant::now();
+    let town = town_sky();
+    let cold = t.elapsed();
+    let t = Instant::now();
+    let again = town_sky();
+    let warm = t.elapsed();
+    for (g, c) in town.sky.galaxies.iter().zip(&town.projects) {
+        println!(
+            "{:<28} {:>5} nodes {:>6} links  radius {:>4.0} at ({:>5.0}, {:>5.0})",
+            g.name,
+            c.graph.nodes.len(),
+            c.graph.links.len(),
+            g.radius,
+            g.centre[0],
+            g.centre[1]
+        );
+    }
+    for (name, why) in &town.missed {
+        println!("{name:<28} not charted: {why}");
+    }
+    let (_, r) = town.sky.bounds();
+    println!(
+        "{} galaxies, {} stars, {} links, {r:.0} across from the middle",
+        town.sky.galaxies.len(),
+        town.sky.stars.len(),
+        town.sky.links.len()
+    );
+    println!(
+        "charted in {cold:?}, again from the cache in {warm:?} ({} the same)",
+        if again.sky == town.sky {
+            "all"
+        } else {
+            "not all"
+        }
+    );
     Ok(())
 }
 

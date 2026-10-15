@@ -127,6 +127,11 @@ impl Place {
         self.store.with_extension("code.json")
     }
 
+    /// Where the notes are kept.
+    pub fn notes_store(&self) -> &Path {
+        &self.store
+    }
+
     /// Where the Arcane Sanctuary keeps its layout, beside the notes.
     pub fn sanctuary_store(&self) -> PathBuf {
         self.store.with_extension("sanctuary.json")

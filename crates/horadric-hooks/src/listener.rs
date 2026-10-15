@@ -1,9 +1,10 @@
-//! A minimal HTTP/1.1 server for seven purposes: accept `POST /horadric/hook`
+//! A minimal HTTP/1.1 server for eight purposes: accept `POST /horadric/hook`
 //! from Claude Code, `POST /horadric/status` from its status line,
 //! `POST /horadric/new` from `horadric new`, `POST /horadric/reload` from
 //! `horadric reload`, `POST /horadric/tasks` from `horadric quest`,
-//! `POST /horadric/browser` from `horadric mcp` and `POST /horadric/know`
-//! from Horadric's Claude mod, the two that wait for the app's answer.
+//! `POST /horadric/browser` and `POST /horadric/glow` from `horadric mcp`
+//! and `POST /horadric/know` from Horadric's Claude mod. The browser and
+//! the mod's are the two that wait for the app's answer.
 //!
 //! Hand rolled on `std::net` because the whole protocol we need is a request
 //! line, a handful of headers, a `Content-Length` body and a fixed reply. A
@@ -22,8 +23,9 @@ use horadric_core::{Agent, HookEvent, Limits, Status};
 use serde_json::{json, Value};
 
 use crate::{
-    client, transcript, AGENT_HEADER, BROWSER_PATH, COMMAND_HEADER, HOOK_PATH, KNOW_PATH, NEW_PATH,
-    OWNER_HEADER, RELOAD_PATH, SESSION_HEADER, STATE_HEADER, STATUS_PATH, TASKS_PATH,
+    client, transcript, AGENT_HEADER, BROWSER_PATH, COMMAND_HEADER, GLOW_PATH, HOOK_PATH,
+    KNOW_PATH, NEW_PATH, OWNER_HEADER, RELOAD_PATH, SESSION_HEADER, STATE_HEADER, STATUS_PATH,
+    TASKS_PATH,
 };
 
 /// A hook event together with the Horadric session id from the header.
@@ -338,6 +340,7 @@ fn handle(
         TASKS_PATH,
         BROWSER_PATH,
         KNOW_PATH,
+        GLOW_PATH,
     ];
     if method != "POST" || !paths.contains(&path) {
         return respond(&stream, "404 Not Found");
@@ -395,6 +398,7 @@ fn handle(
             NEW_PATH => "new",
             TASKS_PATH => "tasks",
             BROWSER_PATH => "browser",
+            GLOW_PATH => "glow",
             _ => "reload",
         };
         if from_browser || command != wanted {
@@ -408,6 +412,9 @@ fn handle(
                 "409 Conflict",
                 &json!({ "error": why }).to_string(),
             );
+        }
+        if path == GLOW_PATH {
+            return glow(&stream, horadric_id, &body, tx);
         }
         let Some(commands) = commands else {
             return respond(&stream, "503 Service Unavailable");
@@ -486,6 +493,29 @@ fn handle(
             limits,
         });
     }
+    Ok(())
+}
+
+/// Hands what a lore tool showed a session to the app as a
+/// [`HookEvent::GLOW`]. Nothing waits on it: it is light, not work.
+fn glow(stream: &TcpStream, session: String, body: &[u8], tx: &Sender<Tagged>) -> io::Result<()> {
+    let Ok(input) = serde_json::from_slice::<Value>(body) else {
+        return respond(stream, "400 Bad Request");
+    };
+    if session.is_empty() {
+        return respond(stream, "400 Bad Request");
+    }
+    respond(stream, "200 OK")?;
+    let event = HookEvent {
+        tool_input: Some(input),
+        ..HookEvent::synthetic(HookEvent::GLOW)
+    };
+    let _ = tx.send(Tagged {
+        horadric_id: session,
+        event,
+        agent: Agent::Claude,
+        limits: None,
+    });
     Ok(())
 }
 
@@ -923,6 +953,40 @@ X-Horadric-Session: tile-2
             "X-Horadric-Command: browser\r\nX-Horadric-Session: t\r\nOrigin: https://a.b\r\n",
         ] {
             let reply = post_to(port, BROWSER_PATH, headers, r#"{"op":"info"}"#);
+            assert!(reply.starts_with("HTTP/1.1 4"), "{headers}: {reply}");
+        }
+        assert!(rx.recv_timeout(Duration::from_millis(200)).is_err());
+    }
+
+    #[test]
+    fn a_glow_is_passed_on_as_an_event_of_its_session() {
+        let (port, rx) = start();
+        let body = r#"{"nodes":["note:3"],"touch":"recall"}"#;
+        let headers = "X-Horadric-Command: glow
+X-Horadric-Session: tile-g
+";
+        let reply = post_to(port, GLOW_PATH, headers, body);
+        assert!(reply.starts_with("HTTP/1.1 200"), "{reply}");
+        let t = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(t.horadric_id, "tile-g");
+        assert_eq!(t.event.hook_event_name, HookEvent::GLOW);
+        assert_eq!(t.event.tool_input.unwrap()["nodes"][0], "note:3");
+    }
+
+    #[test]
+    fn a_glow_needs_its_header_a_session_and_no_origin() {
+        let (port, rx) = start();
+        for headers in [
+            "X-Horadric-Session: tile-g
+",
+            "X-Horadric-Command: glow
+",
+            "X-Horadric-Command: glow
+X-Horadric-Session: t
+Origin: https://a.b
+",
+        ] {
+            let reply = post_to(port, GLOW_PATH, headers, "{}");
             assert!(reply.starts_with("HTTP/1.1 4"), "{headers}: {reply}");
         }
         assert!(rx.recv_timeout(Duration::from_millis(200)).is_err());

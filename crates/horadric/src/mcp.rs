@@ -11,14 +11,19 @@
 //! mouse press and release where it is, as a person's would be.
 //!
 //! It also serves the project's lore (see `lore.rs`), notes its sessions
-//! leave each other, to every session, Horadric's or not.
+//! leave each other, to every session, Horadric's or not. What a lore tool
+//! showed a session of Horadric's is passed on to the app, which lights it
+//! in the project's Arcane Sanctuary.
 
+use std::cell::OnceCell;
 use std::io::{BufRead, Write};
+use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use horadric_core::glow::{self, Touch};
 use horadric_hooks::{
-    client, BROWSER_PATH, COMMAND_HEADER, OWNER_ENV, SESSION_ENV, SESSION_HEADER,
+    client, BROWSER_PATH, COMMAND_HEADER, GLOW_PATH, OWNER_ENV, SESSION_ENV, SESSION_HEADER,
 };
 use serde_json::{json, Value};
 
@@ -45,6 +50,10 @@ pub fn run() -> Result<(), String> {
         .ok()
         .and_then(|p| p.parse().ok())
         .unwrap_or_else(horadric_hooks::port);
+    let ours = session.clone();
+    // Asked once, and only when a lore tool named files: the server's
+    // folder does not change.
+    let top: OnceCell<Option<PathBuf>> = OnceCell::new();
     let mut server = Server {
         browser: session.is_some(),
         app: move |body: Value| ask_app(owner, session.as_deref(), &body),
@@ -67,9 +76,76 @@ pub fn run() -> Result<(), String> {
         if let Some(a) = answer {
             writeln!(out, "{a}").map_err(|e| e.to_string())?;
             out.flush().map_err(|e| e.to_string())?;
+            if let (Some(s), Ok(msg)) = (&ours, serde_json::from_str::<Value>(&line)) {
+                let is_file = |p: &str| {
+                    let top =
+                        top.get_or_init(|| horadric_hooks::lore::Place::here().ok().map(|p| p.top));
+                    top.as_deref()
+                        .is_some_and(|t| t.join(Path::new(p)).is_file())
+                };
+                let nodes = shown(&msg, &a, is_file);
+                if !nodes.is_empty() {
+                    // Light, not work: nobody listening loses nothing else.
+                    let headers = [(COMMAND_HEADER, "glow"), (SESSION_HEADER, s.as_str())];
+                    let body = glow::glow_body(&nodes, Touch::Recall);
+                    let _ = client::post(owner, GLOW_PATH, &headers, &body);
+                }
+            }
         }
     }
     Ok(())
+}
+
+/// The Arcane Sanctuary's nodes a lore tool's `answer` to `msg` showed:
+/// the notes `lore_recall` answered with, the files `lore_find` and
+/// `lore_calls` named, the file `lore_outline` read. Read from the text
+/// the agent was given, so it lights what the agent saw; `is_file` says
+/// whether a path relative to the top is a file of the tree.
+fn shown(msg: &Value, answer: &Value, is_file: impl Fn(&str) -> bool) -> Vec<String> {
+    let result = &answer["result"];
+    if msg["method"] != "tools/call" || result["isError"] != false {
+        return Vec::new();
+    }
+    let text = result["content"][0]["text"].as_str().unwrap_or("");
+    let mut out: Vec<String> = Vec::new();
+    let mut keep = |n: String| {
+        if !out.contains(&n) {
+            out.push(n);
+        }
+    };
+    match msg["params"]["name"].as_str().unwrap_or("") {
+        "lore_recall" => {
+            for line in text.lines() {
+                let Some(rest) = line.strip_prefix('#') else {
+                    continue;
+                };
+                let id: String = rest.chars().take_while(char::is_ascii_digit).collect();
+                if !id.is_empty() && rest[id.len()..].starts_with(" (") {
+                    keep(format!("note:{id}"));
+                }
+            }
+        }
+        "lore_find" | "lore_calls" => {
+            for word in text.split(|c: char| c.is_whitespace() || "(),".contains(c)) {
+                let Some((path, line)) = word.split_once(':') else {
+                    continue;
+                };
+                if line.starts_with(|c: char| c.is_ascii_digit())
+                    && path.contains('.')
+                    && is_file(path)
+                {
+                    keep(path.to_string());
+                }
+            }
+        }
+        "lore_outline" => {
+            if let Some(path) = text.split_whitespace().next().filter(|p| is_file(p)) {
+                keep(path.to_string());
+            }
+        }
+        _ => {}
+    }
+    out
 }
 
 /// One call to the app, and what it answered, or why not.
@@ -1153,6 +1229,54 @@ mod tests {
 
     fn call(name: &str, args: Value) -> Value {
         json!({ "jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": { "name": name, "arguments": args } })
+    }
+
+    fn answered(text: &str) -> Value {
+        json!({ "jsonrpc": "2.0", "id": 7, "result": { "content": [{ "type": "text", "text": text }], "isError": false } })
+    }
+
+    #[test]
+    fn a_recall_shows_the_notes_it_answered_with() {
+        let text = "#12 (3 minutes ago, at abc12345)
+The pane wakes on #4 (sic).
+                    Files: src/a.rs
+
+#7 (2 days ago) MAYBE STALE: b.rs changed since
+B.";
+        let got = shown(&call("lore_recall", json!({})), &answered(text), |_| true);
+        assert_eq!(got, ["note:12", "note:7"]);
+    }
+
+    #[test]
+    fn a_find_or_calls_shows_the_files_it_named() {
+        let text = "src/a.rs:10-20 fn take
+    pub fn take(&mut self)
+                    fn run (src/b.rs:5) calls:
+  Lock::take at src/a.rs:10, gone.rs:3";
+        let known = |p: &str| p != "gone.rs";
+        let got = shown(&call("lore_calls", json!({})), &answered(text), known);
+        assert_eq!(got, ["src/a.rs", "src/b.rs"]);
+        let got = shown(&call("lore_find", json!({})), &answered(text), known);
+        assert_eq!(got, ["src/a.rs", "src/b.rs"]);
+    }
+
+    #[test]
+    fn an_outline_shows_its_file() {
+        let text = "src/a.rs
+   10-20   fn take
+";
+        let got = shown(&call("lore_outline", json!({})), &answered(text), |_| true);
+        assert_eq!(got, ["src/a.rs"]);
+    }
+
+    #[test]
+    fn errors_notes_kept_and_other_tools_show_nothing() {
+        let error = json!({ "result": { "content": [{ "text": "src/a.rs:1" }], "isError": true } });
+        assert!(shown(&call("lore_find", json!({})), &error, |_| true).is_empty());
+        let a = answered("Kept as #3. Every session can find it.");
+        assert!(shown(&call("lore_note", json!({})), &a, |_| true).is_empty());
+        let a = answered("src/a.rs:1");
+        assert!(shown(&call("browser_info", json!({})), &a, |_| true).is_empty());
     }
 
     #[test]

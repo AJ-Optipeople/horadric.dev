@@ -76,6 +76,8 @@ Usage:
                                machine runs one; alone, say who runs one now
   horadric sanctuary             Lay out this project's Arcane Sanctuary graph from where
                                it was left, keep it, and say how large it is
+  horadric sky                   Chart every known project into Tristram's sky, each a
+                               galaxy, and say how large and how quick it is
   horadric runeword list         Every stone of this project's Runetome: its runeword name,
                                label and steps, and why any does not parse
   horadric runeword cast NAME    Cast that stone of this project's Runetome, in a session
@@ -191,6 +193,8 @@ fn main() -> ExitCode {
         Some("portal") => portal::run(&args[1..]),
         #[cfg(windows)]
         Some("sanctuary") => lore::sanctuary(),
+        #[cfg(windows)]
+        Some("sky") => lore::sky(),
         Some("swap") => reload::swap(&args[1..]),
         Some("install") => install_command(),
         Some("uninstall") => uninstall_command(),
