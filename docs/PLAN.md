@@ -106,6 +106,7 @@ one. The registry is an `Arc<Mutex<Registry>>`, each console's grid an
 - [Claude Code 2.1.287 to 2.1.296](plan/claude-code-2-1-287-to-2-1-296.md): Using what is new in recent Claude Code, incl. OSC 7501 and cloud tiles.
 - [Town Portal on the phone, round two](plan/town-portal-on-the-phone-round-two.md): The phone page as an inbox, not a squeezed terminal.
 - [Lore](plan/lore.md): Fewer tokens per quest: spend counts, context packs, shared notes, a code outline and index, a shorter quest log.
+- [The Arcane Sanctuary](plan/the-arcane-sanctuary.md): The lore drawn as a living graph in a stage pane, lit by what agents read and change.
 
 ## Not in any step yet, but needed before daily use
 
