@@ -288,6 +288,149 @@ fn age(secs: u64) -> String {
     }
 }
 
+/// The most files a note Horadric takes by itself names. A quest that
+/// touched more than this was a sweep (a rename, a format), and naming
+/// every file would make its note match every question.
+pub const MOST_FILES: usize = 30;
+
+/// How a note taken when a quest ends starts, so a later one for the
+/// same quest, after it came back, replaces it.
+fn quest_head(title: &str) -> String {
+    format!("Quest \"{}\" done", title.trim())
+}
+
+/// The note Horadric takes when the quest `title` is done, from what its
+/// agent said it achieved.
+pub fn quest_note(title: &str, summary: &str) -> String {
+    let head = quest_head(title);
+    let summary = summary.split_whitespace().collect::<Vec<_>>().join(" ");
+    let text = if summary.is_empty() {
+        format!("{head}.")
+    } else {
+        format!("{head}: {summary}")
+    };
+    text.chars().take(LONGEST).collect()
+}
+
+impl Lore {
+    /// The notes taken when the quest `title` ended before, which a new
+    /// one for it replaces.
+    pub fn of_quest(&self, title: &str) -> Vec<u64> {
+        let head = quest_head(title);
+        self.notes
+            .iter()
+            .filter(|n| {
+                n.text
+                    .strip_prefix(&head)
+                    .is_some_and(|rest| rest.starts_with(':') || rest == ".")
+            })
+            .map(|n| n.id)
+            .collect()
+    }
+
+    /// Whether a note says just this already.
+    pub fn has(&self, text: &str) -> bool {
+        self.notes.iter().any(|n| n.text == text.trim())
+    }
+}
+
+/// The files `git diff --name-only` printed, as a note names them: once
+/// each, at most [`MOST_FILES`], without Horadric's own files, which
+/// change with every quest and say nothing about the code.
+pub fn changed_paths(name_only: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for p in name_only.lines().map(|l| l.trim().replace('\\', "/")) {
+        if !p.is_empty() && !p.starts_with(".horadric/") && !out.contains(&p) {
+            out.push(p);
+        }
+    }
+    out.truncate(MOST_FILES);
+    out
+}
+
+/// The files a Claude Code transcript's file tools wrote, in the order
+/// first written, as the agent named them.
+pub fn edited(jsonl: &str) -> Vec<String> {
+    const WRITERS: &[&str] = &["Edit", "MultiEdit", "Write", "NotebookEdit"];
+    let mut out: Vec<String> = Vec::new();
+    for line in jsonl.lines().filter(|l| l.contains("tool_use")) {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let Some(content) = v.pointer("/message/content").and_then(|c| c.as_array()) else {
+            continue;
+        };
+        for c in content {
+            let name = c.get("name").and_then(|n| n.as_str()).unwrap_or("");
+            if c.get("type").and_then(|t| t.as_str()) != Some("tool_use")
+                || !WRITERS.contains(&name)
+            {
+                continue;
+            }
+            let file = c
+                .get("input")
+                .and_then(|i| i.get("file_path").or_else(|| i.get("notebook_path")))
+                .and_then(|f| f.as_str())
+                .filter(|f| !f.is_empty());
+            if let Some(f) = file {
+                if !out.iter().any(|o| o == f) {
+                    out.push(f.to_string());
+                }
+            }
+        }
+    }
+    out
+}
+
+/// What Warriv learned on a wake: the lines of its memory's Rules that
+/// `new` has and `old` did not, without their bullets. Rules are what
+/// every later session should know; Lately is only what it did.
+pub fn learned(old: &str, new: &str) -> Vec<String> {
+    fn rules(memory: &str) -> Vec<&str> {
+        memory
+            .lines()
+            .skip_while(|l| l.trim_end() != "## Rules")
+            .skip(1)
+            .take_while(|l| !l.starts_with("## "))
+            .map(|l| l.trim().trim_start_matches("- ").trim())
+            .filter(|l| !l.is_empty())
+            .collect()
+    }
+    let before = rules(old);
+    rules(new)
+        .into_iter()
+        .filter(|r| !before.contains(r))
+        .map(str::to_string)
+        .collect()
+}
+
+/// The words of `text` that look like paths to files: with a slash, or a
+/// name and an extension of letters, once each. Whether one is a file of
+/// the project is for the caller to check.
+pub fn named_files(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for w in text.split_whitespace() {
+        let w = w
+            .trim_matches(|c: char| "`'\"()[]{}<>,;:!?*".contains(c))
+            .trim_end_matches('.')
+            .replace('\\', "/");
+        let w = w.trim_start_matches("./");
+        let Some((stem, ext)) = w.rsplit_once('.') else {
+            continue;
+        };
+        let pathy = !stem.is_empty()
+            && (if stem.contains('/') { 1 } else { 2 }..=5).contains(&ext.len())
+            && ext.chars().all(|c| c.is_ascii_alphanumeric())
+            && ext.chars().any(|c| c.is_ascii_alphabetic())
+            && !w.contains("://")
+            && !w.contains("..");
+        if pathy && !out.iter().any(|o| o == w) {
+            out.push(w.to_string());
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -433,5 +576,83 @@ mod tests {
     fn the_hash_is_fnv1a() {
         assert_eq!(hash(b""), 0xcbf2_9ce4_8422_2325);
         assert_eq!(hash(b"a"), 0xaf63_dc4c_8601_ec8c);
+    }
+
+    #[test]
+    fn a_quest_note_says_what_was_achieved() {
+        assert_eq!(
+            quest_note(" Port ", "Moved the\n dev port to 4210"),
+            "Quest \"Port\" done: Moved the dev port to 4210"
+        );
+        assert_eq!(quest_note("Port", "  "), "Quest \"Port\" done.");
+        let long = "x".repeat(LONGEST * 2);
+        assert_eq!(quest_note("Port", &long).chars().count(), LONGEST);
+    }
+
+    #[test]
+    fn a_quest_done_again_finds_its_old_note() {
+        let mut l = lore();
+        let first = l
+            .add(&quest_note("Port", "first"), vec![], "", 300, &[])
+            .unwrap();
+        l.add(&quest_note("Port two", "other"), vec![], "", 300, &[])
+            .unwrap();
+        let bare = l
+            .add(&quest_note("Port", ""), vec![], "", 300, &[])
+            .unwrap();
+        assert_eq!(l.of_quest("Port"), vec![first, bare]);
+        assert!(l.has("Quest \"Port\" done: first"));
+        assert!(!l.has("Quest \"Port\" done: second"));
+    }
+
+    #[test]
+    fn changed_paths_skip_horadric_and_repeats() {
+        let out = "src/a.rs\n.horadric/warriv.md\nsrc\\b.rs\nsrc/a.rs\n\n";
+        assert_eq!(changed_paths(out), vec!["src/a.rs", "src/b.rs"]);
+        let many: String = (0..100).map(|i| format!("f{i}.rs\n")).collect();
+        assert_eq!(changed_paths(&many).len(), MOST_FILES);
+    }
+
+    #[test]
+    fn edited_reads_the_file_tools_of_a_transcript() {
+        let tool = |name: &str, input: &str| {
+            format!(
+                r#"{{"type":"assistant","message":{{"content":[{{"type":"tool_use","id":"t","name":"{name}","input":{input}}}]}}}}"#
+            )
+        };
+        let jsonl = [
+            tool("Read", r#"{"file_path":"C:/p/read.rs"}"#),
+            tool("Edit", r#"{"file_path":"C:/p/a.rs"}"#),
+            tool("Write", r#"{"file_path":"C:/p/b.rs"}"#),
+            tool("Edit", r#"{"file_path":"C:/p/a.rs"}"#),
+            tool("NotebookEdit", r#"{"notebook_path":"C:/p/n.ipynb"}"#),
+            "not json tool_use".to_string(),
+        ]
+        .join("\n");
+        assert_eq!(
+            edited(&jsonl),
+            vec!["C:/p/a.rs", "C:/p/b.rs", "C:/p/n.ipynb"]
+        );
+    }
+
+    #[test]
+    fn warriv_learned_its_new_rules() {
+        let old = "# Warriv's memory\n\n## Rules\n- Old rule.\n\n## Lately\n- 2026 did a thing\n";
+        let new = "# Warriv's memory\n\n## Rules\n- Old rule.\n- New rule about `src/a.rs`.\n\n\
+                   ## Lately\n- 2026 did another\n- 2026 did a thing\n";
+        assert_eq!(learned(old, new), vec!["New rule about `src/a.rs`."]);
+        assert_eq!(learned("", "## Rules\n- First.\n"), vec!["First."]);
+        assert!(learned(new, new).is_empty());
+    }
+
+    #[test]
+    fn named_files_are_the_pathy_words() {
+        assert_eq!(
+            named_files(
+                "Run checks per RELEASING.md step 2, see `crates/x/src/lib.rs`, a/b.c, \
+                 not v0.25.0 or https://a.b/c.html or 3.5 or e.g. the end."
+            ),
+            vec!["RELEASING.md", "crates/x/src/lib.rs", "a/b.c"]
+        );
     }
 }

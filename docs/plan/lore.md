@@ -81,6 +81,17 @@ them itself when a quest ends: the done summary, the files the quest
 changed, and what Warriv learned on a wake, each as a note naming its
 files. The tools stay for what only the agent knows.
 
+Built 2026-10-15. `horadric quest done` keeps `Quest "<title>" done:
+<summary>` naming the files the quest changed: in a worktree, what its
+branch changed since it left main, committed or not; in the main tree,
+where other sessions' changes mix in, the files its own conversations
+wrote with Edit and Write. At most 30 files, Horadric's own left out. A
+quest done again replaces its note. When Warriv rests, each rule it
+added to its memory becomes a note naming the project files it
+mentions; Lately is what it did, not what it learned, so it is left
+out. The note store moved to `horadric_hooks::lore` so the app can
+write too.
+
 ## 4. A code index
 
 Symbols and who calls whom, per project, built once and kept fresh as

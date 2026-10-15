@@ -16,6 +16,7 @@ pub mod grok;
 pub mod install;
 pub mod listener;
 pub mod lock;
+pub mod lore;
 pub mod tasks;
 pub mod transcript;
 

@@ -360,8 +360,13 @@ impl App {
             return;
         };
         std::thread::spawn(move || {
+            let before = crate::worktree::committed(&dir, warriv::MEMORY);
             if let Err(e) = crate::worktree::commit_file(&dir, warriv::MEMORY, MEMORY_COMMIT) {
                 eprintln!("horadric: cannot commit Warriv's memory: {e}");
+            }
+            let after = std::fs::read_to_string(dir.join(warriv::MEMORY)).unwrap_or_default();
+            if let Err(e) = note_learned(&dir, &before.unwrap_or_default(), &after) {
+                eprintln!("horadric: cannot keep what Warriv learned as lore: {e}");
             }
         });
     }
@@ -1276,4 +1281,37 @@ fn reload_log() -> String {
     store::dir()
         .and_then(|d| std::fs::read_to_string(d.join("reload.log")).ok())
         .unwrap_or_default()
+}
+
+/// Each rule Warriv added to its memory on a wake, as a lore note naming
+/// the project's files it mentions, so every session finds what Warriv
+/// learned and not only the next Warriv. A rule kept already is not kept
+/// twice.
+fn note_learned(dir: &std::path::Path, before: &str, after: &str) -> Result<(), String> {
+    let rules = horadric_core::lore::learned(before, after);
+    if rules.is_empty() {
+        return Ok(());
+    }
+    let place = horadric_hooks::lore::Place::of(dir)?;
+    let commit = place.commit();
+    let notes: Vec<_> = rules
+        .into_iter()
+        .map(|rule| {
+            let files = horadric_core::lore::named_files(&rule)
+                .into_iter()
+                .filter(|f| place.exists(f))
+                .take(horadric_core::lore::MOST_FILES)
+                .collect();
+            (rule, place.marks(files))
+        })
+        .collect();
+    let at = horadric_hooks::lore::now();
+    place.change(|l| {
+        for (rule, marks) in notes {
+            if !l.has(&rule) {
+                l.add(&rule, marks, &commit, at, &[])?;
+            }
+        }
+        Ok(())
+    })
 }
