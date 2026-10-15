@@ -188,8 +188,9 @@ That is all. No admin rights needed. Horadric now:
 
 - is in the Start menu (search "Horadric") and starts with Windows,
 - answers to `horadric` in any new terminal,
-- adds "Open in Horadric" to folders in Explorer (under "Show more options"
-  on Windows 11),
+- adds "Open in Horadric" to folders in Explorer, and to the empty space of
+  the folder you are in (under "Show more options" on Windows 11). The
+  Startup settings switch it off and on again,
 - has the hooks it needs in your agent's settings.
 
 It lives in the tray. Windows may hide a new tray icon behind the `^` by the

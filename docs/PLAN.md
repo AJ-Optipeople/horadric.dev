@@ -251,7 +251,15 @@ new project, so three ways in that need no terminal:
   `horadricw.exe`, a second, windowless binary, so a right click never flashes
   a console. `horadricw` starts the app when it is not running (hidden, no
   console window) and then asks it for the session. With no folder it only
-  starts the app.
+  starts the app. The installed copy adds the verbs the first time it runs
+  (`explorer_offered` in the state, the same once only rule as Start with
+  Windows), so an update brings them to a machine that never ran
+  `install`, and the Startup settings have "Open in Horadric in Explorer"
+  to take them away or put them back. The Windows 11 short menu was tried
+  on 2026-10-13: it needs a packaged `IExplorerCommand` handler, and
+  Windows refuses an unsigned package that declares a context menu ("not a
+  valid unsigned package", even registered loose with `AllowUnsigned`). It
+  waits on a signing certificate.
 
 - **The start window** (`start.rs`). With no project open the desktop
   used to show only the usage window and a tray icon, and nothing said how

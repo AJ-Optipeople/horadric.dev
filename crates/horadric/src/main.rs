@@ -12,8 +12,6 @@
 //! one per session to hold its console.
 
 mod console;
-#[cfg(windows)]
-mod explorer;
 mod heavy;
 mod hook;
 #[cfg(windows)]
@@ -369,6 +367,7 @@ fn uninstall_command() -> Result<(), String> {
 
 #[cfg(windows)]
 fn explorer_command(sub: Option<&str>) -> Result<(), String> {
+    use horadric_ui::explorer;
     match sub {
         Some("install") => {
             let exe = std::env::current_exe().map_err(|e| e.to_string())?;

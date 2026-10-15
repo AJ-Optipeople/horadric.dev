@@ -102,6 +102,8 @@ mod caption;
 mod catchup;
 #[cfg(windows)]
 mod clipboard;
+#[cfg(windows)]
+pub mod explorer;
 // The Mac has no file views or browser panes yet, which use the rest.
 #[cfg(any(windows, target_os = "macos"))]
 #[cfg_attr(not(windows), allow(dead_code))]
