@@ -691,9 +691,15 @@ pub(crate) fn finished(cwd: &Path) -> Vec<(String, Touched)> {
     let Some(project) = main_list().or_else(|| file::find_list(cwd)) else {
         return Vec::new();
     };
+    finished_in(&project, &horadric_ui::chronicle_all())
+}
+
+/// The done quests of the project whose log is in `project`, from the
+/// chronicle's `records`, read once by a caller that asks of many projects.
+pub(crate) fn finished_in(project: &Path, records: &[Record]) -> Vec<(String, Touched)> {
     let key = horadric_ui::folder_key(&project.to_string_lossy());
-    let list = tasks::parse(&file::read(&project));
-    chronicle::quests(&horadric_ui::chronicle_all(), &[], &key, &list)
+    let list = tasks::parse(&file::read(project));
+    chronicle::quests(records, &[], &key, &list)
         .into_iter()
         .filter(|q| q.outcome == chronicle::Outcome::Done)
         .filter_map(|q| Some((q.title, q.touched.filter(|t| !t.is_empty())?)))

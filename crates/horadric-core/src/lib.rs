@@ -37,6 +37,7 @@ pub mod sanctuary;
 pub mod saved;
 pub mod session;
 pub mod ship;
+pub mod sky;
 pub mod spend;
 pub mod ssh;
 pub mod tasks;

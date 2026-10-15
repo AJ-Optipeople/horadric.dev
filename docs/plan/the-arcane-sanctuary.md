@@ -112,3 +112,19 @@ Each is a quest.
    files watcher is not used: hooks say who, and it does not.
 4. Tristram's sky: every project as a galaxy in the town's sanctuary,
    a click going into one.
+   Built 2026-10-15, the data side: `horadric_core::sky` places each
+   project's laid out graph as a galaxy apart in one flat picture of
+   stars and links, with `hit` for a click and `frame` for zooming into
+   one. A galaxy grows with the fourth root of its node count, so a
+   project of thousands of files is a few times a small one, not all of
+   the sky. The largest sits in the middle, each other on a ray of its
+   own picked from its key, slid out until it touches none placed
+   before, so a project that comes or goes moves only smaller ones.
+   `lore::town_sky` charts every project `horadric projects` lists,
+   laying out and keeping any never drawn, and keeps each in memory
+   until a file its graph is read from changes. `horadric sky` tries
+   it. Here: 7 projects, 2052 stars, 3982 links; 9.5 s the first time
+   ever (indexing the code of projects never indexed), 0.9 s cold after
+   that, 1.4 ms again from memory. The pane should chart it off the UI
+   thread the first time. Drawing it in the town's pane is left for
+   after step 2.
