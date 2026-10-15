@@ -5,6 +5,7 @@
 - A quest session silent for hours with an empty worktree after two nudges is dead and I can not restart it: hand it to the human with "restart it", who does so (settled on "OSC 7501: plain terminals", which then landed).
 
 ## Lately
+- 2026-10-16 Wake: "Memory: an embedding model ... and a yardstick" stopped a fourth time, waiting on its own review agent before merging. Not stuck, no tell, noted.
 - 2026-10-16 Round after the human left (01:20, main at c520fa9): no code since v0.27.0, so no ship. The embedding quest is alive (lib.rs written 01:17 in its worktree). Gave the two new Memory quests models (Horadrim: opus, the Scroll: sonnet).
 - 2026-10-16 Wake: "Memory: an embedding model ... and a yardstick" stopped a third time, second benchmark run going in its background task. Not stuck, no tell, noted.
 - 2026-10-16 Wake: "Memory: an embedding model ... and a yardstick" stopped again, yardstick done (65 questions), benchmark still running in its background task. Not stuck, no tell, noted.
