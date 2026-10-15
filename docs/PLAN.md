@@ -82,6 +82,7 @@ one. The registry is an `Arc<Mutex<Registry>>`, each console's grid an
 - [Waits a blocked quest can name](plan/waits-a-blocked-quest-can-name.md): Blocked quests that wait on another quest instead of the human.
 - [Performance](plan/performance.md): UI thread performance pass and what is left.
 - [The Runetome](plan/the-runetome.md): Runewords as rune stones in a tile, errands with schedules.
+- [Tristram](plan/tristram.md): A town above the projects for broad work, its own browser, sees every project.
 
 ## Next
 
@@ -105,7 +106,6 @@ one. The registry is an `Arc<Mutex<Registry>>`, each console's grid an
 - [Claude Code 2.1.287 to 2.1.296](plan/claude-code-2-1-287-to-2-1-296.md): Using what is new in recent Claude Code, incl. OSC 7501 and cloud tiles.
 - [Town Portal on the phone, round two](plan/town-portal-on-the-phone-round-two.md): The phone page as an inbox, not a squeezed terminal.
 - [Lore](plan/lore.md): Fewer tokens per quest: spend counts, context packs, shared notes, a code outline and index, a shorter quest log.
-- [Tristram](plan/tristram.md): A town above the projects for broad work, its own browser, sees every project.
 
 ## Not in any step yet, but needed before daily use
 
