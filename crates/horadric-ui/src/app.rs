@@ -134,7 +134,7 @@ use crate::usage::{self, UsageWindow};
 use crate::window::{self, folder_key, project_key, project_name, Cluster, Shared};
 use crate::{
     ask, autostart, browsers, history, inbox, paths, picker, recent, shell, snapping, store, theme,
-    update, viewport, watch, web, worktree,
+    town, update, viewport, watch, web, worktree,
 };
 
 #[path = "runner.rs"]
@@ -763,6 +763,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
     // running the status line from wherever it pointed.
     let status_settings = store::write_status_settings(&console::host_program());
     let mcp_config = store::write_mcp_config(&console::host_program());
+    town::make();
     let usage_window = match UsageWindow::create(
         Rc::clone(&shared),
         saved.usage_window.as_ref().is_some_and(|p| p.collapsed),
@@ -2182,8 +2183,11 @@ fn project_menu(key: &str) {
         Item::action(SETTINGS, "Project settings\u{2026}"),
         Item::Separator,
         Item::action(END_ALL, "End all sessions"),
-        Item::action(CLOSE, "Close project"),
     ]);
+    // The town is always there.
+    if !town::is(key) {
+        items.push(Item::action(CLOSE, "Close project"));
+    }
     let picked = menu::popup(&items);
     match (picked, &dir) {
         (Some(SSH_FIND), Some(_)) => return ssh_to(key, &hosts, &devices),
@@ -5324,6 +5328,9 @@ impl App {
     /// Ends the project's sessions and takes its cluster down, unfinished
     /// tasks or not.
     fn close_project(&mut self, key: &str) {
+        if town::is(key) {
+            return self.end_all(Some(key));
+        }
         self.open.remove(key);
         self.closed.insert(key.to_string());
         self.end_all(Some(key));
@@ -6511,6 +6518,8 @@ impl App {
             .extend(projects.iter().filter(|k| !k.is_empty()).cloned());
         projects.extend(self.open.iter().cloned());
         projects.extend(self.listed());
+        // The town stays when it has no sessions.
+        projects.extend(town::key().map(String::from));
 
         // Remove clusters whose project is gone.
         let mut i = 0;
@@ -6945,7 +6954,18 @@ impl App {
         for input in inputs {
             match input {
                 Input::Toggle(hwnd) => {
-                    if let Some(c) = self.clusters.iter_mut().find(|c| c.hwnd.0 as isize == hwnd) {
+                    // An empty town has nothing to fold, so its header opens
+                    // the stage with its browser pane, the plus beside it.
+                    let town = self
+                        .clusters
+                        .iter()
+                        .find(|c| c.hwnd.0 as isize == hwnd && town::is(&c.key))
+                        .map(|c| c.key.clone());
+                    if let Some(key) = town.filter(|k| self.grid_of(k).is_empty()) {
+                        self.open_web(&key, None);
+                    } else if let Some(c) =
+                        self.clusters.iter_mut().find(|c| c.hwnd.0 as isize == hwnd)
+                    {
                         c.collapsed = !c.collapsed;
                         c.fit();
                         relayout = true;
@@ -7174,8 +7194,9 @@ impl App {
     }
 
     /// Shows the start window while no project is open, and only then.
+    /// The town is always open, so it does not count.
     fn sync_start(&mut self) {
-        if !self.clusters.is_empty() {
+        if self.clusters.iter().any(|c| !town::is(&c.key)) {
             if let Some(s) = self.start_window.take() {
                 s.destroy();
             }
@@ -7201,6 +7222,9 @@ impl App {
     /// session, as the recent list spells it, for a project up for its
     /// task list alone.
     fn project_dir(&self, key: &str) -> Option<PathBuf> {
+        if town::is(key) {
+            return town::dir();
+        }
         let from_session = self.shared.registry.lock().ok().and_then(|r| {
             let mut dirs = r
                 .all()
@@ -7299,7 +7323,7 @@ impl App {
 
     /// The windows standing in a column with these keys, top to bottom.
     /// The start window stands in for the first project, so it goes below
-    /// the usage window in the first column.
+    /// the town and the usage window in the first column.
     fn column_windows(&self, keys: &[String], first: bool) -> Vec<Tile<'_>> {
         let mut out: Vec<Tile> = keys
             .iter()
@@ -7322,7 +7346,11 @@ impl App {
         if let Some(s) = self.start_window.as_deref().filter(|_| first) {
             let at = out
                 .iter()
-                .position(|t| matches!(t, Tile::Usage(_)))
+                .rposition(|t| match t {
+                    Tile::Usage(_) => true,
+                    Tile::Cluster(c) => town::is(&c.key),
+                    _ => false,
+                })
                 .map_or(0, |i| i + 1);
             out.insert(at, Tile::Start(s));
         }
@@ -7347,6 +7375,9 @@ impl App {
         self.columns.prune(is_present);
         if self.usage_window.is_some() && !self.columns.contains(columns::USAGE) {
             self.columns.add_first(columns::USAGE);
+        }
+        if let Some(k) = town::key().filter(|k| is_present(k)) {
+            self.columns.pin_first(k);
         }
         let mut fresh: Vec<(String, String, i32)> = self
             .clusters

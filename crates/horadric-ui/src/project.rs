@@ -71,8 +71,12 @@ impl Known {
     }
 }
 
-/// A readable name for a project key.
+/// A readable name for a project key. The town goes by its own name, not
+/// its folder's.
 pub fn project_name(key: &str) -> String {
+    if crate::town::is(key) {
+        return crate::town::NAME.to_string();
+    }
     key.rsplit('/')
         .next()
         .filter(|s| !s.is_empty())
