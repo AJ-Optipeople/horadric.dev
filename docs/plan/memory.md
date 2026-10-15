@@ -140,3 +140,57 @@ shows the current one and can be asked for history. This is the step
 that makes the memory intelligent rather than a pile, and it is done by
 an agent in the open, with its notes readable, never by a hidden
 rewrite of the kept text.
+
+### 8. Horadrim, the written tongue
+
+Asked for on 2026-10-16: a compressed language of Horadric's own, aiming
+lower than AAAK's claimed 30x but losing nothing that recall needs.
+
+**Search never reads it.** AAAK lost recall because the shortened text
+was what got stored and searched. Here the kept text stays verbatim and
+is what recall scores. Horadrim is only how a hit is written when it is
+handed to an agent, which is where the tokens are spent: a recall's
+answer lands in the agent's context, a megabyte on disk costs nothing.
+So recall cannot drop by construction, and what is measured is the
+other half: tokens per hit, and whether an agent reading the Horadrim
+form answers the yardstick's questions as well as one reading the
+original (judged per question, not by feel).
+
+**Saving where the repetition is, not in new words.** A tokenizer already
+packs plain English tightly, and an invented abbreviation often costs
+more tokens than the word it replaces; AAAK's ratio was counted in
+characters. The savings are in what repeats:
+
+- **Sigils.** A project's most repeated long names (file paths, crates,
+  types, quest titles, Warriv, the dev instance's state folder) each get
+  a sigil, a short word that the token counter confirms is one or two
+  tokens. Which names earn one is counted from the memory itself: length
+  in tokens times how often hits carry it.
+- **The Lexicon.** The sigils and what they stand for, given to a
+  session once, at the head of its first recall, where prompt caching
+  makes it nearly free for the rest of the session. A Lexicon changes
+  only by adding, so an old hit never means something new; a sigil whose
+  name is gone from the project is retired, not reused.
+- **Stripped, not paraphrased.** Greetings, restated questions, "Let me
+  check" and tool chatter go. No sentence is reworded. Each hit keeps its
+  chunk id, and `lore_recall` with that id returns the original: the
+  scroll unrolled.
+
+Expected: 2x to 3x fewer tokens per hit. If the yardstick shows any loss
+in answers, the stripping goes first and sigils stay.
+
+**The theme, a little.** The Horadrim were the order that kept Tal
+Rasha's secrets in scrolls, so: a hit is inscribed, the original is
+unrolled, a long name is bound to a sigil. The Lexicon opens with one
+line in Deckard Cain's voice and is plain after it; flavour that costs
+tokens on every call is not flavour, it is spend. Runes, the Cube,
+Transmute and Identify already mean other things in Horadric, so the
+tongue does not borrow them.
+
+**The Scroll.** A section in the Settings window, drawn as an unrolled
+scroll, where a person reads about the tongue: what it is and why it
+keeps the original, the current project's Lexicon (each sigil, its name,
+how often it was used), and the numbers (tokens saved this week, the
+yardstick's answer score in Horadrim against verbatim). It is read only;
+a switch to turn the tongue off sits at its foot, for when an answer
+seems wrong and the human wants to see if the tongue is why.
