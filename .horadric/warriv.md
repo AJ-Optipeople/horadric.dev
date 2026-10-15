@@ -5,6 +5,8 @@
 - A quest session silent for hours with an empty worktree after two nudges is dead and I can not restart it: hand it to the human with "restart it", who does so (settled on "OSC 7501: plain terminals", which then landed).
 
 ## Lately
+- 2026-10-15 Round (main at 4e456e7): a `cargo build --release` started 21:50:44, after 7a41147 (21:48), so the ship under way carries 5b0816a and the code index. No second cast. Tristram's three quests still open, public held for them.
+- 2026-10-15 Round (21:51, main at 7a41147): "Lore: a code index" landed, so all of Lore is in. The 463f2bc "Ship Local" cast still has not reloaded (last reload 21:42, release exe 21:41, cargo busy), and it will build from main as it stands, so no second cast. Held public until Tristram's three open quests land too, then one release for Lore and Tristram.
 - 2026-10-15 Round (main at f180d7e): "Tristram: generated CLAUDE.md and project dirs" landed (5b0816a). The "Ship Local" cast for 463f2bc has not reloaded yet (last reload 21:42, cargo busy), so no second cast. "Found a project" already has sonnet. Nothing else to do.
 - 2026-10-15 Round (main at 463f2bc): ship-local-69886 reloaded at 21:42, but hand-marked spend (463f2bc) landed at 21:43 after it, so cast "Ship Local". Public still held for the code index, the last of Lore.
 - 2026-10-15 Wake with no new event: log unchanged since the round a minute earlier, ship-local-69886 still building. Nothing to do.
@@ -142,4 +144,5 @@
 - 2026-10-06 Daily look back: the day was clean (24 quests completed, all 24 merged by themselves).
 
 ## Open
-- Next round: if no reload came after 21:46 (5b0816a), or the reload's exe was built before 21:46, cast "Ship Local" for 5b0816a.
+- Next round: check a reload came after 21:51 from the build started 21:50:44. If that build failed and no reload came, cast "Ship Local" for 5b0816a and 7a41147.
+- Once the Tristram quests (quest --project, found a project, label plus New session) land, cast "Ship Public" for Lore and Tristram.
