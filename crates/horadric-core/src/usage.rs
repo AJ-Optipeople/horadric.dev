@@ -6,7 +6,7 @@
 //! context is, and for a subscription the five hour and weekly limits. A
 //! session Horadric starts gets `horadric status` as its status line, which
 //! passes that JSON on to the app. The limits belong to the account, not to
-//! the session, so the latest from any session is the one shown.
+//! the session, so every session's reading is taken in, the truest kept.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -36,6 +36,29 @@ impl Limit {
             Some(t) if t <= now => (0.0, None),
             Some(t) => (self.used, Some(t - now)),
             None => (self.used, None),
+        }
+    }
+
+    /// The truer of two readings of the same limit, `self` held and
+    /// `heard` just in. Every session repeats the numbers of its own last
+    /// reply each time its status line runs, so one idle for an hour still
+    /// speaks of an hour ago. Within one window use only grows, so the
+    /// higher reading is the newer. A reading whose reset has passed at
+    /// `now` is of a window already over, and says nothing of this one.
+    fn merge(self, heard: Limit, now: u64) -> Limit {
+        let (Some(held_at), Some(heard_at)) = (self.resets_at, heard.resets_at) else {
+            return heard;
+        };
+        if heard_at.abs_diff(held_at) <= SAME_WINDOW {
+            if heard.used >= self.used {
+                heard
+            } else {
+                self
+            }
+        } else if heard_at <= now && held_at > now {
+            self
+        } else {
+            heard
         }
     }
 
@@ -87,6 +110,21 @@ pub struct Limits {
 impl Limits {
     pub fn is_empty(&self) -> bool {
         self.five_hour.is_none() && self.seven_day.is_none() && self.spend.is_none()
+    }
+
+    /// The held limits with `heard` taken in, each limit the truer of its
+    /// two readings at `now`, see [`Limit::merge`]. One `heard` does not
+    /// name is kept as it was.
+    pub fn merge(&self, heard: &Limits, now: u64) -> Limits {
+        let one = |held: Option<Limit>, heard: Option<Limit>| match (held, heard) {
+            (Some(a), Some(b)) => Some(a.merge(b, now)),
+            (a, b) => b.or(a),
+        };
+        Limits {
+            five_hour: one(self.five_hour, heard.five_hour),
+            seven_day: one(self.seven_day, heard.seven_day),
+            spend: one(self.spend, heard.spend),
+        }
     }
 
     /// Each limit with what to call it, the ones there are.
@@ -162,6 +200,11 @@ impl Limits {
             .max_by(|a, b| a.1.total_cmp(&b.1))
     }
 }
+
+/// How far apart, in seconds, two readings' resets may be and still be of
+/// one window. Far less than the shortest window, so a new window is never
+/// taken for the old one.
+const SAME_WINDOW: u64 = 15 * 60;
 
 /// How full, in percent, a limit may be before the runner starts no more.
 pub const PACE_AT: f32 = 90.0;
@@ -581,6 +624,55 @@ mod tests {
             resets_at: Some(resets_at),
             minutes: None,
         })
+    }
+
+    #[test]
+    fn an_idle_sessions_old_reading_does_not_pull_the_limit_back() {
+        let held = Limits {
+            five_hour: limit(40.0, 10_000),
+            seven_day: limit(20.0, 500_000),
+            spend: None,
+        };
+        // Same windows, one reset a little off, both lower: an hour old.
+        let old = Limits {
+            five_hour: limit(25.0, 10_060),
+            seven_day: limit(18.0, 500_000),
+            spend: None,
+        };
+        assert_eq!(held.merge(&old, 5_000), held);
+        // Higher is newer.
+        let newer = Limits {
+            five_hour: limit(45.0, 10_000),
+            ..Limits::default()
+        };
+        let m = held.merge(&newer, 5_000);
+        assert_eq!(m.five_hour, limit(45.0, 10_000));
+        assert_eq!(m.seven_day, held.seven_day);
+    }
+
+    #[test]
+    fn a_reading_of_a_window_over_is_passed_over() {
+        let held = Limits {
+            five_hour: limit(5.0, 30_000),
+            ..Limits::default()
+        };
+        let over = Limits {
+            five_hour: limit(90.0, 10_000),
+            ..Limits::default()
+        };
+        assert_eq!(held.merge(&over, 12_000), held);
+        // A new window, or another account's, is taken as it is.
+        let next = Limits {
+            five_hour: limit(2.0, 50_000),
+            ..Limits::default()
+        };
+        assert_eq!(held.merge(&next, 32_000), next);
+        let other = Limits {
+            five_hour: limit(70.0, 20_000),
+            ..Limits::default()
+        };
+        assert_eq!(held.merge(&other, 12_000), other);
+        assert_eq!(Limits::default().merge(&over, 12_000), over);
     }
 
     #[test]

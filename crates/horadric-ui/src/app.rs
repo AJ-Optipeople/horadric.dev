@@ -623,7 +623,8 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
     });
 
     // Feeder thread: apply to the registry, wake the UI. The limits in a
-    // status line are the account's, so the latest from any session wins.
+    // status line are the account's, so any session's reading counts, though
+    // an idle one's stale numbers never pull the bars back.
     let feed_registry = Arc::clone(&registry);
     let feed_usage = Arc::clone(&usage);
     let feed_agent_usage = Arc::clone(&agent_usage);
@@ -636,16 +637,18 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
         let mut asked = Asked::default();
         for t in rx {
             if let Some(limits) = t.limits.filter(|l| !l.is_empty()) {
-                let heard = Usage {
-                    limits,
-                    at: unix_now(),
+                let now = unix_now();
+                let heard = |held: Option<&Usage>| Usage {
+                    limits: held.map_or(limits.clone(), |h| h.limits.merge(&limits, now)),
+                    at: now,
                 };
                 if t.agent == Agent::Claude {
                     if let Ok(mut u) = feed_usage.lock() {
-                        *u = Some(heard);
+                        *u = Some(heard(u.as_ref()));
                     }
                 } else if let Ok(mut u) = feed_agent_usage.lock() {
-                    u.insert(t.agent, heard);
+                    let merged = heard(u.get(&t.agent));
+                    u.insert(t.agent, merged);
                 }
             }
             let route = feed_registry
