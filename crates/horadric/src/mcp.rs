@@ -9,6 +9,9 @@
 //! the project's page); every tool here is made of those. So a click is a
 //! script that finds the element and scrolls it into view, then a real
 //! mouse press and release where it is, as a person's would be.
+//!
+//! It also serves the project's lore (see `lore.rs`), notes its sessions
+//! leave each other, to every session, Horadric's or not.
 
 use std::io::{BufRead, Write};
 use std::thread;
@@ -46,6 +49,7 @@ pub fn run() -> Result<(), String> {
         browser: session.is_some(),
         app: move |body: Value| ask_app(owner, session.as_deref(), &body),
         settle: Duration::from_millis(400),
+        lore: crate::lore::tool,
     };
     let mut out = std::io::stdout().lock();
     for line in std::io::stdin().lock().lines() {
@@ -106,6 +110,8 @@ struct Server<A> {
     app: A,
     /// How long after a click or a key the page is given to react.
     settle: Duration,
+    /// Answers a lore tool, None for any other.
+    lore: fn(&str, &Value) -> Option<Result<String, String>>,
 }
 
 impl<A: FnMut(Value) -> Result<Value, String>> Server<A> {
@@ -122,11 +128,19 @@ impl<A: FnMut(Value) -> Result<Value, String>> Server<A> {
                     .unwrap_or(PROTOCOL),
                 "capabilities": { "tools": {} },
                 "serverInfo": { "name": "horadric", "version": env!("CARGO_PKG_VERSION") },
-                "instructions": if self.browser { INSTRUCTIONS } else { "" },
+                "instructions": if self.browser {
+                    format!("{INSTRUCTIONS}
+
+{LORE}")
+                } else {
+                    LORE.to_string()
+                },
             })),
             "ping" => Ok(json!({})),
-            "tools/list" if self.browser => Ok(json!({ "tools": tools() })),
-            "tools/list" => Ok(json!({ "tools": [] })),
+            "tools/list" if self.browser => {
+                Ok(json!({ "tools": tools().into_iter().chain(lore_tools()).collect::<Vec<_>>() }))
+            }
+            "tools/list" => Ok(json!({ "tools": lore_tools() })),
             "tools/call" => {
                 let name = params.get("name").and_then(Value::as_str).unwrap_or("");
                 let args = params.get("arguments").cloned().unwrap_or(json!({}));
@@ -144,6 +158,9 @@ impl<A: FnMut(Value) -> Result<Value, String>> Server<A> {
     }
 
     fn tool(&mut self, name: &str, args: &Value) -> Result<Vec<Value>, String> {
+        if let Some(answer) = (self.lore)(name, args) {
+            return answer.map(|t| vec![text(t)]);
+        }
         let s = |k: &str| args.get(k).and_then(Value::as_str);
         match name {
             "browser_open" => self.page(json!({ "op": "open", "url": s("url") })),
@@ -638,7 +655,7 @@ fn tools() -> Vec<Value> {
     vec![
         tool(
             "browser_open",
-            "Open this project's browser pane in Horadric, and a tab of your own in it, at url              when given. It is a real browser (Edge WebView2) beside the user's terminals,              logged in wherever the user logged in. Open it when a task needs a web page; it              stays open until closed. Use it in place of Playwright, Puppeteer, a Chrome              DevTools MCP or a Chrome or headless browser of your own.",
+            "Open this project's browser pane in Horadric, and a tab of your own in it, at url when given. It is a real browser (Edge WebView2) beside the user's terminals, logged in wherever the user logged in. Open it when a task needs a web page; it stays open until closed. Use it in place of Playwright, Puppeteer, a Chrome DevTools MCP or a Chrome or headless browser of your own.",
             json!({ "url": { "type": "string", "description": "Where to go; a bare host like localhost:3000 is fine" } }),
             &[],
         ),
@@ -792,6 +809,33 @@ fn tools() -> Vec<Value> {
     ]
 }
 
+fn lore_tools() -> Vec<Value> {
+    let files =
+        |what: &str| json!({ "type": "array", "items": { "type": "string" }, "description": what });
+    vec![
+        tool(
+            "lore_note",
+            "Leave a note for every other session of this project, now and later: a fact you had to find out that the next agent would otherwise find out again (where something is done, why it is so, a trap, how to run or test a part). One fact per note, a few sentences, plain words. Name the files it is about, so the note is found by them and shown as maybe stale once one of them changes.",
+            json!({
+                "text": { "type": "string", "description": "The fact" },
+                "files": files("The files it is about, relative to the project or absolute"),
+                "replaces": { "type": "array", "items": { "type": "integer" },
+                    "description": "Ids of notes this one corrects or outdates; they are dropped" },
+            }),
+            &["text"],
+        ),
+        tool(
+            "lore_recall",
+            "Ask the notes this project's sessions left with lore_note, before you explore: by words (a question or names), by files, or both. Answers with the notes that match, best first, each with its id and age, marked maybe stale where a file it is about changed since. With neither, the newest notes.",
+            json!({
+                "query": { "type": "string", "description": "Words to look for" },
+                "files": files("Files or folders the notes should be about"),
+            }),
+            &[],
+        ),
+    ]
+}
+
 fn tool(name: &str, description: &str, properties: Value, required: &[&str]) -> Value {
     json!({
         "name": name,
@@ -799,6 +843,8 @@ fn tool(name: &str, description: &str, properties: Value, required: &[&str]) -> 
         "inputSchema": { "type": "object", "properties": properties, "required": required },
     })
 }
+
+const LORE: &str = "Horadric keeps notes shared by every session of this project, the lore. Before you explore a part of the code, ask lore_recall about it (words or files): another session may already have found out what you need. When you find out something the next session would otherwise have to find out again, leave it with lore_note, naming its files. A note marked maybe stale is a lead, not a fact: check it, and when it is wrong or outdated leave the right one with replaces.";
 
 const INSTRUCTIONS: &str = "Horadric gives this session a browser, and it is the one to use: a pane on the Horadric stage beside the user's terminals, one per project with tabs, shared by the project's sessions. You work in a tab of your own: the first page you open or look at becomes yours (the tab shown, unless another session has it, else a new one), and your calls stay in it whichever tab the user shows. A popup your click opens becomes yours until it closes. The user sees the page you drive. Whenever a task needs the web (trying a page you built, testing a local server, reading docs, a login, a screenshot of a page), use these tools rather than Playwright, Puppeteer, the Chrome DevTools MCP, Claude in Chrome, or starting Chrome, Edge or a headless browser yourself, unless the user asks for one of those. Open it with browser_open or browser_navigate, read it with browser_snapshot, act with browser_click, browser_type, browser_select (for a dropdown) and browser_press, and look \
 with browser_screenshot. Refs from browser_snapshot are surer than guessed selectors. Close your tab with \
@@ -1078,6 +1124,7 @@ mod tests {
             browser: true,
             app,
             settle: Duration::ZERO,
+            lore: |name, _| (name == "lore_recall").then(|| Ok("#1 a note".into())),
         };
         (s, calls)
     }
@@ -1102,13 +1149,19 @@ mod tests {
     }
 
     #[test]
-    fn a_session_horadric_did_not_start_is_offered_no_tools() {
+    fn a_session_horadric_did_not_start_is_offered_only_the_lore() {
         let (mut s, _) = server(|_| Ok(json!({})));
         s.browser = false;
         let list = json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" });
-        assert_eq!(s.handle(&list).unwrap()["result"]["tools"], json!([]));
+        let names: Vec<Value> = s.handle(&list).unwrap()["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].clone())
+            .collect();
+        assert_eq!(names, [json!("lore_note"), json!("lore_recall")]);
         let init = json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize" });
-        assert_eq!(s.handle(&init).unwrap()["result"]["instructions"], "");
+        assert_eq!(s.handle(&init).unwrap()["result"]["instructions"], LORE);
     }
 
     #[test]
@@ -1128,10 +1181,13 @@ mod tests {
 
     #[test]
     fn every_tool_has_a_name_a_description_and_a_schema() {
-        let tools = tools();
-        assert!(tools.len() >= 15);
-        for t in &tools {
-            assert!(t["name"].as_str().unwrap().starts_with("browser_"), "{t}");
+        assert!(tools().len() >= 15);
+        for t in &[tools(), lore_tools()].concat() {
+            let name = t["name"].as_str().unwrap();
+            assert!(
+                name.starts_with("browser_") || name.starts_with("lore_"),
+                "{t}"
+            );
             assert!(!t["description"].as_str().unwrap().is_empty(), "{t}");
             assert_eq!(t["inputSchema"]["type"], "object", "{t}");
             for r in t["inputSchema"]["required"].as_array().unwrap() {
@@ -1163,6 +1219,15 @@ mod tests {
         let said = a["result"]["content"][0]["text"].as_str().unwrap();
         assert!(said.contains("http://localhost:3000/"), "{said}");
         assert!(said.contains("does not see it"), "{said}");
+    }
+
+    #[test]
+    fn a_lore_tool_is_answered_without_the_app() {
+        let (mut s, calls) = server(|_| Err("no app".into()));
+        let a = s.handle(&call("lore_recall", json!({}))).unwrap();
+        assert_eq!(a["result"]["isError"], false);
+        assert_eq!(a["result"]["content"][0]["text"], "#1 a note");
+        assert!(calls.borrow().is_empty());
     }
 
     #[test]

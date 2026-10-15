@@ -21,6 +21,7 @@ pub mod heavy;
 pub mod history;
 pub mod journal;
 pub mod lookback;
+pub mod lore;
 pub mod merge;
 pub mod overlap;
 pub mod portal;

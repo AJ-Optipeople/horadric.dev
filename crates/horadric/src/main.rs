@@ -22,6 +22,8 @@ mod install;
 #[path = "install_mac.rs"]
 mod install;
 #[cfg(windows)]
+mod lore;
+#[cfg(windows)]
 mod mcp;
 #[cfg(windows)]
 mod portal;

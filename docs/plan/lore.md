@@ -47,6 +47,24 @@ in the repository. A note names its files and the commit it was true at;
 when one of those files changes after that, the note is shown as maybe
 stale. Matching is plain words and file paths, no embeddings.
 
+Built 2026-10-15. `horadric_core::lore` holds the notes and the
+matching; `crates/horadric/src/lore.rs` the file, a lock file so
+sessions take turns writing, and git for the project and commit. The
+file is `lore\<folder>-<hash of the project key>.json` in the state
+folder, so a dev instance keeps its own. Choices made along the way:
+
+- Staleness is a hash of each file's bytes when the note was taken, not
+  a git diff from its commit, so a change not yet committed counts too,
+  and a session in a worktree checks its own copy of the file.
+- `lore_note` takes `replaces`, ids of notes it corrects, which are
+  dropped. There is no forget tool: one tool fewer in every session's
+  list, and a wrong note is best answered with the right one.
+- A project keeps at most 500 notes, the oldest dropped first. A recall
+  answers with at most 10.
+- The lore tools are offered to every session the MCP server runs in,
+  Horadric's or not, since they need no app; the browser tools still
+  only to Horadric's.
+
 ## 4. A code index
 
 Symbols and who calls whom, per project, built once and kept fresh as
