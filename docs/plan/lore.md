@@ -75,6 +75,12 @@ folder, so a dev instance keeps its own. Choices made along the way:
   Horadric's or not, since they need no app; the browser tools still
   only to Horadric's.
 
+Changed after a review on 2026-10-15: an agent mid task rarely stops to
+call `lore_note`, so most notes should not wait for one. Horadric takes
+them itself when a quest ends: the done summary, the files the quest
+changed, and what Warriv learned on a wake, each as a note naming its
+files. The tools stay for what only the agent knows.
+
 ## 4. A code index
 
 Symbols and who calls whom, per project, built once and kept fresh as
@@ -90,3 +96,19 @@ this idea comes from use. Language servers were turned down because they
 differ per language and are slow to start; a ctags style regex outline
 because it misses calls. The quest that builds it adds tree-sitter to
 the dependency list in CLAUDE.md, with the reason.
+
+Order, changed after a review on 2026-10-15: `lore_outline` first. The
+largest saving is a big file's symbols without its bodies (`app.rs` is
+8,000 lines), and nothing else gives that. Claude Code already has an
+LSP tool (go to definition, find references) backed by rust-analyzer,
+so before building `lore_find` and `lore_calls`, check what it answers
+in a Rust and a TypeScript project, and build only what it does not.
+
+## 5. A shorter quest log
+
+`.horadric/tasks.md` was 95 KB on 2026-10-15, about 24k tokens, most of
+it done quests, and Warriv and quest sessions are told to read it. Done
+quests older than a few days move to `.horadric/tasks-done.md`, keeping
+their `@id`, notes and spent records, so the quest log window, the
+chronicle and lookups by id still find them. The live file holds what is
+open plus the last few days.
