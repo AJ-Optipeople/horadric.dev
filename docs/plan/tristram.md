@@ -98,6 +98,30 @@ Each is a quest.
 3. `--project` on the quest CLI and `horadric projects`. **Done.** `town::resolve` matches a name or folder; sessions show as running or paused from the saved state, not live phases.
 4. "Found a project". **Done.** `town::found` makes the folder, runs `git init` and writes the README; `horadric found <name> [--parent] [--summary]` then starts the first session there with the summary as its prompt. The tile menu item (live town sessions only) asks for a name and types the request into the town session, which has the conversation to summarise. The parent defaults to beside the latest known project.
 
+## Reading as the town without a word
+
+Asked for on 2026-10-15: the town made sense to the human who built it,
+not to a new user, for whom it looked like one more repository. It has
+to say "above every project" by how it stands and behaves, not by a
+guide.
+
+1. **A band over the columns.** **Done.** The town is no longer in a
+   column. It lies across the top of all the columns shown, the columns
+   start under it, and its tiles run along the band in lanes that stand
+   right over the columns (`layout::band`, the lane with the highest
+   bottom first). It cannot be dragged and its tiles do not lift, since
+   it has one place.
+2. **A lamp over each project.** **Done.** On the groove under the
+   band's header, one lamp per project over the column it stands in:
+   amber while a session there waits, blue while one works, else the
+   project's own colour, dimmed (`window::light`).
+3. A spark from the town to a project when the town files a quest
+   there, and a founded project's cluster growing out of the band.
+4. The empty town's first session offering a first question, such as
+   what is going on across the projects, instead of a blank prompt.
+5. The label: Tristram is a name for Diablo players. "Town" with
+   Tristram as flavour, if new users still miss it.
+
 ## Open
 
 - One town or several (work and private)? One until the human asks.

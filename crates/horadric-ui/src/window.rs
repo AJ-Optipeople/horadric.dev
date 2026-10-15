@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use horadric_core::tasks::{Mark, Mode};
-use horadric_core::{format_age, Agent, Defaults, Registry, Session, Usage};
+use horadric_core::{format_age, Agent, Defaults, Phase, Registry, Session, Usage};
 use windows::core::{w, Result, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{
@@ -62,7 +62,7 @@ pub use crate::project::{folder_key, project_key, project_name};
 use crate::render::{
     FilesScene, Flight, Gpu, Scene, Target, TaskRow, TasksScene, TomeScene, TomeStone, TRACE_BARS,
 };
-use crate::theme;
+use crate::theme::{self, Color};
 use crate::tip;
 use crate::town;
 use crate::watch::{self, Slot, Watcher};
@@ -123,6 +123,9 @@ pub struct Shared {
     /// What the quests tile says of Warriv, by project key, and its ink.
     /// None while it sleeps with wakes left and does not drive.
     pub warriv_line: RefCell<HashMap<String, (String, board::Ink)>>,
+    /// The project keys standing in each column shown, left to right, for
+    /// the town's band to light a lamp over each.
+    pub lanes: RefCell<Vec<Vec<String>>>,
 }
 
 impl Shared {
@@ -190,6 +193,9 @@ pub struct Cluster {
     /// The tiles' clock readings at the last tick, so the tick redraws only
     /// when an age or a trace has moved.
     clock: RefCell<Vec<Clock>>,
+    /// The town's band over the columns: how many it spans and the step
+    /// from one to the next, in DIPs. None for a cluster in a column.
+    band: Cell<Option<(usize, f32)>>,
 }
 
 /// What the kept layer shows, besides the clock and the cursor.
@@ -203,6 +209,22 @@ struct Still {
     staged: Vec<bool>,
     active: Option<String>,
     astir: bool,
+    lights: Vec<(f32, Color)>,
+}
+
+/// How far apart the band's lamps over one column stand, in DIPs.
+const LIGHT_STEP: f32 = 12.0;
+
+/// A project's lamp in the band: amber while a session waits for the human,
+/// blue while one works, else the project's own colour, dimmed.
+fn light(phases: &[Phase], accent: Color) -> Color {
+    if phases.iter().any(Phase::is_waiting) {
+        theme::waiting()
+    } else if phases.contains(&Phase::Working) {
+        theme::working()
+    } else {
+        accent.with_alpha(0.55)
+    }
 }
 
 /// What a tile shows that moves with time alone: its age, and its trace
@@ -402,6 +424,7 @@ impl Cluster {
             dirty: Cell::new(true),
             drawn: RefCell::new(None),
             clock: RefCell::new(Vec::new()),
+            band: Cell::new(None),
         });
 
         unsafe {
@@ -706,16 +729,17 @@ impl Cluster {
         let n = self.sessions().len();
         let tasks = self.task_rows(self.items().as_deref());
         let tome = self.stone_count(self.stones().as_deref());
-        let h = layout::cluster(
-            &self.shared.metrics,
-            n,
-            self.collapsed,
-            tasks.as_deref().map(|a| (a, self.warriv_line().is_some())),
-            tome,
-            folded,
-        )
-        .size
-        .1;
+        let h = self
+            .banded(layout::cluster(
+                &self.shared.metrics,
+                n,
+                self.collapsed,
+                tasks.as_deref().map(|a| (a, self.warriv_line().is_some())),
+                tome,
+                folded,
+            ))
+            .size
+            .1;
         (h * self.scale()).round() as i32
     }
 
@@ -740,17 +764,42 @@ impl Cluster {
         });
         let tasks = self.task_rows(self.items().as_deref());
         let tome = self.stone_count(self.stones().as_deref());
-        let h = layout::cluster(
-            m,
-            self.sessions().len(),
-            self.collapsed,
-            tasks.as_deref().map(|a| (a, self.warriv_line().is_some())),
-            tome,
-            body,
-        )
-        .size
-        .1;
+        let h = self
+            .banded(layout::cluster(
+                m,
+                self.sessions().len(),
+                self.collapsed,
+                tasks.as_deref().map(|a| (a, self.warriv_line().is_some())),
+                tome,
+                body,
+            ))
+            .size
+            .1;
         (h * self.scale()).round() as i32
+    }
+
+    /// The layout spread over the band's lanes, when it is the band.
+    fn banded(&self, l: ClusterLayout) -> ClusterLayout {
+        match self.band.get() {
+            Some((lanes, step)) => layout::band(l, &self.shared.metrics, lanes, step),
+            None => l,
+        }
+    }
+
+    /// Makes it the band over `lanes` columns `step` physical pixels apart,
+    /// or a cluster in a column again with None. True when its size changed.
+    pub fn set_band(&self, band: Option<(usize, i32)>) -> bool {
+        let band = band.map(|(lanes, step)| (lanes, step as f32 / self.scale()));
+        if self.band.get() == band {
+            return false;
+        }
+        self.band.set(band);
+        self.update()
+    }
+
+    /// Whether it lies across the columns rather than standing in one.
+    pub fn is_band(&self) -> bool {
+        self.band.get().is_some()
     }
 
     /// Whether the files tile asks its column for room, and when it was
@@ -832,7 +881,39 @@ impl Cluster {
             staged,
             active: self.shared.active.borrow().clone(),
             astir: self.shared.astir.borrow().contains(&self.key),
+            lights: self.lights(),
         }
+    }
+
+    /// The band's lamps: one per project, over the column it stands in, in
+    /// the colour of what its sessions are at. Where it is in the header,
+    /// across, and its colour.
+    fn lights(&self) -> Vec<(f32, Color)> {
+        let Some((_, step)) = self.band.get() else {
+            return Vec::new();
+        };
+        let m = &self.shared.metrics;
+        let phases: HashMap<String, Vec<Phase>> = self.shared.registry.lock().map_or_else(
+            |_| HashMap::new(),
+            |r| {
+                let mut by = HashMap::<String, Vec<Phase>>::new();
+                for s in r.all() {
+                    by.entry(project_key(s)).or_default().push(s.phase.clone());
+                }
+                by
+            },
+        );
+        let lanes = self.shared.lanes.borrow();
+        let mut out = Vec::new();
+        for (i, keys) in lanes.iter().enumerate() {
+            let projects: Vec<&String> = keys.iter().filter(|k| phases.contains_key(*k)).collect();
+            let centre = i as f32 * step + m.width / 2.0;
+            for (j, k) in projects.iter().enumerate() {
+                let x = centre + (j as f32 - (projects.len() - 1) as f32 / 2.0) * LIGHT_STEP;
+                out.push((x, light(&phases[*k], theme::accent(k))));
+            }
+        }
+        out
     }
 
     fn lay_out(&self) -> bool {
@@ -850,14 +931,14 @@ impl Cluster {
         let wanted = self.files.borrow().wanted();
         let tasks = self.task_rows(items.as_deref());
         let tome = self.stone_count(self.stones().as_deref());
-        let mut l = layout::cluster(
+        let mut l = self.banded(layout::cluster(
             m,
             n,
             self.collapsed,
             tasks.as_deref().map(|a| (a, self.warriv_line().is_some())),
             tome,
             wanted,
-        );
+        ));
         let marked: Vec<bool> = {
             let browsing = self.shared.browsing.borrow();
             sessions.iter().map(|s| browsing.contains(&s.id)).collect()
@@ -1089,6 +1170,7 @@ impl Cluster {
             layout: &layout,
             name: &self.name,
             town: town::is(&self.key),
+            lights: &self.lights(),
             collapsed: self.collapsed,
             sessions: &refs,
             looks: &looks,
@@ -1334,7 +1416,8 @@ impl Cluster {
                     return Some(LRESULT(0));
                 }
                 let mut drag = self.drag.borrow_mut();
-                if let Some(d) = drag.as_mut() {
+                // The band has one place, over the columns.
+                if let Some(d) = drag.as_mut().filter(|_| !self.is_band()) {
                     let mut cursor = POINT::default();
                     unsafe {
                         let _ = GetCursorPos(&mut cursor);
@@ -1550,7 +1633,11 @@ impl Cluster {
     fn start_lift(&self, i: usize, lparam: LPARAM) -> bool {
         let sessions = self.sessions();
         let top = self.layout.borrow().tiles.get(i).map(|r| r.y);
-        let (Some(s), Some(top), true) = (sessions.get(i), top, sessions.len() > 1) else {
+        // The band's tiles run along rows, which a lift up and down does
+        // not follow.
+        let (Some(s), Some(top), true) =
+            (sessions.get(i), top, sessions.len() > 1 && !self.is_band())
+        else {
             return false;
         };
         *self.lift.borrow_mut() = Some(Lift {
@@ -1877,6 +1964,19 @@ fn cloaked(hwnd: HWND) -> bool {
 mod tests {
     use super::*;
     use horadric_core::session::ACTIVITY_SPAN;
+
+    #[test]
+    fn a_band_lamp_shows_the_project_most_needs_the_human() {
+        use horadric_core::session::WaitReason;
+        let accent = Color::rgb(0x336699);
+        let waiting = Phase::Waiting(WaitReason::Permission);
+        assert_eq!(light(&[Phase::Working, waiting], accent), theme::waiting());
+        assert_eq!(
+            light(&[Phase::Idle, Phase::Working], accent),
+            theme::working()
+        );
+        assert_eq!(light(&[Phase::Idle], accent), accent.with_alpha(0.55));
+    }
 
     #[test]
     fn an_idle_tile_reads_the_same_until_its_age_moves() {

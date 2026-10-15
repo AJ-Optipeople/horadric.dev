@@ -259,6 +259,8 @@ pub struct Scene<'a> {
     /// The cluster is Tristram's, drawn with the town's mark so it never
     /// reads as one more repository.
     pub town: bool,
+    /// The town's lamps over the columns, see `Cluster::lights`.
+    pub lights: &'a [(f32, Color)],
     pub collapsed: bool,
     pub sessions: &'a [&'a Session],
     /// How each tile draws this frame, in the same order.
@@ -2729,6 +2731,9 @@ impl Painter<'_> {
         }
 
         self.groove(h.x, h.right(), h.bottom() + 3.0);
+        for &(x, c) in scene.lights {
+            self.led(x, h.bottom() + 3.0, c);
+        }
 
         let b = scene.button(Hit::New);
         let (_, ink) = theme::button_look(b);

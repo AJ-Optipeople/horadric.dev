@@ -759,6 +759,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
         warriv: RefCell::new(HashMap::new()),
         astir: RefCell::new(HashSet::new()),
         warriv_line: RefCell::new(HashMap::new()),
+        lanes: RefCell::new(Vec::new()),
     });
     menu::init(Rc::clone(&shared));
     let toasts = Toasts::new(Rc::clone(&shared), notify, WM_HORADRIC_TRAY);
@@ -7426,11 +7427,18 @@ impl App {
         let width = px(self.shared.metrics.width);
         let margin = px(MARGIN_DIP as f32);
         let gap = px(GAP_DIP as f32);
+        // The columns stand under the town's band.
+        let band = self
+            .clusters
+            .iter()
+            .find(|c| c.is_band())
+            .map_or(0, |c| c.size_px().1 + gap);
         Some(Grid {
             left: work.0 + margin,
             right: work.2 - margin,
-            top: work.1 + margin,
-            height: work.3 - work.1 - 2 * margin,
+            roof: work.1 + margin,
+            top: work.1 + margin + band,
+            height: work.3 - work.1 - 2 * margin - band,
             width,
             gap,
             min_files: px(layout::min_files_body(&self.shared.metrics)),
@@ -7501,17 +7509,21 @@ impl App {
         };
         let present = self.present();
         let is_present = |k: &str| present.contains(k);
+        // The town lies across the columns, not in one.
+        self.columns.forget(|k| !town::is(k));
         self.columns.prune(is_present);
         if self.usage_window.is_some() && !self.columns.contains(columns::USAGE) {
             self.columns.add_first(columns::USAGE);
         }
-        if let Some(k) = town::key().filter(|k| is_present(k) && !self.columns.contains(k)) {
-            self.columns.add_first(k);
-        }
+        let lanes = self.columns.shown(g.fits, is_present).len();
+        self.span_town(lanes, &g);
+        let Some(g) = self.grid() else {
+            return;
+        };
         let mut fresh: Vec<(String, String, i32)> = self
             .clusters
             .iter()
-            .filter(|c| !self.columns.contains(&c.key))
+            .filter(|c| !self.columns.contains(&c.key) && !town::is(&c.key))
             .map(|c| (c.name.to_lowercase(), c.key.clone(), c.need_px()))
             .collect();
         // Several at once, as on the first start, go in an order that does
@@ -7538,11 +7550,44 @@ impl App {
             self.columns.add(&key, col, is_present);
         }
 
-        let shown = self.columns.shown(g.fits, is_present);
+        let mut shown = self.columns.shown(g.fits, is_present);
+        // A new column widens the band, and a band of more lanes can be
+        // shorter, so the columns under it move.
+        let g = if self.span_town(shown.len(), &g) {
+            let Some(g) = self.grid() else {
+                return;
+            };
+            shown = self.columns.shown(g.fits, is_present);
+            g
+        } else {
+            g
+        };
+        let lanes: Vec<Vec<String>> = shown.iter().map(|(_, keys)| keys.clone()).collect();
+        if *self.shared.lanes.borrow() != lanes {
+            *self.shared.lanes.borrow_mut() = lanes;
+            if let Some(c) = self.clusters.iter().find(|c| c.is_band()) {
+                c.update();
+            }
+        }
         let bottom = g.top + g.height;
         let mut bounds = HashMap::new();
         let mut scrolls = Vec::new();
         let mut seen = HashSet::new();
+        if let Some(c) = self.clusters.iter().find(|c| c.is_band()) {
+            let t = Tile::Cluster(c);
+            seen.insert(c.hwnd.0 as isize);
+            t.place(
+                g.x(0),
+                columns::Filled {
+                    y: g.roof,
+                    files: None,
+                },
+                &mut self.glides.borrow_mut(),
+                animate,
+                self.arranged,
+            );
+            clip_window(&mut self.clipped.borrow_mut(), c.hwnd, None);
+        }
         for (i, (model, keys)) in shown.iter().enumerate() {
             let x = g.x(i);
             let tiles = self.column_windows(keys, i == 0);
@@ -7609,6 +7654,17 @@ impl App {
             self.glided.set(Some(Instant::now()));
             crate::vsync::start(self.notify, GLIDE_TIMER);
         }
+    }
+
+    /// Lays the town across `lanes` columns, at least one. True when that
+    /// changed its height, so the columns under it start somewhere else.
+    fn span_town(&self, lanes: usize, g: &Grid) -> bool {
+        let Some(c) = self.clusters.iter().find(|c| town::is(&c.key)) else {
+            return false;
+        };
+        let was = c.size_px().1;
+        c.set_band(Some((lanes.max(1), g.width + g.gap)));
+        c.size_px().1 != was
     }
 
     /// Moves every gliding window on a frame, and stops the timer once
@@ -7791,6 +7847,9 @@ impl App {
 struct Grid {
     left: i32,
     right: i32,
+    /// The top of the work area inside the margin, where the town's band
+    /// lies. The columns start at `top`, under it.
+    roof: i32,
     top: i32,
     height: i32,
     width: i32,

@@ -334,6 +334,78 @@ pub fn cluster(
     }
 }
 
+/// Spreads a cluster laid out for one column across `lanes` of them, each
+/// `step` DIPs from the last, as the town's band over the columns is. The
+/// header spans them all. The tiles, the plus, the quests and the tome each
+/// go in the lane whose bottom is highest, the leftmost of equals, so tiles
+/// run along a row before they start the next one and stand right over the
+/// tiles of the columns below. One lane is the cluster as it was.
+pub fn band(mut l: ClusterLayout, m: &Metrics, lanes: usize, step: f32) -> ClusterLayout {
+    let lanes = lanes.max(1);
+    let width = m.width + (lanes - 1) as f32 * step;
+    let dx = width - l.size.0;
+    l.header.w += dx;
+    l.new.x += dx;
+    l.size.0 = width;
+    let top = l.header.bottom() + m.gap;
+    let mut bottoms = vec![top; lanes];
+    // The lane a block `h` tall goes in, and how far it moves to get there.
+    let mut take = |h: f32, y: f32| {
+        let lane = (0..lanes)
+            .min_by(|&a, &b| bottoms[a].total_cmp(&bottoms[b]))
+            .unwrap_or(0);
+        let to = bottoms[lane];
+        bottoms[lane] = to + h + m.gap;
+        (lane as f32 * step, to - y)
+    };
+    for t in &mut l.tiles {
+        let (x, y) = take(t.h, t.y);
+        *t = shifted(t, x, y);
+    }
+    if let Some(add) = l.add {
+        let (x, y) = take(add.h, add.y);
+        l.add = Some(shifted(&add, x, y));
+        l.shell = l.shell.map(|s| shifted(&s, x, y));
+    }
+    if let Some(t) = &mut l.tasks {
+        let (x, y) = take(t.rect.h, t.rect.y);
+        for r in [
+            &mut t.rect,
+            &mut t.header,
+            &mut t.mode,
+            &mut t.add,
+            &mut t.give,
+        ]
+        .into_iter()
+        .chain(t.warriv.iter_mut())
+        .chain(t.rows.iter_mut())
+        .chain(t.approve.iter_mut().flatten())
+        {
+            *r = shifted(r, x, y);
+        }
+    }
+    if let Some(t) = &mut l.tome {
+        let (x, y) = take(t.rect.h, t.rect.y);
+        for r in [&mut t.rect, &mut t.header]
+            .into_iter()
+            .chain(t.stones.iter_mut())
+            .chain(t.labels.iter_mut())
+        {
+            *r = shifted(r, x, y);
+        }
+    }
+    let lowest = bottoms.iter().copied().fold(top, f32::max);
+    if lowest > top {
+        // Trailing gap becomes bottom padding, as in `cluster`.
+        l.size.1 = lowest - m.gap + m.pad;
+    }
+    l
+}
+
+fn shifted(r: &Rect, dx: f32, dy: f32) -> Rect {
+    Rect::new(r.x + dx, r.y + dy, r.w, r.h)
+}
+
 /// The Runetome with its top at `y` and `n` stones in rows under its
 /// header, each centred in its share of the row.
 fn tome_tile(m: &Metrics, y: f32, n: usize) -> TomeLayout {
@@ -3612,6 +3684,45 @@ mod tests {
     fn the_catchup_stands_a_little_above_the_middle() {
         assert_eq!(catchup_place((400, 300), [0, 0, 1000, 900]), (300, 200));
         assert_eq!(catchup_place((400, 1000), [0, 0, 1000, 900]), (300, 0));
+    }
+
+    #[test]
+    fn one_lane_of_band_is_the_cluster_as_it_was() {
+        let m = Metrics::default();
+        let l = cluster(&m, 3, false, Some((&[false, true], false)), None, None);
+        assert_eq!(band(l.clone(), &m, 1, 316.0), l);
+    }
+
+    #[test]
+    fn a_band_runs_its_tiles_along_the_lanes_over_the_columns() {
+        let m = Metrics::default();
+        let step = m.width + 12.0;
+        let l = band(cluster(&m, 4, false, None, None, None), &m, 3, step);
+        assert_eq!(l.size.0, m.width + 2.0 * step);
+        assert_eq!(l.new.right(), l.size.0 - m.pad);
+        assert_eq!(l.header.right(), l.size.0 - m.pad);
+        let xs: Vec<f32> = l.tiles.iter().map(|t| t.x).collect();
+        assert_eq!(xs, [m.pad, m.pad + step, m.pad + 2.0 * step, m.pad]);
+        assert_eq!(l.tiles[0].y, l.tiles[2].y);
+        assert!(l.tiles[3].y > l.tiles[0].bottom());
+        // The plus takes the next lane, beside the fourth tile.
+        let add = l.add.unwrap();
+        assert_eq!(add.x, m.pad + step);
+        assert_eq!(add.y, l.tiles[3].y);
+        assert!(l.shell.unwrap().x > add.right());
+        assert_eq!(l.size.1, l.tiles[3].bottom() + m.pad);
+        assert_eq!(hit(&l, add.x + 2.0, add.y + 2.0), Hit::Add);
+    }
+
+    #[test]
+    fn an_empty_band_is_its_header_and_the_plus() {
+        let m = Metrics::default();
+        let l = band(cluster(&m, 0, false, None, None, None), &m, 4, 316.0);
+        let add = l.add.unwrap();
+        assert_eq!(add.x, m.pad);
+        assert_eq!(l.size.1, add.bottom() + m.pad);
+        let folded = band(cluster(&m, 2, true, None, None, None), &m, 4, 316.0);
+        assert_eq!(folded.size.1, folded.header.bottom() + m.pad);
     }
 
     #[test]
