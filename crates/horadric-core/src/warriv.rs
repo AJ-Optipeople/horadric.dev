@@ -47,6 +47,13 @@ pub const WAKES_AN_HOUR: usize = 6;
 /// The span the wakes are counted in, in seconds.
 pub const HOUR: u64 = 60 * 60;
 
+/// How long a round brought by landings waits for the next one, so quests
+/// landing close together share a wake instead of one each.
+pub const SETTLE: u64 = 3 * 60;
+
+/// The longest a landing's round waits while landings keep coming.
+pub const SETTLE_MOST: u64 = 10 * 60;
+
 /// At most this many quests filed for the aims a wake.
 pub const FILE_AT_MOST: usize = 8;
 
@@ -312,6 +319,9 @@ pub struct Desk {
     /// When the last round was due, while it drives: the next by the
     /// clock is [`HOUR`] after.
     round_at: Option<u64>,
+    /// The first and the latest landing of a round that waits for
+    /// landings only, while it settles ([`SETTLE`]).
+    settling: Option<(u64, u64)>,
 }
 
 /// Why a round is due.
@@ -438,6 +448,7 @@ impl Desk {
         self.driving = on;
         if !on {
             self.round_at = None;
+            self.settling = None;
             self.queue
                 .retain(|e| !matches!(e.kind, Kind::Round | Kind::LookBack));
         }
@@ -467,6 +478,12 @@ impl Desk {
             return;
         }
         self.round_at = Some(now);
+        let waits = self.queue.iter().any(|e| e.kind == Kind::Round);
+        self.settling = match (why, self.settling) {
+            (Why::Landed, Some((first, _))) => Some((first, now)),
+            (Why::Landed, None) if !waits => Some((now, now)),
+            _ => None,
+        };
         let says = why.says();
         match self.queue.iter_mut().find(|e| e.kind == Kind::Round) {
             Some(e) if e.detail.split("; ").any(|d| d == says) => {}
@@ -498,11 +515,22 @@ impl Desk {
     }
 
     /// Takes every waiting event, as one wake at `now` when the budget
-    /// allows, else for the human.
+    /// allows, else for the human. A round brought only by landings waits
+    /// while they settle, unless something else wakes Warriv anyway.
     pub fn wake(&mut self, now: u64) -> Wake {
         if self.queue.is_empty() {
             return Wake::Nothing;
         }
+        let only_rounds = self
+            .queue
+            .iter()
+            .all(|e| matches!(e.kind, Kind::Round | Kind::LookBack));
+        if let Some((first, last)) = self.settling {
+            if only_rounds && now < (last + SETTLE).min(first + SETTLE_MOST) {
+                return Wake::Nothing;
+            }
+        }
+        self.settling = None;
         let events = std::mem::take(&mut self.queue);
         self.wakes.retain(|&at| at + HOUR > now);
         if self.wakes.len() >= WAKES_AN_HOUR && !self.driving {
@@ -1785,6 +1813,37 @@ mod tests {
         assert_eq!(d.wake(HOUR + 500), Wake::Nothing);
         d.hourly(HOUR + 1002);
         assert!(matches!(d.wake(HOUR + 1002), Wake::Go(_)));
+    }
+
+    #[test]
+    fn landings_close_together_share_one_round() {
+        let mut d = Desk::default();
+        d.drive(true);
+        d.hourly(0);
+        d.round(Why::Landed, 100);
+        assert_eq!(d.wake(100), Wake::Nothing);
+        d.round(Why::Landed, 100 + SETTLE - 1);
+        assert_eq!(d.wake(100 + SETTLE), Wake::Nothing);
+        assert_eq!(
+            d.wake(99 + 2 * SETTLE),
+            Wake::Go(vec![a_round("a quest landed on main")])
+        );
+        // Landings that never stop still bring a round in time.
+        let mut d = Desk::default();
+        d.drive(true);
+        let mut at = 0;
+        while at < SETTLE_MOST {
+            d.round(Why::Landed, at);
+            assert_eq!(d.wake(at), Wake::Nothing);
+            at += SETTLE / 2;
+        }
+        assert!(matches!(d.wake(SETTLE_MOST), Wake::Go(_)));
+        // Anything else waiting takes the round along at once.
+        let mut d = Desk::default();
+        d.drive(true);
+        d.round(Why::Landed, 0);
+        d.hear(vec![blocked("A", "x")], false);
+        assert!(matches!(d.wake(1), Wake::Go(_)));
     }
 
     #[test]

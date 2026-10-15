@@ -72,7 +72,11 @@ after the last was due (the first look while driving, after the switch
 or a reload, starts the hour) and `Desk::round` one for a landing or
 the human leaving, heard where errands hear `landed` and `away`. Only
 while driving; turning the drive off drops one waiting. Waiting rounds
-are one with every reason, and a round is told like any event: as the
+are one with every reason. A round brought only by landings waits for
+them to settle (added 2026-10-15): it goes three minutes after the
+latest landing, ten at most after the first, or at once when anything
+else wakes Warriv, so a burst of landed quests costs one wake, not one
+each. A round is told like any event: as the
 first prompt of a fresh Warriv, or at the next stop of one awake,
 which is the fold. Its brief (`warriv::prompt`, pure and tested) is the
 picture: the quests not done (the first 40) with what blocks them, the
