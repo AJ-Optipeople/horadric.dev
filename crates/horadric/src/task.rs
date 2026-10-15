@@ -687,6 +687,7 @@ fn spend(cwd: &Path) -> Result<(), String> {
 
 /// The done quests of the project `cwd` is in and the files each touched,
 /// for the Arcane Sanctuary's quest nodes.
+#[cfg(windows)]
 pub(crate) fn finished(cwd: &Path) -> Vec<(String, Touched)> {
     let Some(project) = main_list().or_else(|| file::find_list(cwd)) else {
         return Vec::new();
@@ -696,6 +697,7 @@ pub(crate) fn finished(cwd: &Path) -> Vec<(String, Touched)> {
 
 /// The done quests of the project whose log is in `project`, from the
 /// chronicle's `records`, read once by a caller that asks of many projects.
+#[cfg(windows)]
 pub(crate) fn finished_in(project: &Path, records: &[Record]) -> Vec<(String, Touched)> {
     let key = horadric_ui::folder_key(&project.to_string_lossy());
     let list = tasks::parse(&file::read(project));
