@@ -1439,7 +1439,16 @@ pub fn system_prompt(horadric: &str, file: &str, list: Option<&str>) -> String {
          should be done, with notes indented under them; a notes line `After: \
          <title>` holds a quest back until that one is done. When your item is to \
          plan work, write the items you decide on into the file below your own \
-         line, each with an `After:` line for every quest it needs first."
+         line, each with an `After:` line for every quest it needs first. \
+         Use your Agent tool's subagents by your own judgment, without being \
+         asked, whenever they make the quest faster or surer: send a search \
+         across many files to an Explore agent so you keep its answer and not \
+         the file dumps, start the independent parts of the work (separate \
+         files, research beside a build) as agents in one message so they run \
+         in parallel, and before you report the quest done, have a fresh agent \
+         review your diff against the quest. Tell each agent which files it may \
+         change and never let two change the same one. Do small or tightly \
+         linked steps yourself, since an agent starts without your context."
     );
     if let Some(list) = list {
         out.push_str(&format!(
@@ -2451,6 +2460,8 @@ mod tests {
             .contains("Repro in #12.\n\nLore: x\n\n(A quest"));
         let report = "`hx quest done \"<one short line on what you achieved>\"`";
         assert!(system_prompt("hx", QUESTS_FILE, None).contains(report));
+        // Subagents are the session's own call, not something the human asks for.
+        assert!(system_prompt("hx", QUESTS_FILE, None).contains("without being asked"));
         // Wrapped lines join with one space, not the source's indent.
         assert!(!system_prompt("hx", QUESTS_FILE, Some("C:/p/q.md")).contains("  "));
         assert!(nudge("hx").contains(report));

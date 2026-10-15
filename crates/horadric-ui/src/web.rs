@@ -79,7 +79,12 @@ browser_navigate, browser_snapshot, browser_click, browser_type, browser_screens
 Use them whenever a task needs a web page, testing a site you built included, in place of \
 Playwright, Puppeteer, the Chrome DevTools MCP, Claude in Chrome, or starting Chrome, Edge or a \
 headless browser yourself. The user sees that pane, and not a browser you start. Use another \
-browser only when the user asks for one.";
+browser only when the user asks for one. The pane is also your hands in web dashboards: when a \
+task means changing a setting in a service's console (turning on sign-in methods in Clerk, an \
+environment variable in Vercel, a DNS record, an OAuth app), go and do it there yourself instead \
+of writing the user a list of steps. The user is usually logged in already. Stop and ask only \
+when a login needs their password or a code, or before a step that costs money, deletes \
+something or cannot be undone.";
 
 use crate::app::{self, Input, WebAsk};
 use crate::favicon::{self, Favicon};
