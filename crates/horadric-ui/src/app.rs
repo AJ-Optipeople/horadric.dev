@@ -7074,14 +7074,20 @@ impl App {
         for input in inputs {
             match input {
                 Input::Toggle(hwnd) => {
-                    // An empty town has nothing to fold, so its header opens
-                    // the stage with its browser pane, the plus beside it.
+                    // A town without sessions has no tiles to fold or click,
+                    // so its header opens the stage with its browser pane,
+                    // also when that pane is already open behind another
+                    // project.
                     let town = self
                         .clusters
                         .iter()
                         .find(|c| c.hwnd.0 as isize == hwnd && town::is(&c.key))
                         .map(|c| c.key.clone());
-                    if let Some(key) = town.filter(|k| self.grid_of(k).is_empty()) {
+                    let sessionless = |grid: Vec<String>| {
+                        grid.iter()
+                            .all(|id| id.starts_with(WEB) || id.starts_with(VIEW))
+                    };
+                    if let Some(key) = town.filter(|k| sessionless(self.grid_of(k))) {
                         self.open_web(&key, None);
                     } else if let Some(c) =
                         self.clusters.iter_mut().find(|c| c.hwnd.0 as isize == hwnd)
