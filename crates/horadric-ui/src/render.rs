@@ -1133,7 +1133,11 @@ impl Painter<'_> {
         self.beams(scene);
         self.flights(scene);
         if let Some(add) = &scene.layout.add {
-            self.add(gpu, m, add, scene.button(Hit::Add), '\u{E710}');
+            if scene.town && scene.sessions.is_empty() {
+                self.add_labelled(gpu, m, add, scene.button(Hit::Add), "New session");
+            } else {
+                self.add(gpu, m, add, scene.button(Hit::Add), '\u{E710}');
+            }
         }
         if let Some(shell) = &scene.layout.shell {
             self.add(gpu, m, shell, scene.button(Hit::Shell), theme::SHELL_ICON);
@@ -3672,6 +3676,27 @@ impl Painter<'_> {
         let (_, ink) = theme::button_look(b);
         self.slot(gpu, m, r, b);
         self.icon(&gpu.icon_small, ink, glyph, *r);
+    }
+
+    /// The plus with words beside it, the pair centred in the bay. An
+    /// empty town has nothing else in it, and a bare plus there does not
+    /// say what it makes.
+    unsafe fn add_labelled(&self, gpu: &Gpu, m: &Metrics, r: &Rect, b: Button, label: &str) {
+        let (_, ink) = theme::button_look(b);
+        self.slot(gpu, m, r, b);
+        let plus_w = 12.0;
+        let gap = 6.0;
+        let label_w = self.measure(gpu, &gpu.small, label);
+        let x = r.x + ((r.w - plus_w - gap - label_w) / 2.0).max(0.0);
+        self.icon(
+            &gpu.icon_small,
+            ink,
+            '\u{E710}',
+            Rect::new(x, r.y, plus_w, r.h),
+        );
+        let text_x = x + plus_w + gap;
+        let text = Rect::new(text_x, r.y, (r.x + r.w - text_x).max(0.0), r.h);
+        self.text(&gpu.small, ink, label, text);
     }
 
     /// A bay sunk into the plate, where something is yet to go, its edge
