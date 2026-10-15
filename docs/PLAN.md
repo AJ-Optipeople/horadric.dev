@@ -107,6 +107,7 @@ one. The registry is an `Arc<Mutex<Registry>>`, each console's grid an
 - [Town Portal on the phone, round two](plan/town-portal-on-the-phone-round-two.md): The phone page as an inbox, not a squeezed terminal.
 - [Lore](plan/lore.md): Fewer tokens per quest: spend counts, context packs, shared notes, a code outline and index, a shorter quest log.
 - [The Arcane Sanctuary](plan/the-arcane-sanctuary.md): The lore drawn as a living graph in a stage pane, lit by what agents read and change.
+- [Memory](plan/memory.md): Long term memory by meaning, in Rust with candle: notes, transcripts kept verbatim, code, across projects.
 
 ## Not in any step yet, but needed before daily use
 

@@ -81,7 +81,8 @@ Horadric's MCP server: `lore_note` (a fact, the files it is about) and
 Notes live per project in `%APPDATA%\Horadric\lore\<project>.json`, not
 in the repository. A note names its files and the commit it was true at;
 when one of those files changes after that, the note is shown as maybe
-stale. Matching is plain words and file paths, no embeddings.
+stale. Matching is plain words and file paths. Embeddings come later,
+see [memory.md](memory.md) (2026-10-16).
 
 Built 2026-10-15. `horadric_core::lore` holds the notes and the
 matching; `crates/horadric/src/lore.rs` the file, a lock file so
