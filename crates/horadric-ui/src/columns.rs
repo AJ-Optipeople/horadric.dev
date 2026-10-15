@@ -140,6 +140,26 @@ impl Columns {
         }
     }
 
+    /// Keeps `key` at the very top of the first column, wherever it was
+    /// put or dragged: the town stands above everything, the usage window
+    /// included.
+    pub fn pin_first(&mut self, key: &str) {
+        if self
+            .cols
+            .first()
+            .and_then(|c| c.keys.first())
+            .map(String::as_str)
+            == Some(key)
+        {
+            return;
+        }
+        for c in &mut self.cols {
+            c.keys.retain(|k| k != key);
+        }
+        self.cols.retain(|c| !c.keys.is_empty());
+        self.add_first(key);
+    }
+
     /// Puts `key` right under `above`, or at the top of the first column
     /// when `above` stands nowhere. The stash goes under the usage window:
     /// it belongs to no project either.
@@ -439,6 +459,22 @@ mod tests {
         let mut c = cols(&[&["a", "old"], &["old2"]]);
         c.forget(|k| !k.starts_with("old"));
         assert_eq!(c.keys(), vec![vec!["a"]]);
+    }
+
+    #[test]
+    fn the_town_is_pinned_above_everything() {
+        let mut c = Columns::default();
+        c.pin_first("town");
+        assert_eq!(c.keys(), vec![vec!["town"]]);
+        let mut c = cols(&[&[USAGE, "a"], &["b", "town"]]);
+        c.pin_first("town");
+        assert_eq!(c.keys(), vec![vec!["town", USAGE, "a"], vec!["b"]]);
+        // Dragged into a column of its own, it comes back.
+        let mut c = cols(&[&["a"], &["town"]]);
+        c.pin_first("town");
+        assert_eq!(c.keys(), vec![vec!["town", "a"]]);
+        c.pin_first("town");
+        assert_eq!(c.keys(), vec![vec!["town", "a"]]);
     }
 
     #[test]

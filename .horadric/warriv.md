@@ -5,6 +5,12 @@
 - A quest session silent for hours with an empty worktree after two nudges is dead and I can not restart it: hand it to the human with "restart it", who does so (settled on "OSC 7501: plain terminals", which then landed).
 
 ## Lately
+- 2026-10-15 Wake: the first fix-up for hand-marked spend conflicted on merge too (task.rs, main moved). Its own fix-up was already running, so I gave it "Model: sonnet". If a third fix-up appears, look at why task.rs keeps clashing before letting it loop.
+- 2026-10-15 Round (main at b9d2c36): "Lore: a context pack for each new quest" landed (5f321c9), tree clean apart from Horadric's own files, so cast "Ship Local". Public still held until the code index and hand-marked spend land.
+- 2026-10-15 Wake: "Lore: count the spend of a quest marked done by hand" conflicted in task.rs on merge. The fix-up quest was already running, so I only gave it "Model: sonnet" and noted it.
+- 2026-10-15 Round (main at 75379ec): "Lore: take notes when a quest ends" landed, tree clean (the five under way quests work in worktrees), so cast "Ship Local". Public still held for the rest of Lore. Gave the three waiting Tristram quests "Model: sonnet".
+- 2026-10-15 Wake: "Lore: notes shared" said its auto merge failed (os error 267), but it is already on main (8a65e94 at c863656) and its branch and worktree are gone, so nothing to merge. Noted it.
+- 2026-10-15 Round (main at 65ee70e): Lore notes (8a65e94) and token counting (65ee70e) landed since 0.25.0, so cast "Ship Local". Held public until the rest of Lore (context pack, code index, hand-marked spend) lands, then one release for the set.
 - 2026-10-13 Round after the human left (main at 69fd50f): only my memory since the last round, no code since Release 0.24.0, so no ship. 187 done, none open, no aim. Nothing to do.
 - 2026-10-13 Hourly round (main at f081b37): only my memory since the last round, and no code since Release 0.24.0 (the three landings counted are docs), so no ship. 187 done, none open, no aim. Nothing to do.
 - 2026-10-13 Round (main at 47f6f55): only docs landed since the last ship (Town Portal deploy step in RELEASING.md and CLAUDE.md, two PLAN.md notes), no code, so no ship. The human settled cloud tiles: option 4, wait until `claude agents --json` lists them, so nothing to file and the Open line is gone. 187 done, none open, no aim. Nothing to do.

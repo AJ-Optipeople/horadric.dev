@@ -117,7 +117,10 @@ pub use dialog::error_alone;
 pub use store::exe_command;
 /// For `horadric quest`, which writes the chronicle from a session's shell
 /// under the same project key the app uses.
-pub use {project::folder_key, store::chronicle};
+pub use {
+    project::folder_key,
+    store::{chronicle, chronicle_all},
+};
 #[cfg(windows)]
 mod dropdown;
 #[cfg(windows)]
@@ -155,6 +158,7 @@ mod sound;
 mod start;
 #[cfg(windows)]
 mod stash;
+pub mod town;
 // The journal, the chronicle and the MCP config wait for the Mac's quest log
 // and browser pane.
 #[cfg(windows)]

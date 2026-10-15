@@ -64,6 +64,7 @@ use crate::render::{
 };
 use crate::theme;
 use crate::tip;
+use crate::town;
 use crate::watch::{self, Slot, Watcher};
 
 pub(crate) const CLASS: PCWSTR = w!("HoradricCluster");
@@ -422,7 +423,8 @@ impl Cluster {
                 Some(&*cluster as *const Cluster as *const c_void),
             )?;
             cluster.hwnd = hwnd;
-            if let Some(dir) = cluster.dir.clone() {
+            // The town is not a repository, so it has no files tile.
+            if let Some(dir) = cluster.dir.clone().filter(|_| !town::is(&cluster.key)) {
                 let slot = cluster.files.borrow().slot.clone();
                 cluster.watcher = watch::start(dir, hwnd, WM_CLUSTER_FILES, slot);
             }
@@ -1086,6 +1088,7 @@ impl Cluster {
         let scene = Scene {
             layout: &layout,
             name: &self.name,
+            town: town::is(&self.key),
             collapsed: self.collapsed,
             sessions: &refs,
             looks: &looks,
