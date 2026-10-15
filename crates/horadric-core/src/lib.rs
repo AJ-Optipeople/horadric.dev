@@ -17,6 +17,7 @@ pub mod discord;
 pub mod event;
 pub mod experience;
 pub mod fleet;
+pub mod glow;
 pub mod heavy;
 pub mod history;
 pub mod journal;

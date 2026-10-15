@@ -85,6 +85,10 @@ pub const BROWSER_PATH: &str = "/horadric/browser";
 /// carries it.
 pub const KNOW_PATH: &str = "/horadric/know";
 
+/// Path `horadric mcp` posts to after a lore tool answered: the notes and
+/// files it showed the session, for the Arcane Sanctuary to light.
+pub const GLOW_PATH: &str = "/horadric/glow";
+
 /// Header a command request must carry. A browser can not send a custom
 /// header to another origin without a preflight we never answer, so this is
 /// what stops a web page from starting processes through localhost.

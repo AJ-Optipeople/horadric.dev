@@ -2304,6 +2304,9 @@ pub(super) fn record_pack(key: &str, id: &str, title: &str, files: Vec<String>) 
     if files.is_empty() {
         return;
     }
+    let pack = horadric_core::glow::Touch::Pack;
+    let lit: Vec<_> = files.iter().map(|f| (f.clone(), pack)).collect();
+    crate::glows::light(key, id, &lit);
     store::chronicle(&chronicle::Record {
         at: unix_now(),
         project: key.to_string(),

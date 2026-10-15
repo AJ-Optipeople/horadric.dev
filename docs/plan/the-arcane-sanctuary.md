@@ -95,5 +95,20 @@ Each is a quest.
    menu and a key, still when nothing moves.
 3. Lighting it up: reads, edits, new and deleted files, lore recalls,
    context packs and the sparks, in each session's colour.
+   Built 2026-10-15, the data side: `horadric_core::glow` keeps a
+   project's recent touches and says how each node is lit, how far a
+   deleted one has faded, which sparks are on their way and whether
+   anything still moves. Reads glow a minute, edits three, a new file
+   flashes, a deleted one fades out in four seconds; a session going
+   from file to file within 20 seconds sends a spark that takes 1.2.
+   The app keeps one per project in `glows` and the feeder fills it
+   from `PreToolUse` and `PostToolUse` (a Write of a file not there yet
+   is a new file, a file a shell command names that is gone after it
+   is a delete), worktree paths mapped to the main tree's. The lore
+   tools pass what they showed to the app over `/horadric/glow`, read
+   from the answer the agent got, and a quest's pack is lit where it
+   is recorded. Panes have no session colours, so a session's colour
+   is one of eight picked by its id, the same in every process. The
+   files watcher is not used: hooks say who, and it does not.
 4. Tristram's sky: every project as a galaxy in the town's sanctuary,
    a click going into one.

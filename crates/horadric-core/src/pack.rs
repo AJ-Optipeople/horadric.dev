@@ -116,7 +116,7 @@ pub fn touched(jsonl: &str, root: &str) -> Touched {
 
 /// The words of a shell command that look like files: a separator and an
 /// extension, no wildcard or variable.
-fn command_paths(command: &str) -> Vec<&str> {
+pub(crate) fn command_paths(command: &str) -> Vec<&str> {
     command
         .split(|c: char| c.is_whitespace() || ";|&<>()'\"`=,".contains(c))
         .filter(|w| !w.starts_with('-') && !w.contains("://") && !w.starts_with('~'))
@@ -128,7 +128,7 @@ fn command_paths(command: &str) -> Vec<&str> {
 
 /// Whether a path's last part has an extension, which is how a file is
 /// told from a folder without looking.
-fn is_file_name(path: &str) -> bool {
+pub(crate) fn is_file_name(path: &str) -> bool {
     let last = path.rsplit(['/', '\\']).next().unwrap_or_default();
     match last.rsplit_once('.') {
         Some((stem, ext)) => {

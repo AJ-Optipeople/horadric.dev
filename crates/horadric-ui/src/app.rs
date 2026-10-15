@@ -636,6 +636,14 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
         }
         let mut asked = Asked::default();
         for t in rx {
+            // What a lore tool showed a session lights the sanctuary and
+            // is no news of the session itself.
+            if t.event.hook_event_name == HookEvent::GLOW {
+                if crate::glows::hear(&feed_registry, &t.horadric_id, &t.event) {
+                    post_event(notify_id, false);
+                }
+                continue;
+            }
             if let Some(limits) = t.limits.filter(|l| !l.is_empty()) {
                 let now = unix_now();
                 let heard = |held: Option<&Usage>| Usage {
@@ -687,6 +695,8 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
                 .lock()
                 .map(|mut r| r.apply(&target, &t.event, SystemTime::now()))
                 .unwrap_or(false);
+            // Woken by the post below whether or not it lit anything.
+            crate::glows::hear(&feed_registry, &target, &t.event);
             post_event(notify_id, changed);
         }
     });
