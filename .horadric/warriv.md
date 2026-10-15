@@ -5,6 +5,7 @@
 - A quest session silent for hours with an empty worktree after two nudges is dead and I can not restart it: hand it to the human with "restart it", who does so (settled on "OSC 7501: plain terminals", which then landed).
 
 ## Lately
+- 2026-10-16 Round (main at 75aa250): "Arcane Sanctuary: the pane on the stage" landed, but "light up and Tristram's sky" has six UI files uncommitted in the shared tree (app, glows, glyphs, pane, sanctuary, sky), so a release build would take them half done. Held the ship until that quest lands, then one Ship Local and a public release for the Sanctuary.
 - 2026-10-16 Round (main at 78b141e): "Arcane Sanctuary: the graph and its layout" landed, but nothing shows it until the pane quest lands, and the sky quest works in the shared tree (sky.rs uncommitted). Held the ship until the pane lands. Both under way quests are the human's own, no Model: line added.
 - 2026-10-15 Stall wake (main at 9897c76): only the pack comparison waits, as expected. No open aim. Nothing to do.
 - 2026-10-15 Stall wake (main at c4d7f33): only the pack comparison waits, as expected. No open aim. Nothing to do.
@@ -155,4 +156,4 @@
 
 ## Open
 - Once quests run with a pack, the pack comparison resumes by itself.
-- Ship Local once "Arcane Sanctuary: the pane on the stage" lands; public once the sky quest is in too.
+- Ship once "Arcane Sanctuary: light up what agents do, and Tristram's sky" lands and the shared tree is clean: Ship Public for the whole Sanctuary (graph, pane, lights, sky).
