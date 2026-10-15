@@ -12,9 +12,10 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 
 use horadric_core::lore;
+use horadric_core::sanctuary::{self, Graph, Kind, QuestFiles};
 use horadric_hooks::lock::Lock;
 use horadric_hooks::lore::{now, Place};
 use serde_json::Value;
@@ -64,6 +65,51 @@ fn recall(args: &Value) -> Result<String, String> {
 fn find(args: &Value) -> Result<String, String> {
     let name = args.get("name").and_then(Value::as_str).unwrap_or("");
     with_index(&Place::here()?, |files| code::find(files, name))
+}
+
+/// The Arcane Sanctuary's graph of the project `place` is in: every file
+/// of the tree, the calls between them from the code index, the notes and
+/// the done quests.
+pub fn graph(place: &Place) -> Result<Graph, String> {
+    let calls = with_index(place, code::links)?;
+    let files = place.listed().unwrap_or_else(|| {
+        let mut found = Vec::new();
+        walk(&place.top, "", &mut found);
+        found
+    });
+    let notes = place.read()?.notes;
+    let done = crate::task::finished(&place.top);
+    let quests: Vec<QuestFiles> = done
+        .iter()
+        .map(|(title, touched)| QuestFiles { title, touched })
+        .collect();
+    Ok(Graph::build(&files, &calls, &notes, &quests))
+}
+
+/// `horadric sanctuary`: lays the graph out from where it was left and
+/// keeps it, saying how large it is and how long that took, so the layout
+/// can be tried on a real project before the pane draws it.
+pub fn sanctuary() -> Result<(), String> {
+    let place = Place::here()?;
+    let t = Instant::now();
+    let g = graph(&place)?;
+    let built = t.elapsed();
+    let t = Instant::now();
+    let at = sanctuary::layout(&g, &place.positions());
+    let laid = t.elapsed();
+    place.keep_positions(&at)?;
+    let count = |k| g.nodes.iter().filter(|n| n.kind == k).count();
+    let orphans = g.nodes.iter().filter(|n| n.weight == 0).count();
+    println!(
+        "{} files, {} notes, {} quests, {} links, {orphans} with none",
+        count(Kind::File),
+        count(Kind::Note),
+        count(Kind::Quest),
+        g.links.len()
+    );
+    println!("built in {built:?}, laid out in {laid:?}");
+    println!("kept in {}", place.sanctuary_store().display());
+    Ok(())
 }
 
 fn calls(args: &Value) -> Result<String, String> {

@@ -32,6 +32,7 @@ pub mod rarity;
 pub mod registry;
 pub mod release;
 pub mod runeword;
+pub mod sanctuary;
 pub mod saved;
 pub mod session;
 pub mod ship;

@@ -14,6 +14,7 @@ use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use horadric_core::lore::{self, Lore, Mark};
+use horadric_core::sanctuary::Positions;
 
 use crate::lock::Lock;
 
@@ -126,6 +127,11 @@ impl Place {
         self.store.with_extension("code.json")
     }
 
+    /// Where the Arcane Sanctuary keeps its layout, beside the notes.
+    pub fn sanctuary_store(&self) -> PathBuf {
+        self.store.with_extension("sanctuary.json")
+    }
+
     /// The files of the working tree, relative to its top, as git has them
     /// or would have them, so ignored folders (`target`, `node_modules`)
     /// are left out. None outside git.
@@ -196,6 +202,28 @@ impl Place {
         fs::write(&new, json).map_err(|e| e.to_string())?;
         fs::rename(&new, &self.store).map_err(|e| e.to_string())?;
         Ok(out)
+    }
+
+    /// Where the Arcane Sanctuary's nodes were left, none when it was never
+    /// drawn or its file does not read: a fresh layout is no loss.
+    pub fn positions(&self) -> Positions {
+        fs::read_to_string(self.sanctuary_store())
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    }
+
+    /// Keeps where the nodes settled. Only the app writes it, so no lock,
+    /// but through a new file all the same so a crash leaves the old one.
+    pub fn keep_positions(&self, p: &Positions) -> Result<(), String> {
+        let store = self.sanctuary_store();
+        if let Some(dir) = store.parent() {
+            fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+        }
+        let json = serde_json::to_string(p).map_err(|e| e.to_string())?;
+        let new = store.with_extension("new");
+        fs::write(&new, json).map_err(|e| e.to_string())?;
+        fs::rename(&new, &store).map_err(|e| e.to_string())
     }
 }
 

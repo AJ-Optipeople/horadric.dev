@@ -74,6 +74,8 @@ Usage:
   horadric projects              Every known project: folder, sessions, open quests, last commit
   horadric heavy -- COMMAND...    Run a test suite or build once no other session on this
                                machine runs one; alone, say who runs one now
+  horadric sanctuary             Lay out this project's Arcane Sanctuary graph from where
+                               it was left, keep it, and say how large it is
   horadric runeword list         Every stone of this project's Runetome: its runeword name,
                                label and steps, and why any does not parse
   horadric runeword cast NAME    Cast that stone of this project's Runetome, in a session
@@ -184,6 +186,8 @@ fn main() -> ExitCode {
         Some("mcp") => mcp::run(),
         #[cfg(windows)]
         Some("portal") => portal::run(&args[1..]),
+        #[cfg(windows)]
+        Some("sanctuary") => lore::sanctuary(),
         Some("swap") => reload::swap(&args[1..]),
         Some("install") => install_command(),
         Some("uninstall") => uninstall_command(),

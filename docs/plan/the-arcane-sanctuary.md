@@ -83,6 +83,13 @@ Each is a quest.
 1. The graph and its layout: the pure part. Build the graph from the
    code index, the lore notes and the quests' `touched` records; the
    force layout with Barnes Hut; positions kept per project. Tested.
+   Done 2026-10-15: `horadric_core::sanctuary` (the graph, `Layout` to
+   step it, `layout` to run it to still), `code::links` for the calls,
+   `Place::positions` and `keep_positions` beside the notes
+   (`<project>.sanctuary.json`), and `horadric sanctuary` to try it.
+   This repo: 390 nodes, 1620 links, laid out in 57 ms from nothing.
+   Only calls that resolve to one file make a link; a kept picture with
+   nothing new is not moved at all.
 2. The pane: drawn on the stage beside sessions and the browser, zoom
    to fill the stage, pan, wheel zoom, hover, opened from the header
    menu and a key, still when nothing moves.

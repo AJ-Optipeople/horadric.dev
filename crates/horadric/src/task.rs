@@ -685,6 +685,21 @@ fn spend(cwd: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// The done quests of the project `cwd` is in and the files each touched,
+/// for the Arcane Sanctuary's quest nodes.
+pub(crate) fn finished(cwd: &Path) -> Vec<(String, Touched)> {
+    let Some(project) = main_list().or_else(|| file::find_list(cwd)) else {
+        return Vec::new();
+    };
+    let key = horadric_ui::folder_key(&project.to_string_lossy());
+    let list = tasks::parse(&file::read(&project));
+    chronicle::quests(&horadric_ui::chronicle_all(), &[], &key, &list)
+        .into_iter()
+        .filter(|q| q.outcome == chronicle::Outcome::Done)
+        .filter_map(|q| Some((q.title, q.touched.filter(|t| !t.is_empty())?)))
+        .collect()
+}
+
 /// The context pack a quest in the log gets when it starts, so whoever
 /// files it can see it and put what it misses in the quest's notes.
 fn show_pack(cwd: &Path, title: &str) -> Result<(), String> {

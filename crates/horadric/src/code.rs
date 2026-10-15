@@ -554,7 +554,8 @@ fn resolve<'a>(c: &Call, here: &str, own: Option<&str>, defs: &[Def<'a>]) -> Vec
     at
 }
 
-fn callees(files: &Files, asked: &Asked, out: &mut String) {
+/// Every place each name is defined, by the name.
+fn definitions<'a>(files: &'a Files) -> HashMap<&'a str, Vec<Def<'a>>> {
     const TYPES: &[&str] = &["impl", "class", "trait", "interface", "struct", "enum"];
     let mut defined: HashMap<&str, Vec<Def>> = HashMap::new();
     for (path, f) in files {
@@ -571,6 +572,44 @@ fn callees(files: &Files, asked: &Asked, out: &mut String) {
             });
         }
     }
+    defined
+}
+
+/// File to file, how many calls the first makes to symbols the second
+/// defines, for the Arcane Sanctuary's lines. Only calls that resolve to
+/// one file count: a call on a value or one that could go to several
+/// files is a guess, and guesses would tie every file to every other.
+pub fn links(files: &Files) -> Vec<(String, String, u32)> {
+    let defined = definitions(files);
+    let mut count: HashMap<(&str, &str), u32> = HashMap::new();
+    for (path, f) in files {
+        for c in f.calls.iter().filter(|c| !c.method) {
+            let Some(defs) = defined.get(c.name.trim_end_matches('!')) else {
+                continue;
+            };
+            let own = c
+                .from
+                .and_then(|i| f.symbols[i as usize].parent)
+                .map(|p| f.symbols[p as usize].name.as_str());
+            let at = resolve(c, path, own, defs);
+            let Some(first) = at.first() else {
+                continue;
+            };
+            if first.path != path && at.iter().all(|d| d.path == first.path) {
+                *count.entry((path.as_str(), first.path)).or_default() += 1;
+            }
+        }
+    }
+    let mut out: Vec<(String, String, u32)> = count
+        .into_iter()
+        .map(|((a, b), n)| (a.to_string(), b.to_string(), n))
+        .collect();
+    out.sort();
+    out
+}
+
+fn callees(files: &Files, asked: &Asked, out: &mut String) {
+    let defined = definitions(files);
     let mut any = false;
     for (path, f) in files {
         for (i, s) in f.symbols.iter().enumerate() {
@@ -892,6 +931,43 @@ mod tests {
 
     fn files(p: &[(String, FileIndex)]) -> Vec<(String, &FileIndex)> {
         p.iter().map(|(n, f)| (n.clone(), f)).collect()
+    }
+
+    #[test]
+    fn links_count_calls_that_go_to_one_other_file() {
+        let p = vec![
+            (
+                "src/a.rs".to_string(),
+                read(
+                    Lang::Rust,
+                    b"fn main() { helper(); helper(); b::other(); x.take(); twice(); }
+",
+                ),
+            ),
+            (
+                "src/b.rs".to_string(),
+                read(
+                    Lang::Rust,
+                    b"pub fn helper() {}
+pub fn other() { helper(); }
+pub fn twice() {}
+impl T { fn take(&self) {} }
+",
+                ),
+            ),
+            (
+                "src/c.rs".to_string(),
+                read(
+                    Lang::Rust,
+                    b"pub fn twice() {}
+",
+                ),
+            ),
+        ];
+        let got = links(&files(&p));
+        // helper (kept once for main) and b::other; .take() is on a value,
+        // twice() could be either file and b's own helper() stays in b.
+        assert_eq!(got, [("src/a.rs".into(), "src/b.rs".into(), 2)]);
     }
 
     #[test]
