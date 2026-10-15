@@ -39,9 +39,15 @@ Do not reopen these without asking. They were argued through and chosen.
   same `windows` version), and `tree-sitter` with one grammar crate per
   language (Rust, TypeScript and JavaScript, Python) for the lore's code
   index (parsing languages is not the project either, and it finds the
-  calls a regex outline misses). Not a crate but vendored: `conpty.dll` and
-  `OpenConsole.exe` from Microsoft's ConPTY package, the pseudo console
-  that passes `CSI c` through so OSC 7501 works (see
+  calls a regex outline misses), and in `horadric-memory` `candle-core`,
+  `candle-nn` and `candle-transformers` with `tokenizers` (its `onig`
+  feature only) to run the embedding model that finds memory by meaning:
+  Hugging Face's pure Rust ML crates, no DLL to ship and no service that
+  must be running, and the tokenizer is the one the models were trained
+  with (writing either is not the project; see docs/plan/memory.md).
+  Not a crate but vendored: `conpty.dll` and `OpenConsole.exe` from
+  Microsoft's ConPTY package, the pseudo console that passes `CSI c`
+  through so OSC 7501 works (see
   `crates/horadric-pty/conpty/README.md`). Adding one is a decision, not a reflex.
 
 ## Conventions

@@ -89,6 +89,56 @@ it. Measure recall at 5 for words only (today), each model, and both
 fused; the time per chunk on this CPU; and the memory used. Keep the set
 in the repository so every later change is measured against it.
 
+**Built 2026-10-16.** The crate is `horadric-memory` (candle takes a
+minute to build, so it stays out of `horadric-core`). The yardstick is
+in `crates/horadric-memory/yardstick/`: 1,686 chunks (705 from the docs,
+16 lore notes, 965 of dialogue from September and October transcripts)
+and 65 hand written questions. Run it with `cargo run --release -p
+horadric-memory --example yardstick`. The models are read from the dev
+state folder's `models\`, fetched by hand for now.
+
+Measured on this machine (i7-11700K, CPU shared with other sessions),
+chunks of 759 characters on average, recall at 5:
+
+| | alone | fused with words | ms a chunk | memory |
+|---|---|---|---|---|
+| words (the lore today) | 61.5 % | | | |
+| BM25 | 67.7 % | | | |
+| all-MiniLM-L6-v2, 384 | 73.8 % | **87.7 %** | 82 | 92 MB |
+| bge-small-en-v1.5, 384 | 76.9 % | 84.6 % | 159 | 134 MB |
+| EmbeddingGemma 300M, 768 | 80.0 % | 84.6 % | 234 | 858 MB |
+| EmbeddingGemma, cut to 256 | 70.8 % | 83.1 % | | |
+| EmbeddingGemma, cut to 128 | 72.3 % | 81.5 % | | |
+
+"Fused with words" is reciprocal rank fusion with the lore's word
+matching; fused with BM25 instead it is about the same (MiniLM 87.7 %,
+Gemma 84.6 %). Memory is the working set the loaded model adds. Gemma's
+peak while loading is 2.8 GB, with its token table already kept in half
+precision (a third of a billion numbers; full precision adds 400 MB).
+
+**Chosen: all-MiniLM-L6-v2** (decided 2026-10-16). Fused, which is how
+recall will run, it finds the most, at a tenth of Gemma's memory and a
+third of its time a chunk: a year of dialogue (90k chunks) embeds in
+about two hours of one core's spare time, against six. Gemma alone is
+better on dialogue (81.8 % against 68.2 %), and fused that gap shrinks
+to 77.3 % against 81.8 %, two or three questions out of 65, which is
+within what a set this size can tell apart. It is English only; the
+human writes to the agents in English. Gemma stays runnable in the crate
+and the yardstick, so a larger set or a need for other languages can
+reopen this with numbers, and since vectors are a cache tagged by model,
+changing it later costs one background re-embed.
+
+Weights: sentence-transformers/all-MiniLM-L6-v2 at commit
+`1110a243fdf4706b3f48f1d95db1a4f5529b4d41`, SHA-256 of `model.safetensors`
+`53aa51172d142c89d9012cce15ae4d6cc0ca6895895114379cacb4fab128d9db`,
+`tokenizer.json` `be50c3628f2bf5bb5e3a7f17b1f74611b2561a3a27eeab05e5aa30f411572037`,
+`config.json` `953f9c0d463486b10a6871cc2fd59f223b2c70184f49815e7efbcab5d8908b41`
+(Apache 2.0). Google's own EmbeddingGemma repository is gated behind a
+licence click; the measurement used the ungated `unsloth` copy, whose
+output matches Google's model card to three decimals. Fetching the
+weights into `models\` and checking these hashes is a quest of its own,
+before part 3.
+
 ### 2. The store
 
 Per state folder, `memory\`: append only segment files, one per month,
