@@ -34,7 +34,7 @@ use horadric_core::journal::{self, Commit, Entry, What};
 use horadric_core::tasks::{self, Holder, Mark, Mode, Next, Task, Wait};
 use horadric_core::usage::{self, format_until};
 use horadric_core::worktree::{self, Worktree};
-use horadric_core::{fleet, merge, ship, ssh, tombs, Agent, Phase, Setting, WaitReason};
+use horadric_core::{fleet, merge, pack, ship, ssh, tombs, Agent, Phase, Setting, WaitReason};
 use horadric_hooks::tasks as file;
 
 use super::{post, push, unix_now, with_app, App, Input, WM_HORADRIC_KEPT, WM_HORADRIC_TASK_MENU};
@@ -602,9 +602,11 @@ impl App {
         if !taken {
             return Err("the list changed, so that item is not there to take".into());
         }
+        let (pack, packed) = context_pack(key, &dir, &task);
+        record_pack(key, &id, title, packed);
         self.tasks.prompts.insert(
             id.clone(),
-            tasks::prompt(&task, &horadric_command(), file::rel(&dir)),
+            tasks::prompt(&task, &pack, &horadric_command(), file::rel(&dir)),
         );
         self.refresh_boards(true);
         let parallel = self
@@ -2240,6 +2242,33 @@ pub(super) fn merges(dir: &Path) -> Vec<Merge> {
             title,
         })
         .collect()
+}
+
+/// The context pack for `task` from the project's finished quests (Lore
+/// part 2), files no longer there left out: the text for its prompt, and
+/// its files.
+pub(super) fn context_pack(key: &str, dir: &Path, task: &Task) -> (String, Vec<String>) {
+    let list = tasks::parse(&file::read(dir));
+    let quests = chronicle::quests(&store::chronicle_all(), &[], key, &list);
+    let mut hints = pack::pack(task, &quests);
+    hints.retain(|h| dir.join(&h.file).exists());
+    let text = pack::render(&hints);
+    (text, hints.into_iter().map(|h| h.file).collect())
+}
+
+/// Keeps which files the quest `id` was started with, so its spend can be
+/// set beside that of quests started without.
+pub(super) fn record_pack(key: &str, id: &str, title: &str, files: Vec<String>) {
+    if files.is_empty() {
+        return;
+    }
+    store::chronicle(&chronicle::Record {
+        at: unix_now(),
+        project: key.to_string(),
+        quest: id.to_string(),
+        title: title.to_string(),
+        what: Happened::Packed { files },
+    });
 }
 
 #[cfg(test)]
