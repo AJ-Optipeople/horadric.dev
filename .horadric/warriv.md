@@ -5,6 +5,8 @@
 - A quest session silent for hours with an empty worktree after two nudges is dead and I can not restart it: hand it to the human with "restart it", who does so (settled on "OSC 7501: plain terminals", which then landed).
 
 ## Lately
+- 2026-10-15 Round (main at bfae2b1): nothing new to do. ship-local-71894 still building from bfae2b1 and Ship Public cast a minute earlier (last tag v0.25.0).
+- 2026-10-15 Stall wake (main at bfae2b1): only the pack comparison waits, on quests run with a pack, which is expected. "Found a project" landed (5182a14) and ship-local-71894 is building from it, so cast "Ship Public" for Lore and Tristram. No open aim to plan toward.
 - 2026-10-15 Round (main at d33393a): the 21:54 build reloaded fine (carries 5b0816a and 7a41147). "Tristram: quest --project" (d33393a, 21:57) and the plus New session label landed after it, so cast "Ship Local". Public held for "Found a project", the last Tristram quest, under way.
 - 2026-10-15 Round (main at 4e456e7): a `cargo build --release` started 21:50:44, after 7a41147 (21:48), so the ship under way carries 5b0816a and the code index. No second cast. Tristram's three quests still open, public held for them.
 - 2026-10-15 Round (21:51, main at 7a41147): "Lore: a code index" landed, so all of Lore is in. The 463f2bc "Ship Local" cast still has not reloaded (last reload 21:42, release exe 21:41, cargo busy), and it will build from main as it stands, so no second cast. Held public until Tristram's three open quests land too, then one release for Lore and Tristram.
@@ -145,5 +147,5 @@
 - 2026-10-06 Daily look back: the day was clean (24 quests completed, all 24 merged by themselves).
 
 ## Open
-- Next round: check a reload came after 21:58 carrying d33393a. If not and cargo is idle, cast "Ship Local" again.
-- Once "Tristram: found a project" lands, cast "Ship Public" for Lore and Tristram.
+- Next round: check the Ship Public cast at 22:04 published a release and reloaded (reload.log, git tags). If it stopped, read its session and decide.
+- Once quests run with a pack, the pack comparison resumes by itself.
