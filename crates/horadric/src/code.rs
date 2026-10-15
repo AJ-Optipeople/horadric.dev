@@ -409,8 +409,9 @@ pub fn find(files: &Files, query: &str) -> String {
         .iter()
         .flat_map(|(p, f)| f.symbols.iter().map(move |s| (p.as_str(), *f, s)))
         .collect();
+    type Try<'t> = &'t dyn Fn(&FileIndex, &Symbol) -> bool;
     let low = asked.name.to_lowercase();
-    let tries: [&dyn Fn(&FileIndex, &Symbol) -> bool; 3] = [
+    let tries: [Try; 3] = [
         &|f, s| asked.fits(f, s),
         &|_, s| s.name.to_lowercase() == low,
         &|_, s| s.name.to_lowercase().contains(&low),
