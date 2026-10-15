@@ -944,6 +944,152 @@ pub fn move_item(text: &str, line: usize, to: usize, above: bool) -> Option<Stri
     Some(join(lines, ending, text.ends_with('\n')))
 }
 
+/// How long a done quest stays in the log before it moves to the done
+/// file, in seconds. The log is read by every agent on every quest, so
+/// what is long finished only costs them.
+pub const KEEP_DONE: u64 = 3 * 24 * 60 * 60;
+
+/// Where a list's done quests go: `.horadric/quests-done.md` beside
+/// `.horadric/quests.md`.
+pub fn done_file(list: &str) -> String {
+    format!("{}-done.md", list.strip_suffix(".md").unwrap_or(list))
+}
+
+/// Takes the done quests that `old` says ended long enough ago out of the
+/// log: `text` without them, and them as they were, notes and all, each
+/// under the heading it had. None when there is none to take.
+///
+/// A quest that a quest staying in the log names in `After:` stays too,
+/// since that name would match nothing once it left. A heading whose
+/// section this empties goes with it.
+pub fn sweep(text: &str, old: impl Fn(&Task) -> bool) -> Option<(String, String)> {
+    let tasks = parse(text);
+    let mut moving: Vec<bool> = tasks
+        .iter()
+        .map(|t| t.mark == Mark::Done && old(t))
+        .collect();
+    // Keeping one quest may keep the ones it names in turn.
+    loop {
+        let mut kept_more = false;
+        let staying: Vec<usize> = (0..tasks.len()).filter(|&i| !moving[i]).collect();
+        for i in staying {
+            for name in tasks[i].after() {
+                if let Ok(j) = find(&tasks, name) {
+                    kept_more |= std::mem::replace(&mut moving[j], false);
+                }
+            }
+        }
+        if !kept_more {
+            break;
+        }
+    }
+    if !moving.contains(&true) {
+        return None;
+    }
+    let (lines, ending) = cut(text);
+    let heading = |raw: &str| raw.starts_with('#');
+    let mut keep = vec![true; lines.len()];
+    let mut moved = String::new();
+    let mut under: Option<usize> = None;
+    for t in tasks
+        .iter()
+        .zip(&moving)
+        .filter(|(_, m)| **m)
+        .map(|(t, _)| t)
+    {
+        let section = (0..t.line).rev().find(|&i| heading(&lines[i]));
+        if let Some(s) = section.filter(|_| section != under) {
+            if !moved.is_empty() {
+                moved.push_str(ending);
+            }
+            moved.push_str(lines[s].trim_end_matches(['\r', '\n']));
+            moved.push_str(ending);
+            moved.push_str(ending);
+            under = section;
+        }
+        for i in span(&lines, t.line) {
+            keep[i] = false;
+            moved.push_str(lines[i].trim_end_matches(['\r', '\n']));
+            moved.push_str(ending);
+        }
+    }
+    let blank = |i: usize| lines[i].trim().is_empty();
+    let heads: Vec<usize> = (0..lines.len()).filter(|&i| heading(&lines[i])).collect();
+    for (n, &h) in heads.iter().enumerate() {
+        let end = heads.get(n + 1).copied().unwrap_or(lines.len());
+        let body = h + 1..end;
+        let emptied = body.clone().any(|i| !keep[i]);
+        if !emptied || body.clone().any(|i| keep[i] && !blank(i)) {
+            continue;
+        }
+        keep[h] = false;
+        body.for_each(|i| keep[i] = false);
+        // A last section taken leaves no blank lines at the end.
+        if end == lines.len() {
+            (0..h)
+                .rev()
+                .take_while(|&i| blank(i))
+                .for_each(|i| keep[i] = false);
+        }
+    }
+    // Where quests left from between two blank lines, one blank line is
+    // enough. Blank lines nothing left from between stay as written.
+    let mut last_blank = false;
+    let mut taken = false;
+    for (i, k) in keep.iter_mut().enumerate() {
+        if !*k {
+            taken = true;
+        } else if blank(i) {
+            if last_blank && taken {
+                *k = false;
+            }
+            last_blank = true;
+        } else {
+            last_blank = false;
+            taken = false;
+        }
+    }
+    let rest: Vec<String> = lines
+        .into_iter()
+        .zip(keep)
+        .filter_map(|(l, k)| k.then_some(l))
+        .collect();
+    Some((join(rest, ending, text.ends_with('\n')), moved))
+}
+
+/// The done file with the quests `moved` from the log at its end. A new
+/// one starts with a word on what it is.
+pub fn append_done(done: &str, moved: &str, list: &str) -> String {
+    let ending = if moved.contains("\r\n") { "\r\n" } else { "\n" };
+    let mut out = if done.trim().is_empty() {
+        format!(
+            "# Done quests{ending}{ending}Moved here from {list} a few days after they were \
+             done. Horadric's quest log still shows them.{ending}"
+        )
+    } else {
+        done.to_string()
+    };
+    if !out.ends_with('\n') {
+        out.push_str(ending);
+    }
+    out.push_str(ending);
+    out.push_str(moved);
+    out
+}
+
+/// `notes` without the `After:` lines that name a quest only the done file
+/// still has: it is done, so there is nothing to wait for, and the log
+/// would find no quest by that name.
+pub fn drop_done_after(notes: &str, log: &[Task], done: &[Task]) -> String {
+    notes
+        .lines()
+        .filter(|n| {
+            after_line(n).is_none_or(|name| find(log, name) != Err(0) || find(done, name).is_err())
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// How a project's list gets worked through.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Mode {
@@ -2428,6 +2574,140 @@ mod tests {
         assert_eq!(
             move_item(text, 0, 2, false).unwrap(),
             "- [ ] Two\r\n- [ ] Three\r\n- [ ] One"
+        );
+    }
+
+    #[test]
+    fn the_done_file_sits_beside_the_list() {
+        assert_eq!(done_file(QUESTS_FILE), ".horadric/quests-done.md");
+        assert_eq!(done_file(OLD_FILE), ".horadric/tasks-done.md");
+    }
+
+    #[test]
+    fn old_done_quests_leave_the_log_with_their_notes_and_heading() {
+        let text = "# Quests\n\
+                    \n\
+                    ## Old work\n\
+                    \n\
+                    - [x] Old one @old-1\n\
+                    \x20 A note.\n\
+                    - [x] Old two @old-2\n\
+                    \n\
+                    ## Now\n\
+                    \n\
+                    - [x] Recent @recent-3\n\
+                    - [ ] Open one\n\
+                    - [x] Old three @old-4\n";
+        let old = |t: &Task| t.holder.as_deref().is_some_and(|h| h.starts_with("old"));
+        let (rest, moved) = sweep(text, old).unwrap();
+        assert_eq!(
+            rest,
+            "# Quests\n\
+             \n\
+             ## Now\n\
+             \n\
+             - [x] Recent @recent-3\n\
+             - [ ] Open one\n"
+        );
+        assert_eq!(
+            moved,
+            "## Old work\n\
+             \n\
+             - [x] Old one @old-1\n\
+             \x20 A note.\n\
+             - [x] Old two @old-2\n\
+             \n\
+             ## Now\n\
+             \n\
+             - [x] Old three @old-4\n"
+        );
+        assert_eq!(parse(&moved).len(), 3);
+        assert!(sweep(&rest, old).is_none());
+    }
+
+    #[test]
+    fn quests_leaving_from_between_prose_leave_one_blank_line() {
+        let text = "## Section
+
+Why it exists.
+
+- [x] Old @a
+
+
+## Next
+
+
+Kept.
+";
+        let (rest, _) = sweep(text, |_| true).unwrap();
+        assert_eq!(
+            rest,
+            "## Section
+
+Why it exists.
+
+## Next
+
+
+Kept.
+"
+        );
+    }
+
+    #[test]
+    fn only_done_quests_leave() {
+        let text = "- [!] Stuck @old-1: why\n- [?] Looked at @old-2\n- [ ] Open\n";
+        assert!(sweep(text, |_| true).is_none());
+    }
+
+    #[test]
+    fn a_quest_still_named_in_after_stays() {
+        let text = "- [x] Base @a\n\
+                    - [x] Middle @b\n\
+                    \x20 After: Base\n\
+                    - [x] Loose @c\n\
+                    - [ ] Top\n\
+                    \x20 After: Middle\n";
+        let (rest, moved) = sweep(text, |_| true).unwrap();
+        assert_eq!(
+            rest,
+            "- [x] Base @a\n\
+             - [x] Middle @b\n\
+             \x20 After: Base\n\
+             - [ ] Top\n\
+             \x20 After: Middle\n"
+        );
+        assert_eq!(moved, "- [x] Loose @c\n");
+    }
+
+    #[test]
+    fn sweeping_keeps_the_files_line_endings() {
+        let text = "- [x] Old @a\r\n  Note\r\n- [ ] Open";
+        let (rest, moved) = sweep(text, |_| true).unwrap();
+        assert_eq!(rest, "- [ ] Open");
+        assert_eq!(moved, "- [x] Old @a\r\n  Note\r\n");
+    }
+
+    #[test]
+    fn the_done_file_starts_with_a_word_and_grows_at_its_end() {
+        let first = append_done("", "- [x] One @a\n", OLD_FILE);
+        assert!(first.starts_with("# Done quests\n\nMoved here from .horadric/tasks.md"));
+        assert!(first.ends_with(".\n\n- [x] One @a\n"));
+        let second = append_done(&first, "- [x] Two @b\n", OLD_FILE);
+        assert!(second.ends_with("- [x] One @a\n\n- [x] Two @b\n"));
+        let all = parse(&second);
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[1].holder.as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn an_after_line_naming_only_a_done_quest_is_dropped() {
+        let log = parse("- [ ] Live one\n- [x] Same name\n");
+        let done = parse("- [x] Archived one @a\n- [x] Same name @b\n");
+        let notes = "Why it matters.\nAfter: Archived one\nAfter: Live one\nAfter: Same name\nAfter: Nowhere";
+        assert_eq!(
+            drop_done_after(notes, &log, &done),
+            "Why it matters.\nAfter: Live one\nAfter: Same name\nAfter: Nowhere"
         );
     }
 }

@@ -112,3 +112,25 @@ quests older than a few days move to `.horadric/tasks-done.md`, keeping
 their `@id`, notes and spent records, so the quest log window, the
 chronicle and lookups by id still find them. The live file holds what is
 open plus the last few days.
+
+Built 2026-10-15. `tasks::sweep` takes the done quests out, notes and
+all, each under the heading it had; `horadric quest done` runs it after
+marking, so the log is tidied as often as quests end. A quest is old when
+the chronicle's last record of it is more than three days back
+(`KEEP_DONE`), or when the chronicle never heard of it. The done file
+sits beside the list, `quests-done.md` beside `quests.md`. Choices made
+along the way:
+
+- A done quest that a quest staying in the log names in `After:` stays
+  too, or that name would match nothing and its quest would need the
+  human. `quest add --after` an archived quest drops the line, since
+  there is nothing left to wait for.
+- A heading whose section the sweep empties goes with it; one with prose
+  under it stays.
+- Every write of the list (`tasks::update` in `horadric-hooks`) now takes
+  a lock file beside it, `.horadric/tasks.lock`, the same `Lock` the
+  lore notes use. Before, two writers at once could lose one's change;
+  with the sweep, two could also archive the same quests twice. An
+  agent's own Edit of the file takes no lock and never did.
+- The quest log window reads the done file before the list. The spent
+  records were always in the chronicle, by id, so they need no move.

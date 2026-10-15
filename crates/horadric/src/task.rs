@@ -8,6 +8,7 @@
 //! session takes it. Then it tells the app, which reads the list again and
 //! lets the runner move on.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use horadric_core::chronicle::{self, Command, Happened, Record};
@@ -236,6 +237,7 @@ fn report(cwd: &Path, blocked: Option<(&str, Option<On>)>, summary: &str) -> Res
     if !changed {
         return Err(format!("the quest held by {id} is already completed"));
     }
+    sweep(&project);
     tell_app(&project);
     match (why, wait, mark) {
         (Some(_), Some(_), _) => println!(
@@ -251,6 +253,30 @@ fn report(cwd: &Path, blocked: Option<(&str, Option<On>)>, summary: &str) -> Res
         _ => println!("Marked for review. The human looks next; stop here."),
     }
     Ok(())
+}
+
+/// Moves the log's done quests that last saw anything happen days ago to
+/// the done file, so the log every agent reads stays short. A quest the
+/// chronicle never heard of is older than it. Tidying, so it can not fail
+/// the command.
+fn sweep(project: &Path) {
+    let key = horadric_ui::folder_key(&project.to_string_lossy());
+    let mut last: HashMap<String, u64> = HashMap::new();
+    for r in horadric_ui::chronicle_all() {
+        if r.project == key && !r.quest.is_empty() {
+            let at = last
+                .entry(chronicle::quest_of(&r.quest).to_string())
+                .or_default();
+            *at = (*at).max(r.at);
+        }
+    }
+    let before = unix_now().saturating_sub(tasks::KEEP_DONE);
+    let _ = file::sweep_done(project, |t| {
+        t.holder
+            .as_deref()
+            .and_then(|h| last.get(chronicle::quest_of(h)))
+            .is_none_or(|&at| at < before)
+    });
 }
 
 /// A tomb's report leaves the list alone, since the item is the batch's
@@ -312,17 +338,17 @@ fn add(cwd: &Path, title: &str, notes: &str, below: Option<&str>) -> Result<(), 
         .or_else(main_list)
         .or_else(|| file::find_list(cwd))
         .unwrap_or_else(|| cwd.to_path_buf());
+    let done = file::read_done(&project);
     write(&project, |text| {
+        let log = tasks::parse(text);
         // An `After:` line naming either of two quests alike would match
         // both, so Warriv files none that is already in the log.
         if session().is_some_and(|id| warriv::is_warriv(&id)) {
-            if let Some(t) = tasks::parse(text)
-                .iter()
-                .find(|t| aim::same(&t.title, title))
-            {
+            if let Some(t) = log.iter().find(|t| aim::same(&t.title, title)) {
                 return Err(format!("\"{}\" is in the log already", t.title));
             }
         }
+        let notes = &tasks::drop_done_after(notes, &log, &done);
         match below {
             None => Ok(tasks::append_with_notes(text, title, notes)),
             Some(b) => warriv::add_below(text, b, title, notes),
