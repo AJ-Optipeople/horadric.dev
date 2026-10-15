@@ -11,12 +11,13 @@
 use std::path::{Path, PathBuf};
 
 use horadric_core::chronicle::{self, Command, Happened, Record};
+use horadric_core::spend::Sitting;
 use horadric_core::tasks::{self, Mark, Wait};
 use horadric_core::{aim, runeword, tombs, warriv};
 use horadric_hooks::listener::TasksChanged;
 use horadric_hooks::{
-    client, tasks as file, COMMAND_HEADER, OWNER_ENV, SESSION_ENV, STATE_HEADER, TASKS_ENV,
-    TASKS_PATH,
+    client, tasks as file, transcript, COMMAND_HEADER, OWNER_ENV, SESSION_ENV, STATE_HEADER,
+    TASKS_ENV, TASKS_PATH,
 };
 
 const USAGE: &str = "\
@@ -215,10 +216,12 @@ fn report(cwd: &Path, blocked: Option<(&str, Option<On>)>, summary: &str) -> Res
     if let Some((batch, _)) = tombs::of(&id) {
         let project = held(cwd, batch).ok_or(format!("{NO_LOG} has a quest held by {batch}"))?;
         record_summary(&project, &id, summary);
+        record_spend(&project, &id, cwd);
         return report_tomb(&project, &id, why);
     }
     let project = held(cwd, &id).ok_or(format!("{NO_LOG} has a quest held by {id}"))?;
     record_summary(&project, &id, summary);
+    record_spend(&project, &id, cwd);
     let mode = file::mode(&project);
     let mark = match why {
         Some(_) => Mark::Blocked,
@@ -520,6 +523,55 @@ fn record_summary(project: &Path, id: &str, summary: &str) {
         .map(|t| t.title.clone())
         .unwrap_or_default();
     record(project, id.to_string(), &title, Happened::Summary { text });
+}
+
+/// Keeps what the quest's conversations spent in tokens: every one the
+/// chronicle saw a turn of, under this quest or a tomb of its batch, and
+/// this one, whose last turn has not ended yet. Codex keeps no usage per
+/// message, so its conversations count nothing.
+fn record_spend(project: &Path, id: &str, cwd: &Path) {
+    let key = horadric_ui::folder_key(&project.to_string_lossy());
+    let quest = chronicle::quest_of(id);
+    let mut seen: Vec<(String, String)> = Vec::new();
+    if let Ok(now) = std::env::var("CLAUDE_CODE_SESSION_ID") {
+        seen.push((now, cwd.to_string_lossy().into_owned()));
+    }
+    for r in horadric_ui::chronicle_all() {
+        if r.project != key || chronicle::quest_of(&r.quest) != quest {
+            continue;
+        }
+        if let Happened::Turn {
+            conversation, cwd, ..
+        } = r.what
+        {
+            if !conversation.is_empty() && !seen.iter().any(|(c, _)| *c == conversation) {
+                seen.push((conversation, cwd));
+            }
+        }
+    }
+    let sittings: Vec<Sitting> = seen
+        .into_iter()
+        .filter_map(|(conversation, cwd)| {
+            let spend = transcript::spend(&cwd, &conversation)?;
+            (!spend.is_empty()).then_some(Sitting {
+                conversation,
+                spend,
+            })
+        })
+        .collect();
+    if sittings.is_empty() {
+        return;
+    }
+    let list = tasks::parse(&file::read(project));
+    let title = chronicle::worked_by(&list, id)
+        .map(|t| t.title.clone())
+        .unwrap_or_default();
+    record(
+        project,
+        id.to_string(),
+        &title,
+        Happened::Spent { sittings },
+    );
 }
 
 /// A command Warriv ran, for the chronicle's story of its wake, or an

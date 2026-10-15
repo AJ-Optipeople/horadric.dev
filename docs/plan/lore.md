@@ -26,6 +26,16 @@ the rest). Keep the totals with the quest when it is done, so the quest
 log window can show what a quest cost and a comparison can be made
 across weeks. Pure parsing and summing, tested on transcript fixtures.
 
+Built 2026-10-15. `horadric-core/src/spend.rs` reads a transcript: a
+message counts once (its lines repeat its usage), and the whole call is
+charged to the tools whose results started it, split evenly, or to
+"Prompt" (a subagent's own transcript: "Agent"). MCP tools go by server.
+`horadric quest done` and `blocked` sum every conversation the chronicle
+saw a turn of under the quest, with their subagents, and append a
+`spent` record of one sitting each; the last one is the quest's. The
+quest log's detail shows "Spent" and "Went on". Not yet: a quest marked
+done by hand has none, and Codex rollouts count nothing.
+
 ## 2. A context pack per quest
 
 When a quest starts, the agent explores from nothing. The hooks already

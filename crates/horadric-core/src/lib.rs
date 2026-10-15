@@ -34,6 +34,7 @@ pub mod runeword;
 pub mod saved;
 pub mod session;
 pub mod ship;
+pub mod spend;
 pub mod ssh;
 pub mod tasks;
 pub mod title;
