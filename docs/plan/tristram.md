@@ -111,6 +111,14 @@ locked usage window became its top and pinned there. The town stays a
 tile in a column that scrolls and drags like the rest. Any next try
 works inside that.
 
+## Hiding it
+
+Not everyone wants the town. "Hide Tristram" in its header menu, offered
+once no session runs there, takes the tile away and is remembered
+(`town_hidden` in the state). "Show Tristram" under Appearance in the
+Settings window brings it back. The folder and its quests stay. A session
+started in the town anyway shows the tile while it runs.
+
 ## Open
 
 - One town or several (work and private)? One until the human asks.

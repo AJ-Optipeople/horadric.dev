@@ -862,6 +862,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             autostart_offered,
             quiet: saved.quiet,
             sounds: saved.sounds,
+            town_hidden: saved.town_hidden,
             discord: saved.discord,
             rich: None,
             run: presence::Run::from_saved(saved.run),
@@ -2148,6 +2149,7 @@ fn project_menu(key: &str) {
     const ADD_TREE: usize = 6;
     const SSH_FIND: usize = 11;
     const CLOSE: usize = 12;
+    const HIDE_TOWN: usize = 13;
     const SSH: usize = 20;
     const SSH_END: usize = 200;
     const MERGE: usize = 300;
@@ -2242,9 +2244,16 @@ fn project_menu(key: &str) {
         Item::Separator,
         Item::action(END_ALL, "End all sessions"),
     ]);
-    // The town is always there.
+    // The town is not closed but hidden, and only once no session runs
+    // there, or the hide would not show.
     if !town::is(key) {
         items.push(Item::action(CLOSE, "Close project"));
+    } else if with_app(|app| app.sessions_in(key)) == Some(0) {
+        items.push(Item::action(HIDE_TOWN, "Hide Tristram"));
+    } else {
+        items.push(Item::Disabled(
+            "Hide Tristram (end its sessions first)".into(),
+        ));
     }
     let picked = menu::popup(&items);
     match (picked, &dir) {
@@ -2277,6 +2286,7 @@ fn project_menu(key: &str) {
         Some(START_OVER) => app.start_over(key, BATCH),
         Some(END_ALL) => app.end_all(Some(key)),
         Some(CLOSE) => app.close_project(key),
+        Some(HIDE_TOWN) => app.hide_town(true),
         Some(SHELL) => app.open_shell(key),
         Some(BROWSE) => app.open_web(key, None),
         Some(i) if (SSH..SSH_END).contains(&i) => app.open_ssh(key, &listed[i - SSH], None),
@@ -2977,6 +2987,8 @@ struct App {
     quiet: bool,
     /// Loot sounds, from the Settings window.
     sounds: bool,
+    /// Tristram's tile is hidden while no session runs in the town.
+    town_hidden: bool,
     /// What the Discord profile may show, from the Settings window.
     /// Changed only through [`App::set_discord`].
     discord: Discord,
@@ -4814,6 +4826,7 @@ impl App {
             screen: shown.and_then(|n| screens.iter().position(|s| s.name == n)),
             notify: !self.quiet,
             sounds: self.sounds,
+            town: !self.town_hidden,
             agent: self.settings_agent,
             defaults: self.shared.defaults_of(self.settings_agent),
             offered: (self.settings_agent != Agent::Claude).then(|| {
@@ -5097,6 +5110,7 @@ impl App {
                 self.quiet = !self.quiet;
                 self.save();
             }
+            Field::Town => self.hide_town(!self.town_hidden),
             Field::Sounds => {
                 self.sounds = !self.sounds;
                 self.save();
@@ -5385,6 +5399,22 @@ impl App {
         for id in &ids {
             self.forget(id);
         }
+        self.reconcile(false);
+    }
+
+    /// How many sessions the registry has in the project.
+    fn sessions_in(&self, key: &str) -> usize {
+        self.shared
+            .registry
+            .lock()
+            .map_or(0, |r| r.all().filter(|s| project_key(s) == key).count())
+    }
+
+    /// Hides Tristram's tile, or shows it again. A session running in the
+    /// town keeps it on screen until it ends.
+    fn hide_town(&mut self, hidden: bool) {
+        self.town_hidden = hidden;
+        self.save();
         self.reconcile(false);
     }
 
@@ -6491,6 +6521,7 @@ impl App {
             font_size: Some(self.shared.font.size()).filter(|&s| s != keys::FONT_DEFAULT),
             quiet: self.quiet,
             sounds: self.sounds,
+            town_hidden: self.town_hidden,
             discord: self.discord,
             run: self.run.saved(),
             cube: self.cube_on,
@@ -6640,10 +6671,16 @@ impl App {
         self.closed.retain(|k| !projects.contains(k));
         self.open
             .extend(projects.iter().filter(|k| !k.is_empty()).cloned());
+        // A hidden town shows only while a session runs there.
+        if self.town_hidden {
+            self.open.retain(|k| !town::is(k));
+        }
         projects.extend(self.open.iter().cloned());
         projects.extend(self.listed());
-        // The town stays when it has no sessions.
-        projects.extend(town::key().map(String::from));
+        // The town stays when it has no sessions, unless it is hidden.
+        if !self.town_hidden {
+            projects.extend(town::key().map(String::from));
+        }
 
         // Remove clusters whose project is gone.
         let mut i = 0;

@@ -101,6 +101,8 @@ pub enum Field {
     Theme,
     Font,
     Screen,
+    /// Whether Tristram's tile shows.
+    Town,
     Notify,
     Sounds,
     /// Whose session defaults the rows under it show.
@@ -169,6 +171,8 @@ pub struct Values {
     pub screen: Option<usize>,
     pub notify: bool,
     pub sounds: bool,
+    /// Tristram's tile shows.
+    pub town: bool,
     /// The agent the Sessions section shows, and its defaults.
     pub agent: Agent,
     pub defaults: Defaults,
@@ -270,10 +274,12 @@ pub fn lines(section: Section, v: &Values) -> Vec<Line> {
                 (Some(s), _) => (s.as_str(), Control::Fixed),
                 (None, _) => ("Primary", Control::Fixed),
             };
+            let (town, t) = switch(v.town);
             vec![
                 line(Field::Theme, "Theme", v.theme.label(), Control::List),
                 line(Field::Font, "Terminal font", &v.font, Control::List),
                 line(Field::Screen, "Tiles on screen", name, control),
+                line(Field::Town, "Show Tristram", town, t),
             ]
         }
         Section::Notifications => {
@@ -1046,6 +1052,7 @@ mod tests {
             screen: Some(1),
             notify: true,
             sounds: false,
+            town: true,
             agent: Agent::Claude,
             defaults: Defaults {
                 effort: Some("xhigh".into()),
@@ -1087,7 +1094,7 @@ mod tests {
         let v = values();
         assert_eq!(
             fields(Section::Appearance, &v),
-            [Field::Theme, Field::Font, Field::Screen]
+            [Field::Theme, Field::Font, Field::Screen, Field::Town]
         );
         assert_eq!(
             fields(Section::Notifications, &v),
