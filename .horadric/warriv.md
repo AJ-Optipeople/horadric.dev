@@ -5,6 +5,7 @@
 - A quest session silent for hours with an empty worktree after two nudges is dead and I can not restart it: hand it to the human with "restart it", who does so (settled on "OSC 7501: plain terminals", which then landed).
 
 ## Lately
+- 2026-10-15 Stall wake (main at c4d7f33): only the pack comparison waits, as expected. No open aim. Nothing to do.
 - 2026-10-15 Stall wake (main at ab5e826): only the pack comparison waits, as expected. No open aim. Nothing to do.
 - 2026-10-15 Stall wake (main at ee4604f): only the pack comparison waits, as expected. Ship Public landed as v0.26.0 (tagged, reloaded fine). Nothing to do.
 - 2026-10-15 Round (22:07, main at b10b665): the plus New label landed; Ship Public (cast 22:04, no tag yet) builds from main and should carry it. No cast, nothing else to do.
