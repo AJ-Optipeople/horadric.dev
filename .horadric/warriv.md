@@ -5,6 +5,7 @@
 - A quest session silent for hours with an empty worktree after two nudges is dead and I can not restart it: hand it to the human with "restart it", who does so (settled on "OSC 7501: plain terminals", which then landed).
 
 ## Lately
+- 2026-10-16 Wake: "Memory: an embedding model ... and a yardstick" stopped waiting on its own background benchmark and yardstick agent, not stuck, so no tell. Gave the six queued Memory quests models (opus: store, lore_recall by meaning, Warriv distills; sonnet: transcripts, code by meaning, across projects). v0.27.0 is tagged and reloaded, so that Open line is gone.
 - 2026-10-16 Stall wake (main at 37202ef): only the pack comparison waits, as expected. The sky and lights quest landed (dd518ce, 37202ef) and the tree is clean apart from Horadric's own files, so cast "Ship Public" for the whole Arcane Sanctuary (last tag v0.26.0).
 - 2026-10-16 Round (main at 75aa250): "Arcane Sanctuary: the pane on the stage" landed, but "light up and Tristram's sky" has six UI files uncommitted in the shared tree (app, glows, glyphs, pane, sanctuary, sky), so a release build would take them half done. Held the ship until that quest lands, then one Ship Local and a public release for the Sanctuary.
 - 2026-10-16 Round (main at 78b141e): "Arcane Sanctuary: the graph and its layout" landed, but nothing shows it until the pane quest lands, and the sky quest works in the shared tree (sky.rs uncommitted). Held the ship until the pane lands. Both under way quests are the human's own, no Model: line added.
@@ -157,4 +158,4 @@
 
 ## Open
 - Once quests run with a pack, the pack comparison resumes by itself.
-- Ship Public cast 2026-10-16 from 37202ef for the Arcane Sanctuary: check next time that a tag after v0.26.0 exists and reload.log shows it reloaded.
+- If "Memory: an embedding model" stays silent with its benchmark done and nothing committed, nudge it to pick the model and commit.
