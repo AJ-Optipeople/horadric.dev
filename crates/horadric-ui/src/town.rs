@@ -140,6 +140,204 @@ pub fn add_dir_args(projects: &[Project]) -> Vec<String> {
         .collect()
 }
 
+/// The folder `--project` names: a project's folder name, compared without
+/// case, or its whole folder. Several folders with one name are refused with
+/// the matches listed, since filing a quest in the wrong project is quiet.
+pub fn resolve(query: &str, dirs: &[String]) -> Result<String, String> {
+    let slashed = |d: &str| d.replace('\\', "/").trim_end_matches('/').to_string();
+    let q = slashed(query.trim());
+    if let Some(d) = dirs.iter().find(|d| slashed(d).eq_ignore_ascii_case(&q)) {
+        return Ok(d.clone());
+    }
+    let named: Vec<&String> = dirs
+        .iter()
+        .filter(|d| {
+            slashed(d)
+                .rsplit('/')
+                .next()
+                .is_some_and(|n| n.eq_ignore_ascii_case(&q))
+        })
+        .collect();
+    match named.as_slice() {
+        [] => Err(format!("no known project is called \"{query}\"")),
+        [one] => Ok((*one).clone()),
+        many => Err(format!(
+            "\"{query}\" matches more than one project, give the folder: {}",
+            many.iter()
+                .map(|d| d.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
+}
+
+/// The project folders Horadric knows from its saved state: the recent
+/// folders that still exist, once each, without the town.
+pub fn known_dirs() -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    crate::store::load()
+        .recent
+        .into_iter()
+        .filter(|p| Path::new(p).is_dir())
+        .filter(|p| {
+            let key = crate::project::folder_key(p);
+            !is(&key) && seen.insert(key)
+        })
+        .collect()
+}
+
+/// Every saved session as its folder, name and whether its process was
+/// running when the state was last written.
+pub fn saved_sessions() -> Vec<(String, String, bool)> {
+    crate::store::load()
+        .sessions
+        .into_iter()
+        .map(|s| (s.cwd, s.name, s.running))
+        .collect()
+}
+
+/// What `horadric projects` knows of one project.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Overview {
+    pub name: String,
+    pub dir: String,
+    /// Each session's name and whether it was running.
+    pub sessions: Vec<(String, bool)>,
+    pub open: usize,
+    pub working: usize,
+    pub last_commit: String,
+}
+
+/// The text of `horadric projects`, a pure function of what it gathered.
+pub fn overview(projects: &[Overview]) -> String {
+    if projects.is_empty() {
+        return "No projects known yet.\n".to_string();
+    }
+    let mut out = String::new();
+    for p in projects {
+        out.push_str(&format!("{}\n  folder: {}\n", p.name, p.dir));
+        if p.sessions.is_empty() {
+            out.push_str("  sessions: none\n");
+        } else {
+            // Many sessions share a name (Warriv's), so each kind is counted.
+            let mut kinds: Vec<(String, usize)> = Vec::new();
+            for (n, up) in &p.sessions {
+                let label = format!("{n} ({})", if *up { "running" } else { "paused" });
+                match kinds.iter_mut().find(|(l, _)| *l == label) {
+                    Some((_, c)) => *c += 1,
+                    None => kinds.push((label, 1)),
+                }
+            }
+            let list: Vec<String> = kinds
+                .into_iter()
+                .map(|(l, c)| if c > 1 { format!("{l} x{c}") } else { l })
+                .collect();
+            out.push_str(&format!("  sessions: {}\n", list.join(", ")));
+        }
+        out.push_str(&format!(
+            "  quests: {} open, {} working\n",
+            p.open, p.working
+        ));
+        if !p.last_commit.is_empty() {
+            out.push_str(&format!("  last commit: {}\n", p.last_commit));
+        }
+    }
+    out
+}
+
+/// Why a project can not be called this, or none when it can. The name is a
+/// folder, so what a Windows folder refuses is refused here.
+pub fn check_name(name: &str) -> Option<String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Some("a project needs a name".into());
+    }
+    if name
+        .chars()
+        .any(|c| r#"<>:"/\|?*"#.contains(c) || c.is_control())
+    {
+        return Some(r#"a name cannot hold any of < > : " / \ | ? *"#.into());
+    }
+    if name.ends_with('.') || name.ends_with(' ') || name == "." || name == ".." {
+        return Some("a name cannot end in a dot or a space".into());
+    }
+    None
+}
+
+/// The first `README.md` of a founded project: what the town settled, which
+/// the new session reads first.
+pub fn readme(name: &str, summary: &str) -> String {
+    let summary = summary.trim();
+    if summary.is_empty() {
+        format!(
+            "# {name}
+"
+        )
+    } else {
+        format!(
+            "# {name}
+
+{summary}
+"
+        )
+    }
+}
+
+/// What the first session of a founded project is asked, so it starts from
+/// what the town settled instead of from nothing.
+pub fn first_prompt(name: &str, summary: &str) -> String {
+    let summary = summary.trim();
+    if summary.is_empty() {
+        format!(
+            "This is {name}, founded from Tristram. Read README.md and ask what to build first."
+        )
+    } else {
+        format!(
+            "This is {name}, founded from Tristram. What the town conversation settled:              {summary}
+
+Read README.md, then start on it."
+        )
+    }
+}
+
+/// Where a founded project goes by default: beside the project Horadric knew
+/// most recently, which is where the human keeps their projects.
+pub fn default_parent() -> Option<PathBuf> {
+    known_dirs()
+        .first()
+        .and_then(|d| Path::new(d).parent().map(Path::to_path_buf))
+}
+
+/// Makes the folder, runs `git init` and writes the first README. A folder
+/// that is already there is refused, since founding over work loses it.
+pub fn found(name: &str, parent: &Path, summary: &str) -> Result<PathBuf, String> {
+    let name = name.trim();
+    if let Some(why) = check_name(name) {
+        return Err(why);
+    }
+    if !parent.is_dir() {
+        return Err(format!("{} is not a folder", parent.display()));
+    }
+    let dir = parent.join(name);
+    if dir.exists() {
+        return Err(format!("{} is already there", dir.display()));
+    }
+    std::fs::create_dir(&dir).map_err(|e| format!("cannot make {}: {e}", dir.display()))?;
+    let init = horadric_hooks::no_window(
+        std::process::Command::new("git")
+            .arg("init")
+            .current_dir(&dir),
+    )
+    .output()
+    .map_err(|e| format!("cannot run git: {e}"))?;
+    if !init.status.success() {
+        return Err("git init failed".into());
+    }
+    std::fs::write(dir.join("README.md"), readme(name, summary))
+        .map_err(|e| format!("cannot write the README: {e}"))?;
+    Ok(dir)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -196,5 +394,79 @@ mod tests {
             add_dir_args(&[proj("a", None, ""), proj("b", None, "")]),
             ["--add-dir", "C:/code/a", "--add-dir", "C:/code/b"]
         );
+    }
+
+    fn dirs() -> Vec<String> {
+        vec![
+            "C:/code/app".into(),
+            "D:/old/app".into(),
+            "C:/code/lib".into(),
+        ]
+    }
+
+    #[test]
+    fn a_project_is_found_by_name_or_folder() {
+        assert_eq!(resolve("LIB", &dirs()).unwrap(), "C:/code/lib");
+        assert_eq!(resolve("D:\\old\\app\\", &dirs()).unwrap(), "D:/old/app");
+    }
+
+    #[test]
+    fn an_ambiguous_or_unknown_project_is_refused() {
+        let e = resolve("app", &dirs()).unwrap_err();
+        assert!(e.contains("C:/code/app") && e.contains("D:/old/app"));
+        assert!(resolve("nope", &dirs()).is_err());
+    }
+
+    #[test]
+    fn the_overview_says_what_goes_on() {
+        let t = overview(&[Overview {
+            name: "app".into(),
+            dir: "C:/code/app".into(),
+            sessions: vec![("a".into(), true), ("b".into(), false), ("b".into(), false)],
+            open: 3,
+            working: 1,
+            last_commit: "abc fix".into(),
+        }]);
+        assert!(t.contains("a (running), b (paused) x2"));
+        assert!(t.contains("3 open, 1 working"));
+        assert!(t.contains("last commit: abc fix"));
+        assert!(overview(&[]).contains("No projects"));
+    }
+
+    #[test]
+    fn names_are_folders() {
+        assert!(check_name("my-app").is_none());
+        assert!(check_name("  ").is_some());
+        assert!(check_name("a/b").is_some());
+        assert!(check_name("a:b").is_some());
+        assert!(check_name("x.").is_some());
+    }
+
+    #[test]
+    fn readme_and_prompt_carry_the_summary() {
+        assert_eq!(
+            readme("x", " "),
+            "# x
+"
+        );
+        assert_eq!(
+            readme("x", "A tool."),
+            "# x
+
+A tool.
+"
+        );
+        assert!(first_prompt("x", "A tool.").contains("A tool."));
+        assert!(first_prompt("x", "").contains("ask what to build"));
+    }
+
+    #[test]
+    fn founding_refuses_an_existing_folder() {
+        let parent = std::env::temp_dir().join(format!("horadric-found-{}", std::process::id()));
+        std::fs::create_dir_all(&parent).unwrap();
+        let dir = found("p1", &parent, "Hi.").unwrap();
+        assert!(dir.join("README.md").is_file());
+        assert!(found("p1", &parent, "").is_err());
+        let _ = std::fs::remove_dir_all(&parent);
     }
 }

@@ -94,8 +94,8 @@ Each is a quest.
    `town::brief` is the pure text, `town::write` keeps `CLAUDE.md` current
    and makes `NOTES.md`, rewritten by `refresh_town` when the recent
    folders change. A session in the town starts with `--add-dir` for each.
-3. `--project` on the quest CLI and `horadric projects`.
-4. "Found a project".
+3. `--project` on the quest CLI and `horadric projects`. **Done.** `town::resolve` matches a name or folder; sessions show as running or paused from the saved state, not live phases.
+4. "Found a project". **Done.** `town::found` makes the folder, runs `git init` and writes the README; `horadric found <name> [--parent] [--summary]` then starts the first session there with the summary as its prompt. The tile menu item (live town sessions only) asks for a name and types the request into the town session, which has the conversation to summarise. The parent defaults to beside the latest known project.
 
 ## Open
 

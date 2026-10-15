@@ -98,6 +98,46 @@ pub fn new(args: &[String]) -> Result<(), String> {
     }
 }
 
+/// `horadric found <name>`: make a project from the town and start its first
+/// session there, with what the town settled as the first prompt.
+pub fn found(args: &[String]) -> Result<(), String> {
+    let mut name: Option<String> = None;
+    let mut parent: Option<PathBuf> = None;
+    let mut summary = String::new();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--parent" => {
+                parent = args.get(i + 1).map(PathBuf::from);
+                i += 2;
+            }
+            "--summary" => {
+                summary = args.get(i + 1).cloned().unwrap_or_default();
+                i += 2;
+            }
+            other if !other.starts_with("--") && name.is_none() => {
+                name = Some(other.to_string());
+                i += 1;
+            }
+            other => return Err(format!("unknown option `{other}` for found")),
+        }
+    }
+    let name =
+        name.ok_or("usage: horadric found <name> [--parent <folder>] [--summary \"...\"]")?;
+    let parent = parent
+        .or_else(horadric_ui::town::default_parent)
+        .ok_or("no known project to put it beside, give --parent <folder>")?;
+    let parent = std::path::absolute(&parent).map_err(|e| e.to_string())?;
+    let dir = horadric_ui::town::found(&name, &parent, &summary)?;
+    println!("made {}", dir.display());
+    new(&[
+        "--cwd".to_string(),
+        dir.to_string_lossy().to_string(),
+        "--".to_string(),
+        horadric_ui::town::first_prompt(name.trim(), &summary),
+    ])
+}
+
 /// `horadric run`: start `claude` in this terminal, tagged.
 pub fn run(args: &[String]) -> Result<(), String> {
     let Options {

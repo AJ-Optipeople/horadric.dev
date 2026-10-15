@@ -1523,6 +1523,7 @@ fn tile_menu(id: &str) {
     const STASH: usize = 4;
     const PICK: usize = 5;
     const STOP_RUNEWORD: usize = 6;
+    const FOUND: usize = 7;
     let Some((kind, shell)) = with_app(|app| app.tile_kind(id)).flatten() else {
         return;
     };
@@ -1532,6 +1533,7 @@ fn tile_menu(id: &str) {
         Some(false) => Item::action(STASH, "Stash"),
         _ => Item::Disabled("Stash is full".into()),
     };
+    let live = matches!(kind, TileKind::Live);
     let items = match (kind, shell) {
         (TileKind::Live, false) => vec![
             Item::action(OPEN, "Show terminal"),
@@ -1583,6 +1585,11 @@ fn tile_menu(id: &str) {
         items.insert(0, changes_menu(w, diff.as_ref()));
         items.insert(1, Item::Separator);
     }
+    let in_town = with_app(|app| app.project_of(id).is_some_and(|k| town::is(&k)));
+    if in_town == Some(true) && live && !shell {
+        items.insert(0, Item::action(FOUND, "Found a project\u{2026}"));
+        items.insert(1, Item::Separator);
+    }
     if with_app(|app| app.can_pick(id)) == Some(true) {
         items.insert(0, Item::action(PICK, "Pick this tomb\u{2026}"));
         items.insert(1, Item::Separator);
@@ -1617,6 +1624,7 @@ fn tile_menu(id: &str) {
         }
         Some(RENAME) => rename_session(id),
         Some(PICK) => runner::tomb::ask_pick(id),
+        Some(FOUND) => found_project(id),
         Some(STOP_RUNEWORD) => {
             with_app(|app| app.stop_runeword(id));
         }
@@ -1625,6 +1633,52 @@ fn tile_menu(id: &str) {
         }
         _ => {}
     }
+}
+
+/// Asks for the new project's name, then asks the town session to found it:
+/// only the session has the conversation to summarise, so it runs
+/// `horadric found` with what it settled.
+fn found_project(id: &str) {
+    let Some(key) = with_app(|app| app.project_of(id)).flatten() else {
+        return;
+    };
+    let prompt = match town::default_parent() {
+        Some(p) => format!("It is made in {}, beside your latest project.", p.display()),
+        None => "What is it called?".to_string(),
+    };
+    let question = ask::Ask {
+        title: "Found a project",
+        prompt: &prompt,
+        initial: "",
+        placeholder: "Project name",
+        verb: "found",
+        notes: false,
+        pick: None,
+    };
+    let Some(a) = ask_beside(Some(&key), &question) else {
+        return;
+    };
+    let name = a.text.trim().to_string();
+    if let Some(why) = town::check_name(&name) {
+        ask(&Dialog {
+            tone: Tone::Warning,
+            title: "Found a project",
+            text: &why,
+            buttons: &["OK"],
+            default: 0,
+            check: None,
+        });
+        return;
+    }
+    let text = format!(
+        "Found the project \"{name}\": run `horadric found \"{name}\" --summary \"<what we \
+         settled, in a short paragraph>\"`, then tell me it is made.\r"
+    );
+    with_app(|app| {
+        if let Some(c) = app.consoles.get(id) {
+            c.write(text.into_bytes());
+        }
+    });
 }
 
 /// Asks before stashing a session mid turn, which stops the turn. One

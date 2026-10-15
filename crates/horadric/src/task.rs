@@ -48,6 +48,10 @@ usage: horadric quest done [\"summary\"]  The quest this session works is comple
                                         the next quests toward it when the log runs dry
        horadric quest aim done \"text\"   That aim is reached
        horadric quest list              Show the log
+       horadric quest add|list --project <name|folder>
+                                        Do it in another known project's log
+       horadric projects                Every project: folder, sessions, open quests,
+                                        last commit
        horadric quest spend             What done quests spent, those started with a
                                         context pack beside those without
        horadric quest pack \"title\"      The context pack that quest gets when it starts";
@@ -56,7 +60,20 @@ usage: horadric quest done [\"summary\"]  The quest this session works is comple
 const NO_LOG: &str = "no quest log (.horadric/quests.md or .horadric/tasks.md) above here";
 
 pub fn run(args: &[String]) -> Result<(), String> {
-    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    let (project, args) = project_flag(args)?;
+    let args = &args[..];
+    let here = std::env::current_dir().map_err(|e| e.to_string())?;
+    let elsewhere = project.is_some();
+    let cwd = match project {
+        Some(p) => PathBuf::from(horadric_ui::town::resolve(
+            &p,
+            &horadric_ui::town::known_dirs(),
+        )?),
+        None => here,
+    };
+    if elsewhere && !matches!(args.first().map(String::as_str), Some("add" | "list")) {
+        return Err("--project works with `quest add` and `quest list`".into());
+    }
     match args.first().map(String::as_str) {
         Some("done") => report(&cwd, None, &args[1..].join(" ")),
         Some("blocked") => {
@@ -72,7 +89,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
             if title.is_empty() {
                 return Err("say what: horadric quest add \"title\"".into());
             }
-            add(&cwd, &title, &notes, below.as_deref())
+            add(&cwd, &title, &notes, below.as_deref(), elsewhere)
         }
         Some("move") => {
             let (title, to, above) = title_and_place(&args[1..])?;
@@ -101,11 +118,72 @@ pub fn run(args: &[String]) -> Result<(), String> {
             Some("done") => aim(&cwd, &args[2..], true),
             _ => aim(&cwd, &args[1..], false),
         },
-        Some("list") => list(&cwd),
+        Some("list") => list(&cwd, elsewhere),
         Some("spend") => spend(&cwd),
         Some("pack") => show_pack(&cwd, &args[1..].join(" ")),
         _ => Err(USAGE.into()),
     }
+}
+
+/// `--project <name or folder>` taken out of the words, wherever it stands.
+fn project_flag(args: &[String]) -> Result<(Option<String>, Vec<String>), String> {
+    let Some(at) = args.iter().position(|a| a == "--project") else {
+        return Ok((None, args.to_vec()));
+    };
+    let Some(name) = args.get(at + 1).filter(|n| !n.starts_with("--")) else {
+        return Err("say which project: --project <name or folder>".into());
+    };
+    let mut rest = args[..at].to_vec();
+    rest.extend_from_slice(&args[at + 2..]);
+    Ok((Some(name.clone()), rest))
+}
+
+/// `horadric projects`: what goes on in every project at once.
+pub fn projects() -> Result<(), String> {
+    let saved = horadric_ui::town::saved_sessions();
+    let mut all = Vec::new();
+    for dir in horadric_ui::town::known_dirs() {
+        let path = Path::new(&dir);
+        let key = horadric_ui::folder_key(&dir);
+        let sessions = saved
+            .iter()
+            .filter(|(cwd, _, _)| horadric_ui::folder_key(cwd) == key)
+            .map(|(_, name, up)| (name.clone(), *up))
+            .collect();
+        let (mut open, mut working) = (0, 0);
+        if file::file(path).is_file() {
+            for t in tasks::parse(&file::read(path)) {
+                match t.mark {
+                    Mark::Open => open += 1,
+                    Mark::Working => working += 1,
+                    _ => {}
+                }
+            }
+        }
+        all.push(horadric_ui::town::Overview {
+            name: horadric_ui::project_name(&key),
+            dir: dir.clone(),
+            sessions,
+            open,
+            working,
+            last_commit: last_commit(path),
+        });
+    }
+    print!("{}", horadric_ui::town::overview(&all));
+    Ok(())
+}
+
+/// The newest commit of the repository at `dir` as one line, empty when
+/// there is none or git is not there.
+fn last_commit(dir: &Path) -> String {
+    std::process::Command::new("git")
+        .args(["log", "-1", "--format=%h %s (%cr)"])
+        .current_dir(dir)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default()
 }
 
 /// `--quest "title"` taken out of `quest blocked`'s words: the quest to
@@ -341,12 +419,23 @@ fn title_and_notes(args: &[String]) -> Result<(String, String, Option<String>), 
     Ok((title, notes.join("\n"), below))
 }
 
-fn add(cwd: &Path, title: &str, notes: &str, below: Option<&str>) -> Result<(), String> {
-    let project = session()
-        .and_then(|id| held(cwd, &id))
-        .or_else(main_list)
-        .or_else(|| file::find_list(cwd))
-        .unwrap_or_else(|| cwd.to_path_buf());
+fn add(
+    cwd: &Path,
+    title: &str,
+    notes: &str,
+    below: Option<&str>,
+    elsewhere: bool,
+) -> Result<(), String> {
+    // This session's own main tree is not the log of the project it named.
+    let project = if elsewhere {
+        file::find_list(cwd).unwrap_or_else(|| cwd.to_path_buf())
+    } else {
+        session()
+            .and_then(|id| held(cwd, &id))
+            .or_else(main_list)
+            .or_else(|| file::find_list(cwd))
+            .unwrap_or_else(|| cwd.to_path_buf())
+    };
     let done = file::read_done(&project);
     write(&project, |text| {
         let log = tasks::parse(text);
@@ -366,7 +455,7 @@ fn add(cwd: &Path, title: &str, notes: &str, below: Option<&str>) -> Result<(), 
     // Inside a session the new quest grows out of whatever that session
     // works, which the quest log draws as a branch: its quest, or else its
     // conversation, which Claude Code names to the commands it runs.
-    if let Some(by) = session() {
+    if let Some(by) = session().filter(|_| !elsewhere) {
         let conversation = std::env::var("CLAUDE_CODE_SESSION_ID").unwrap_or_default();
         record(
             &project,
@@ -531,8 +620,13 @@ fn aim(cwd: &Path, words: &[String], done: bool) -> Result<(), String> {
     Ok(())
 }
 
-fn list(cwd: &Path) -> Result<(), String> {
-    let project = main_list().or_else(|| file::find_list(cwd)).ok_or(NO_LOG)?;
+fn list(cwd: &Path, elsewhere: bool) -> Result<(), String> {
+    let project = if elsewhere {
+        file::find_list(cwd)
+    } else {
+        main_list().or_else(|| file::find_list(cwd))
+    }
+    .ok_or(NO_LOG)?;
     let text = file::read(&project);
     for a in aim::read(&text) {
         let head = if a.reached { aim::REACHED } else { aim::OPEN };
