@@ -81,7 +81,15 @@ The town session stays in town, ended or kept as the human likes.
 Each is a quest.
 
 1. The town folder, the pinned cluster that stays empty, its stage
-   and browser pane. Useful on its own.
+   and browser pane. Useful on its own. **Done.** `town.rs` owns the
+   folder and the key, `town::make` runs at start. The cluster is named
+   Tristram by `project_name`, drawn with a house mark, pinned by
+   `Columns::pin_first` above the usage window (dragging it away puts
+   it back), has no files watcher and no "Close project". A header
+   click while it is empty opens the stage with its browser pane; the
+   plus under the header is the new session. The start window no
+   longer counts the town as a project, so it still shows, under the
+   town, when nothing else is open.
 2. The generated `CLAUDE.md` and `--add-dir` for project folders.
 3. `--project` on the quest CLI and `horadric projects`.
 4. "Found a project".

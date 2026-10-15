@@ -90,6 +90,9 @@ const TILE_TEXT_X: f32 = 56.0;
 /// A window's name from the left of its header, in line with the text in
 /// the boxes below it.
 const NAME_INSET: f32 = INNER_PAD;
+
+/// Room the town's mark takes before its name, in DIPs.
+const TOWN_MARK: f32 = 20.0;
 /// Between the edge of a key, screen or section and the text in it.
 const INNER_PAD: f32 = 14.0;
 /// The room a background session's mark takes after a catch-up line.
@@ -253,6 +256,9 @@ unsafe fn format(
 pub struct Scene<'a> {
     pub layout: &'a ClusterLayout,
     pub name: &'a str,
+    /// The cluster is Tristram's, drawn with the town's mark so it never
+    /// reads as one more repository.
+    pub town: bool,
     pub collapsed: bool,
     pub sessions: &'a [&'a Session],
     /// How each tile draws this frame, in the same order.
@@ -2646,6 +2652,7 @@ impl Painter<'_> {
         let Scene {
             layout,
             name,
+            town,
             collapsed,
             sessions,
             ..
@@ -2661,7 +2668,17 @@ impl Painter<'_> {
         }
 
         let cy = h.y + h.h / 2.0;
-        let name_x = h.x + NAME_INSET;
+        let mut name_x = h.x + NAME_INSET;
+        if town {
+            // Segoe Fluent's house, in the town's colour.
+            self.icon(
+                &gpu.icon_small,
+                scene.accent,
+                '\u{E80F}',
+                Rect::new(name_x - 2.0, h.y, 18.0, h.h),
+            );
+            name_x += TOWN_MARK;
+        }
         let name_w = self.measure(gpu, &gpu.display, name).min(h.w * 0.62);
         self.text(
             &gpu.display,
