@@ -139,3 +139,19 @@ Each is a quest.
    that, 1.4 ms again from memory. The pane should chart it off the UI
    thread the first time. Drawing it in the town's pane is left for
    after step 2.
+
+Wired into the pane 2026-10-16, steps 3 and 4 together. `sky::shine`
+turns a glow into what a frame lights by node index, and the frame
+carries each dot's glow and fade and the sparks. A lit dot is drawn over
+a few rings of its session's colour, thinning outward, so a lit cluster
+reads as one light. The app redraws every open sanctuary when the glows'
+stamp moved on a hook event, and the pane runs its vsync clock while
+anything fades, then stops. The town's pane (`sanctuary::Town`, built
+by `lore::town_graph` from the sky) is one graph whose ids carry their
+project, at fixed points, each galaxy named, and a click that does not
+drag fits the view to the galaxy under it.
+
+Orphans moved from one ring to a band of rings around the middle of the
+linked nodes: with hundreds of orphans one ring sat so far out that the
+linked part, the picture worth seeing, was a speck when fitted. The
+sky re-rings positions kept by an older build the same way.

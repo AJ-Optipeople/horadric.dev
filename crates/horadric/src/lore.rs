@@ -283,6 +283,10 @@ fn chart(
     if graph.nodes.iter().any(|n| !at.at.contains_key(&n.id)) {
         at = sanctuary::layout(&graph, &at);
         place.keep_positions(&at)?;
+    } else {
+        // Kept by an older build, the orphans may sit on a ring far out;
+        // a layout with nothing new moves only them, back beside the rest.
+        at = sanctuary::Layout::new(&graph, &at).kept(&graph);
     }
     // Building wrote the code index and keeping wrote the positions, so
     // their times are taken again; the rest as they were before reading,
