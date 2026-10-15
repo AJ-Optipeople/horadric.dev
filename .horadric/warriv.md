@@ -5,6 +5,7 @@
 - A quest session silent for hours with an empty worktree after two nudges is dead and I can not restart it: hand it to the human with "restart it", who does so (settled on "OSC 7501: plain terminals", which then landed).
 
 ## Lately
+- 2026-10-16 Round (main at 78b141e): "Arcane Sanctuary: the graph and its layout" landed, but nothing shows it until the pane quest lands, and the sky quest works in the shared tree (sky.rs uncommitted). Held the ship until the pane lands. Both under way quests are the human's own, no Model: line added.
 - 2026-10-15 Stall wake (main at 9897c76): only the pack comparison waits, as expected. No open aim. Nothing to do.
 - 2026-10-15 Stall wake (main at c4d7f33): only the pack comparison waits, as expected. No open aim. Nothing to do.
 - 2026-10-15 Stall wake (main at ab5e826): only the pack comparison waits, as expected. No open aim. Nothing to do.
@@ -154,3 +155,4 @@
 
 ## Open
 - Once quests run with a pack, the pack comparison resumes by itself.
+- Ship Local once "Arcane Sanctuary: the pane on the stage" lands; public once the sky quest is in too.
