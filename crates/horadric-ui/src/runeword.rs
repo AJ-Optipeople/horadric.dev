@@ -965,7 +965,7 @@ impl App {
             }
             None => self.cast_on_project(key, label, runes.clone()),
         }
-        if label == ship::STONE {
+        if label == ship::STONE || label == ship::PUBLIC {
             store::chronicle(&chronicle::Record {
                 at: unix_now(),
                 project: key.to_string(),
@@ -1023,7 +1023,7 @@ impl App {
                 return;
             }
         }
-        if label == ship::STONE {
+        if label == ship::STONE || label == ship::PUBLIC {
             store::chronicle(&chronicle::Record {
                 at: unix_now(),
                 project: key.clone(),

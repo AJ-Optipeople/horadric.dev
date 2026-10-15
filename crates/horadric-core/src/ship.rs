@@ -33,6 +33,28 @@ pub fn last(key: &str, log: &str, records: &[Record]) -> Option<u64> {
         .max()
 }
 
+/// How long a cast ship counts as under way without a reload to show for
+/// it: a release build, the checks and the reload fit well inside, and a
+/// cast that never reloaded must not hold shipping for good.
+pub const UNDER_WAY: u64 = 30 * 60;
+
+/// Whether a ship of the project at `key` is under way at `now`: a ship
+/// stone was cast less than [`UNDER_WAY`] ago, and no reload has finished
+/// since. Until it has, the last ship is still the one before, so every
+/// round would be told to ship again.
+pub fn under_way(key: &str, log: &str, records: &[Record], now: u64) -> bool {
+    let Some(cast) = records
+        .iter()
+        .filter(|r| r.project == key && r.what == Happened::Shipped)
+        .map(|r| r.at)
+        .max()
+    else {
+        return false;
+    };
+    let reloaded_since = newest(log).is_some_and(|at| at >= cast) && came_up(log).is_some();
+    !reloaded_since && now.saturating_sub(cast) < UNDER_WAY
+}
+
 /// Whether the reload `reload.log` tells of is over: None while it is
 /// still under way, else whether the new build came up.
 pub fn came_up(log: &str) -> Option<bool> {
@@ -204,9 +226,10 @@ pub fn resumes(held: &Held, records: &[Record], checked: bool) -> bool {
 }
 
 /// Whether a round of a driven project ships: quests landed since the last
-/// ship, the checks passed on `main`, and no rail holds it.
-pub fn due(landed: usize, checked: bool, held: bool) -> bool {
-    landed > 0 && checked && !held
+/// ship, the checks passed on `main`, no rail holds it, and no ship is
+/// already under way.
+pub fn due(landed: usize, checked: bool, held: bool, under_way: bool) -> bool {
+    landed > 0 && checked && !held && !under_way
 }
 
 /// What a round is told of shipping, None when there is nothing to say:
@@ -455,10 +478,27 @@ mod tests {
 
     #[test]
     fn a_round_ships_when_quests_landed_on_green_and_nothing_holds() {
-        assert!(due(1, true, false));
-        assert!(!due(0, true, false));
-        assert!(!due(1, false, false));
-        assert!(!due(1, true, true));
+        assert!(due(1, true, false, false));
+        assert!(!due(0, true, false, false));
+        assert!(!due(1, false, false, false));
+        assert!(!due(1, true, true, false));
+        assert!(!due(1, true, false, true));
+    }
+
+    #[test]
+    fn a_cast_ship_is_under_way_until_a_reload_after_it_is_over() {
+        let cast = [rec(200, KEY, Happened::Shipped)];
+        assert!(under_way(KEY, LOG, &cast, 300));
+        assert!(!under_way("c:/elsewhere", LOG, &cast, 300));
+        assert!(!under_way(KEY, LOG, &[], 300));
+        let busy = "210 installing C:\\x into C:\\y\n";
+        assert!(under_way(KEY, busy, &cast, 300));
+        let done = format!("{busy}215 reloaded\n");
+        assert!(!under_way(KEY, &done, &cast, 300));
+        let rolled = format!("{busy}215 rolled back\n");
+        assert!(!under_way(KEY, &rolled, &cast, 300));
+        // A cast that never reloaded stops holding after a while.
+        assert!(!under_way(KEY, LOG, &cast, 200 + UNDER_WAY));
     }
 
     #[test]

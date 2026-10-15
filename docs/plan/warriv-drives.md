@@ -163,7 +163,10 @@ rails:
 **Built on 2026-10-05**: a round's picture says what to do about
 shipping (`ship::brief`, pure and tested), in a project with a "Ship
 Local" stone. `ship::due` ships when any quest landed since the last
-ship, the checks passed on `main` and nothing holds it; then the round
+ship, the checks passed on `main`, nothing holds it and no ship is
+under way (`ship::under_way`, added 2026-10-15: a ship stone cast in
+the last 30 minutes with no finished reload since; without it every
+landing during a build told its round to ship again); then the round
 is told to cast "Ship Local", or with "and ships public" on to cast
 "Ship Public" when the work is worth a release and "Ship Local" else.
 The cast is a session of its own, as any stone's. The rails are kept

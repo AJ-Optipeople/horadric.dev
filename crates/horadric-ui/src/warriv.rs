@@ -526,7 +526,8 @@ impl App {
             let ship = drive
                 .filter(|_| stones.iter().any(|s| s.label == ship::STONE))
                 .and_then(|d| {
-                    let due = ship::due(landed, checked, held.is_some());
+                    let busy = ship::under_way(key, &log, &records, unix_now());
+                    let due = ship::due(landed, checked, held.is_some(), busy);
                     ship::brief(due, d.ships_public, held)
                 });
             (warriv::main_line(&head, checked, landed), ship)
