@@ -116,10 +116,6 @@ pub struct SavedState {
     /// turned on from the tray.
     #[serde(default)]
     pub sounds: bool,
-    /// Tristram's tile is hidden, from its header menu or the Settings
-    /// window. It shows again while a session runs in the town.
-    #[serde(default)]
-    pub town_hidden: bool,
     /// The Horadric Cube is shown, off until turned on from the usage
     /// window's menu.
     #[serde(default)]
@@ -772,7 +768,6 @@ mod tests {
             theme: Some("glass".into()),
             quiet: true,
             sounds: true,
-            town_hidden: true,
             discord: Discord::Named,
             run: Some(SavedRun {
                 start: 100,
@@ -810,7 +805,6 @@ mod tests {
         assert_eq!(back.theme, state.theme);
         assert!(back.quiet);
         assert!(back.sounds);
-        assert!(back.town_hidden);
         assert_eq!(back.discord, Discord::Named);
         assert_eq!(back.run, state.run);
         assert_eq!(back.screen, state.screen);
