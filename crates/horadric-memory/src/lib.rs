@@ -14,8 +14,6 @@ use candle_nn::VarBuilder;
 use candle_transformers::models::bert::{BertModel, Config as BertConfig};
 use tokenizers::Tokenizer;
 
-pub use gemma::MOST_TOKENS;
-
 /// The models Horadric can embed with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
@@ -47,6 +45,16 @@ impl Kind {
             Kind::EmbeddingGemma => "task: search result | query: ",
             Kind::BgeSmall => "Represent this sentence for searching relevant passages: ",
             Kind::MiniLm => "",
+        }
+    }
+
+    /// The longest input read, in tokens: what each model was trained to
+    /// read, as sentence-transformers cuts it.
+    pub fn most_tokens(self) -> usize {
+        match self {
+            Kind::EmbeddingGemma => gemma::MOST_TOKENS,
+            Kind::BgeSmall => 512,
+            Kind::MiniLm => 256,
         }
     }
 
@@ -128,7 +136,7 @@ impl Embedder {
             .tokenizer
             .encode(text, true)
             .map_err(|e| e.to_string())?;
-        let ids = keep_ends(enc.get_ids(), MOST_TOKENS);
+        let ids = keep_ends(enc.get_ids(), self.kind.most_tokens());
         let err = |e: candle_core::Error| e.to_string();
         match &self.net {
             Net::Gemma(g) => g.embed(&ids).map_err(err),

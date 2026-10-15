@@ -75,10 +75,11 @@ fn main() {
         PathBuf::from(std::env::var("APPDATA").expect("APPDATA")).join("Horadric-dev/models");
     let cache = here.join("../../target/yardstick");
     std::fs::create_dir_all(&cache).expect("cache folder");
-    let stamp = format!(
-        "{:x}",
-        horadric_core::lore::hash(&std::fs::read(set.join("corpus.jsonl")).expect("corpus"),)
-    );
+    // The code that makes the vectors is part of the key, so a change to
+    // a model's layers or prompts is never scored on stale vectors.
+    let mut keyed = std::fs::read(set.join("corpus.jsonl")).expect("corpus");
+    keyed.extend(include_str!("../src/lib.rs").bytes());
+    keyed.extend(include_str!("../src/gemma.rs").bytes());
     for (name, kind) in kinds {
         if !wanted.is_empty() && !wanted.iter().any(|w| w == name) {
             continue;
@@ -92,7 +93,12 @@ fn main() {
             t.elapsed(),
             memory_mb() - before
         );
-        let file = cache.join(format!("{name}-{stamp}.json"));
+        let weights = std::fs::metadata(models.join(kind.folder()).join("model.safetensors"))
+            .map_or(0, |m| m.len());
+        let mut key = keyed.clone();
+        key.extend(weights.to_le_bytes());
+        let stamp = horadric_core::lore::hash(&key);
+        let file = cache.join(format!("{name}-{stamp:x}.json"));
         let docs: Vec<Vec<f32>> = match std::fs::read(&file) {
             Ok(b) => serde_json::from_slice(&b).expect("cached vectors"),
             Err(_) => {
@@ -189,7 +195,8 @@ fn rank_lore(corpus: &[Chunk], questions: &[Question]) -> Ranking {
                 .map(|(i, h)| (asked.iter().filter(|w| h.contains(w)).count(), i))
                 .filter(|(n, _)| *n > 0)
                 .collect();
-            s.sort_by_key(|x| std::cmp::Reverse(x.0));
+            // Ties go to the later chunk, as the lore's go to the newer note.
+            s.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
             s.into_iter().map(|(_, i)| i).collect()
         })
         .collect()

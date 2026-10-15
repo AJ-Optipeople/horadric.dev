@@ -100,33 +100,36 @@ state folder's `models\`, fetched by hand for now.
 Measured on this machine (i7-11700K, CPU shared with other sessions),
 chunks of 759 characters on average, recall at 5:
 
-| | alone | fused with words | ms a chunk | memory |
-|---|---|---|---|---|
-| words (the lore today) | 61.5 % | | | |
-| BM25 | 67.7 % | | | |
-| all-MiniLM-L6-v2, 384 | 73.8 % | **87.7 %** | 82 | 92 MB |
-| bge-small-en-v1.5, 384 | 76.9 % | 84.6 % | 159 | 134 MB |
-| EmbeddingGemma 300M, 768 | 80.0 % | 84.6 % | 234 | 858 MB |
-| EmbeddingGemma, cut to 256 | 70.8 % | 83.1 % | | |
-| EmbeddingGemma, cut to 128 | 72.3 % | 81.5 % | | |
+| | alone | fused with BM25 | fused with words | ms a chunk | memory |
+|---|---|---|---|---|---|
+| words (the lore today) | 63.1 % | | | | |
+| BM25 | 67.7 % | | | | |
+| all-MiniLM-L6-v2, 384 | 76.9 % | **87.7 %** | 80.0 % | 74 | 92 MB |
+| bge-small-en-v1.5, 384 | 76.9 % | 76.9 % | 72.3 % | 164 | 133 MB |
+| EmbeddingGemma 300M, 768 | 80.0 % | 84.6 % | 83.1 % | 232 | 858 MB |
+| EmbeddingGemma, cut to 256 | 70.8 % | 80.0 % | 75.4 % | | |
+| EmbeddingGemma, cut to 128 | 70.8 % | 73.8 % | 75.4 % | | |
 
-"Fused with words" is reciprocal rank fusion with the lore's word
-matching; fused with BM25 instead it is about the same (MiniLM 87.7 %,
-Gemma 84.6 %). Memory is the working set the loaded model adds. Gemma's
-peak while loading is 2.8 GB, with its token table already kept in half
-precision (a third of a billion numbers; full precision adds 400 MB).
+Fusion is reciprocal rank fusion. "Words" is the lore's matching today,
+a count of shared words; its scores tie so often that the order ties
+are broken in moved its own recall and every fusion with it by several
+points, which is one more reason part 3 writes BM25. The time is with
+candle using every core. Memory is the working set the loaded model
+adds. Gemma's peak while loading is 2.8 GB, with its token table already
+kept in half precision (a fifth of a billion numbers; full precision
+adds 400 MB).
 
-**Chosen: all-MiniLM-L6-v2** (decided 2026-10-16). Fused, which is how
-recall will run, it finds the most, at a tenth of Gemma's memory and a
-third of its time a chunk: a year of dialogue (90k chunks) embeds in
-about two hours of one core's spare time, against six. Gemma alone is
-better on dialogue (81.8 % against 68.2 %), and fused that gap shrinks
-to 77.3 % against 81.8 %, two or three questions out of 65, which is
-within what a set this size can tell apart. It is English only; the
-human writes to the agents in English. Gemma stays runnable in the crate
-and the yardstick, so a larger set or a need for other languages can
-reopen this with numbers, and since vectors are a cache tagged by model,
-changing it later costs one background re-embed.
+**Chosen: all-MiniLM-L6-v2** (decided 2026-10-16). Fused with BM25, as
+recall will run, it and EmbeddingGemma are a tie: 87.7 % against
+84.6 % is two questions of 65, within what a set this size can tell
+apart. On cost they are not close: MiniLM takes a tenth of the memory
+and a third of the time a chunk, so a year of dialogue (90k chunks)
+embeds in under two hours of the whole CPU, against six. Gemma alone is
+better on dialogue (81.8 % against MiniLM's 72.7 %), and that is the
+part that will grow most, so a larger yardstick may reopen this. MiniLM
+is English only; the human writes to the agents in English. Gemma stays
+runnable in the crate and the yardstick, and since vectors are a cache
+tagged by model, changing later costs one background re-embed.
 
 Weights: sentence-transformers/all-MiniLM-L6-v2 at commit
 `1110a243fdf4706b3f48f1d95db1a4f5529b4d41`, SHA-256 of `model.safetensors`

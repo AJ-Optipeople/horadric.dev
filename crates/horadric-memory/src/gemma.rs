@@ -27,9 +27,7 @@ pub struct Config {
     pub layer_types: Vec<String>,
 }
 
-/// The longest input read, in tokens. Up to the sliding window every
-/// layer sees the whole input, so no mask is needed; memory chunks are
-/// far shorter than this.
+/// The longest input read, in tokens. Memory chunks are far shorter.
 pub const MOST_TOKENS: usize = 512;
 
 struct RmsNorm {
@@ -135,7 +133,7 @@ impl Layer {
         })
     }
 
-    fn forward(&self, xs: &Tensor, rope: &Rope) -> Result<Tensor> {
+    fn forward(&self, xs: &Tensor, rope: &Rope, mask: Option<&Tensor>) -> Result<Tensor> {
         let (b, len, _) = xs.dims3()?;
         let x = self.input_norm.forward(xs)?;
         let split = |t: Tensor, n: usize| {
@@ -152,6 +150,10 @@ impl Layer {
         let k = candle_transformers::utils::repeat_kv(k, groups)?.contiguous()?;
         let v = candle_transformers::utils::repeat_kv(v, groups)?.contiguous()?;
         let w = (q.matmul(&k.transpose(2, 3)?)? * self.scale)?;
+        let w = match mask {
+            Some(m) => w.broadcast_add(m)?,
+            None => w,
+        };
         let w = candle_nn::ops::softmax_last_dim(&w)?;
         let attn = w
             .matmul(&v)?
@@ -173,21 +175,21 @@ pub struct Gemma {
     norm: RmsNorm,
     dense: [Linear; 2],
     hidden: usize,
+    /// How far apart two tokens may be and still see each other in a
+    /// sliding layer.
+    window: usize,
 }
 
 impl Gemma {
     /// Loads the model laid out as sentence-transformers saves it: the
     /// text model at the top of `dir`, the two dense layers in
-    /// `2_Dense` and `3_Dense`. The token table, a third of a billion
+    /// `2_Dense` and `3_Dense`. The token table, a fifth of a billion
     /// numbers, is kept in half precision when `small_table` is set,
     /// which halves the memory the model takes.
     pub fn load(dir: &Path, small_table: bool) -> Result<Gemma> {
         let dev = Device::Cpu;
         let cfg: Config = serde_json::from_slice(&std::fs::read(dir.join("config.json"))?)
             .map_err(candle_core::Error::wrap)?;
-        if cfg.sliding_window < MOST_TOKENS {
-            candle_core::bail!("a sliding window under {MOST_TOKENS} tokens needs a mask");
-        }
         // SAFETY: the files are only read, and Horadric never writes them
         // while a model is loaded.
         let vb = unsafe {
@@ -234,21 +236,60 @@ impl Gemma {
             norm,
             dense: [dense("2_Dense")?, dense("3_Dense")?],
             hidden: cfg.hidden_size,
+            // Read both ways, Hugging Face halves the window to each side,
+            // plus one: the reference implementation, and so the training.
+            window: cfg.sliding_window / 2 + 1,
         })
     }
 
     /// The unit vector for one input's token ids, at most [`MOST_TOKENS`].
     pub fn embed(&self, ids: &[u32]) -> Result<Vec<f32>> {
         let dev = Device::Cpu;
+        let len = ids.len();
         let ids = Tensor::new(ids, &dev)?.unsqueeze(0)?;
+        let mask = if len > self.window {
+            Some(Tensor::from_vec(band(len, self.window), (len, len), &dev)?)
+        } else {
+            None
+        };
         let mut xs =
             (self.embed.forward(&ids)?.to_dtype(DType::F32)? * (self.hidden as f64).sqrt())?;
         for layer in &self.layers {
-            xs = layer.forward(&xs, &self.ropes[layer.rope])?;
+            let sliding = mask.as_ref().filter(|_| layer.rope == 0);
+            xs = layer.forward(&xs, &self.ropes[layer.rope], sliding)?;
         }
         let pooled = self.norm.forward(&xs)?.mean(1)?;
         let out = pooled.apply(&self.dense[0])?.apply(&self.dense[1])?;
         let out = out.broadcast_div(&out.sqr()?.sum_keepdim(D::Minus1)?.sqrt()?)?;
         out.squeeze(0)?.to_vec1()
+    }
+}
+
+/// The mask of a sliding layer read both ways: token `i` sees token `j`
+/// when they are fewer than `window` apart.
+fn band(len: usize, window: usize) -> Vec<f32> {
+    (0..len * len)
+        .map(|n| {
+            let (i, j) = (n / len, n % len);
+            if i.abs_diff(j) < window {
+                0.0
+            } else {
+                f32::NEG_INFINITY
+            }
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_sliding_layer_sees_only_its_neighbours() {
+        let inf = f32::NEG_INFINITY;
+        assert_eq!(
+            band(3, 2),
+            vec![0.0, 0.0, inf, 0.0, 0.0, 0.0, inf, 0.0, 0.0]
+        );
     }
 }
