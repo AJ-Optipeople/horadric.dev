@@ -1073,24 +1073,67 @@ impl GridTarget {
                 None,
             );
         }
+        let disc = |at: (f32, f32), r: f32, c: Color| {
+            self.brush.SetColor(&render::color(c));
+            self.rt.FillEllipse(
+                &D2D1_ELLIPSE {
+                    point: Vector2 { X: at.0, Y: at.1 },
+                    radiusX: r,
+                    radiusY: r,
+                },
+                &self.brush,
+            );
+        };
+        // What an agent touched glows under every dot, a few rings of its
+        // session's colour thinning outward, so a lit cluster reads as one
+        // light rather than as single dots.
         for d in &sky.dots {
-            let c = match (d.hovered, d.lit) {
+            if let Some((rgb, strength)) = d.glow {
+                let c = Color::rgb(rgb);
+                let reach = 4.0 + 10.0 * strength;
+                for (grow, alpha) in [(1.0, 0.10), (0.6, 0.16), (0.3, 0.26)] {
+                    disc(
+                        d.at,
+                        d.r + reach * grow,
+                        c.with_alpha(alpha * strength * d.fade),
+                    );
+                }
+            }
+        }
+        for d in &sky.dots {
+            let mut c = match (d.hovered, d.lit) {
                 (true, _) => accent,
                 (false, true) => kind_color(d.kind).mix(accent, 0.6),
                 _ => kind_color(d.kind),
             };
-            self.brush.SetColor(&render::color(c));
-            self.rt.FillEllipse(
-                &D2D1_ELLIPSE {
-                    point: Vector2 {
-                        X: d.at.0,
-                        Y: d.at.1,
-                    },
-                    radiusX: d.r,
-                    radiusY: d.r,
+            if let Some((rgb, strength)) = d.glow {
+                if !d.hovered {
+                    c = c.mix(Color::rgb(rgb).mix(ink, 0.25), strength.min(1.0));
+                }
+            }
+            if d.fade < 1.0 {
+                c = c.with_alpha(d.fade.max(0.0));
+            }
+            disc(d.at, d.r, c);
+        }
+        for s in &sky.sparks {
+            let c = Color::rgb(s.rgb);
+            self.brush.SetColor(&render::color(c.with_alpha(0.7)));
+            self.rt.DrawLine(
+                Vector2 {
+                    X: s.tail.0,
+                    Y: s.tail.1,
+                },
+                Vector2 {
+                    X: s.at.0,
+                    Y: s.at.1,
                 },
                 &self.brush,
+                1.6,
+                None,
             );
+            disc(s.at, 5.0, c.with_alpha(0.25));
+            disc(s.at, 2.2, c.mix(ink, 0.4));
         }
         // A name is drawn over a halo of the background, so it reads over
         // the dots and threads behind it.

@@ -32,14 +32,12 @@ pub fn now() -> f64 {
 
 /// Changes whenever any project is touched, so a still pane can tell
 /// cheaply whether it has light to draw again.
-#[allow(dead_code)]
 pub fn stamp() -> u64 {
     STAMP.load(Ordering::Acquire)
 }
 
 /// Reads the glow of the project `key`, None when nothing in it was
 /// touched since the app started.
-#[allow(dead_code)]
 pub fn with<R>(key: &str, f: impl FnOnce(&Glow) -> R) -> Option<R> {
     glows().lock().ok()?.get(key).map(f)
 }

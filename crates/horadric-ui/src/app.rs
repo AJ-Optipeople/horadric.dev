@@ -832,6 +832,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             views: HashMap::new(),
             webs: HashMap::new(),
             skies: HashMap::new(),
+            glow_stamp: 0,
             web_ask: None,
             pane_ask: None,
             stage: None,
@@ -2876,6 +2877,8 @@ struct App {
     /// Arcane Sanctuaries, at most one per project, by project key. What
     /// they show is `sanctuary`'s and outlives the pane.
     skies: HashMap<String, Arc<Console>>,
+    /// The glows' stamp the sanctuaries were last drawn at.
+    glow_stamp: u64,
     /// What to ask for which project's browser pane, once out of the borrow.
     web_ask: Option<(String, WebAsk)>,
     /// Which session pane's header button to act on, once out of the
@@ -3138,6 +3141,7 @@ impl App {
     fn on_message(&mut self, msg: u32, wparam: usize) {
         match msg {
             WM_HORADRIC_EVENT => {
+                self.light_skies();
                 let events = EVENTS.swap(0, Ordering::AcqRel);
                 if events & EVENTS_DUE == 0 {
                     return;
@@ -6207,6 +6211,20 @@ impl App {
         if self.fill_stage(key) {
             if let Some(stage) = &self.stage {
                 stage.focus_session(&id);
+            }
+        }
+    }
+
+    /// An agent touched something: every sanctuary on the stage draws it
+    /// lit and runs its clock while the light fades.
+    fn light_skies(&mut self) {
+        let stamp = crate::glows::stamp();
+        if std::mem::replace(&mut self.glow_stamp, stamp) == stamp {
+            return;
+        }
+        if let Some(stage) = &self.stage {
+            for sky in self.skies.values() {
+                stage.refresh(sky.serial);
             }
         }
     }

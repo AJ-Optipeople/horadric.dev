@@ -170,6 +170,7 @@ fn main() -> ExitCode {
         #[cfg(windows)]
         Some("app") => {
             horadric_ui::sanctuary::set_source(lore::graph_at);
+            horadric_ui::sanctuary::set_town_source(lore::town_graph);
             horadric_ui::app::run(
                 horadric_hooks::port(),
                 args.get(1).is_some_and(|a| a == "--reload"),

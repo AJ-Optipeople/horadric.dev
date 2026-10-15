@@ -2848,7 +2848,9 @@ impl Pane {
             WM_LBUTTONUP if self.console.sky.is_some() => {
                 if let Some(key) = &self.console.sky {
                     if sanctuary::dragging(key) {
-                        sanctuary::release(key);
+                        if sanctuary::release(key) {
+                            self.invalidate();
+                        }
                         unsafe {
                             let _ = ReleaseCapture();
                         }
@@ -2938,7 +2940,7 @@ impl Pane {
                     self.invalidate();
                 }
                 if let Some(key) = &self.console.sky {
-                    sanctuary::release(key);
+                    sanctuary::cancel(key);
                 }
                 // Capture taken away mid press, by a menu or Alt+Tab: the
                 // program must not think the button is still down.

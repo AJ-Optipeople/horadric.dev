@@ -4,6 +4,9 @@
 //! (docs/plan/the-arcane-sanctuary.md). Pure, so the pane only draws what
 //! this says.
 
+use std::collections::HashMap;
+
+use horadric_core::glow::Glow;
 use horadric_core::sanctuary::{Graph, Kind};
 
 /// How much of the room a fitted picture leaves free at each side, in DIPs.
@@ -158,6 +161,47 @@ fn cut(s: &str) -> String {
     }
 }
 
+/// What the agents lit in a graph, by node index: each lit node's colour
+/// and strength, how far a deleted one has faded (1 still there, 0 gone),
+/// and the sparks travelling between two nodes, `t` of the way.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Light {
+    pub lit: HashMap<usize, (u32, f32)>,
+    pub gone: HashMap<usize, f32>,
+    pub sparks: Vec<(usize, usize, u32, f32)>,
+}
+
+/// Adds what `glow` lit at `now` to `light`, for the nodes `index` finds by
+/// id. `prefix` goes before each glow id, so the town's sky, whose ids
+/// carry their project, can take each project's glow in turn.
+pub fn shine(
+    index: &HashMap<String, usize>,
+    prefix: &str,
+    glow: &Glow,
+    now: f64,
+    light: &mut Light,
+) {
+    let find = |id: &str| index.get(&format!("{prefix}{id}")).copied();
+    for id in glow.touched() {
+        let Some(i) = find(id) else {
+            continue;
+        };
+        if let Some(l) = glow.light(id, now) {
+            if l.strength > 0.0 {
+                light.lit.insert(i, (l.rgb, l.strength));
+            }
+        }
+        if let Some(g) = glow.gone(id, now) {
+            light.gone.insert(i, g);
+        }
+    }
+    for s in glow.sparks(now) {
+        if let (Some(a), Some(b)) = (find(&s.from), find(&s.to)) {
+            light.sparks.push((a, b, s.rgb, s.t));
+        }
+    }
+}
+
 /// What is drawn of the graph in one frame, in DIPs. The colours are the
 /// pane's to pick from `kind`.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -167,7 +211,20 @@ pub struct SkyFrame {
     pub labels: Vec<Label>,
     /// Said in the middle while there is nothing to draw yet.
     pub message: Option<String>,
+    pub sparks: Vec<SparkMark>,
 }
+
+/// A spark on its way along a link: its head at `at`, its tail trailing
+/// back toward where it came from.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SparkMark {
+    pub at: (f32, f32),
+    pub tail: (f32, f32),
+    pub rgb: u32,
+}
+
+/// How long a spark's tail is, as a share of its link.
+const TAIL: f32 = 0.25;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Line {
@@ -188,6 +245,10 @@ pub struct Dot {
     pub lit: bool,
     /// Under the mouse itself.
     pub hovered: bool,
+    /// The colour and strength an agent lit it in.
+    pub glow: Option<(u32, f32)>,
+    /// 1 while it is there, falling to 0 as a deleted file fades out.
+    pub fade: f32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -207,6 +268,7 @@ pub fn frame(
     view: &View,
     hover: Option<usize>,
     room: [f32; 4],
+    light: &Light,
 ) -> SkyFrame {
     let [left, top, right, bottom] = room;
     let inside = |(x, y): (f32, f32), r: f32| {
@@ -250,6 +312,23 @@ pub fn frame(
                 kind: n.kind,
                 lit: linked.get(i).copied().unwrap_or(false),
                 hovered: hover == Some(i),
+                glow: light.lit.get(&i).copied(),
+                fade: light.gone.get(&i).copied().unwrap_or(1.0),
+            });
+        }
+    }
+    for &(a, b, rgb, t) in &light.sparks {
+        let (Some(pa), Some(pb)) = (points.get(a), points.get(b)) else {
+            continue;
+        };
+        let (a, b) = (view.to_screen(*pa), view.to_screen(*pb));
+        let along = |t: f32| (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t);
+        let at = along(t);
+        if inside(at, REACH) {
+            f.sparks.push(SparkMark {
+                at,
+                tail: along((t - TAIL).max(0.0)),
+                rgb,
             });
         }
     }
@@ -440,7 +519,7 @@ mod tests {
             y: 10.0,
         };
         let room = [0.0, 0.0, 120.0, 120.0];
-        let f = frame(&g, &pts, &v, Some(1), room);
+        let f = frame(&g, &pts, &v, Some(1), room, &Light::default());
         // The note far outside the room is left out.
         assert_eq!(f.dots.len(), 3);
         assert_eq!(f.lines.len(), 2);
@@ -456,5 +535,72 @@ mod tests {
         assert_eq!(hovered[0].text, "src/a.rs");
         // A hub named on its own is not named twice when hovered.
         assert!(!f.labels.iter().any(|l| l.text == "a.rs"));
+    }
+
+    fn index(g: &Graph, prefix: &str) -> HashMap<String, usize> {
+        g.nodes
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (format!("{prefix}{}", n.id), i))
+            .collect()
+    }
+
+    #[test]
+    fn shine_lights_the_touched_nodes_and_the_spark_between_them() {
+        use horadric_core::glow::Touch;
+        let g = graph();
+        let mut glow = Glow::default();
+        glow.touch("src/a.rs", Touch::Read, 0x112233, 0.0);
+        glow.touch("src/app.rs", Touch::Edit, 0x112233, 0.5);
+        glow.touch("not/in/graph.rs", Touch::Read, 0x112233, 0.6);
+        let mut light = Light::default();
+        shine(&index(&g, ""), "", &glow, 1.0, &mut light);
+        assert_eq!(light.lit.len(), 2);
+        assert_eq!(light.lit[&1].0, 0x112233);
+        assert!(
+            light.lit[&0].1 > light.lit[&1].1,
+            "an edit outshines a read"
+        );
+        assert_eq!(light.sparks.len(), 1);
+        assert_eq!((light.sparks[0].0, light.sparks[0].1), (1, 0));
+    }
+
+    #[test]
+    fn shine_finds_nodes_by_their_prefixed_ids() {
+        use horadric_core::glow::Touch;
+        let g = graph();
+        let mut glow = Glow::default();
+        glow.touch("src/b.rs", Touch::Read, 0x445566, 0.0);
+        let mut light = Light::default();
+        shine(&index(&g, "p\u{1f}"), "q\u{1f}", &glow, 0.5, &mut light);
+        assert!(
+            light.lit.is_empty(),
+            "another project's glow lights nothing"
+        );
+        shine(&index(&g, "p\u{1f}"), "p\u{1f}", &glow, 0.5, &mut light);
+        assert!(light.lit.contains_key(&2));
+    }
+
+    #[test]
+    fn a_frame_carries_the_light_and_the_sparks() {
+        let g = graph();
+        let pts = [[0.0, 0.0], [100.0, 0.0], [0.0, 50.0], [20.0, 20.0]];
+        let v = View {
+            scale: 1.0,
+            x: 0.0,
+            y: 0.0,
+        };
+        let mut light = Light::default();
+        light.lit.insert(1, (0xff0000, 0.5));
+        light.gone.insert(2, 0.25);
+        light.sparks.push((0, 1, 0x00ff00, 0.5));
+        let f = frame(&g, &pts, &v, None, [-10.0, -10.0, 200.0, 200.0], &light);
+        assert_eq!(f.dots[1].glow, Some((0xff0000, 0.5)));
+        assert_eq!(f.dots[0].glow, None);
+        assert_eq!(f.dots[2].fade, 0.25);
+        assert_eq!(f.dots[0].fade, 1.0);
+        assert_eq!(f.sparks.len(), 1);
+        assert!(close(f.sparks[0].at, (50.0, 0.0)));
+        assert!(close(f.sparks[0].tail, (25.0, 0.0)));
     }
 }

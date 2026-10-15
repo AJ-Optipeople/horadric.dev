@@ -189,6 +189,52 @@ pub fn town_sky() -> TownSky {
     }
 }
 
+/// Tristram's sky as one graph for the town's sanctuary pane: each
+/// project's nodes under its key, the links between them, every star where
+/// the sky put it.
+#[cfg(windows)]
+pub fn town_graph() -> Result<horadric_ui::sanctuary::Town, String> {
+    use horadric_ui::sanctuary::{Galaxy, Town, SEP};
+    let town = town_sky();
+    let mut graph = Graph::default();
+    let mut points = Vec::with_capacity(town.sky.stars.len());
+    for star in &town.sky.stars {
+        let c = &town.projects[star.galaxy];
+        let mut n = c.graph.nodes[star.node].clone();
+        n.id = format!("{}{SEP}{}", c.key, n.id);
+        n.label = format!("{}: {}", c.name, n.label);
+        graph.nodes.push(n);
+        points.push(star.at);
+    }
+    graph.links = town
+        .sky
+        .links
+        .iter()
+        .map(|l| sanctuary::Link {
+            a: l.a.min(l.b),
+            b: l.a.max(l.b),
+            weight: l.weight,
+        })
+        .collect();
+    let galaxies = town
+        .sky
+        .galaxies
+        .iter()
+        .map(|g| Galaxy {
+            key: g.key.clone(),
+            name: g.name.clone(),
+            centre: g.centre,
+            radius: g.radius,
+            nodes: g.stars.clone(),
+        })
+        .collect();
+    Ok(Town {
+        graph,
+        points,
+        galaxies,
+    })
+}
+
 fn stamp(sources: &[PathBuf]) -> Vec<Option<SystemTime>> {
     sources
         .iter()

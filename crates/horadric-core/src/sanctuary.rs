@@ -301,9 +301,11 @@ impl Layout {
         !self.still()
     }
 
-    /// Sets the orphans on a ring just outside the linked nodes, evenly,
-    /// in the graph's order, as Obsidian leaves its orphans drifting at
-    /// the edge rather than in the middle.
+    /// Sets the orphans in a band of rings just outside the linked nodes,
+    /// around their middle, as Obsidian leaves its orphans drifting at the
+    /// edge rather than in the middle. One wide ring for hundreds of
+    /// orphans would sit so far out that the linked part, the picture
+    /// worth seeing, shrank to a speck when the pane fits it all.
     fn ring(&mut self) {
         let mut linked = vec![false; self.pos.len()];
         for &i in &self.moving {
@@ -313,18 +315,29 @@ impl Layout {
         if orphans.is_empty() {
             return;
         }
+        let c = middle(self.moving.iter().map(|&i| self.pos[i]));
         let reach = self
             .moving
             .iter()
-            .map(|&i| (self.pos[i][0].powi(2) + self.pos[i][1].powi(2)).sqrt())
+            .map(|&i| dist(self.pos[i], c))
             .fold(0.0, f32::max);
-        // Far enough out that the ring itself is not crowded.
-        let around = LENGTH * 0.6 * orphans.len() as f32 / std::f32::consts::TAU;
-        let r = (reach + 2.0 * LENGTH).max(around);
-        for (k, &i) in orphans.iter().enumerate() {
-            let a = k as f32 / orphans.len() as f32 * std::f32::consts::TAU;
-            self.pos[i] = [r * a.cos(), r * a.sin()];
-            self.vel[i] = [0.0; 2];
+        let gap = LENGTH * 0.6;
+        let mut r = reach + LENGTH;
+        let mut left = &orphans[..];
+        let mut turn = 0.0;
+        while !left.is_empty() {
+            let fits = ((std::f32::consts::TAU * r / gap) as usize).max(1);
+            let (these, rest) = left.split_at(fits.min(left.len()));
+            for (k, &i) in these.iter().enumerate() {
+                let a = turn + k as f32 / these.len() as f32 * std::f32::consts::TAU;
+                self.pos[i] = [c[0] + r * a.cos(), c[1] + r * a.sin()];
+                self.vel[i] = [0.0; 2];
+            }
+            left = rest;
+            r += gap;
+            // Each ring turned against the last, so the dots do not line
+            // up in spokes.
+            turn += std::f32::consts::PI * (3.0 - 5f32.sqrt());
         }
     }
 
@@ -360,6 +373,25 @@ pub fn layout(g: &Graph, old: &Positions) -> Positions {
 
 fn add(a: [f32; 2], b: [f32; 2]) -> [f32; 2] {
     [a[0] + b[0], a[1] + b[1]]
+}
+
+/// The mean of `points`, or the origin when there are none.
+fn middle(points: impl Iterator<Item = [f32; 2]>) -> [f32; 2] {
+    let (mut sum, mut n) = ([0.0f32; 2], 0.0f32);
+    for p in points {
+        sum[0] += p[0];
+        sum[1] += p[1];
+        n += 1.0;
+    }
+    if n == 0.0 {
+        [0.0; 2]
+    } else {
+        [sum[0] / n, sum[1] / n]
+    }
+}
+
+fn dist(a: [f32; 2], b: [f32; 2]) -> f32 {
+    ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2)).sqrt()
 }
 
 /// A small offset that is the same for the same id every time, so a
@@ -565,10 +597,6 @@ mod tests {
         }
     }
 
-    fn dist(a: [f32; 2], b: [f32; 2]) -> f32 {
-        ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2)).sqrt()
-    }
-
     #[test]
     fn the_graph_joins_files_notes_and_quests() {
         let touched = Touched {
@@ -664,14 +692,15 @@ mod tests {
             "the clusters are apart: {} against {spread}",
             dist(m0, m1)
         );
+        let c = middle(g.nodes.iter().filter(|n| n.weight > 0).map(|n| p(&n.id)));
         let reach = g
             .nodes
             .iter()
             .filter(|n| n.weight > 0)
-            .map(|n| dist(p(&n.id), [0.0; 2]))
+            .map(|n| dist(p(&n.id), c))
             .fold(0.0, f32::max);
         for i in 0..3 {
-            let r = dist(p(&format!("lone/{i}")), [0.0; 2]);
+            let r = dist(p(&format!("lone/{i}")), c);
             assert!(r > reach, "orphan {i} at {r}, the rest within {reach}");
         }
         for v in at.at.values() {
