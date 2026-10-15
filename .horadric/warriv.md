@@ -5,6 +5,8 @@
 - A quest session silent for hours with an empty worktree after two nudges is dead and I can not restart it: hand it to the human with "restart it", who does so (settled on "OSC 7501: plain terminals", which then landed).
 
 ## Lately
+- 2026-10-15 Round (22:07, main at b10b665): the plus New label landed; Ship Public (cast 22:04, no tag yet) builds from main and should carry it. No cast, nothing else to do.
+- 2026-10-15 Stall wake (22:07, main at b10b665): only the pack comparison waits, expected until quests run with a pack. Ship Local reloaded; Ship Public (22:04) still under way, no v0.26.0 tag yet. Nothing to do.
 - 2026-10-15 Round (main at bfae2b1): nothing new to do. ship-local-71894 still building from bfae2b1 and Ship Public cast a minute earlier (last tag v0.25.0).
 - 2026-10-15 Stall wake (main at bfae2b1): only the pack comparison waits, on quests run with a pack, which is expected. "Found a project" landed (5182a14) and ship-local-71894 is building from it, so cast "Ship Public" for Lore and Tristram. No open aim to plan toward.
 - 2026-10-15 Round (main at d33393a): the 21:54 build reloaded fine (carries 5b0816a and 7a41147). "Tristram: quest --project" (d33393a, 21:57) and the plus New session label landed after it, so cast "Ship Local". Public held for "Found a project", the last Tristram quest, under way.
