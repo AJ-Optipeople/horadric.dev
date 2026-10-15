@@ -47,6 +47,27 @@ prompt: the plan parts and files they needed, at most a dozen, each with
 why. Warriv may write or correct a pack when it files a quest. A pack is
 a hint, never a rule: the agent still reads what it needs.
 
+Built 2026-10-15. `horadric_core::pack` reads a transcript for the files
+it read (Read, a Grep of one file, a path named in a Bash or PowerShell
+command, since agents `cat` as often as they Read) and changed (the
+writer tools), relative to the session's tree, so a worktree's paths
+match the main tree's. `quest done` keeps them as a `touched` record. A
+quest that starts gets the files of the three finished quests most like
+it, changes weighing double reads, files its notes name first, at most
+12, files gone from the tree left out, and a `packed` record says it
+had one. Alike is shared title and notes words weighed by rarity, one
+`After:` the other or both the same quest, and the same plan parts
+named. Warriv writes or corrects a pack through the quest's notes: a
+path named there leads the pack. `horadric quest pack "title"` shows
+what a quest would get.
+
+`horadric quest spend` sets done quests started with a pack beside
+those without, and first fills in the spend and files of quests done
+before either was kept, from their last conversation. The baseline on
+2026-10-15, 63 quests without a pack: median 6.5M tokens and 60 calls,
+Read 8%. The comparison with a pack waits for enough quests to run with
+one.
+
 ## 3. Notes shared between sessions
 
 Five sessions in one project each find out the same things. Two tools on

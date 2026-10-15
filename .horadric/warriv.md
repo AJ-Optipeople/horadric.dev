@@ -5,6 +5,8 @@
 - A quest session silent for hours with an empty worktree after two nudges is dead and I can not restart it: hand it to the human with "restart it", who does so (settled on "OSC 7501: plain terminals", which then landed).
 
 ## Lately
+- 2026-10-15 Wake: the first fix-up for hand-marked spend conflicted on merge too (task.rs, main moved). Its own fix-up was already running, so I gave it "Model: sonnet". If a third fix-up appears, look at why task.rs keeps clashing before letting it loop.
+- 2026-10-15 Round (main at b9d2c36): "Lore: a context pack for each new quest" landed (5f321c9), tree clean apart from Horadric's own files, so cast "Ship Local". Public still held until the code index and hand-marked spend land.
 - 2026-10-15 Wake: "Lore: count the spend of a quest marked done by hand" conflicted in task.rs on merge. The fix-up quest was already running, so I only gave it "Model: sonnet" and noted it.
 - 2026-10-15 Round (main at 75379ec): "Lore: take notes when a quest ends" landed, tree clean (the five under way quests work in worktrees), so cast "Ship Local". Public still held for the rest of Lore. Gave the three waiting Tristram quests "Model: sonnet".
 - 2026-10-15 Wake: "Lore: notes shared" said its auto merge failed (os error 267), but it is already on main (8a65e94 at c863656) and its branch and worktree are gone, so nothing to merge. Noted it.
