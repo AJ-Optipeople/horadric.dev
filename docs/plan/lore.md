@@ -73,15 +73,10 @@ files change, served by `lore_find` (where is `x` defined), `lore_calls`
 without its bodies). Shared by every session of the project, so it is
 built once and not per agent.
 
-It needs something that understands code. The choice is open, see Open
-questions below.
-
-## Open questions
-
-- **What reads the code for part 4?** tree-sitter (the `tree-sitter`
-  crate and one grammar crate per language, C compiled by `cc`) is what
-  Graphify and most of these tools use: accurate, many languages, a new
-  dependency. Language servers already installed (rust-analyzer,
-  typescript-language-server) need no crate but differ per language and
-  are slow to start. A regex outline like ctags needs nothing but misses
-  calls. To be decided by the human before part 4 starts.
+Code is read with tree-sitter (decided 2026-10-15): the `tree-sitter`
+crate and one grammar crate per language, starting with Rust,
+TypeScript and JavaScript, and Python. Accurate, fast, and what the tools
+this idea comes from use. Language servers were turned down because they
+differ per language and are slow to start; a ctags style regex outline
+because it misses calls. The quest that builds it adds tree-sitter to
+the dependency list in CLAUDE.md, with the reason.
