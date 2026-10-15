@@ -17,7 +17,7 @@ use horadric_core::tasks::{self, Mark, Wait};
 use horadric_core::{aim, runeword, tombs, warriv};
 use horadric_hooks::listener::TasksChanged;
 use horadric_hooks::{
-    client, tasks as file, transcript, COMMAND_HEADER, OWNER_ENV, SESSION_ENV, STATE_HEADER,
+    client, lore, tasks as file, transcript, COMMAND_HEADER, OWNER_ENV, SESSION_ENV, STATE_HEADER,
     TASKS_ENV, TASKS_PATH,
 };
 
@@ -228,6 +228,9 @@ fn report(cwd: &Path, blocked: Option<(&str, Option<On>)>, summary: &str) -> Res
     let project = held(cwd, &id).ok_or(format!("{NO_LOG} has a quest held by {id}"))?;
     record_summary(&project, &id, summary);
     record_spend(&project, &id, cwd);
+    if why.is_none() {
+        record_lore(&project, &id, cwd, summary);
+    }
     let mode = file::mode(&project);
     let mark = match why {
         Some(_) => Mark::Blocked,
@@ -597,31 +600,11 @@ fn record_summary(project: &Path, id: &str, summary: &str) {
     record(project, id.to_string(), &title, Happened::Summary { text });
 }
 
-/// Keeps what the quest's conversations spent in tokens and which files
-/// they read and changed: every one the chronicle saw a turn of, under this
-/// quest or a tomb of its batch, and this one, whose last turn has not
-/// ended yet. Codex keeps no usage per message, so its conversations count
-/// nothing.
+/// Keeps what the quest's [`conversations`] spent in tokens and which
+/// files they read and changed. Codex keeps no usage per message, so its
+/// conversations count nothing.
 fn record_spend(project: &Path, id: &str, cwd: &Path) {
-    let key = horadric_ui::folder_key(&project.to_string_lossy());
-    let quest = chronicle::quest_of(id);
-    let mut seen: Vec<(String, String)> = Vec::new();
-    if let Ok(now) = std::env::var("CLAUDE_CODE_SESSION_ID") {
-        seen.push((now, cwd.to_string_lossy().into_owned()));
-    }
-    for r in horadric_ui::chronicle_all() {
-        if r.project != key || chronicle::quest_of(&r.quest) != quest {
-            continue;
-        }
-        if let Happened::Turn {
-            conversation, cwd, ..
-        } = r.what
-        {
-            if !conversation.is_empty() && !seen.iter().any(|(c, _)| *c == conversation) {
-                seen.push((conversation, cwd));
-            }
-        }
-    }
+    let seen = conversations(project, id, cwd);
     let mut touched = Touched::default();
     for (conversation, cwd) in &seen {
         if let Some(t) = transcript::touched(cwd, conversation) {
@@ -658,6 +641,80 @@ fn record_spend(project: &Path, id: &str, cwd: &Path) {
             &title,
             Happened::Touched { read, changed },
         );
+    }
+}
+
+/// The conversations of a quest, each with the folder it ran in: every
+/// one the chronicle saw a turn of, under this quest or a tomb of its
+/// batch, and this one, whose last turn has not ended yet.
+fn conversations(project: &Path, id: &str, cwd: &Path) -> Vec<(String, String)> {
+    let key = horadric_ui::folder_key(&project.to_string_lossy());
+    let quest = chronicle::quest_of(id);
+    let mut seen: Vec<(String, String)> = Vec::new();
+    if let Ok(now) = std::env::var("CLAUDE_CODE_SESSION_ID") {
+        seen.push((now, cwd.to_string_lossy().into_owned()));
+    }
+    for r in horadric_ui::chronicle_all() {
+        if r.project != key || chronicle::quest_of(&r.quest) != quest {
+            continue;
+        }
+        if let Happened::Turn {
+            conversation, cwd, ..
+        } = r.what
+        {
+            if !conversation.is_empty() && !seen.iter().any(|(c, _)| *c == conversation) {
+                seen.push((conversation, cwd));
+            }
+        }
+    }
+    seen
+}
+
+/// Takes a lore note of what the quest achieved, naming the files it
+/// changed, so a later session asking about them finds it. An agent mid
+/// task rarely stops to take one itself. A quest done again replaces its
+/// note. A failure is only said: the quest is done either way.
+fn record_lore(project: &Path, id: &str, cwd: &Path, summary: &str) {
+    let list = tasks::parse(&file::read(project));
+    let Some(title) = chronicle::worked_by(&list, id).map(|t| t.title.clone()) else {
+        return;
+    };
+    let kept = lore::Place::of(cwd).and_then(|place| {
+        // A worktree's branch says exactly what the quest changed. In the
+        // main tree other sessions' changes are mixed in, so the files its
+        // own conversations wrote are taken instead.
+        let files = match place.branch_changes() {
+            Some(files) => files,
+            None => {
+                let mut written = Vec::new();
+                for (conversation, cwd) in conversations(project, id, cwd) {
+                    let text = transcript::path(&cwd, &conversation)
+                        .and_then(|p| std::fs::read_to_string(p).ok())
+                        .unwrap_or_default();
+                    written.extend(horadric_core::lore::edited(&text));
+                }
+                let rel = written
+                    .iter()
+                    .filter_map(|f| place.relative([f.as_str()]).ok())
+                    .flatten()
+                    .collect::<Vec<_>>()
+                    .join(
+                        "
+",
+                    );
+                horadric_core::lore::changed_paths(&rel)
+            }
+        };
+        let text = horadric_core::lore::quest_note(&title, summary);
+        let marks = place.marks(files);
+        let commit = place.commit();
+        place.change(|l| {
+            let old = l.of_quest(&title);
+            l.add(&text, marks, &commit, lore::now(), &old)
+        })
+    });
+    if let Err(e) = kept {
+        eprintln!("horadric: no lore note of this quest: {e}");
     }
 }
 
