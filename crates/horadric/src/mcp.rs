@@ -833,6 +833,28 @@ fn lore_tools() -> Vec<Value> {
             }),
             &[],
         ),
+        tool(
+            "lore_find",
+            "Where a function, method, type, trait, class or module is defined in this project, from an index of its code (Rust, TypeScript, JavaScript, Python) kept fresh as files change: each place with its lines and its signature. Quicker and smaller than grepping for it. Type::name or Type.name narrows it to one type's; a name not found exactly falls back to case and then to names that hold it.",
+            json!({ "name": { "type": "string", "description": "The name, or Type::name" } }),
+            &["name"],
+        ),
+        tool(
+            "lore_calls",
+            "Who calls a function or method in this project and what it calls, from the same index as lore_find: each call's file, line and the symbol it is in, and for what it calls, where each is defined. Matched by name, as the index does not know types: the callers of take include every .take(); Type::name leaves out calls written with another type's path.",
+            json!({
+                "name": { "type": "string", "description": "The name, or Type::name" },
+                "which": { "type": "string", "enum": ["callers", "callees", "both"],
+                    "description": "Callers, callees or both (the default)" },
+            }),
+            &["name"],
+        ),
+        tool(
+            "lore_outline",
+            "A file's outline: every function, method, type and class in it with its signature and lines, nested as in the file, without the bodies. Read it before reading a large file, then read only the lines you need.",
+            json!({ "file": { "type": "string", "description": "The file, relative to the project or absolute" } }),
+            &["file"],
+        ),
     ]
 }
 
@@ -844,7 +866,7 @@ fn tool(name: &str, description: &str, properties: Value, required: &[&str]) -> 
     })
 }
 
-const LORE: &str = "Horadric keeps notes shared by every session of this project, the lore. Before you explore a part of the code, ask lore_recall about it (words or files): another session may already have found out what you need. When you find out something the next session would otherwise have to find out again, leave it with lore_note, naming its files. A note marked maybe stale is a lead, not a fact: check it, and when it is wrong or outdated leave the right one with replaces.";
+const LORE: &str = "Horadric keeps notes shared by every session of this project, the lore. Before you explore a part of the code, ask lore_recall about it (words or files): another session may already have found out what you need. When you find out something the next session would otherwise have to find out again, leave it with lore_note, naming its files. A note marked maybe stale is a lead, not a fact: check it, and when it is wrong or outdated leave the right one with replaces. It also keeps an index of the project's code: ask lore_find where a name is defined, lore_calls who calls it, and lore_outline what a file holds, before you grep or read whole files.";
 
 const INSTRUCTIONS: &str = "Horadric gives this session a browser, and it is the one to use: a pane on the Horadric stage beside the user's terminals, one per project with tabs, shared by the project's sessions. You work in a tab of your own: the first page you open or look at becomes yours (the tab shown, unless another session has it, else a new one), and your calls stay in it whichever tab the user shows. A popup your click opens becomes yours until it closes. The user sees the page you drive. Whenever a task needs the web (trying a page you built, testing a local server, reading docs, a login, a screenshot of a page), use these tools rather than Playwright, Puppeteer, the Chrome DevTools MCP, Claude in Chrome, or starting Chrome, Edge or a headless browser yourself, unless the user asks for one of those. Open it with browser_open or browser_navigate, read it with browser_snapshot, act with browser_click, browser_type, browser_select (for a dropdown) and browser_press, and look \
 with browser_screenshot. Refs from browser_snapshot are surer than guessed selectors. Close your tab with \
@@ -1159,7 +1181,16 @@ mod tests {
             .iter()
             .map(|t| t["name"].clone())
             .collect();
-        assert_eq!(names, [json!("lore_note"), json!("lore_recall")]);
+        assert_eq!(
+            names,
+            [
+                "lore_note",
+                "lore_recall",
+                "lore_find",
+                "lore_calls",
+                "lore_outline"
+            ]
+        );
         let init = json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize" });
         assert_eq!(s.handle(&init).unwrap()["result"]["instructions"], LORE);
     }

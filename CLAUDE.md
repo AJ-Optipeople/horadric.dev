@@ -34,9 +34,12 @@ Do not reopen these without asking. They were argued through and chosen.
 - **Dependencies are justified one at a time.** Today: `serde`, `serde_json`,
   `windows`, `windows-numerics`, `alacritty_terminal` for the terminal
   grid (writing a VT parser is not the project), `syntect` for the
-  file viewer's colours (writing grammars is not either), and
+  file viewer's colours (writing grammars is not either),
   `webview2-com` for the browser pane (the WebView2 COM bindings, on the
-  same `windows` version). Not a crate but vendored: `conpty.dll` and
+  same `windows` version), and `tree-sitter` with one grammar crate per
+  language (Rust, TypeScript and JavaScript, Python) for the lore's code
+  index (parsing languages is not the project either, and it finds the
+  calls a regex outline misses). Not a crate but vendored: `conpty.dll` and
   `OpenConsole.exe` from Microsoft's ConPTY package, the pseudo console
   that passes `CSI c` through so OSC 7501 works (see
   `crates/horadric-pty/conpty/README.md`). Adding one is a decision, not a reflex.

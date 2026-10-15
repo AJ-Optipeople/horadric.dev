@@ -80,3 +80,31 @@ this idea comes from use. Language servers were turned down because they
 differ per language and are slow to start; a ctags style regex outline
 because it misses calls. The quest that builds it adds tree-sitter to
 the dependency list in CLAUDE.md, with the reason.
+
+Built 2026-10-15. `crates/horadric/src/code.rs` reads a file into its
+symbols (each with its kind, lines, head and the symbol it is in) and its
+calls (each with the symbol it is made in), with one query per language
+written for the index rather than the grammars' own tags queries, and
+answers the three questions. `lore.rs` lists the working tree's files
+(`git ls-files`, so ignored folders are left out) and keeps the index.
+Choices made along the way:
+
+- The index is kept per project in `lore\<folder>-<hash>.code.json`,
+  each file by its language and the hash of its bytes, not by its path.
+  So a file is read once whichever worktree has it, and a worktree whose
+  copy differs reads its own without the two trading places. A file no
+  tree has had for 30 days is dropped.
+- Fresh without a watcher: each question stats the tree's files and
+  reads again only those whose time or size changed since this process
+  last looked. On this repository (4 MB of code) the first question of a
+  session takes about 2 s in a release build, the rest well under half
+  a second.
+- Calls are matched by name, as tree-sitter knows no types. What helps:
+  a call written with a path (`Lock::take`, `code::read`, `Self::x`,
+  `self.x()`) resolves to that type or module; a bare call only to free
+  functions; a call on any other value is listed apart as "maybe the
+  project's"; and of several definitions the one in the caller's own
+  file wins.
+- `lore_outline` reads its one file each time instead of using the
+  index: as quick, and never stale.
+- Files over 1 MB, `.min.js` and `.d.ts` are left out as generated.

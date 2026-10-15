@@ -11,6 +11,8 @@
 //! Horadric up on this machine. `host` is not for people: the app starts
 //! one per session to hold its console.
 
+#[cfg(windows)]
+mod code;
 mod console;
 #[cfg(windows)]
 mod explorer;
