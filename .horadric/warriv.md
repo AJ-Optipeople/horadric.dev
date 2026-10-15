@@ -5,6 +5,7 @@
 - A quest session silent for hours with an empty worktree after two nudges is dead and I can not restart it: hand it to the human with "restart it", who does so (settled on "OSC 7501: plain terminals", which then landed).
 
 ## Lately
+- 2026-10-15 Wake: "Lore: count the spend of a quest marked done by hand" conflicted in task.rs on merge. The fix-up quest was already running, so I only gave it "Model: sonnet" and noted it.
 - 2026-10-15 Round (main at 75379ec): "Lore: take notes when a quest ends" landed, tree clean (the five under way quests work in worktrees), so cast "Ship Local". Public still held for the rest of Lore. Gave the three waiting Tristram quests "Model: sonnet".
 - 2026-10-15 Wake: "Lore: notes shared" said its auto merge failed (os error 267), but it is already on main (8a65e94 at c863656) and its branch and worktree are gone, so nothing to merge. Noted it.
 - 2026-10-15 Round (main at 65ee70e): Lore notes (8a65e94) and token counting (65ee70e) landed since 0.25.0, so cast "Ship Local". Held public until the rest of Lore (context pack, code index, hand-marked spend) lands, then one release for the set.
