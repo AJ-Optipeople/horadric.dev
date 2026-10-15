@@ -222,6 +222,12 @@ pub fn checked_out(main: &Path) -> Option<String> {
         .filter(|b| !b.is_empty() && b != "HEAD")
 }
 
+/// The file `rel` as the last commit in `dir` has it, None where it has
+/// none.
+pub fn committed(dir: &Path, rel: &str) -> Option<String> {
+    git(dir, &["show", &format!("HEAD:{rel}")]).ok()
+}
+
 /// Commits the file `rel` in the main tree `main` by itself, leaving
 /// whatever else is staged there to the sessions that staged it. True when
 /// there was something to commit. Nothing on a detached head, or where git
