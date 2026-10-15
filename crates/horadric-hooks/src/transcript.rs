@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::SystemTime;
 
+use horadric_core::pack;
 use horadric_core::spend::{self, Spend};
 use horadric_core::{title, Agent, Limits, Title};
 
@@ -233,6 +234,23 @@ pub fn spend(cwd: &str, id: &str) -> Option<Spend> {
         if p.extension().is_some_and(|x| x == "jsonl") {
             let text = std::fs::read_to_string(&p).unwrap_or_default();
             out.add(&spend::read(&text, spend::AGENT));
+        }
+    }
+    Some(out)
+}
+
+/// What the conversation `id` in `cwd` read and changed under `cwd`, its
+/// subagents' reads and changes included. None when its transcript is not
+/// there.
+pub fn touched(cwd: &str, id: &str) -> Option<pack::Touched> {
+    let path = path(cwd, id)?;
+    let mut out = pack::touched(&std::fs::read_to_string(&path).ok()?, cwd);
+    let subagents = path.with_extension("").join("subagents");
+    for e in std::fs::read_dir(subagents).into_iter().flatten().flatten() {
+        let p = e.path();
+        if p.extension().is_some_and(|x| x == "jsonl") {
+            let text = std::fs::read_to_string(&p).unwrap_or_default();
+            out.add(&pack::touched(&text, cwd));
         }
     }
     Some(out)

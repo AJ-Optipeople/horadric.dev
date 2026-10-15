@@ -1235,13 +1235,18 @@ fn ascii(c: char) -> &'static str {
 }
 
 /// The first prompt of a session that takes `task`: the item, its notes,
-/// and how to report back. The system prompt says so too, but an agent
-/// follows its prompt more surely, and the human sees what it was asked.
-pub fn prompt(task: &Task, horadric: &str, file: &str) -> String {
+/// its context pack (see [`crate::pack`]), and how to report back. The
+/// system prompt says so too, but an agent follows its prompt more surely,
+/// and the human sees what it was asked.
+pub fn prompt(task: &Task, pack: &str, horadric: &str, file: &str) -> String {
     let mut out = task.title.clone();
     if !task.notes.is_empty() {
         out.push_str("\n\n");
         out.push_str(&task.notes.join("\n"));
+    }
+    if !pack.is_empty() {
+        out.push_str("\n\n");
+        out.push_str(pack);
     }
     out.push_str(&format!(
         "\n\n(A quest from {file}. When it is finished, run \
@@ -2291,11 +2296,13 @@ mod tests {
     fn the_first_prompt_is_the_item_its_notes_and_how_to_report() {
         let t = &parse(SAMPLE)[1];
         assert_eq!(
-            prompt(t, "hx", QUESTS_FILE),
+            prompt(t, "", "hx", QUESTS_FILE),
             "Fix the login redirect\n\nHappens only after a session expires.\nRepro in #12.\n\n\
              (A quest from .horadric/quests.md. When it is finished, run \
              `hx quest done \"<one short line on what you achieved>\"`.)"
         );
+        assert!(prompt(t, "Lore: x", "hx", QUESTS_FILE)
+            .contains("Repro in #12.\n\nLore: x\n\n(A quest"));
         let report = "`hx quest done \"<one short line on what you achieved>\"`";
         assert!(system_prompt("hx", QUESTS_FILE, None).contains(report));
         // Wrapped lines join with one space, not the source's indent.

@@ -1832,6 +1832,8 @@ mod tests {
             conversation: None,
             commits: vec![],
             spend: None,
+            touched: None,
+            packed: None,
             merged: None,
             parent: None,
             added_by: None,

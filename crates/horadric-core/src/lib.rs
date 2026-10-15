@@ -24,6 +24,7 @@ pub mod lookback;
 pub mod lore;
 pub mod merge;
 pub mod overlap;
+pub mod pack;
 pub mod portal;
 pub mod presence;
 pub mod program_status;

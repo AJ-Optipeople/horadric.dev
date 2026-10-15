@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::journal::{self, Commit};
 use crate::merge::Failure;
+use crate::pack::Touched;
 use crate::spend::{self, Sitting, Spend};
 use crate::tasks::{Mark, Task};
 use crate::warriv::Kind;
@@ -86,6 +87,17 @@ pub enum Happened {
     /// done`. A later one, after the quest came back, counts them all
     /// again, so it replaces the earlier.
     Spent { sittings: Vec<Sitting> },
+    /// The files the quest's conversations read and changed, by `horadric
+    /// quest done`, for the packs of quests like it. A later one replaces
+    /// the earlier, as [`Happened::Spent`] does.
+    Touched {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        read: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        changed: Vec<String>,
+    },
+    /// The quest was started with a context pack of these files.
+    Packed { files: Vec<String> },
     /// The commits made under the quest, newest first.
     Commits { commits: Vec<Commit> },
     /// The quest's branch went into the main tree. `checked` is the
@@ -743,6 +755,11 @@ pub struct Quest {
     pub commits: Vec<Commit>,
     /// What its conversations spent, when it was reported done.
     pub spend: Option<Spend>,
+    /// The files its conversations read and changed, when it was reported
+    /// done.
+    pub touched: Option<Touched>,
+    /// The files of the context pack it was started with.
+    pub packed: Option<Vec<String>>,
     /// The branch it was merged from, when it had one.
     pub merged: Option<String>,
     /// The quest it grew out of, an index into the same list.
@@ -761,7 +778,7 @@ pub struct Quest {
 }
 
 impl Quest {
-    fn new(id: &str, title: &str) -> Self {
+    pub(crate) fn new(id: &str, title: &str) -> Self {
         Self {
             id: id.to_string(),
             title: title.to_string(),
@@ -776,6 +793,8 @@ impl Quest {
             conversation: None,
             commits: Vec::new(),
             spend: None,
+            touched: None,
+            packed: None,
             merged: None,
             parent: None,
             added_by: None,
@@ -864,6 +883,13 @@ pub fn quests(
             }
             Happened::Commits { commits } => q.commits = commits.clone(),
             Happened::Spent { sittings } => q.spend = Some(spend::total(sittings)),
+            Happened::Touched { read, changed } => {
+                q.touched = Some(Touched {
+                    read: read.clone(),
+                    changed: changed.clone(),
+                })
+            }
+            Happened::Packed { files } => q.packed = Some(files.clone()),
             Happened::Merged { branch, .. } => q.merged = Some(branch.clone()),
             Happened::Shipped | Happened::Assumed { .. } | Happened::NotMerged { .. } => {}
         }

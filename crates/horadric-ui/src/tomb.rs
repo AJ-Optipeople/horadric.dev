@@ -17,11 +17,12 @@ use horadric_core::tasks::{self, Holder, Mark, Task};
 use horadric_core::tombs;
 use horadric_hooks::tasks as file;
 
-use super::{horadric_command, Merge, START_GAP};
+use super::{context_pack, horadric_command, record_pack, Merge, START_GAP};
 use crate::app::{with_app, App, Run};
 use crate::board::{Board, RowState};
 use crate::dialog::{Dialog, Tone};
 use crate::toast::Kind;
+use crate::window::folder_key;
 
 impl App {
     /// The tombs of `batch` there are, running, paused or stashed, by their
@@ -128,9 +129,12 @@ impl App {
         if !self.new_trees.contains_key(&id) {
             return Err("git gave the tomb no worktree of its own".into());
         }
+        let key = folder_key(&dir.to_string_lossy());
+        let (pack, packed) = context_pack(&key, dir, task);
+        record_pack(&key, &id, &task.title, packed);
         self.tasks.prompts.insert(
             id.clone(),
-            tasks::prompt(task, &horadric_command(), file::rel(dir)),
+            tasks::prompt(task, &pack, &horadric_command(), file::rel(dir)),
         );
         let name = tombs::name(&task.title, n);
         if let Err(e) = self.launch(
