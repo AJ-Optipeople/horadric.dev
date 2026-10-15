@@ -129,6 +129,18 @@ pub(super) struct State {
     pub(super) warriv: warriv::State,
 }
 
+impl State {
+    /// The runner of a run that follows one which heard `heard`.
+    pub(super) fn after(
+        heard: &std::collections::BTreeMap<String, horadric_core::warriv::Heard>,
+    ) -> State {
+        State {
+            warriv: warriv::State::after(heard),
+            ..State::default()
+        }
+    }
+}
+
 /// The last look at a wait that git or a command answers.
 #[derive(Clone, Copy)]
 struct Check {

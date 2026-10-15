@@ -309,9 +309,9 @@ pub struct Desk {
     wakes: Vec<u64>,
     /// The budget ran out and the human was told so, until it frees up.
     tired: bool,
-    /// Events that went to the human: the budget was spent, or Warriv
-    /// ended its turn with them still holding. Kept while they hold.
-    human: Vec<Event>,
+    /// Events that went to the human, by key: the budget was spent, or
+    /// Warriv ended its turn with them still holding. Kept while they hold.
+    human: BTreeSet<String>,
     /// Wakes in a row for the aims that filed nothing.
     dry: usize,
     /// Warriv drives the project, which lifts the budget on its wakes.
@@ -357,6 +357,22 @@ pub enum Dried {
     Human,
 }
 
+/// What a [`Desk`] has heard, kept in `state.json` so a reload does not
+/// wake Warriv for events it already took or handed to the human.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Heard {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub seen: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub human: Vec<String>,
+}
+
+impl Heard {
+    pub fn is_empty(&self) -> bool {
+        self.seen.is_empty() && self.human.is_empty()
+    }
+}
+
 /// What to do with the events waiting.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Wake {
@@ -370,6 +386,30 @@ pub enum Wake {
 }
 
 impl Desk {
+    /// A desk that has already heard what a run before this one heard.
+    pub fn after(heard: Heard) -> Desk {
+        Desk {
+            seen: heard.seen.into_iter().collect(),
+            human: heard.human.into_iter().collect(),
+            ..Desk::default()
+        }
+    }
+
+    /// What to keep across a reload. An event still waiting to be told
+    /// was never told, so the next run hears it again.
+    pub fn heard(&self) -> Heard {
+        let waiting: BTreeSet<String> = self.queue.iter().map(Event::key).collect();
+        Heard {
+            seen: self
+                .seen
+                .iter()
+                .filter(|k| !waiting.contains(*k))
+                .cloned()
+                .collect(),
+            human: self.human.iter().cloned().collect(),
+        }
+    }
+
     /// Takes the events the log holds now. A new one waits for Warriv,
     /// unless it showed up while Warriv was `working` and could be its own
     /// doing. One that no longer holds is forgotten, so it is heard again
@@ -377,7 +417,7 @@ impl Desk {
     pub fn hear(&mut self, now: Vec<Event>, working: bool) {
         let keys: BTreeSet<String> = now.iter().map(Event::key).collect();
         self.seen.retain(|k| keys.contains(k));
-        self.human.retain(|e| keys.contains(&e.key()));
+        self.human.retain(|k| keys.contains(k));
         // A failed merge, a round and a look back are not in the log: they
         // hold until told.
         self.queue.retain(|e| {
@@ -406,9 +446,7 @@ impl Desk {
     /// An event Warriv could not settle, which is the human's while it
     /// holds and never goes to Warriv again.
     pub fn hand(&mut self, e: Event) {
-        if !self.human.contains(&e) {
-            self.human.push(e);
-        }
+        self.human.insert(e.key());
     }
 
     /// The quests among the events `now` that Warriv has, so they need
@@ -416,7 +454,7 @@ impl Desk {
     /// Warriv handed on is no event, so it is the human's too.
     pub fn holding(&self, now: &[Event]) -> BTreeSet<String> {
         now.iter()
-            .filter(|e| !e.title.is_empty() && !self.human.contains(e))
+            .filter(|e| !e.title.is_empty() && !self.human.contains(&e.key()))
             .map(|e| e.title.clone())
             .collect()
     }
@@ -1949,6 +1987,25 @@ mod tests {
         let clean = look(Some(Looked::default()));
         assert!(clean.contains("nothing that happened twice"));
         assert!(!clean.contains("File one quest"));
+    }
+
+    #[test]
+    fn a_reload_wakes_warriv_only_for_what_it_never_heard() {
+        let ev = |t: &str| Event {
+            kind: Kind::Blocked,
+            title: t.into(),
+            detail: "why".into(),
+        };
+        let mut d = Desk::default();
+        d.hear(vec![ev("Taken"), ev("Handed")], false);
+        assert!(matches!(d.wake(0), Wake::Go(_)));
+        d.hand(ev("Handed"));
+        d.hear(vec![ev("Taken"), ev("Handed"), ev("Waiting")], false);
+        let mut after = Desk::after(d.heard());
+        after.hear(vec![ev("Taken"), ev("Handed"), ev("Waiting")], false);
+        assert_eq!(after.wake(1), Wake::Go(vec![ev("Waiting")]));
+        let holding = after.holding(&[ev("Taken"), ev("Handed")]);
+        assert_eq!(holding, BTreeSet::from(["Taken".to_string()]));
     }
 
     #[test]

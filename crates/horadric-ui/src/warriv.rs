@@ -8,14 +8,15 @@
 //! session gets the text only while it is live and between turns, as
 //! `go_on` types.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime};
 
 use horadric_core::chronicle::{self, Happened, Woken};
 use horadric_core::tasks::{self, Mark, Mode, Task};
 use horadric_core::warriv::{
-    self, Brief, Desk, Dried, Drive, Event, Kind, Looked, Picture, Review, Reviews, Wake, Why,
+    self, Brief, Desk, Dried, Drive, Event, Heard, Kind, Looked, Picture, Review, Reviews, Wake,
+    Why,
 };
 use horadric_core::{lookback, runeword, ship, tombs, Agent, Phase};
 use horadric_hooks::tasks as file;
@@ -192,6 +193,35 @@ pub(in crate::app) struct State {
     camps: HashMap<String, Camp>,
     tells: Vec<Tell>,
     reviewing: HashMap<String, Reviewing>,
+}
+
+impl State {
+    /// Camps that remember what the run before this one heard, so a reload
+    /// does not wake Warriv for every event that still stands.
+    pub(in crate::app) fn after(heard: &BTreeMap<String, Heard>) -> State {
+        State {
+            camps: heard
+                .iter()
+                .map(|(key, h)| {
+                    let camp = Camp {
+                        desk: Desk::after(h.clone()),
+                        ..Camp::default()
+                    };
+                    (key.clone(), camp)
+                })
+                .collect(),
+            ..State::default()
+        }
+    }
+
+    /// What each project's Warriv has heard, for `state.json`.
+    pub(in crate::app) fn heard(&self) -> BTreeMap<String, Heard> {
+        self.camps
+            .iter()
+            .map(|(key, c)| (key.clone(), c.desk.heard()))
+            .filter(|(_, h)| !h.is_empty())
+            .collect()
+    }
 }
 
 impl App {
