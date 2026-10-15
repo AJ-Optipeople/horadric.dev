@@ -5,6 +5,10 @@
 - A quest session silent for hours with an empty worktree after two nudges is dead and I can not restart it: hand it to the human with "restart it", who does so (settled on "OSC 7501: plain terminals", which then landed).
 
 ## Lately
+- 2026-10-15 Round (main at f180d7e): "Tristram: generated CLAUDE.md and project dirs" landed (5b0816a). The "Ship Local" cast for 463f2bc has not reloaded yet (last reload 21:42, cargo busy), so no second cast. "Found a project" already has sonnet. Nothing else to do.
+- 2026-10-15 Round (main at 463f2bc): ship-local-69886 reloaded at 21:42, but hand-marked spend (463f2bc) landed at 21:43 after it, so cast "Ship Local". Public still held for the code index, the last of Lore.
+- 2026-10-15 Wake with no new event: log unchanged since the round a minute earlier, ship-local-69886 still building. Nothing to do.
+- 2026-10-15 Round (main at 3d317b0): "Move done quests out of tasks.md" (fb9a5f4) and the Tristram town cluster (d64f5bc) landed. The ship-local-69886 session started `cargo build --release` at 21:38, after 3d317b0 at 21:36, so it carries both. No second cast. Public still held for the code index and hand-marked spend.
 - 2026-10-15 Wake: the first fix-up for hand-marked spend conflicted on merge too (task.rs, main moved). Its own fix-up was already running, so I gave it "Model: sonnet". If a third fix-up appears, look at why task.rs keeps clashing before letting it loop.
 - 2026-10-15 Round (main at b9d2c36): "Lore: a context pack for each new quest" landed (5f321c9), tree clean apart from Horadric's own files, so cast "Ship Local". Public still held until the code index and hand-marked spend land.
 - 2026-10-15 Wake: "Lore: count the spend of a quest marked done by hand" conflicted in task.rs on merge. The fix-up quest was already running, so I only gave it "Model: sonnet" and noted it.
@@ -138,3 +142,4 @@
 - 2026-10-06 Daily look back: the day was clean (24 quests completed, all 24 merged by themselves).
 
 ## Open
+- Next round: if no reload came after 21:46 (5b0816a), or the reload's exe was built before 21:46, cast "Ship Local" for 5b0816a.

@@ -33,8 +33,13 @@ charged to the tools whose results started it, split evenly, or to
 `horadric quest done` and `blocked` sum every conversation the chronicle
 saw a turn of under the quest, with their subagents, and append a
 `spent` record of one sitting each; the last one is the quest's. The
-quest log's detail shows "Spent" and "Went on". Not yet: a quest marked
-done by hand has none, and Codex rollouts count nothing.
+quest log's detail shows "Spent" and "Went on". A quest marked done any
+other way (by the human, the runner or Warriv) gets its `spent` record
+from the app when it sees the mark, unless one came since the quest was
+last taken, with the quest's sessions still running counted too. A
+conversation with no Claude Code transcript is looked for among Codex's
+rollouts, whose `token_count` events give each call's usage, charged to
+the tool outputs before it the same way.
 
 ## 2. A context pack per quest
 
@@ -136,6 +141,43 @@ LSP tool (go to definition, find references) backed by rust-analyzer,
 so before building `lore_find` and `lore_calls`, check what it answers
 in a Rust and a TypeScript project, and build only what it does not.
 
+Built 2026-10-15, all three. The review reached the quest after the
+index was written, so the check came last: in this repository Claude
+Code's LSP tool answered nothing, as its rust-analyzer crashed three
+times and was given up on. A language server has to be installed per
+language, set up per machine and indexed per session; the lore's index
+needs none of that and is shared. So `lore_find` and `lore_calls` stay,
+and where an LSP does work it is the surer answer for a method call,
+which the index can only match by name.
+
+`crates/horadric/src/code.rs` reads a file into its symbols (each with
+its kind, lines, head and the symbol it is in) and its calls (each with
+the symbol it is made in), with one query per language written for the
+index rather than the grammars' own tags queries, and answers the three
+questions. `crates/horadric/src/lore.rs` lists the working tree's files
+(`git ls-files`, so ignored folders are left out) and keeps the index.
+Choices made along the way:
+
+- The index is kept per project in `lore\<folder>-<hash>.code.json`,
+  each file by its language and the hash of its bytes, not by its path.
+  So a file is read once whichever worktree has it, and a worktree whose
+  copy differs reads its own without the two trading places. A file no
+  tree has had for 30 days is dropped.
+- Fresh without a watcher: each question stats the tree's files and
+  reads again only those whose time or size changed since this process
+  last looked. On this repository (4 MB of code) the first question of a
+  session takes about 2 s in a release build, the rest under half a
+  second.
+- Calls are matched by name, as tree-sitter knows no types. What helps:
+  a call written with a path (`Lock::take`, `code::read`, `Self::x`,
+  `self.x()`) resolves to that type or module; a bare call only to free
+  functions; a call on any other value is listed apart as "maybe the
+  project's"; and of several definitions the one in the caller's own
+  file wins.
+- `lore_outline` reads its one file each time instead of using the
+  index: as quick, and never stale.
+- Files over 1 MB, `.min.js` and `.d.ts` are left out as generated.
+
 ## 5. A shorter quest log
 
 `.horadric/tasks.md` was 95 KB on 2026-10-15, about 24k tokens, most of
@@ -144,3 +186,25 @@ quests older than a few days move to `.horadric/tasks-done.md`, keeping
 their `@id`, notes and spent records, so the quest log window, the
 chronicle and lookups by id still find them. The live file holds what is
 open plus the last few days.
+
+Built 2026-10-15. `tasks::sweep` takes the done quests out, notes and
+all, each under the heading it had; `horadric quest done` runs it after
+marking, so the log is tidied as often as quests end. A quest is old when
+the chronicle's last record of it is more than three days back
+(`KEEP_DONE`), or when the chronicle never heard of it. The done file
+sits beside the list, `quests-done.md` beside `quests.md`. Choices made
+along the way:
+
+- A done quest that a quest staying in the log names in `After:` stays
+  too, or that name would match nothing and its quest would need the
+  human. `quest add --after` an archived quest drops the line, since
+  there is nothing left to wait for.
+- A heading whose section the sweep empties goes with it; one with prose
+  under it stays.
+- Every write of the list (`tasks::update` in `horadric-hooks`) now takes
+  a lock file beside it, `.horadric/tasks.lock`, the same `Lock` the
+  lore notes use. Before, two writers at once could lose one's change;
+  with the sweep, two could also archive the same quests twice. An
+  agent's own Edit of the file takes no lock and never did.
+- The quest log window reads the done file before the list. The spent
+  records were always in the chronicle, by id, so they need no move.

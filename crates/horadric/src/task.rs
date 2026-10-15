@@ -8,6 +8,7 @@
 //! session takes it. Then it tells the app, which reads the list again and
 //! lets the runner move on.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use horadric_core::chronicle::{self, Command, Happened, Record};
@@ -245,6 +246,7 @@ fn report(cwd: &Path, blocked: Option<(&str, Option<On>)>, summary: &str) -> Res
     if !changed {
         return Err(format!("the quest held by {id} is already completed"));
     }
+    sweep(&project);
     tell_app(&project);
     match (why, wait, mark) {
         (Some(_), Some(_), _) => println!(
@@ -260,6 +262,30 @@ fn report(cwd: &Path, blocked: Option<(&str, Option<On>)>, summary: &str) -> Res
         _ => println!("Marked for review. The human looks next; stop here."),
     }
     Ok(())
+}
+
+/// Moves the log's done quests that last saw anything happen days ago to
+/// the done file, so the log every agent reads stays short. A quest the
+/// chronicle never heard of is older than it. Tidying, so it can not fail
+/// the command.
+fn sweep(project: &Path) {
+    let key = horadric_ui::folder_key(&project.to_string_lossy());
+    let mut last: HashMap<String, u64> = HashMap::new();
+    for r in horadric_ui::chronicle_all() {
+        if r.project == key && !r.quest.is_empty() {
+            let at = last
+                .entry(chronicle::quest_of(&r.quest).to_string())
+                .or_default();
+            *at = (*at).max(r.at);
+        }
+    }
+    let before = unix_now().saturating_sub(tasks::KEEP_DONE);
+    let _ = file::sweep_done(project, |t| {
+        t.holder
+            .as_deref()
+            .and_then(|h| last.get(chronicle::quest_of(h)))
+            .is_none_or(|&at| at < before)
+    });
 }
 
 /// A tomb's report leaves the list alone, since the item is the batch's
@@ -321,17 +347,17 @@ fn add(cwd: &Path, title: &str, notes: &str, below: Option<&str>) -> Result<(), 
         .or_else(main_list)
         .or_else(|| file::find_list(cwd))
         .unwrap_or_else(|| cwd.to_path_buf());
+    let done = file::read_done(&project);
     write(&project, |text| {
+        let log = tasks::parse(text);
         // An `After:` line naming either of two quests alike would match
         // both, so Warriv files none that is already in the log.
         if session().is_some_and(|id| warriv::is_warriv(&id)) {
-            if let Some(t) = tasks::parse(text)
-                .iter()
-                .find(|t| aim::same(&t.title, title))
-            {
+            if let Some(t) = log.iter().find(|t| aim::same(&t.title, title)) {
                 return Err(format!("\"{}\" is in the log already", t.title));
             }
         }
+        let notes = &tasks::drop_done_after(notes, &log, &done);
         match below {
             None => Ok(tasks::append_with_notes(text, title, notes)),
             Some(b) => warriv::add_below(text, b, title, notes),
@@ -601,9 +627,10 @@ fn record_summary(project: &Path, id: &str, summary: &str) {
 }
 
 /// Keeps what the quest's [`conversations`] spent in tokens and which
-/// files they read and changed. Codex keeps no usage per message, so its
-/// conversations count nothing.
+/// files they read and changed. The app keeps the spend for a quest
+/// marked done any other way.
 fn record_spend(project: &Path, id: &str, cwd: &Path) {
+    let key = horadric_ui::folder_key(&project.to_string_lossy());
     let seen = conversations(project, id, cwd);
     let mut touched = Touched::default();
     for (conversation, cwd) in &seen {
@@ -611,27 +638,13 @@ fn record_spend(project: &Path, id: &str, cwd: &Path) {
             touched.add(&t);
         }
     }
-    let sittings: Vec<Sitting> = seen
-        .into_iter()
-        .filter_map(|(conversation, cwd)| {
-            let spend = transcript::spend(&cwd, &conversation)?;
-            (!spend.is_empty()).then_some(Sitting {
-                conversation,
-                spend,
-            })
-        })
-        .collect();
     let list = tasks::parse(&file::read(project));
     let title = chronicle::worked_by(&list, id)
         .map(|t| t.title.clone())
         .unwrap_or_default();
-    if !sittings.is_empty() {
-        record(
-            project,
-            id.to_string(),
-            &title,
-            Happened::Spent { sittings },
-        );
+    let records = horadric_ui::chronicle_all();
+    if let Some(r) = horadric_ui::spent(&records, &key, id, &title, seen, unix_now()) {
+        horadric_ui::chronicle(&r);
     }
     if !touched.is_empty() {
         let Touched { read, changed } = touched;
@@ -644,27 +657,18 @@ fn record_spend(project: &Path, id: &str, cwd: &Path) {
     }
 }
 
-/// The conversations of a quest, each with the folder it ran in: every
-/// one the chronicle saw a turn of, under this quest or a tomb of its
-/// batch, and this one, whose last turn has not ended yet.
+/// The conversations of a quest, each with the folder it ran in: this
+/// one, whose last turn has not ended yet, and every one the chronicle
+/// saw a turn of, under this quest or a tomb of its batch.
 fn conversations(project: &Path, id: &str, cwd: &Path) -> Vec<(String, String)> {
     let key = horadric_ui::folder_key(&project.to_string_lossy());
-    let quest = chronicle::quest_of(id);
     let mut seen: Vec<(String, String)> = Vec::new();
     if let Ok(now) = std::env::var("CLAUDE_CODE_SESSION_ID") {
         seen.push((now, cwd.to_string_lossy().into_owned()));
     }
-    for r in horadric_ui::chronicle_all() {
-        if r.project != key || chronicle::quest_of(&r.quest) != quest {
-            continue;
-        }
-        if let Happened::Turn {
-            conversation, cwd, ..
-        } = r.what
-        {
-            if !conversation.is_empty() && !seen.iter().any(|(c, _)| *c == conversation) {
-                seen.push((conversation, cwd));
-            }
+    for c in chronicle::conversations(&horadric_ui::chronicle_all(), &key, id) {
+        if !seen.iter().any(|(s, _)| *s == c.0) {
+            seen.push(c);
         }
     }
     seen

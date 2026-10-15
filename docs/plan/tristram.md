@@ -90,7 +90,10 @@ Each is a quest.
    plus under the header is the new session. The start window no
    longer counts the town as a project, so it still shows, under the
    town, when nothing else is open.
-2. The generated `CLAUDE.md` and `--add-dir` for project folders.
+2. The generated `CLAUDE.md` and `--add-dir` for project folders. **Done.**
+   `town::brief` is the pure text, `town::write` keeps `CLAUDE.md` current
+   and makes `NOTES.md`, rewritten by `refresh_town` when the recent
+   folders change. A session in the town starts with `--add-dir` for each.
 3. `--project` on the quest CLI and `horadric projects`.
 4. "Found a project".
 

@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use horadric_core::chronicle;
 use horadric_core::history::{self, History};
 use horadric_core::journal::{self, Entry};
+use horadric_core::spend::Sitting;
 use horadric_core::SavedState;
 
 pub(crate) fn dir() -> Option<PathBuf> {
@@ -197,6 +198,45 @@ pub fn chronicle_all() -> Vec<chronicle::Record> {
         return Vec::new();
     };
     chronicle::parse(&fs::read_to_string(dir.join(chronicle::FILE)).unwrap_or_default())
+}
+
+/// The record of what the quest `id` of the project `key` spent: every
+/// conversation the chronicle saw a turn of under it, and `live`, ones
+/// whose turn has not ended and so has no turn in it yet. None when
+/// nothing counts. A conversation with no Claude Code transcript is
+/// looked for among Codex's.
+pub fn spent(
+    records: &[chronicle::Record],
+    key: &str,
+    id: &str,
+    title: &str,
+    live: Vec<(String, String)>,
+    now: u64,
+) -> Option<chronicle::Record> {
+    let mut seen = live;
+    for c in chronicle::conversations(records, key, id) {
+        if !seen.iter().any(|(s, _)| *s == c.0) {
+            seen.push(c);
+        }
+    }
+    let sittings: Vec<Sitting> = seen
+        .into_iter()
+        .filter_map(|(conversation, cwd)| {
+            let spend = horadric_hooks::transcript::spend(&cwd, &conversation)
+                .or_else(|| horadric_hooks::codex::spend(&conversation))?;
+            (!spend.is_empty()).then_some(Sitting {
+                conversation,
+                spend,
+            })
+        })
+        .collect();
+    (!sittings.is_empty()).then(|| chronicle::Record {
+        at: now,
+        project: key.to_string(),
+        quest: id.to_string(),
+        title: title.to_string(),
+        what: chronicle::Happened::Spent { sittings },
+    })
 }
 
 /// Drops the journal's lines older than a week, the way [`save`] writes.

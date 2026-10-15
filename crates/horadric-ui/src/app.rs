@@ -854,6 +854,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             closed: saved.closed.iter().cloned().collect(),
             columns: Columns::from_keys(&saved.columns),
             recent: saved.recent.clone(),
+            town_listed: None,
             autostart_offered,
             quiet: saved.quiet,
             sounds: saved.sounds,
@@ -2870,6 +2871,8 @@ struct App {
     columns: Columns,
     /// Projects sessions were started in, newest first, for the tray menu.
     recent: Vec<String>,
+    /// The projects the town's `CLAUDE.md` was last written for.
+    town_listed: Option<Vec<town::Project>>,
     autostart_offered: bool,
     last_saved: Option<SavedState>,
     /// Set once Horadric is quitting or Windows is shutting down. The state
@@ -4261,6 +4264,9 @@ impl App {
         let config = self.mcp_config.as_ref().map(|p| p.to_string_lossy());
         extra.extend(Agent::Claude.mcp_args("", config.as_deref()));
         extra.extend(self.task_args(id, program, cwd));
+        if town::is(&folder_key(&cwd.to_string_lossy())) {
+            extra.extend(town::add_dir_args(&self.town_projects()));
+        }
         extra
     }
 
@@ -6504,9 +6510,69 @@ impl App {
         }
     }
 
+    /// Every project the town agent is told about: the recent folders that
+    /// still exist, with when a session last ran in each.
+    fn town_projects(&self) -> Vec<town::Project> {
+        let now = SystemTime::now();
+        let last: HashMap<String, u64> = self
+            .shared
+            .registry
+            .lock()
+            .map(|r| {
+                let mut m: HashMap<String, u64> = HashMap::new();
+                for s in r.all().filter(|s| !s.cwd.is_empty()) {
+                    let secs = now.duration_since(s.since).map_or(0, |d| d.as_secs());
+                    let e = m.entry(project_key(s)).or_insert(secs);
+                    *e = (*e).min(secs);
+                }
+                m
+            })
+            .unwrap_or_default();
+        let mut seen = HashSet::new();
+        self.recent
+            .iter()
+            .filter(|p| Path::new(p).is_dir())
+            .filter_map(|p| {
+                let key = folder_key(p);
+                if town::is(&key) || !seen.insert(key.clone()) {
+                    return None;
+                }
+                let intro = ["README.md", "CLAUDE.md"]
+                    .iter()
+                    .find_map(|f| std::fs::read_to_string(Path::new(p).join(f)).ok())
+                    .map(|t| town::intro_of(&t, 3))
+                    .unwrap_or_default();
+                Some(town::Project {
+                    name: project_name(&key),
+                    dir: p.clone(),
+                    intro,
+                    last_ran: last.get(&key).copied(),
+                })
+            })
+            .collect()
+    }
+
+    /// Rewrites the town's `CLAUDE.md` when the set of projects changed.
+    /// Only the folders count: how long ago a session ran would rewrite it
+    /// on every pass.
+    fn refresh_town(&mut self) {
+        let Some(dir) = town::dir().filter(|d| d.is_dir()) else {
+            return;
+        };
+        let projects = self.town_projects();
+        let same = self.town_listed.as_ref().is_some_and(|old| {
+            old.len() == projects.len() && old.iter().zip(&projects).all(|(a, b)| a.dir == b.dir)
+        });
+        if !same {
+            town::write(&dir, &projects);
+            self.town_listed = Some(projects);
+        }
+    }
+
     /// Makes the windows match the projects in the registry.
     fn reconcile(&mut self, phase_changed: bool) {
         self.read_boards(false);
+        self.refresh_town();
         let mut projects: HashSet<String> = self
             .shared
             .registry

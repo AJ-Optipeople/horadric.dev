@@ -11,14 +11,11 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use horadric_core::lore::{self, Lore, Mark};
 
-/// How long a lock is waited for before it is taken as left by a process
-/// that died holding it.
-const LOCK_WAIT: Duration = Duration::from_secs(3);
+use crate::lock::Lock;
 
 pub fn now() -> u64 {
     SystemTime::now()
@@ -124,6 +121,35 @@ impl Place {
             .unwrap_or_default()
     }
 
+    /// Where the code index is kept, beside the notes.
+    pub fn code_store(&self) -> PathBuf {
+        self.store.with_extension("code.json")
+    }
+
+    /// The files of the working tree, relative to its top, as git has them
+    /// or would have them, so ignored folders (`target`, `node_modules`)
+    /// are left out. None outside git.
+    pub fn listed(&self) -> Option<Vec<String>> {
+        let out = git(
+            &self.top,
+            &[
+                "ls-files",
+                "-z",
+                "--cached",
+                "--others",
+                "--exclude-standard",
+            ],
+        )?;
+        let mut files: Vec<String> = out
+            .split('\0')
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .collect();
+        // A file in a merge is listed once per side.
+        files.dedup();
+        Some(files)
+    }
+
     /// What the worktree this folder is in changed since its branch left
     /// the main tree, committed or not. None in the main tree itself, where
     /// other sessions' changes are mixed in, and outside git.
@@ -162,7 +188,7 @@ impl Place {
         if let Some(dir) = self.store.parent() {
             fs::create_dir_all(dir).map_err(|e| e.to_string())?;
         }
-        let _lock = Lock::take(&self.store.with_extension("lock"))?;
+        let _lock = Lock::take(&self.store.with_extension("lock")).map_err(|e| e.to_string())?;
         let mut lore = self.read()?;
         let out = f(&mut lore)?;
         let json = serde_json::to_string_pretty(&lore).map_err(|e| e.to_string())?;
@@ -170,41 +196,6 @@ impl Place {
         fs::write(&new, json).map_err(|e| e.to_string())?;
         fs::rename(&new, &self.store).map_err(|e| e.to_string())?;
         Ok(out)
-    }
-}
-
-/// A lock file, removed when dropped.
-struct Lock(PathBuf);
-
-impl Lock {
-    fn take(path: &Path) -> Result<Lock, String> {
-        let mut waited = Duration::ZERO;
-        let step = Duration::from_millis(20);
-        loop {
-            match fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(path)
-            {
-                Ok(_) => return Ok(Lock(path.to_path_buf())),
-                Err(e) if e.kind() == ErrorKind::AlreadyExists => {
-                    if waited >= LOCK_WAIT {
-                        // Its holder died: no write takes this long.
-                        let _ = fs::remove_file(path);
-                        waited = Duration::ZERO;
-                    }
-                    thread::sleep(step);
-                    waited += step;
-                }
-                Err(e) => return Err(e.to_string()),
-            }
-        }
-    }
-}
-
-impl Drop for Lock {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.0);
     }
 }
 
