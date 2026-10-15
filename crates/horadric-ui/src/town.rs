@@ -245,6 +245,99 @@ pub fn overview(projects: &[Overview]) -> String {
     out
 }
 
+/// Why a project can not be called this, or none when it can. The name is a
+/// folder, so what a Windows folder refuses is refused here.
+pub fn check_name(name: &str) -> Option<String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Some("a project needs a name".into());
+    }
+    if name
+        .chars()
+        .any(|c| r#"<>:"/\|?*"#.contains(c) || c.is_control())
+    {
+        return Some(r#"a name cannot hold any of < > : " / \ | ? *"#.into());
+    }
+    if name.ends_with('.') || name.ends_with(' ') || name == "." || name == ".." {
+        return Some("a name cannot end in a dot or a space".into());
+    }
+    None
+}
+
+/// The first `README.md` of a founded project: what the town settled, which
+/// the new session reads first.
+pub fn readme(name: &str, summary: &str) -> String {
+    let summary = summary.trim();
+    if summary.is_empty() {
+        format!(
+            "# {name}
+"
+        )
+    } else {
+        format!(
+            "# {name}
+
+{summary}
+"
+        )
+    }
+}
+
+/// What the first session of a founded project is asked, so it starts from
+/// what the town settled instead of from nothing.
+pub fn first_prompt(name: &str, summary: &str) -> String {
+    let summary = summary.trim();
+    if summary.is_empty() {
+        format!(
+            "This is {name}, founded from Tristram. Read README.md and ask what to build first."
+        )
+    } else {
+        format!(
+            "This is {name}, founded from Tristram. What the town conversation settled:              {summary}
+
+Read README.md, then start on it."
+        )
+    }
+}
+
+/// Where a founded project goes by default: beside the project Horadric knew
+/// most recently, which is where the human keeps their projects.
+pub fn default_parent() -> Option<PathBuf> {
+    known_dirs()
+        .first()
+        .and_then(|d| Path::new(d).parent().map(Path::to_path_buf))
+}
+
+/// Makes the folder, runs `git init` and writes the first README. A folder
+/// that is already there is refused, since founding over work loses it.
+pub fn found(name: &str, parent: &Path, summary: &str) -> Result<PathBuf, String> {
+    let name = name.trim();
+    if let Some(why) = check_name(name) {
+        return Err(why);
+    }
+    if !parent.is_dir() {
+        return Err(format!("{} is not a folder", parent.display()));
+    }
+    let dir = parent.join(name);
+    if dir.exists() {
+        return Err(format!("{} is already there", dir.display()));
+    }
+    std::fs::create_dir(&dir).map_err(|e| format!("cannot make {}: {e}", dir.display()))?;
+    let init = horadric_hooks::no_window(
+        std::process::Command::new("git")
+            .arg("init")
+            .current_dir(&dir),
+    )
+    .output()
+    .map_err(|e| format!("cannot run git: {e}"))?;
+    if !init.status.success() {
+        return Err("git init failed".into());
+    }
+    std::fs::write(dir.join("README.md"), readme(name, summary))
+        .map_err(|e| format!("cannot write the README: {e}"))?;
+    Ok(dir)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -338,5 +431,42 @@ mod tests {
         assert!(t.contains("3 open, 1 working"));
         assert!(t.contains("last commit: abc fix"));
         assert!(overview(&[]).contains("No projects"));
+    }
+
+    #[test]
+    fn names_are_folders() {
+        assert!(check_name("my-app").is_none());
+        assert!(check_name("  ").is_some());
+        assert!(check_name("a/b").is_some());
+        assert!(check_name("a:b").is_some());
+        assert!(check_name("x.").is_some());
+    }
+
+    #[test]
+    fn readme_and_prompt_carry_the_summary() {
+        assert_eq!(
+            readme("x", " "),
+            "# x
+"
+        );
+        assert_eq!(
+            readme("x", "A tool."),
+            "# x
+
+A tool.
+"
+        );
+        assert!(first_prompt("x", "A tool.").contains("A tool."));
+        assert!(first_prompt("x", "").contains("ask what to build"));
+    }
+
+    #[test]
+    fn founding_refuses_an_existing_folder() {
+        let parent = std::env::temp_dir().join(format!("horadric-found-{}", std::process::id()));
+        std::fs::create_dir_all(&parent).unwrap();
+        let dir = found("p1", &parent, "Hi.").unwrap();
+        assert!(dir.join("README.md").is_file());
+        assert!(found("p1", &parent, "").is_err());
+        let _ = std::fs::remove_dir_all(&parent);
     }
 }
