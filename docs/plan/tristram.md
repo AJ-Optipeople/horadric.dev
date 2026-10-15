@@ -101,26 +101,15 @@ Each is a quest.
 ## Reading as the town without a word
 
 Asked for on 2026-10-15: the town made sense to the human who built it,
-not to a new user, for whom it looked like one more repository. It has
-to say "above every project" by how it stands and behaves, not by a
-guide.
+not to a new user, for whom it looked like one more repository.
 
-1. **A band over the columns.** **Done.** The town is no longer in a
-   column. It lies across the top of all the columns shown, the columns
-   start under it, and its tiles run along the band in lanes that stand
-   right over the columns (`layout::band`, the lane with the highest
-   bottom first). It cannot be dragged and its tiles do not lift, since
-   it has one place.
-2. **A lamp over each project.** **Done.** On the groove under the
-   band's header, one lamp per project over the column it stands in:
-   amber while a session there waits, blue while one works, else the
-   project's own colour, dimmed (`window::light`).
-3. A spark from the town to a project when the town files a quest
-   there, and a founded project's cluster growing out of the band.
-4. The empty town's first session offering a first question, such as
-   what is going on across the projects, instead of a blank prompt.
-5. The label: Tristram is a name for Diablo players. "Town" with
-   Tristram as flavour, if new users still miss it.
+Tried and taken out the same day: the town as a band across the top of
+all the columns, with a lamp per project over its column. The human did
+not want it. A band outside the columns does not scroll with them and
+cannot be dragged, and with the town gone from the first column a
+locked usage window became its top and pinned there. The town stays a
+tile in a column that scrolls and drags like the rest. Any next try
+works inside that.
 
 ## Open
 
