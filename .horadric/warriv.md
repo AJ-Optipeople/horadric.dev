@@ -7,6 +7,8 @@
 - A quest session silent for hours with an empty worktree after two nudges is dead and I can not restart it: hand it to the human with "restart it", who does so (settled on "OSC 7501: plain terminals", which then landed).
 
 ## Lately
+- 2026-10-16 "Backup: encrypted snapshots to a folder, and restore" stopped a sixth time, checks queued behind another clippy before its fast-forward. Not stuck (lore #31), noted, no tell.
+- 2026-10-16 Round (human left, main at 8485c6d): the Ship Local reloaded fine at 13:04 with e81cbca. Four quests under way, Backup Settings waits on part 1. Nothing to do.
 - 2026-10-16 "Memory: horadric quest pack shows the quest's recall too" stopped again, review fixes made, checks queued behind a ship build. Not stuck (lore #31), noted, no tell.
 - 2026-10-16 "Memory: horadric quest pack shows the quest's recall too" stopped, checks queued behind a ship build and a review agent reading. Not stuck (lore #31), noted, no tell.
 - 2026-10-16 Round (12:58, main at e81cbca): Ship Local runs the three checks first (5170f91) and the "not nudged" quest (e81cbca) landed. The 12:45 Ship Local has not reloaded (release exe 03:54) and a `cargo test --workspace` started 12:58, after both landings, so it carries them. No second cast. Backup part 1, recall on every prompt, quest pack recall and recall off the window thread under way; Backup Settings waits on part 1.
@@ -39,5 +41,4 @@
 
 ## Open
 - Once quests run with a pack, the pack comparison resumes by itself.
-- The 12:45 Ship Local should reload with e81cbca (release exe still 03:54 at 12:58); reload.log's last entry (04:03) was a failed reload. If it fails again, hand it to the human.
 - The human's session said it will ship public when all six Backup and recall quests land ("released asap"). If it has not when they land, cast "Ship Local" and leave public to the human.
