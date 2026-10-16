@@ -1,10 +1,18 @@
 # Warriv's memory
 
 ## Rules
-- Do not wait for main's checks before casting a ship stone: nothing runs them between landings, and the ship session runs all three first (RELEASING.md step 2) and stops on red.
+- Do not wait for main's checks before casting a ship stone: nothing runs them between landings. Ship Public runs all three first (RELEASING.md step 2) and stops on red; Ship Local did not always until "Ship Local runs the three checks first and stops on red" lands (lore #30).
+- Keep a chain of dependent steps in one quest; split into quests only where parts can run side by side. The human finds handovers slow (lore #34).
+- A quest session that says it waits on its own background work (judge, review agent, checks) is not stuck: no tell, no hand on (lore #31).
 - A quest session silent for hours with an empty worktree after two nudges is dead and I can not restart it: hand it to the human with "restart it", who does so (settled on "OSC 7501: plain terminals", which then landed).
 
 ## Lately
+- 2026-10-16 "Backup: encrypted snapshots to a folder, and restore" stopped a third time, full checks running in its background before commit and merge. Not stuck (lore #31), noted it, no tell.
+- 2026-10-16 "Backup: encrypted snapshots to a folder, and restore" stopped again, checks green, waiting on its review agent before committing. Not stuck (lore #31), noted it, no tell.
+- 2026-10-16 "Backup: encrypted snapshots to a folder, and restore" stopped while its tests and review agent run. Not stuck (lore #31), noted it, no tell.
+- 2026-10-16 "Backup: Google Drive with one click sign in" stopped while its review agent checks the diff. Not stuck (lore #31), noted it, no tell.
+- 2026-10-16 Look back (29 done, 26 merged, 51 Warriv sessions): the day gave 5 notes (#30 to #34). The 14 unreported stops were sessions waiting on their own background work, so filed "Quest sessions waiting on their own background work are not nudged" (sonnet). The 2 conflicts were both crates/horadric/src/task.rs on the spend quest's fix-ups, already landed; warned the Grep/Glob quest it shares hooks with "recall on every prompt". Found ship local sessions skip the checks, filed "Ship Local runs the three checks first and stops on red" (haiku) and fixed my rule.
+- 2026-10-16 Round (main at 06e257c): 6 Backup and recall quests filed by the human's session, 4 under way. Gave Model: sonnet to "Backup: the Settings section" and "Grep or Glob". Nothing landed, nothing to ship.
 - 2026-10-16 Round after the human left (main at 6791d8a): Ship Public landed as v0.28.0, tagged and reloaded fine. 91 done, none open, no aim. Nothing to do.
 - 2026-10-16 Round (main at daf3727): "Memory: the Scroll" landed (32fe982), the last Memory quest, tree clean apart from Horadric's own files, so cast "Ship Public" for all of Memory (last tag v0.27.0). 91 done, none open, no aim.
 - 2026-10-16 Round (main at d9b8dd7): "Memory: Horadrim, sigils and the Lexicon" landed (63eb633), tree clean apart from Horadric's own files, so cast "Ship Local". Held public one more quest: the Scroll (its Settings section, under way) finishes Memory, then one release for it all.
@@ -186,3 +194,4 @@
 
 ## Open
 - Once quests run with a pack, the pack comparison resumes by itself.
+- The human's session said it will ship public when all six Backup and recall quests land ("released asap"). If it has not when they land, cast "Ship Local" and leave public to the human.

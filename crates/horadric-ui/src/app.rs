@@ -636,6 +636,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
     web::set_sizes(&saved.page_sizes);
     theme::set_accents(&saved.accents);
     web::set_docks(&saved.page_docks);
+    sanctuary::set_docks(&saved.sky_docks);
     let mut registry = Registry::new();
     let now = SystemTime::now();
     for s in &saved.sessions {
@@ -6692,6 +6693,7 @@ impl App {
             page_sizes: web::sizes(),
             accents: theme::accents(),
             page_docks: web::docks(),
+            sky_docks: sanctuary::docks(),
             pages: web::pages(),
             runewords: self.tome.projects.clone(),
             stones_cast: self.tome.cast.clone(),

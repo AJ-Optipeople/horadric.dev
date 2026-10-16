@@ -23,6 +23,7 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::OnceLock;
 
 use horadric_core::sanctuary::{Graph, Layout};
+use horadric_core::saved::{Dock, Side};
 use horadric_hooks::lore::Place;
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_USER};
@@ -118,6 +119,43 @@ struct Sky {
 
 thread_local! {
     static SKIES: RefCell<HashMap<String, Sky>> = RefCell::new(HashMap::new());
+    /// Kept apart from the skies, so a sanctuary closed and opened again
+    /// comes back to the side it stood on.
+    static DOCKS: RefCell<HashMap<String, Dock>> = RefCell::new(HashMap::new());
+}
+
+/// Where the project's sanctuary stands beside the stage's grid, or None
+/// while it takes a place in it.
+pub fn dock(key: &str) -> Option<Dock> {
+    DOCKS.with(|d| d.borrow().get(key).copied())
+}
+
+/// Stands the project's sanctuary beside the grid, or puts it back in it
+/// with None. The caller lays the stage out again.
+pub fn set_dock(key: &str, dock: Option<Dock>) {
+    DOCKS.with(|d| {
+        let mut d = d.borrow_mut();
+        match dock {
+            Some(v) => d.insert(key.to_string(), v),
+            None => d.remove(key),
+        }
+    });
+}
+
+/// Moves the sanctuary to `side`, keeping its size along the same axis,
+/// or back into the grid when it is there already.
+pub fn toggle_dock(key: &str, side: Side) {
+    set_dock(key, crate::viewport::toggled(dock(key), side));
+}
+
+/// Every project's dock, to save.
+pub fn docks() -> std::collections::BTreeMap<String, Dock> {
+    DOCKS.with(|d| d.borrow().iter().map(|(k, &v)| (k.clone(), v)).collect())
+}
+
+/// The docks saved last time.
+pub fn set_docks(saved: &std::collections::BTreeMap<String, Dock>) {
+    DOCKS.with(|d| *d.borrow_mut() = saved.iter().map(|(k, &v)| (k.clone(), v)).collect());
 }
 
 fn with<T>(key: &str, f: impl FnOnce(&mut Sky) -> T) -> Option<T> {

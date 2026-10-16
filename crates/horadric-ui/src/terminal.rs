@@ -70,7 +70,7 @@ use crate::menu::{self, Item};
 use crate::pane::{self, Pane, DIRS, WM_PANE_FOCUS, WM_PANE_GRAB, WM_PANE_MOVE, WM_PANE_ZOOM};
 use crate::tip;
 use crate::window::Shared;
-use crate::{layout, snapping, theme, web};
+use crate::{layout, sanctuary, snapping, theme, web};
 
 pub(crate) const CLASS: PCWSTR = w!("HoradricTerminal");
 /// Between panes, and around them, in DIPs. Each pane has a bezel of its
@@ -84,12 +84,12 @@ const GLIDE_TIMER: usize = 1;
 const DRAG_TIMER: usize = 2;
 /// How far a header has to move before a press becomes a drag.
 const DRAG_THRESHOLD: i32 = 4;
-/// The least a docked browser pane and the grid beside it each keep, in
+/// The least a docked pane and the grid beside it each keep, in
 /// DIPs.
 const DOCK_MIN_DIP: f32 = 320.0;
 
 /// Posted to the stage when a pane's place changes from outside it: the
-/// browser pane docked on the right or put back in the grid.
+/// browser or sanctuary pane docked on a side or put back in the grid.
 pub const WM_STAGE_LAYOUT: u32 = windows::Win32::UI::WindowsAndMessaging::WM_USER + 7;
 
 /// Where the stage opens, in physical pixels, as left, top, right, bottom.
@@ -158,12 +158,12 @@ pub struct TerminalWindow {
     glides: RefCell<Glides>,
     /// When the glides last moved on, while they move.
     glided: Cell<Option<Instant>>,
-    /// The gap between the grid and a docked browser pane, while there is
-    /// one: the pane's side, and the gap's start and end across it in
+    /// Each docked pane's cut from the grid, with the gap beside it in
     /// client pixels, x for a side and y on top.
-    seam: Cell<Option<(Side, (i32, i32))>>,
-    /// The seam is being dragged: how far into it the cursor took it.
-    seam_drag: Cell<Option<i32>>,
+    seams: RefCell<Vec<layout::Cut>>,
+    /// A seam is being dragged: its pane, and how far into it the cursor
+    /// took it.
+    seam_drag: Cell<Option<(usize, i32)>>,
 }
 
 pub fn register_class() -> Result<()> {
@@ -211,7 +211,7 @@ impl TerminalWindow {
             caption: RefCell::new(None),
             tracking: Cell::new(false),
             glides: RefCell::default(),
-            seam: Cell::new(None),
+            seams: RefCell::new(Vec::new()),
             seam_drag: Cell::new(None),
             glided: Cell::new(None),
         });
@@ -381,24 +381,29 @@ impl TerminalWindow {
             let _ = GetClientRect(self.hwnd, &mut r);
         }
         let panes = self.panes.borrow();
-        let gap = (PANE_GAP_DIP * self.dpi() as f32 / 96.0).round() as i32;
+        let gap = self.gap();
         let top = self.caption_h();
         if let Some(c) = self.caption.borrow().as_ref() {
             c.place(r.right, top, r.bottom);
             c.set_maximized(unsafe { IsZoomed(self.hwnd) }.as_bool());
         }
         let area = (gap, top, r.right - gap, r.bottom - gap);
-        let dock = self.dock(&panes);
-        let docked = dock.and_then(|d| {
-            let px = |dip: f32| (dip * self.dpi() as f32 / 96.0).round() as i32;
-            let size = d.size.map(px);
-            layout::docked_grid(panes.len(), area, gap, d.side, size, px(DOCK_MIN_DIP))
-        });
-        self.seam.set(
-            dock.zip(docked.as_ref().and_then(|g| g.last()))
-                .map(|(d, c)| (d.side, layout::seam(d.side, *c, gap))),
-        );
-        let grid = docked.unwrap_or_else(|| layout::grid(panes.len(), area, gap));
+        let px = |dip: f32| (dip * self.dpi() as f32 / 96.0).round() as i32;
+        // In the panes' order, so the browser stands outside the sanctuary.
+        let docks: Vec<layout::Docked> = panes
+            .iter()
+            .enumerate()
+            .filter_map(|(index, p)| {
+                let d = Self::dock(p)?;
+                Some(layout::Docked {
+                    index,
+                    side: d.side,
+                    size: d.size.map(px),
+                })
+            })
+            .collect();
+        let (grid, cuts) = layout::docked_grid(panes.len(), area, gap, &docks, px(DOCK_MIN_DIP));
+        *self.seams.borrow_mut() = cuts;
         let many = panes.len() > 1;
         let zoomed = many && self.zoomed.get();
         let active = self.active.borrow().clone();
@@ -438,11 +443,15 @@ impl TerminalWindow {
         }
     }
 
-    /// Where the browser pane stands beside the grid, when it does. It is
-    /// always the last pane.
-    fn dock(&self, panes: &[Box<Pane>]) -> Option<Dock> {
-        let key = panes.last()?.console().web.as_deref()?;
-        web::dock(key)
+    /// Where a browser or sanctuary pane stands beside the grid, when it
+    /// does.
+    fn dock(pane: &Pane) -> Option<Dock> {
+        let c = pane.console();
+        match (&c.web, &c.sky) {
+            (Some(key), _) => web::dock(key),
+            (_, Some(key)) => sanctuary::dock(key),
+            _ => None,
+        }
     }
 
     /// Where a client point is across the seam: x beside a side dock, y
@@ -455,49 +464,52 @@ impl TerminalWindow {
         }
     }
 
-    /// Whether a client point is on the seam beside a docked browser pane.
-    fn on_seam(&self, p: POINT) -> bool {
-        self.seam.get().is_some_and(|(side, (a, b))| {
-            let at = Self::across(side, p);
-            at >= a && at < b
+    /// The seam beside a docked pane a client point is on.
+    fn seam_at(&self, p: POINT) -> Option<layout::Cut> {
+        self.seams.borrow().iter().copied().find(|c| {
+            let at = Self::across(c.side, p);
+            at >= c.seam.0 && at < c.seam.1
         })
     }
 
-    /// The client area the panes are laid out in, as `layout_with` has it.
-    fn pane_area(&self) -> ((i32, i32, i32, i32), i32) {
-        let mut r = RECT::default();
-        unsafe {
-            let _ = GetClientRect(self.hwnd, &mut r);
-        }
-        let gap = (PANE_GAP_DIP * self.dpi() as f32 / 96.0).round() as i32;
-        ((gap, self.caption_h(), r.right - gap, r.bottom - gap), gap)
+    /// The seam beside the docked pane `index`, while it stands there.
+    fn seam_of(&self, index: usize) -> Option<layout::Cut> {
+        self.seams
+            .borrow()
+            .iter()
+            .copied()
+            .find(|c| c.index == index)
     }
 
-    /// Follows the seam with the cursor: the docked pane grows or shrinks
+    /// Between panes and round them, in pixels.
+    fn gap(&self) -> i32 {
+        (PANE_GAP_DIP * self.dpi() as f32 / 96.0).round() as i32
+    }
+
+    /// Follows a seam with the cursor: its docked pane grows or shrinks
     /// to meet it.
-    fn drag_seam(&self, grab: i32) {
-        let Some((side, _)) = self.seam.get() else {
+    fn drag_seam(&self, index: usize, grab: i32) {
+        let Some(cut) = self.seam_of(index) else {
             return;
         };
-        let (area, gap) = self.pane_area();
-        let at = Self::across(side, self.cursor()) - grab;
-        let px = layout::seam_size(side, area, gap, at);
-        let size = (px as f32 * 96.0 / self.dpi() as f32).max(DOCK_MIN_DIP);
-        let key = self
-            .panes
-            .borrow()
-            .last()
-            .and_then(|p| p.console().web.clone());
-        if let Some(key) = key {
-            web::set_dock(
-                &key,
-                Some(Dock {
-                    side,
-                    size: Some(size),
-                }),
-            );
-            self.layout();
+        let at = Self::across(cut.side, self.cursor()) - grab;
+        let px = layout::seam_size(cut.side, cut.from, self.gap(), at);
+        let dock = Some(Dock {
+            side: cut.side,
+            size: Some((px as f32 * 96.0 / self.dpi() as f32).max(DOCK_MIN_DIP)),
+        });
+        let console = self.panes.borrow().get(index).map(|p| p.console().clone());
+        let Some(c) = console else {
+            return;
+        };
+        if let Some(key) = &c.web {
+            web::set_dock(key, dock);
+        } else if let Some(key) = &c.sky {
+            sanctuary::set_dock(key, dock);
+        } else {
+            return;
         }
+        self.layout();
     }
 
     /// Where a pane's top left corner is in the stage's client area.
@@ -1552,10 +1564,15 @@ impl TerminalWindow {
             }
             WM_SETCURSOR
                 if (lparam.0 & 0xffff) as u32 == HTCLIENT
-                    && (self.seam_drag.get().is_some() || self.on_seam(self.cursor())) =>
+                    && (self.seam_drag.get().is_some()
+                        || self.seam_at(self.cursor()).is_some()) =>
             {
-                let cursor = match self.seam.get() {
-                    Some((Side::Top, _)) => IDC_SIZENS,
+                let cut = match self.seam_drag.get() {
+                    Some((index, _)) => self.seam_of(index),
+                    None => self.seam_at(self.cursor()),
+                };
+                let cursor = match cut.map(|c| c.side) {
+                    Some(Side::Top) => IDC_SIZENS,
                     _ => IDC_SIZEWE,
                 };
                 unsafe {
@@ -1563,10 +1580,10 @@ impl TerminalWindow {
                 }
                 Some(LRESULT(1))
             }
-            WM_LBUTTONDOWN if self.on_seam(self.cursor()) => {
-                if let Some((side, (start, _))) = self.seam.get() {
-                    self.seam_drag
-                        .set(Some(Self::across(side, self.cursor()) - start));
+            WM_LBUTTONDOWN if self.seam_at(self.cursor()).is_some() => {
+                if let Some(c) = self.seam_at(self.cursor()) {
+                    let grab = Self::across(c.side, self.cursor()) - c.seam.0;
+                    self.seam_drag.set(Some((c.index, grab)));
                 }
                 unsafe {
                     SetCapture(self.hwnd);
@@ -1584,8 +1601,8 @@ impl TerminalWindow {
                 Some(LRESULT(0))
             }
             WM_MOUSEMOVE if self.seam_drag.get().is_some() => {
-                if let Some(grab) = self.seam_drag.get() {
-                    self.drag_seam(grab);
+                if let Some((index, grab)) = self.seam_drag.get() {
+                    self.drag_seam(index, grab);
                 }
                 Some(LRESULT(0))
             }
