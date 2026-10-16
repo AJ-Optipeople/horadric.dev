@@ -32,6 +32,7 @@ use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::search::{Match, RegexSearch};
 use alacritty_terminal::term::{Term, TermMode};
 use alacritty_terminal::vte::ansi::Rgb;
+use horadric_core::saved::Side as DockSide;
 use windows::core::{w, Result, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::LOGFONTW;
@@ -92,6 +93,7 @@ use crate::motion::{self, REVEAL, SPOTLIGHT};
 use crate::paste::{self, Source};
 use crate::sanctuary;
 use crate::suggest::{self, Suggest};
+use crate::terminal::WM_STAGE_LAYOUT;
 use crate::theme::{self, Color};
 use crate::viewer::Hit;
 use crate::viewport::{self, Fit, Grip};
@@ -944,6 +946,11 @@ impl Pane {
             stash: self.stashes(),
             zoom: self.zoom.get(),
             bar,
+            places: self
+                .console
+                .sky
+                .as_deref()
+                .map(|k| sanctuary::dock(k).map(|d| d.side)),
         };
         let search = self.search.borrow();
         let find = search.as_ref().map(|s| FindBar {
@@ -1791,6 +1798,37 @@ impl Pane {
         glyphs::bar_hit(&self.bar_layout(), self.dip(lparam).0)
     }
 
+    /// The sanctuary's place button under a client point.
+    fn place_at(&self, lparam: LPARAM) -> Option<DockSide> {
+        if self.console.sky.is_none() || !self.in_header(lparam) {
+            return None;
+        }
+        let mut r = RECT::default();
+        unsafe {
+            let _ = GetClientRect(self.hwnd, &mut r);
+        }
+        let width = r.right as f32 * 96.0 / self.dpi_now() as f32;
+        let zoom = self.zoom.get().is_some();
+        let places = glyphs::header_places(width, self.stashes(), zoom, true);
+        glyphs::place_hit(&places, self.dip(lparam).0)
+    }
+
+    /// A press on one of the sanctuary's place buttons: it stands on that
+    /// side of the stage, or back in the grid when it stood there.
+    fn on_place(&self, lparam: LPARAM) -> bool {
+        let (Some(key), Some(side)) = (&self.console.sky, self.place_at(lparam)) else {
+            return false;
+        };
+        sanctuary::toggle_dock(key, side);
+        unsafe {
+            if let Ok(stage) = GetParent(self.hwnd) {
+                let _ = PostMessageW(Some(stage), WM_STAGE_LAYOUT, WPARAM(0), LPARAM(0));
+            }
+        }
+        self.invalidate();
+        true
+    }
+
     /// What in a browser pane's tab strip is under a client point.
     fn tab_at(&self, lparam: LPARAM) -> Option<TabHit> {
         let key = self.console.web.as_deref()?;
@@ -2303,6 +2341,10 @@ impl Pane {
             let docked = self.console.web.as_deref().and_then(web::dock);
             return tip::bar(hit, docked.map(|d| d.side));
         }
+        if let Some(side) = self.place_at(lparam) {
+            let docked = self.console.sky.as_deref().and_then(sanctuary::dock);
+            return Some(tip::sky_place(side, docked.map(|d| d.side)));
+        }
         if let Some(hit) = self.tab_at(lparam) {
             return Some(tip::tab(hit));
         }
@@ -2763,7 +2805,7 @@ impl Pane {
                 None
             }
             WM_LBUTTONDOWN | WM_LBUTTONDBLCLK => {
-                if self.on_bar(lparam, msg == WM_LBUTTONDBLCLK) {
+                if self.on_bar(lparam, msg == WM_LBUTTONDBLCLK) || self.on_place(lparam) {
                     return Some(LRESULT(0));
                 }
                 if self.on_tabs(lparam, false) {

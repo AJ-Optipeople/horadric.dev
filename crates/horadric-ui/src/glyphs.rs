@@ -119,6 +119,9 @@ pub struct Header<'a> {
     /// A browser pane's back, forward and reload and its address, in
     /// place of the name.
     pub bar: Option<Bar<'a>>,
+    /// The sanctuary's place buttons, before the header's own, with the
+    /// side it stands on lit. None on every other pane.
+    pub places: Option<Option<Side>>,
 }
 
 /// A browser pane's address bar, as a browser has one.
@@ -319,6 +322,22 @@ pub fn bar_layout(width: f32, zoom: bool, close: bool) -> BarLayout {
     }
 }
 
+/// The sanctuary's place buttons, left, top and right, [`PLACE_W`] wide
+/// each and ending a little before the header's buttons.
+pub fn header_places(width: f32, stash: bool, zoom: bool, close: bool) -> [(Side, f32); 3] {
+    let first = header_buttons(width, stash, zoom, close).start(width) - 4.0 - 3.0 * PLACE_W;
+    let places = [Side::Left, Side::Top, Side::Right];
+    std::array::from_fn(|i| (places[i], first + i as f32 * PLACE_W))
+}
+
+/// The place button under `x`, a point in the header.
+pub fn place_hit(places: &[(Side, f32); 3], x: f32) -> Option<Side> {
+    places
+        .iter()
+        .find(|(_, at)| x >= *at && x < at + PLACE_W)
+        .map(|&(side, _)| side)
+}
+
 /// What in the address bar is under `x`, a point in the header.
 pub fn bar_hit(l: &BarLayout, x: f32) -> Option<BarHit> {
     let on = |at: f32| x >= at && x < at + HEADER_H;
@@ -330,7 +349,7 @@ pub fn bar_hit(l: &BarLayout, x: f32) -> Option<BarHit> {
         Some(BarHit::Reload)
     } else if on(l.size) {
         Some(BarHit::Size)
-    } else if let Some(&(side, _)) = l.places.iter().find(|(_, at)| x >= *at && x < at + PLACE_W) {
+    } else if let Some(side) = place_hit(&l.places, x) {
         Some(BarHit::Place(side))
     } else if x >= l.field.0 && x < l.field.1 {
         Some(BarHit::Field)
@@ -1750,7 +1769,7 @@ impl GridTarget {
 
         let left = BEZEL + 16.0;
         let at = header_buttons(width, h.stash, h.zoom.is_some(), h.close);
-        let right = if at == Buttons::default() {
+        let mut right = if at == Buttons::default() {
             width - 8.0
         } else {
             at.start(width)
@@ -1781,6 +1800,19 @@ impl GridTarget {
         }
         if let Some(at) = at.stash {
             button("\u{E7B8}", at);
+        }
+        if let Some(dock) = h.places {
+            let places = header_places(width, h.stash, h.zoom.is_some(), h.close);
+            for &(side, at) in &places {
+                let on = dock == Some(side);
+                let ink = if on {
+                    h.accent.mix(theme::text(), 0.35)
+                } else {
+                    theme::text_dim()
+                };
+                self.place_icon(side, at, ink, on);
+            }
+            right = places[0].1 - 4.0;
         }
         if let Some(bar) = &h.bar {
             self.bar(
@@ -2164,6 +2196,16 @@ mod tests {
         assert_eq!(all.start(400.0), end - 3.0 * HEADER_H);
         let no_zoom = header_buttons(400.0, true, false, true);
         assert_eq!(no_zoom.stash, Some(end - 2.0 * HEADER_H), "closes the gap");
+    }
+
+    #[test]
+    fn the_sanctuary_places_end_before_the_header_buttons() {
+        let start = header_buttons(600.0, false, true, true).start(600.0);
+        let places = header_places(600.0, false, true, true);
+        assert_eq!(places[2].1 + PLACE_W, start - 4.0);
+        assert_eq!(place_hit(&places, places[0].1), Some(Side::Left));
+        assert_eq!(place_hit(&places, places[1].1 + 1.0), Some(Side::Top));
+        assert_eq!(place_hit(&places, start - 4.0), None);
     }
 
     #[test]
