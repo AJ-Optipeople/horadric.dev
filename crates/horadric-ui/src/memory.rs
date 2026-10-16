@@ -8,6 +8,11 @@
 //! nobody recalls in keeps its dialogue (part 4) without the download or
 //! the memory it takes. Until the model is loaded the keeper answers by
 //! words.
+//!
+//! The code index lives in the `horadric` binary, so it hands over what
+//! the memory keeps of it with [`set_code_source`]. A recall owes the
+//! project's code a sync, done when nothing is asked, so a project the
+//! index has never read does not hold the first recall up.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -15,11 +20,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::OnceLock;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use horadric_hooks::listener::RecallCall;
 use horadric_hooks::lore::{now, Place};
-use horadric_memory::keeper::Keeper;
+use horadric_memory::keeper::{CodeFile, Keeper};
 use horadric_memory::recall::{self, Ask};
 use horadric_memory::transcripts::Format;
 use horadric_memory::{models, Embedder, Kind};
@@ -37,6 +42,21 @@ const BUDGET: Duration = Duration::from_secs(3);
 /// and sessions share them.
 const STEP: usize = 2;
 const REST: Duration = Duration::from_millis(100);
+
+/// How long a project's code is left alone after a sync: looking is cheap
+/// (a stat of each file) but not free, and recalls come in bursts.
+const SYNC_EVERY: Duration = Duration::from_secs(30);
+
+/// The code of the project a folder is in, as the memory keeps it.
+pub type CodeSource = fn(&Path) -> Result<Vec<CodeFile>, String>;
+
+static CODE: OnceLock<CodeSource> = OnceLock::new();
+
+/// Gives the memory the function that reads a project's code index.
+/// Without it the memory finds notes and passages but no code.
+pub fn set_code_source(f: CodeSource) {
+    let _ = CODE.set(f);
+}
 
 /// A transcript that has grown: a hook said so, with the folder the
 /// session is in.
@@ -136,6 +156,10 @@ fn run(state: &Path, rx: Receiver<Msg>, loaded: Sender<Msg>) {
     let mut projects = Projects::default();
     let mut loading = false;
     let mut behind = !backlog.is_empty();
+    // The folder a recall came from whose code is owed a sync, and when
+    // each was last synced.
+    let mut owed: Option<String> = None;
+    let mut synced: HashMap<String, Instant> = HashMap::new();
     loop {
         let msg = if behind {
             match rx.recv_timeout(REST) {
@@ -166,7 +190,14 @@ fn run(state: &Path, rx: Receiver<Msg>, loaded: Sender<Msg>) {
                     };
                     call.reply.send(body);
                 }
-                behind = keeper.has_model() || !backlog.is_empty();
+                if let Some(dir) = call.body["dir"].as_str() {
+                    if CODE.get().is_some()
+                        && synced.get(dir).is_none_or(|t| t.elapsed() >= SYNC_EVERY)
+                    {
+                        owed = Some(dir.to_string());
+                    }
+                }
+                behind = keeper.has_model() || !backlog.is_empty() || owed.is_some();
             }
             Some(Msg::Keep(job)) => {
                 kept(
@@ -185,6 +216,14 @@ fn run(state: &Path, rx: Receiver<Msg>, loaded: Sender<Msg>) {
             // What was said before the app ran comes first: text is cheap to
             // keep, and the embedding of it can wait.
             None => {
+                if let Some(dir) = owed.take() {
+                    synced.insert(dir.clone(), Instant::now());
+                    if let Err(e) = sync_code(&mut keeper, &dir) {
+                        eprintln!("horadric: memory could not read the code of {dir}: {e}");
+                    }
+                    behind = true;
+                    continue;
+                }
                 if let Some((path, format)) = backlog.pop() {
                     kept(&mut keeper, &mut projects, &path, format, None);
                     behind = true;
@@ -200,6 +239,16 @@ fn run(state: &Path, rx: Receiver<Msg>, loaded: Sender<Msg>) {
             }
         }
     }
+}
+
+fn sync_code(keeper: &mut Keeper<Embedder>, dir: &str) -> Result<(), String> {
+    let source = CODE.get().ok_or("no code source")?;
+    let place = Place::of(Path::new(dir))?;
+    let files = source(Path::new(dir))?;
+    keeper
+        .sync_code(place.key(), &files, now())
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 fn kept(

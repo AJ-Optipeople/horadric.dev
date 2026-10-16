@@ -4,7 +4,7 @@
 //! at a time when nothing is asked.
 //!
 //! The model is passed in once it is loaded, so recall answers by words
-//! alone until then. See docs/plan/memory.md, part 3.
+//! alone until then. See docs/plan/memory.md, parts 3 and 5.
 
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use horadric_core::lore::{Lore, Note};
 
 use crate::recall::{self, Ask, Candidate, Source};
-use crate::store::{Chunk, ChunkId, FileMark, Store};
+use crate::store::{Chunk, ChunkId, FileMark, Kind, Store};
 use crate::transcripts::{self, Format};
 use crate::Embedder;
 
@@ -41,6 +41,16 @@ impl Embed for Embedder {
     }
 }
 
+/// One source file of a project's code index, as the memory takes it in:
+/// the hash of its bytes and a text for each symbol (see
+/// docs/plan/memory.md, part 5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodeFile {
+    pub path: String,
+    pub hash: u64,
+    pub symbols: Vec<String>,
+}
+
 pub struct Keeper<E> {
     store: Store,
     model: Option<E>,
@@ -48,6 +58,26 @@ pub struct Keeper<E> {
     /// How far each transcript has been kept, by path: bytes, to the end
     /// of a whole line.
     cursors: BTreeMap<String, u64>,
+    /// Each project's files as the last [`Keeper::sync_code`] saw them,
+    /// path to hash. A code chunk of a file that has changed since is
+    /// replaced by a new one, so it is not an answer any more.
+    code: HashMap<String, HashMap<String, u64>>,
+}
+
+/// Whether `c` still describes the code it was made of. Anything that is
+/// not code does, and so does code of a project not synced yet, which the
+/// staleness mark then speaks for.
+fn current(code: &HashMap<String, HashMap<String, u64>>, project: &str, c: &Chunk) -> bool {
+    if c.kind != Kind::Code {
+        return true;
+    }
+    match code.get(project) {
+        None => true,
+        Some(files) => c
+            .files
+            .first()
+            .is_some_and(|f| files.get(&f.path) == Some(&f.hash)),
+    }
 }
 
 /// Where the keeper remembers how much of each transcript it has kept.
@@ -63,9 +93,54 @@ impl<E: Embed> Keeper<E> {
         Ok(Keeper {
             store: Store::open(dir)?,
             model: None,
+            code: HashMap::new(),
             dir: dir.to_path_buf(),
             cursors,
         })
+    }
+
+    /// Makes the store hold a chunk for each symbol of `files`, the
+    /// project's code now: a file whose hash the store already has is left
+    /// as it is, one that changed gets new chunks (and the old ones stop
+    /// being answers), one that is gone drops out. The vectors come with
+    /// [`Keeper::catch_up`]. Says how many chunks it added.
+    pub fn sync_code(&mut self, project: &str, files: &[CodeFile], now: u64) -> io::Result<usize> {
+        self.store.refresh()?;
+        let have: HashSet<(&str, u64)> = self
+            .store
+            .chunks()
+            .filter(|(_, c)| c.kind == Kind::Code && c.project == project)
+            .filter_map(|(_, c)| c.files.first().map(|f| (f.path.as_str(), f.hash)))
+            .collect();
+        let mut add = Vec::new();
+        for f in files
+            .iter()
+            .filter(|f| !have.contains(&(f.path.as_str(), f.hash)))
+        {
+            for text in &f.symbols {
+                add.push(Chunk {
+                    time: now,
+                    project: project.to_string(),
+                    kind: Kind::Code,
+                    session: None,
+                    quest: None,
+                    commit: None,
+                    files: vec![FileMark {
+                        path: f.path.clone(),
+                        hash: f.hash,
+                    }],
+                    note: None,
+                    text: text.clone(),
+                });
+            }
+        }
+        let added = add.len();
+        self.store.add_all(&add, now)?;
+        self.code.insert(
+            project.to_string(),
+            files.iter().map(|f| (f.path.clone(), f.hash)).collect(),
+        );
+        Ok(added)
     }
 
     pub fn set_model(&mut self, model: E) {
@@ -120,7 +195,9 @@ impl<E: Embed> Keeper<E> {
         let copies = self
             .copies(project, &lore.notes, ask.now)
             .map_err(|e| e.to_string())?;
-        let Keeper { store, model, .. } = self;
+        let Keeper {
+            store, model, code, ..
+        } = self;
         let mut query = None;
         if let Some(m) = model {
             let tag = m.tag().to_string();
@@ -149,11 +226,8 @@ impl<E: Embed> Keeper<E> {
             store
                 .chunks()
                 .filter(|(_, c)| {
-                    if c.project == project {
-                        c.note.is_none()
-                    } else {
-                        across
-                    }
+                    let own = c.project == project;
+                    (across || own) && (!own || c.note.is_none()) && current(code, &c.project, c)
                 })
                 .map(|(id, c)| Candidate::chunk(id, c, c.project == project)),
         );
@@ -266,7 +340,6 @@ fn copy(project: &str, note: &Note) -> Chunk {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::Kind;
     use horadric_core::lore::Mark;
     use std::cell::Cell;
     use std::fs;
@@ -598,5 +671,70 @@ mod tests {
                 hash: 3
             }]
         );
+    }
+
+    #[test]
+    fn code_is_found_by_meaning_and_a_changed_file_replaces_its_symbols() {
+        let dir = temp("code");
+        let mut k = keeper(&dir);
+        let file = |hash, text: &str| CodeFile {
+            path: "src/pets.rs".into(),
+            hash,
+            symbols: vec![text.into()],
+        };
+        let old = [file(
+            1,
+            "src/pets.rs
+fn feed: fn feed(cat: Cat)",
+        )];
+        assert_eq!(k.sync_code("p", &old, NOW).unwrap(), 1);
+        // Same hash, nothing to add.
+        assert_eq!(k.sync_code("p", &old, NOW).unwrap(), 0);
+        k.catch_up(10).unwrap();
+        let got = k
+            .recall(
+                "p",
+                &lore(&[]),
+                &ask("puppy"),
+                false,
+                Duration::ZERO,
+                |_| Some(1),
+            )
+            .unwrap();
+        assert!(got.contains("fn feed(cat: Cat)"), "{got}");
+        assert!(got.starts_with("2026-10#0 (code,"), "{got}");
+        let new = [file(
+            2,
+            "src/pets.rs
+fn feed: fn feed(dog: Dog)",
+        )];
+        assert_eq!(k.sync_code("p", &new, NOW).unwrap(), 1);
+        k.catch_up(10).unwrap();
+        let got = k
+            .recall(
+                "p",
+                &lore(&[]),
+                &ask("puppy"),
+                false,
+                Duration::ZERO,
+                |_| Some(2),
+            )
+            .unwrap();
+        assert!(got.contains("fn feed(dog: Dog)"), "{got}");
+        assert!(!got.contains("Cat"), "{got}");
+        // A file that is gone is not an answer either.
+        k.sync_code("p", &[], NOW).unwrap();
+        let got = k
+            .recall(
+                "p",
+                &lore(&[]),
+                &ask("puppy"),
+                false,
+                Duration::ZERO,
+                |_| None,
+            )
+            .unwrap();
+        assert!(got.starts_with("Nothing matches"), "{got}");
+        fs::remove_dir_all(&dir).unwrap();
     }
 }

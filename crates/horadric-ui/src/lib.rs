@@ -129,7 +129,7 @@ mod glows;
 #[cfg(windows)]
 mod glyphs;
 #[cfg(windows)]
-mod memory;
+pub mod memory;
 #[cfg(windows)]
 mod menu;
 #[cfg(windows)]
