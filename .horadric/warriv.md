@@ -7,6 +7,7 @@
 - A quest session silent for hours with an empty worktree after two nudges is dead and I can not restart it: hand it to the human with "restart it", who does so (settled on "OSC 7501: plain terminals", which then landed).
 
 ## Lately
+- 2026-10-16 Round (hourly, main at 6b3024d): unchanged, the task notification quest still waits for the runner, nothing landed, no v0.29.0. Nothing to do.
 - 2026-10-16 Round (hourly, main at 0fcc7c9): unchanged, one quest open waiting for the runner, nothing landed, no v0.29.0. Nothing to do.
 - 2026-10-16 Round (human left, main at 46a863e): same picture as 13:42, one quest open waiting for the runner, nothing landed. Nothing to do.
 - 2026-10-16 Round (13:42, human left, main at 1a453fc): the 13:40 Ship Local reloaded fine at 13:41 with all six Backup and recall quests. One quest open (task notification recall, sonnet), waiting for the runner. No v0.29.0 yet; public stays with the human. Nothing else to do.
