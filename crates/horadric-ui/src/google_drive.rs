@@ -9,6 +9,7 @@ use std::sync::Mutex;
 
 use horadric_core::google::{self, DriveFile};
 
+use crate::backup::Vault;
 use crate::google::Session;
 use crate::net::{self, Answer};
 
@@ -53,8 +54,14 @@ impl DriveVault {
         Ok(names)
     }
 
+    fn id(&self, name: &str) -> Option<String> {
+        self.ids.lock().unwrap().get(name).cloned()
+    }
+}
+
+impl Vault for DriveVault {
     /// Every file in this machine's backup folder, by relative name.
-    pub fn list(&self) -> Result<Vec<String>, String> {
+    fn list(&self) -> Result<Vec<String>, String> {
         let files = list_all(
             &mut self.session.lock().unwrap(),
             &google::children_query(&self.folder, false),
@@ -71,7 +78,7 @@ impl DriveVault {
         Ok(names)
     }
 
-    pub fn get(&self, name: &str) -> Result<Vec<u8>, String> {
+    fn get(&self, name: &str) -> Result<Vec<u8>, String> {
         let id = self
             .id(name)
             .ok_or_else(|| format!("{name} is not in the backup"))?;
@@ -83,7 +90,7 @@ impl DriveVault {
 
     /// Writes or replaces, as one resumable upload: Drive's simple upload
     /// stops at 5 MB, and a month's segment passes that.
-    pub fn put(&self, name: &str, bytes: &[u8]) -> Result<(), String> {
+    fn put(&self, name: &str, bytes: &[u8]) -> Result<(), String> {
         let length = bytes.len().to_string();
         let mut session = self.session.lock().unwrap();
         let headers = [
@@ -126,7 +133,7 @@ impl DriveVault {
         Ok(())
     }
 
-    pub fn delete(&self, name: &str) -> Result<(), String> {
+    fn delete(&self, name: &str) -> Result<(), String> {
         let Some(id) = self.id(name) else {
             return Ok(());
         };
@@ -137,10 +144,6 @@ impl DriveVault {
         }
         self.ids.lock().unwrap().remove(name);
         Ok(())
-    }
-
-    fn id(&self, name: &str) -> Option<String> {
-        self.ids.lock().unwrap().get(name).cloned()
     }
 }
 

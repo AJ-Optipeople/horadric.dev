@@ -2,6 +2,7 @@
 //! sign out, say who is signed in, and try the Drive vault end to end.
 //! The Settings section (docs/plan/backup.md) does the same with buttons.
 
+use horadric_ui::backup::Vault;
 use horadric_ui::google;
 use horadric_ui::google_drive::DriveVault;
 use horadric_ui::portal_pair::pc_name;
