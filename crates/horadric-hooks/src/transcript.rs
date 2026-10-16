@@ -148,6 +148,31 @@ fn list_in(root: &Path, cwd: &str, skip: &[String], limit: usize) -> Vec<Past> {
         .collect()
 }
 
+/// Every conversation Claude Code has on disk, newest first: the
+/// `<id>.jsonl` files in each folder of its projects folder. Subagents'
+/// own transcripts, in folders named after their parent, are not among
+/// them.
+pub fn files() -> Vec<PathBuf> {
+    let Some(root) = projects_root(
+        std::env::var("CLAUDE_CONFIG_DIR").ok().as_deref(),
+        crate::home().as_deref(),
+    ) else {
+        return Vec::new();
+    };
+    let mut found: Vec<(SystemTime, PathBuf)> = std::fs::read_dir(root)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|d| std::fs::read_dir(d.path()).ok())
+        .flatten()
+        .flatten()
+        .filter(|e| e.path().extension().is_some_and(|x| x == "jsonl"))
+        .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
+        .collect();
+    found.sort_by_key(|(m, _)| std::cmp::Reverse(*m));
+    found.into_iter().map(|(_, p)| p).collect()
+}
+
 /// Where Claude Code keeps its transcripts, one folder per working
 /// directory.
 fn projects_root(config_dir: Option<&str>, home: Option<&str>) -> Option<PathBuf> {

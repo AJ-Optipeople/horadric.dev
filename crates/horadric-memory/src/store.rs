@@ -390,20 +390,22 @@ impl Store {
 
     /// Keeps `chunk`, in the segment of the month `now` falls in.
     pub fn add(&mut self, chunk: &Chunk, now: u64) -> io::Result<ChunkId> {
-        Ok(self.add_many(std::slice::from_ref(chunk), now)?[0])
+        Ok(self.add_all(std::slice::from_ref(chunk), now)?[0])
     }
 
-    /// Keeps all of `chunks` with one lock and one write to disk, for the
-    /// thousands a code index makes.
-    pub fn add_many(&mut self, chunks: &[Chunk], now: u64) -> io::Result<Vec<ChunkId>> {
+    /// Keeps `chunks` in one write, so a backfill of thousands costs one
+    /// lock and one sync, not one each. Either all are kept or an error is
+    /// returned, though a write that dies half way leaves a torn tail the
+    /// next write cuts, as for [`Store::add`].
+    pub fn add_all(&mut self, chunks: &[Chunk], now: u64) -> io::Result<Vec<ChunkId>> {
+        if chunks.is_empty() {
+            return Ok(Vec::new());
+        }
         if chunks.iter().any(|c| c.kind == Kind::Other) {
             return Err(io::Error::new(
                 ErrorKind::InvalidInput,
                 "a chunk of no known kind",
             ));
-        }
-        if chunks.is_empty() {
-            return Ok(Vec::new());
         }
         let month = Month::of(now);
         let _lock = Lock::take(&self.dir.join("write.lock"))?;
