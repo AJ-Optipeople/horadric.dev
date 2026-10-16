@@ -298,6 +298,13 @@ fn inscribe(
         if i % SESSION == 0 {
             known.clear();
         }
+        // What earlier answers of the session told, which a real session
+        // still has in its context.
+        let told: String = known
+            .iter()
+            .filter_map(|k| k.split_once('='))
+            .map(|(s, name)| format!("{s} = {name}\n"))
+            .collect();
         let in_session = horadrim::inscribe(&mut lex, &known, &hits, 0);
         known.extend(in_session.given.iter().cloned());
         hits_n += hits.len();
@@ -313,6 +320,7 @@ fn inscribe(
             "verbatim": verbatim,
             "inscribed": alone.text,
             "session": in_session.text,
+            "told": told,
         });
         lines.push_str(&row.to_string());
         lines.push('\n');
@@ -330,7 +338,7 @@ fn inscribe(
     );
     let mut used: Vec<&horadric_memory::horadrim::Sigil> =
         lex.sigils.iter().filter(|s| s.uses > 0).collect();
-    used.sort_by(|a, b| b.uses.cmp(&a.uses));
+    used.sort_by_key(|s| std::cmp::Reverse(s.uses));
     for s in used.iter().take(12) {
         println!("  {} = {} ({} answers)", s.sigil, s.name, s.uses);
     }

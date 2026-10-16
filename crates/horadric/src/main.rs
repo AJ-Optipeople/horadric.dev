@@ -170,6 +170,7 @@ fn main() -> ExitCode {
         #[cfg(windows)]
         Some("app") => {
             horadric_ui::sanctuary::set_source(lore::graph_at);
+            horadric_ui::memory::set_code_source(lore::code_files);
             horadric_ui::sanctuary::set_town_source(lore::town_graph);
             horadric_ui::app::run(
                 horadric_hooks::port(),

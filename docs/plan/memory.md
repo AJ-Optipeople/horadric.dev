@@ -245,7 +245,8 @@ and 0.9 is better by words, 1.0 drops by words to BM25's 67.7 %. The
 cosine floor cost nothing on the set (the best 50 are all above it).
 
 Not yet: the background embeds with every core, which is fine for notes
-and will want a gentler pace for part 4's backfill.
+and will want a gentler pace once the backfill's chunks are waiting for
+vectors (part 4 only keeps the text, and rests between files).
 
 ### 4. Transcripts, verbatim
 
@@ -257,11 +258,51 @@ reads what is on disk now. Anything that looks like a secret (see
 [secrets.md](secrets.md)) is left out before it is written, since this
 lives for years.
 
+**Built 2026-10-16.** The reading is `crates/horadric-memory/src/transcripts.rs`
+(pure, tested), the keeping is `Keeper::ingest`, and `horadric-ui/src/memory.rs`
+is the thread that runs both. On Stop, PreCompact and SessionEnd the app
+hands the transcript's path and folder to the memory thread (not for a
+subagent's hooks, not for Grok). A transcript's cursor, bytes read to the
+end of the last whole line, is kept in `memory	ranscripts.json`, so each
+read takes only what was added, a restart goes on where it was, and a
+file rewritten shorter is read again. What is kept: the human's prompts
+and the agent's text, `You: ...` and `Agent: ...`, each tool call as
+`Agent: used Edit: src/a.rs` (the name and the files its input named, never
+the input or the output), packed into chunks of about a thousand
+characters of kind dialogue with the session id and the time of the last
+thing said. Left out: tool results, meta lines, Claude Code's own compact
+summaries, the reminders hooks append to a prompt, `/clear` and
+interrupt notes. Codex is read from its rollouts (an event or an item per
+message, said once; `function_call` and `apply_patch` as tools).
+
+The backfill is the same ingest over every transcript on disk, newest
+first, one file each time nothing else is asked, with the 100 ms rest, so
+it shares the CPU politely: at the first start of the memory it reads
+`~/.claude/projects/*/*.jsonl` and Codex's `sessions`, and the cursors make
+a second start free. A chunk's project is the one git says the transcript's
+folder belongs to (the same key as the lore's); a worktree since deleted
+keeps its own folder as a key, a loose end for part 6.
+
+Secrets are cut before a chunk is written (`redact`): the well known token
+shapes (GitHub, Slack, Stripe, AWS, npm, Hugging Face, Google, JWTs), PEM
+private keys, a value after a name that sounds like a secret (`TOKEN=`,
+`"api_key":`, `password:`), a bearer token, a password in a link, and any
+long mixed case run of letters and digits. Pure hex is left, since commits
+and hashes are worth keeping. It cannot catch a password that reads as a
+word, which is why `docs/plan/secrets.md` keeps agents from seeing them.
+It does not yet know the vault's own values.
+
+The model is now fetched by the first recall, not the first keep: an app
+nobody recalls in keeps its dialogue without the download, and its chunks
+are embedded when a recall first loads the model.
+
 ### 5. Code by meaning
 
 Each symbol in the lore's code index (its head and doc comment, not its
 whole body) gets a vector, refreshed when its file's hash changes, so
 "where do we roll back a failed reload" finds the function.
+
+Done: the index reads each symbol's doc comment (Rust `///`, JS and TS `/** */`, Python docstrings), and the app's memory thread, once a recall has come in, syncs the project's code when idle: one `code` chunk per symbol (path, kind, name, head, doc), added for a file whose hash the store lacks and left alone otherwise. A chunk of a file that has since changed or gone is no longer an answer. The old chunks stay in the store and are embedded too, a small waste a later compaction can remove. The binary hands the index over with `horadric_ui::memory::set_code_source`.
 
 ### 6. Across projects
 
@@ -315,8 +356,69 @@ characters. The savings are in what repeats:
   chunk id, and `lore_recall` with that id returns the original: the
   scroll unrolled.
 
-Expected: 2x to 3x fewer tokens per hit. If the yardstick shows any loss
-in answers, the stripping goes first and sigils stay.
+Expected at first: 2x to 3x fewer tokens per hit. If the yardstick shows
+any loss in answers, the stripping goes first and sigils stay.
+
+**Built 2026-10-16**, in `crates/horadric-memory/src/horadrim.rs` (pure,
+tested). The keeper inscribes after the ranking, so recall's scores never
+see the inscribed form. A sigil is `§` and a word of up to seven letters,
+two of Claude's tokens (measured with `claude -p` usage; a crate's path
+is fourteen). A name earns one when it is five or more tokens, occurs
+three times or more in the project's memory and would save 24 tokens
+there in all; the memory is counted at most once an hour, at most 96
+sigils are in use. A file's sigil retires while its file is gone and
+comes back with it; no sigil ever takes another name.
+
+Decided while building it:
+
+- **Each sigil is told once, at the head of the first answer that uses
+  it**, not the whole Lexicon at the first recall. A sigil is used where
+  the session was told it, or where the answer holds its name twice,
+  which pays for telling it. The whole Lexicon up front cost more than a
+  few recalls save.
+- **The session's memory of sigils is `horadric mcp`'s**, one process per
+  session: it sends what it was told (`sigil=name`, so a sigil could never
+  be read with another name) and the app answers with what it told. A
+  context compacted or cleared loses them while the process remembers, so
+  an answer leaning on an old sigil carries `(§ forgotten? unroll
+  "lexicon")`, and `lore_recall` with `unroll: "lexicon"` tells them all.
+- **Only the agent's narration is stripped**: short "Let me check"
+  sentences naming no file, "Okay." and the like, tool lines that named
+  no file (`Agent: used Bash`), and the quest wrapper line. The human's
+  words are never touched (their "Ok." may be the approval), nor code in
+  fences.
+- `lore_recall` with `unroll` and a hit's id (`#12`, `2026-10#5`) returns
+  it word for word; it works with the app down too, reading the store.
+- The Lexicon is `memory\horadrim.json`, never written over when it
+  cannot be read (an empty one saved over it would rebind sigils). The
+  off switch is the file `memory\horadrim.off`, its own so the Scroll
+  never races the keeper.
+
+**Measured.** The yardstick (`horadrim` lines and `yardstick/judge.py`):
+recall's ten hits per question, answered by claude-haiku-4-5 from each
+form and judged against the answer chunks by Sonnet.
+
+| | answered right | tokens a hit (Claude, median) |
+|---|---|---|
+| verbatim | 52 of 65 | 236 |
+| inscribed, a session's first answer | 59 of 65 | 236 |
+| inscribed, five answers a session | 54 of 65 | 244 |
+
+No loss in answers (the differences either way are the answering
+model's own spread), and no savings either. On a real store of part 4's
+dialogue (`--example tongue`, the installed Horadric's memory, nine
+projects) the tongue saves 1.05x to 1.29x, 1.11x on Horadric's own: about
+a tenth, stripping most of it.
+
+**Where the 2x to 3x went missing.** Recall's hits are prose. A passage
+of 250 tokens carries few long names, and seldom the same one twice, so a
+sigil rarely pays for being told; on the yardstick most answers use none.
+The chatter this part counted on is mostly gone already: part 4
+keeps no tool output, and the agent's narration is short. What is left
+to strip is the tool lines and the odd "Let me check". Claude's tokenizer
+packs English tightly, as this part guessed, so no shortening that keeps
+every word can save much. The tongue stays on, since it costs nothing in
+answers; the gap is not chased here.
 
 **The theme, a little.** The Horadrim were the order that kept Tal
 Rasha's secrets in scrolls, so: a hit is inscribed, the original is

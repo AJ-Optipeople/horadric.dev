@@ -390,7 +390,18 @@ impl Store {
 
     /// Keeps `chunk`, in the segment of the month `now` falls in.
     pub fn add(&mut self, chunk: &Chunk, now: u64) -> io::Result<ChunkId> {
-        if chunk.kind == Kind::Other {
+        Ok(self.add_all(std::slice::from_ref(chunk), now)?[0])
+    }
+
+    /// Keeps `chunks` in one write, so a backfill of thousands costs one
+    /// lock and one sync, not one each. Either all are kept or an error is
+    /// returned, though a write that dies half way leaves a torn tail the
+    /// next write cuts, as for [`Store::add`].
+    pub fn add_all(&mut self, chunks: &[Chunk], now: u64) -> io::Result<Vec<ChunkId>> {
+        if chunks.is_empty() {
+            return Ok(Vec::new());
+        }
+        if chunks.iter().any(|c| c.kind == Kind::Other) {
             return Err(io::Error::new(
                 ErrorKind::InvalidInput,
                 "a chunk of no known kind",
@@ -424,16 +435,21 @@ impl Store {
             )?;
             out.push(b'\n');
         }
-        serde_json::to_writer(&mut out, chunk)?;
-        out.push(b'\n');
+        for chunk in chunks {
+            serde_json::to_writer(&mut out, chunk)?;
+            out.push(b'\n');
+        }
         file.write_all(&out)?;
         file.sync_data()?;
         seg.read_to += out.len() as u64;
-        seg.chunks.push(Some(chunk.clone()));
-        Ok(ChunkId {
-            month,
-            n: seg.chunks.len() as u32 - 1,
-        })
+        let first = seg.chunks.len() as u32;
+        seg.chunks.extend(chunks.iter().cloned().map(Some));
+        Ok((0..chunks.len() as u32)
+            .map(|i| ChunkId {
+                month,
+                n: first + i,
+            })
+            .collect())
     }
 
     pub fn chunk(&self, id: ChunkId) -> Option<&Chunk> {

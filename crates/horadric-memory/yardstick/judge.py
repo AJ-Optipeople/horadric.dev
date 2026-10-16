@@ -60,8 +60,14 @@ def claude(model, system, prompt, tries=5):
 
 
 def answer(row, form):
-    text = row[form]
+    # A session has the sigils earlier answers told still in its context,
+    # paid for then, so they are given here and not counted.
+    told = row.get("told", "") if form == "session" else ""
+    text = told + row[form]
     reply, n = claude(ANSWERER, ANSWER_SYSTEM.format(hits=text), row["q"])
+    if told:
+        n -= claude(ANSWERER, ANSWER_SYSTEM.format(hits=told), row["q"])[1]
+        n += claude(ANSWERER, ANSWER_SYSTEM.format(hits=""), row["q"])[1]
     refs = "\n\n".join(f"<reference>\n{r}\n</reference>" for r in row["reference"])
     verdict, _ = claude(
         JUDGE, JUDGE_SYSTEM, f"Question: {row['q']}\n\n{refs}\n\nAnswer: {reply}"

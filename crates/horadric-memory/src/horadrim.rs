@@ -117,22 +117,37 @@ pub fn tokens(s: &str) -> usize {
 /// sentences that name nothing. What is kept is kept word for word.
 pub fn strip(text: &str) -> String {
     let mut out: Vec<String> = Vec::new();
+    let mut fenced = false;
     for line in text.lines() {
-        if is_wrapper(line) {
+        // Code quoted in a message is kept as it is, indents and all.
+        if line.trim_start().starts_with("```") {
+            fenced = !fenced;
+        }
+        let speaker = match line.split_once(": ") {
+            Some((who @ ("You" | "Human" | "Agent"), said)) if !fenced => Some((who, said)),
+            _ => None,
+        };
+        let Some((who, said)) = speaker else {
+            if !fenced && is_wrapper(line) {
+                continue;
+            }
+            out.push(line.to_string());
+            continue;
+        };
+        if is_wrapper(said) || is_bare_tool(who, said) {
             continue;
         }
-        let (speaker, said) = match line.split_once(": ") {
-            Some((who @ ("Human" | "Agent"), said)) => (Some(who), said),
-            _ => (None, line),
-        };
+        // Only the agent's own narration is chatter: a human's "Ok." may
+        // be the approval the next line acts on.
+        if who != "Agent" {
+            out.push(line.to_string());
+            continue;
+        }
         let kept = keep_sentences(said);
         if kept.trim().is_empty() && !said.trim().is_empty() {
             continue;
         }
-        out.push(match speaker {
-            Some(who) => format!("{who}: {kept}"),
-            None => kept,
-        });
+        out.push(format!("{who}: {kept}"));
     }
     // A dropped message leaves the blank lines around it.
     let mut joined = String::new();
@@ -160,6 +175,19 @@ fn is_wrapper(line: &str) -> bool {
         && l.ends_with(')')
 }
 
+/// A tool call that named no file (`Agent: used Bash`): the memory keeps
+/// a call as its name and its files, and without files the name alone
+/// says nothing the answer needs. One that named files is kept.
+fn is_bare_tool(speaker: &str, said: &str) -> bool {
+    speaker == "Agent"
+        && said.strip_prefix("used ").is_some_and(|name| {
+            !name.is_empty()
+                && name
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || "_-".contains(c))
+        })
+}
+
 /// `said` without its chatter sentences, the rest as it was written.
 fn keep_sentences(said: &str) -> String {
     let mut kept = String::new();
@@ -168,7 +196,7 @@ fn keep_sentences(said: &str) -> String {
             kept.push_str(s);
         }
     }
-    kept.trim().to_string()
+    kept.trim_end().to_string()
 }
 
 /// `s` cut after each `.`, `!` or `?` that a space follows, each piece
@@ -223,7 +251,7 @@ fn is_chatter(sentence: &str) -> bool {
     if SAID_AND_GONE.contains(&bare.as_str()) {
         return true;
     }
-    const ON_THE_WAY: &[&str] = &["let me ", "now let me ", "let's ", "now i'll ", "i'll now "];
+    const ON_THE_WAY: &[&str] = &["let me ", "now let me ", "now i'll ", "i'll now "];
     // Short, and naming no file, code or number: the narration of a step
     // whose result the next sentence gives.
     ON_THE_WAY.iter().any(|w| bare.starts_with(w))
@@ -496,26 +524,49 @@ fn mnemonics(name: &str) -> Vec<String> {
     out
 }
 
-/// What the tongue keeps on disk: whether it is on, and each project's
-/// Lexicon by the lore's key for it.
+/// The file whose being there turns the tongue off, in the memory folder.
+/// Its own file, so the Scroll that writes it never races the keeper that
+/// writes the Lexicon.
+pub const OFF: &str = "horadrim.off";
+
+/// Whether the tongue is turned off in `dir`, for when an answer seems
+/// wrong and the human wants to see whether the tongue is why.
+pub fn is_off(dir: &Path) -> bool {
+    dir.join(OFF).exists()
+}
+
+/// Turns the tongue off in `dir`, or on again.
+pub fn set_off(dir: &Path, off: bool) -> io::Result<()> {
+    if off {
+        fs::write(dir.join(OFF), b"")
+    } else {
+        match fs::remove_file(dir.join(OFF)) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+            r => r,
+        }
+    }
+}
+
+/// What the tongue keeps on disk: each project's Lexicon by the lore's
+/// key for it.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Tongue {
-    /// Turned off in the Scroll, for when an answer seems wrong and the
-    /// human wants to see whether the tongue is why.
-    #[serde(default)]
-    pub off: bool,
     #[serde(default)]
     pub projects: BTreeMap<String, Lexicon>,
 }
 
 impl Tongue {
     /// The tongue kept in `dir`, the memory folder; a new one when there
-    /// is none or it cannot be read.
-    pub fn load(dir: &Path) -> Tongue {
-        fs::read(dir.join(FILE))
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_default()
+    /// is none. A file that cannot be read is an error, never an empty
+    /// tongue: saving that over it would lose every sigil, and binding
+    /// them again could give a known sigil a new name.
+    pub fn load(dir: &Path) -> io::Result<Tongue> {
+        match fs::read(dir.join(FILE)) {
+            Ok(b) => serde_json::from_slice(&b)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e)),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Tongue::default()),
+            Err(e) => Err(e),
+        }
     }
 
     /// Writes it whole beside, then over, the old one, so a reader never
@@ -590,6 +641,7 @@ pub fn inscribe(lex: &mut Lexicon, known: &[String], hits: &[Hit], now: u64) -> 
     }
     let body = body.trim_end().to_string();
     let known: HashSet<&str> = known.iter().map(String::as_str).collect();
+    let knows = |s: &Sigil| known.contains(told(s).as_str());
     // Text that already holds the mark is left as it is: a sigil in it
     // could not be told from one of ours.
     let usable: Vec<&Sigil> = if body.contains(MARK) {
@@ -605,7 +657,7 @@ pub fn inscribe(lex: &mut Lexicon, known: &[String], hits: &[Hit], now: u64) -> 
         .into_iter()
         .filter(|s| {
             let n = count.get(s.sigil.as_str()).copied().unwrap_or(0);
-            n > 0 && (known.contains(s.sigil.as_str()) || n >= 2)
+            n > 0 && (knows(s) || n >= 2)
         })
         .collect();
     let mut text = String::new();
@@ -619,11 +671,7 @@ pub fn inscribe(lex: &mut Lexicon, known: &[String], hits: &[Hit], now: u64) -> 
 
     let mut given: Vec<String> = Vec::new();
     let mut head = String::new();
-    let new: Vec<&Sigil> = used
-        .iter()
-        .copied()
-        .filter(|s| !known.contains(s.sigil.as_str()))
-        .collect();
+    let new: Vec<&Sigil> = used.iter().copied().filter(|s| !knows(s)).collect();
     let changed = text != verbatim;
     if changed && !known.contains(TOLD) {
         head.push_str(
@@ -635,7 +683,13 @@ pub fn inscribe(lex: &mut Lexicon, known: &[String], hits: &[Hit], now: u64) -> 
     }
     for s in &new {
         head.push_str(&format!("{} = {}\n", s.sigil, s.name));
-        given.push(s.sigil.clone());
+        given.push(told(s));
+    }
+    // A sigil told before may be gone from the session's context (it was
+    // compacted or cleared), so an answer that leans on one says where
+    // they are all told again.
+    if new.len() < used.len() {
+        head.push_str("(§ forgotten? unroll \"lexicon\")\n");
     }
     if !head.is_empty() {
         head.push('\n');
@@ -654,11 +708,17 @@ pub fn inscribe(lex: &mut Lexicon, known: &[String], hits: &[Hit], now: u64) -> 
     Inscribed { text, given, saved }
 }
 
+/// How a session's knowing of `s` is kept: the sigil with its name, so a
+/// sigil could never be taken for one told with another name.
+pub fn told(s: &Sigil) -> String {
+    format!("{}={}", s.sigil, s.name)
+}
+
 /// Where the names of `sigils` stand in `text`, as whole names, the
 /// longest where two start at one place, in order.
 fn find<'s>(text: &str, sigils: &[&'s Sigil]) -> Vec<(usize, &'s Sigil)> {
     let mut by_length: Vec<&Sigil> = sigils.to_vec();
-    by_length.sort_by(|a, b| b.name.len().cmp(&a.name.len()));
+    by_length.sort_by_key(|s| std::cmp::Reverse(s.name.len()));
     let bytes = text.as_bytes();
     // A name inside a longer path or word is not the name.
     let joins_before = |b: u8| b.is_ascii_alphanumeric() || b"_-/\\.%".contains(&b);
@@ -743,6 +803,22 @@ mod tests {
              Agent: Let me read crates/a/src/b.rs before the rest."
         );
         assert_eq!(strip("Agent: Okay."), "");
+        // A human's "Ok." may be an approval; code keeps its indent.
+        let kept = "You: Shall I delete it?\nYou: Ok. Let's not.\n\
+                    Agent: Here:\n```\nok\n    let me = 1;\n```\n  indented";
+        assert_eq!(strip(kept), kept);
+        // As part 4 keeps a transcript.
+        assert_eq!(
+            strip(
+                "You: Fix it\n\
+                 You: (A quest from .horadric/tasks.md. When it is finished, run `x`.)\n\
+                 Agent: used Bash\n\
+                 Agent: used mcp__horadric__lore_recall\n\
+                 Agent: used Edit: src/a.rs\n\
+                 Agent: Fixed."
+            ),
+            "You: Fix it\nAgent: used Edit: src/a.rs\nAgent: Fixed."
+        );
     }
 
     #[test]
@@ -843,16 +919,23 @@ mod tests {
              #1 (note, a minute ago)\nIt is in §recall.\nFiles: §recall\n\n\
              #2 (note, a minute ago)\ncrates/horadric-memory/src/keeper.rs holds it"
         );
-        assert_eq!(first.given, vec!["§", "§recall"]);
+        assert_eq!(
+            first.given,
+            vec!["§", "§recall=crates/horadric-memory/src/recall.rs"]
+        );
         assert_eq!(lex.sigils[0].uses, 1);
         assert_eq!(lex.sigils[1].uses, 0);
         // Known now, so once is enough and nothing is told again.
         let known = first.given;
         let again = inscribe(&mut lex, &known, &hits[1..], NOW);
         assert!(again.given.is_empty());
-        let one = [hit("#3 (note)", Kind::Note, &format!("see {rc}"), &[])];
+        let one = [hit("#3 (note)", Kind::Note, &format!("{rc}, {rc}"), &[])];
         let third = inscribe(&mut lex, &known, &one, NOW);
-        assert_eq!(third.text, "#3 (note)\nsee §recall");
+        assert_eq!(
+            third.text,
+            "(§ forgotten? unroll \"lexicon\")\n\n\
+             #3 (note)\n§recall, §recall"
+        );
         assert!(third.saved > 0);
         assert_eq!(
             lex.saved_this_week(NOW),
@@ -930,12 +1013,21 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("horadric-tongue-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
-        assert_eq!(Tongue::load(&dir), Tongue::default());
+        assert_eq!(Tongue::load(&dir).unwrap(), Tongue::default());
         let mut t = Tongue::default();
         t.projects
             .insert("p".into(), lexicon(&[("§a", "crates/x/src/a.rs")]));
         t.save(&dir).unwrap();
-        assert_eq!(Tongue::load(&dir), t);
+        assert_eq!(Tongue::load(&dir).unwrap(), t);
+        // A file that cannot be read is an error, never an empty tongue.
+        fs::write(dir.join(FILE), b"{ torn").unwrap();
+        assert!(Tongue::load(&dir).is_err());
+        assert!(!is_off(&dir));
+        set_off(&dir, true).unwrap();
+        assert!(is_off(&dir));
+        set_off(&dir, false).unwrap();
+        set_off(&dir, false).unwrap();
+        assert!(!is_off(&dir));
         fs::remove_dir_all(&dir).unwrap();
     }
 }

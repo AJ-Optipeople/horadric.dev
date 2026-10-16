@@ -4,11 +4,11 @@
 //! at a time when nothing is asked.
 //!
 //! The model is passed in once it is loaded, so recall answers by words
-//! alone until then. See docs/plan/memory.md, part 3. Answers are
-//! inscribed in Horadrim unless the tongue is off, see part 8.
+//! alone until then. See docs/plan/memory.md, parts 3 and 5. Answers
+//! are inscribed in Horadrim unless the tongue is off, see part 8.
 
 use std::collections::hash_map::Entry;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -17,7 +17,8 @@ use horadric_core::lore::{Lore, Note};
 
 use crate::horadrim::{self, Tongue, MARK, TOLD};
 use crate::recall::{self, Ask, Candidate, Source};
-use crate::store::{Chunk, ChunkId, FileMark, Store};
+use crate::store::{Chunk, ChunkId, FileMark, Kind, Store};
+use crate::transcripts::{self, Format};
 use crate::Embedder;
 
 /// What the keeper embeds with: the model, or a stand in for tests.
@@ -42,10 +43,27 @@ impl Embed for Embedder {
     }
 }
 
+/// One source file of a project's code index, as the memory takes it in:
+/// the hash of its bytes and a text for each symbol (see
+/// docs/plan/memory.md, part 5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodeFile {
+    pub path: String,
+    pub hash: u64,
+    pub symbols: Vec<String>,
+}
+
 pub struct Keeper<E> {
-    dir: PathBuf,
     store: Store,
     model: Option<E>,
+    dir: PathBuf,
+    /// How far each transcript has been kept, by path: bytes, to the end
+    /// of a whole line.
+    cursors: BTreeMap<String, u64>,
+    /// Each project's files as the last [`Keeper::sync_code`] saw them,
+    /// path to hash. A code chunk of a file that has changed since is
+    /// replaced by a new one, so it is not an answer any more.
+    code: HashMap<String, HashMap<String, u64>>,
 }
 
 /// How often a project's memory is counted for names that earn a sigil:
@@ -61,14 +79,83 @@ pub struct Answer {
     pub given: Vec<String>,
 }
 
+/// Whether `c` still describes the code it was made of. Anything that is
+/// not code does, and so does code of a project not synced yet, which the
+/// staleness mark then speaks for.
+fn current(code: &HashMap<String, HashMap<String, u64>>, project: &str, c: &Chunk) -> bool {
+    if c.kind != Kind::Code {
+        return true;
+    }
+    match code.get(project) {
+        None => true,
+        Some(files) => c
+            .files
+            .first()
+            .is_some_and(|f| files.get(&f.path) == Some(&f.hash)),
+    }
+}
+
+/// Where the keeper remembers how much of each transcript it has kept.
+const CURSORS: &str = "transcripts.json";
+
 impl<E: Embed> Keeper<E> {
     /// The keeper of the store in `dir`, with no model yet.
     pub fn open(dir: &Path) -> io::Result<Keeper<E>> {
+        let cursors = std::fs::read(dir.join(CURSORS))
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default();
         Ok(Keeper {
-            dir: dir.to_path_buf(),
             store: Store::open(dir)?,
             model: None,
+            code: HashMap::new(),
+            dir: dir.to_path_buf(),
+            cursors,
         })
+    }
+
+    /// Makes the store hold a chunk for each symbol of `files`, the
+    /// project's code now: a file whose hash the store already has is left
+    /// as it is, one that changed gets new chunks (and the old ones stop
+    /// being answers), one that is gone drops out. The vectors come with
+    /// [`Keeper::catch_up`]. Says how many chunks it added.
+    pub fn sync_code(&mut self, project: &str, files: &[CodeFile], now: u64) -> io::Result<usize> {
+        self.store.refresh()?;
+        let have: HashSet<(&str, u64)> = self
+            .store
+            .chunks()
+            .filter(|(_, c)| c.kind == Kind::Code && c.project == project)
+            .filter_map(|(_, c)| c.files.first().map(|f| (f.path.as_str(), f.hash)))
+            .collect();
+        let mut add = Vec::new();
+        for f in files
+            .iter()
+            .filter(|f| !have.contains(&(f.path.as_str(), f.hash)))
+        {
+            for text in &f.symbols {
+                add.push(Chunk {
+                    time: now,
+                    project: project.to_string(),
+                    kind: Kind::Code,
+                    session: None,
+                    quest: None,
+                    commit: None,
+                    files: vec![FileMark {
+                        path: f.path.clone(),
+                        hash: f.hash,
+                    }],
+                    note: None,
+                    text: text.clone(),
+                });
+            }
+        }
+        let added = add.len();
+        self.store.add_all(&add, now)?;
+        self.code.insert(
+            project.to_string(),
+            files.iter().map(|f| (f.path.clone(), f.hash)).collect(),
+        );
+        Ok(added)
     }
 
     pub fn set_model(&mut self, model: E) {
@@ -124,7 +211,13 @@ impl<E: Embed> Keeper<E> {
         let copies = self
             .copies(project, &lore.notes, ask.now)
             .map_err(|e| e.to_string())?;
-        let Keeper { store, model, dir } = self;
+        let Keeper {
+            store,
+            model,
+            code,
+            dir,
+            ..
+        } = self;
         let mut query = None;
         if let Some(m) = model {
             let tag = m.tag().to_string();
@@ -150,7 +243,9 @@ impl<E: Embed> Keeper<E> {
         cands.extend(
             store
                 .chunks()
-                .filter(|(_, c)| c.note.is_none() && c.project == project)
+                .filter(|(_, c)| {
+                    c.note.is_none() && c.project == project && current(code, project, c)
+                })
                 .map(|(id, c)| Candidate::chunk(id, c, true)),
         );
         let meaning: Vec<usize> = match &query {
@@ -183,15 +278,25 @@ impl<E: Embed> Keeper<E> {
             });
         }
         let hits = recall::hits(&cands, &found, ask.now, &now_hash);
-        // Read again each time: the Scroll turns the tongue off from
-        // another thread.
-        let mut tongue = Tongue::load(dir);
-        if tongue.off {
-            return Ok(Answer {
-                text: horadrim::plain(&hits),
-                given: Vec::new(),
-            });
+        let plain = || Answer {
+            text: horadrim::plain(&hits),
+            given: Vec::new(),
+        };
+        if horadrim::is_off(dir) {
+            return Ok(plain());
         }
+        // A Lexicon that cannot be read is never written over, so no
+        // sigil is lost or bound again to a new name: answer word for word.
+        let mut tongue = match Tongue::load(dir) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!(
+                    "horadric: the Lexicon in {} cannot be read: {e}",
+                    dir.display()
+                );
+                return Ok(plain());
+            }
+        };
         let lex = tongue.projects.entry(project.to_string()).or_default();
         if ask.now.saturating_sub(lex.counted) >= RECOUNT {
             let texts: Vec<String> = cands
@@ -238,13 +343,60 @@ impl<E: Embed> Keeper<E> {
         now_hash: impl Fn(&str) -> Option<u64>,
     ) -> Result<Answer, String> {
         if id.trim() == "lexicon" {
-            return Ok(lexicon(&Tongue::load(&self.dir), project));
+            let tongue = Tongue::load(&self.dir).map_err(|e| e.to_string())?;
+            return Ok(lexicon(&tongue, project));
         }
         self.store.refresh().map_err(|e| e.to_string())?;
         Ok(Answer {
             text: unroll(&self.store, project, lore, id, now, now_hash)?,
             given: Vec::new(),
         })
+    }
+
+    /// Keeps what a transcript has gained since it was last read: its
+    /// dialogue, as chunks of the project `project_of` names from the
+    /// folder the transcript says it was held in (`cwd` where the lines do
+    /// not). Says how many chunks it kept. A transcript no project claims
+    /// is passed over, not read again.
+    pub fn ingest(
+        &mut self,
+        path: &Path,
+        format: Format,
+        cwd: Option<&str>,
+        project_of: impl FnOnce(&str) -> Option<String>,
+        now: u64,
+    ) -> Result<usize, String> {
+        let key = path.to_string_lossy().to_lowercase();
+        let from = self.cursors.get(&key).copied().unwrap_or(0);
+        let scan = transcripts::scan(path, format, from).map_err(|e| e.to_string())?;
+        let mut kept = 0;
+        let project = scan
+            .cwd
+            .as_deref()
+            .or(cwd)
+            .filter(|_| !scan.turns.is_empty())
+            .and_then(project_of);
+        if let Some(project) = project {
+            let session = scan.session.clone().unwrap_or_else(|| {
+                path.file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            });
+            let cs = transcripts::chunks(&scan.turns, &project, &session, now);
+            kept = cs.len();
+            self.store.add_all(&cs, now).map_err(|e| e.to_string())?;
+        }
+        // After the chunks: a crash between the two keeps some twice, never
+        // loses any.
+        self.cursors.insert(key, scan.end);
+        self.save_cursors().map_err(|e| e.to_string())?;
+        Ok(kept)
+    }
+
+    fn save_cursors(&self) -> io::Result<()> {
+        let tmp = self.dir.join(format!("{CURSORS}.tmp"));
+        std::fs::write(&tmp, serde_json::to_vec(&self.cursors)?)?;
+        std::fs::rename(&tmp, self.dir.join(CURSORS))
     }
 
     /// Embeds up to `most` chunks the model has not, oldest first, and
@@ -313,7 +465,7 @@ pub fn lexicon(tongue: &Tongue, project: &str) -> Answer {
     let mut given = vec![TOLD.to_string()];
     for s in sigils {
         text.push_str(&format!("{} = {}\n", s.sigil, s.name));
-        given.push(s.sigil.clone());
+        given.push(horadrim::told(s));
     }
     Answer {
         text: text.trim_end().to_string(),
@@ -348,7 +500,6 @@ fn copy(project: &str, note: &Note) -> Chunk {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::Kind;
     use horadric_core::lore::Mark;
     use std::cell::Cell;
     use std::fs;
@@ -481,8 +632,7 @@ mod tests {
                 |_| None,
                 &[],
             )
-            .unwrap()
-            .text;
+            .unwrap();
         }
         assert_eq!(k.store.len(), 2);
         assert_eq!(k.model.as_ref().unwrap().embedded.get(), 2);
@@ -496,8 +646,7 @@ mod tests {
             |_| None,
             &[],
         )
-        .unwrap()
-        .text;
+        .unwrap();
         assert_eq!(k.store.len(), 4);
         fs::remove_dir_all(&dir).unwrap();
     }
@@ -514,8 +663,7 @@ mod tests {
             |_| None,
             &[],
         )
-        .unwrap()
-        .text;
+        .unwrap();
         let got = k
             .recall(
                 "p",
@@ -542,8 +690,7 @@ mod tests {
             "The price went up.",
         ]);
         k.recall("p", &l, &ask("cat"), Duration::ZERO, |_| None, &[])
-            .unwrap()
-            .text;
+            .unwrap();
         assert_eq!(k.model.as_ref().unwrap().embedded.get(), 0);
         assert_eq!(k.catch_up(2), Ok(2));
         assert_eq!(k.catch_up(2), Ok(1));
@@ -633,7 +780,10 @@ mod tests {
             "{}",
             a.text
         );
-        assert_eq!(a.given, vec!["§", "§recall"]);
+        assert_eq!(
+            a.given,
+            vec!["§", "§recall=crates/horadric-memory/src/recall.rs"]
+        );
         // Told already, so not again.
         let again = k
             .recall(
@@ -645,7 +795,15 @@ mod tests {
                 &a.given,
             )
             .unwrap();
-        assert!(again.text.starts_with("#1 (note,"), "{}", again.text);
+        assert!(
+            again.text.contains(
+                "
+
+#1 (note,"
+            ),
+            "{}",
+            again.text
+        );
         assert!(again.given.is_empty());
 
         let back = k.unroll("p", &l, "2026-10#0", NOW, |_| Some(1)).unwrap();
@@ -658,22 +816,90 @@ mod tests {
             "{}",
             lex.text
         );
-        assert_eq!(lex.given, vec!["§", "§recall"]);
+        assert_eq!(
+            lex.given,
+            vec!["§", "§recall=crates/horadric-memory/src/recall.rs"]
+        );
         for wrong in ["2026-10#9", "#99", "nonsense"] {
             assert!(k.unroll("p", &l, wrong, NOW, |_| None).is_err(), "{wrong}");
         }
         assert!(k.unroll("q", &l, "2026-10#0", NOW, |_| None).is_err());
 
-        let mut tongue = Tongue::load(&dir);
+        let tongue = Tongue::load(&dir).unwrap();
         assert_eq!(tongue.projects["p"].sigils[0].uses, 2);
-        tongue.off = true;
-        tongue.save(&dir).unwrap();
+        horadrim::set_off(&dir, true).unwrap();
         let off = k
             .recall("p", &l, &ask("weighs"), Duration::ZERO, |_| Some(1), &[])
             .unwrap();
         assert!(off.text.contains("Let me check"), "{}", off.text);
         assert!(off.given.is_empty());
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_transcript_is_kept_once_and_then_only_what_it_gains() {
+        let dir = temp("ingest");
+        let file = dir.with_extension("jsonl");
+        let line = |who: &str, text: &str| {
+            format!(
+                "{}\n",
+                serde_json::json!({"type": who, "cwd": "C:\\proj", "sessionId": "s1",
+                    "message": {"content": text}})
+            )
+        };
+        fs::write(
+            &file,
+            line("user", "my cat is sick")
+                + &line("assistant", "token ghp_abcdefghijklmnopqrstuvwxyz0123"),
+        )
+        .unwrap();
+        let mut k: Keeper<Topics> = Keeper::open(&dir).unwrap();
+        let project = |cwd: &str| Some(cwd.to_lowercase());
+        assert_eq!(
+            k.ingest(&file, Format::Claude, None, project, NOW).unwrap(),
+            1
+        );
+        assert_eq!(
+            k.ingest(&file, Format::Claude, None, project, NOW).unwrap(),
+            0
+        );
+        let mut text = fs::read_to_string(&file).unwrap();
+        text += &line("user", "and a dog");
+        fs::write(&file, text).unwrap();
+        // A restart remembers how far it had read.
+        drop(k);
+        let mut k: Keeper<Topics> = Keeper::open(&dir).unwrap();
+        assert_eq!(
+            k.ingest(&file, Format::Claude, None, project, NOW).unwrap(),
+            1
+        );
+        let kept: Vec<&Chunk> = k.store.chunks().map(|(_, c)| c).collect();
+        assert_eq!(kept.len(), 2);
+        assert_eq!(kept[0].project, "c:\\proj");
+        assert_eq!(kept[0].session.as_deref(), Some("s1"));
+        assert!(kept[0].text.contains("You: my cat is sick"));
+        assert!(
+            kept[0].text.contains("Agent: token [secret]"),
+            "{}",
+            kept[0].text
+        );
+        assert_eq!(kept[1].text, "You: and a dog");
+        // A transcript no project claims is passed over, and not read again.
+        let other = dir.with_extension("other.jsonl");
+        fs::write(&other, line("user", "hello")).unwrap();
+        assert_eq!(
+            k.ingest(&other, Format::Claude, None, |_| None, NOW)
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            k.ingest(&other, Format::Claude, None, project, NOW)
+                .unwrap(),
+            0
+        );
+        fs::remove_dir_all(&dir).unwrap();
+        fs::remove_file(&file).unwrap();
+        fs::remove_file(&other).unwrap();
     }
 
     #[test]
@@ -702,5 +928,73 @@ mod tests {
                 hash: 3
             }]
         );
+    }
+
+    #[test]
+    fn code_is_found_by_meaning_and_a_changed_file_replaces_its_symbols() {
+        let dir = temp("code");
+        let mut k = keeper(&dir);
+        let file = |hash, text: &str| CodeFile {
+            path: "src/pets.rs".into(),
+            hash,
+            symbols: vec![text.into()],
+        };
+        let old = [file(
+            1,
+            "src/pets.rs
+fn feed: fn feed(cat: Cat)",
+        )];
+        assert_eq!(k.sync_code("p", &old, NOW).unwrap(), 1);
+        // Same hash, nothing to add.
+        assert_eq!(k.sync_code("p", &old, NOW).unwrap(), 0);
+        k.catch_up(10).unwrap();
+        let got = k
+            .recall(
+                "p",
+                &lore(&[]),
+                &ask("puppy"),
+                Duration::ZERO,
+                |_| Some(1),
+                &[],
+            )
+            .unwrap()
+            .text;
+        assert!(got.contains("fn feed(cat: Cat)"), "{got}");
+        assert!(got.starts_with("2026-10#0 (code,"), "{got}");
+        let new = [file(
+            2,
+            "src/pets.rs
+fn feed: fn feed(dog: Dog)",
+        )];
+        assert_eq!(k.sync_code("p", &new, NOW).unwrap(), 1);
+        k.catch_up(10).unwrap();
+        let got = k
+            .recall(
+                "p",
+                &lore(&[]),
+                &ask("puppy"),
+                Duration::ZERO,
+                |_| Some(2),
+                &[],
+            )
+            .unwrap()
+            .text;
+        assert!(got.contains("fn feed(dog: Dog)"), "{got}");
+        assert!(!got.contains("Cat"), "{got}");
+        // A file that is gone is not an answer either.
+        k.sync_code("p", &[], NOW).unwrap();
+        let got = k
+            .recall(
+                "p",
+                &lore(&[]),
+                &ask("puppy"),
+                Duration::ZERO,
+                |_| None,
+                &[],
+            )
+            .unwrap()
+            .text;
+        assert!(got.starts_with("Nothing matches"), "{got}");
+        fs::remove_dir_all(&dir).unwrap();
     }
 }

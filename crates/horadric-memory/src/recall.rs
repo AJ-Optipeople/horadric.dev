@@ -350,7 +350,7 @@ pub fn describe(
 }
 
 /// The answer when nothing is found.
-pub const NOTHING: &str = "Nothing matches. When you find something out that the next session                            would otherwise have to find out again, leave it with lore_note.";
+pub const NOTHING: &str = "Nothing matches. When you find something out that the next session would otherwise have to find out again, leave it with lore_note.";
 
 /// The hits of `found` as an answer shows them, before they are written
 /// out word for word ([`describe`]) or inscribed

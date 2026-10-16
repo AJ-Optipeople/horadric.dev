@@ -78,3 +78,15 @@ The models are read from `%APPDATA%\Horadric-dev\models\<folder>`.
 Vectors are cached in `target\yardstick` under a hash of the corpus, so
 a second run only scores. The first results and the model chosen from
 them are in docs/plan/memory.md, part 1.
+
+## Horadrim
+
+The run with `minilm` also inscribes each question's answer in Horadrim
+(docs/plan/memory.md, part 8) and writes it word for word and inscribed
+to `target\yardstick\horadrim.jsonl`, printing the tokens a hit by the
+crate's estimate. `python -I judge.py` then has Claude answer every
+question from each form and judges the answers against the answer
+chunks, counting the tokens with Claude's own tokenizer. It calls
+`claude -p`, a few hundred short calls on the runner's own login.
+`cargo run --release -p horadric-memory --example tongue` measures the
+same on a real store, which holds part 4's dialogue with its tool lines.
