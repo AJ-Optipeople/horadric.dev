@@ -183,9 +183,14 @@ pub fn context(o: &Overlap) -> String {
 
 /// The reply to a `PostToolUse` hook that puts `text` before the agent.
 pub fn reply(text: &str) -> String {
+    reply_to("PostToolUse", text)
+}
+
+/// The reply to the hook `event` that puts `text` before the agent.
+pub fn reply_to(event: &str, text: &str) -> String {
     serde_json::json!({
         "hookSpecificOutput": {
-            "hookEventName": "PostToolUse",
+            "hookEventName": event,
             "additionalContext": text,
         }
     })
