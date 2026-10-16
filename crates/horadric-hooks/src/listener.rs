@@ -578,6 +578,9 @@ fn recall(stream: &TcpStream, body: &[u8], commands: &Sender<Command>) -> io::Re
         return respond(stream, "400 Bad Request");
     };
     let (reply, rx) = Reply::new();
+    // The flag, not the reply, is kept: an app that drops the call (the
+    // Mac has no memory yet) closes the reply, and the caller hears at once.
+    let gone = Arc::clone(&reply.gone);
     if commands
         .send(Command::Recall(RecallCall { body, reply }))
         .is_err()
@@ -587,7 +590,12 @@ fn recall(stream: &TcpStream, body: &[u8], commands: &Sender<Command>) -> io::Re
     let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
     match rx.recv_timeout(RECALL_WAIT) {
         Ok(answer) => respond_with(stream, "200 OK", &answer),
-        Err(_) => respond(stream, "504 Gateway Timeout"),
+        Err(_) => {
+            // The server answers by words now; a recall still queued
+            // behind others is not worth the memory's time.
+            gone.store(true, Ordering::Relaxed);
+            respond(stream, "504 Gateway Timeout")
+        }
     }
 }
 

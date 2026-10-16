@@ -797,6 +797,24 @@ mod tests {
     }
 
     #[test]
+    fn a_chunk_s_cosine_needs_its_vector_and_the_same_numbers() {
+        let dir = temp("cosine");
+        let mut store = Store::open(&dir).unwrap();
+        let a = store.add(&chunk("a"), OCT).unwrap();
+        let b = store.add(&chunk("b"), OCT).unwrap();
+        store.put_vector(a, "m", &unit(&[1.0, 1.0])).unwrap();
+        let cos = store.cosine("m", a, &unit(&[1.0, 0.0])).unwrap();
+        assert!(
+            (cos - std::f32::consts::FRAC_1_SQRT_2).abs() < 0.01,
+            "{cos}"
+        );
+        assert_eq!(store.cosine("m", b, &[1.0, 0.0]), None);
+        assert_eq!(store.cosine("m", a, &[1.0, 0.0, 0.0]), None);
+        assert_eq!(store.cosine("other", a, &[1.0, 0.0]), None);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn months_come_from_unix_time() {
         assert_eq!(Month::of(0).to_string(), "1970-01");
         assert_eq!(Month::of(OCT).to_string(), "2026-10");
