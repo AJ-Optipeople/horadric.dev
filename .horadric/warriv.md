@@ -7,6 +7,7 @@
 - A quest session silent for hours with an empty worktree after two nudges is dead and I can not restart it: hand it to the human with "restart it", who does so (settled on "OSC 7501: plain terminals", which then landed).
 
 ## Lately
+- 2026-10-16 "Memory: horadric quest pack shows the quest's recall too" stopped, checks queued behind a ship build and a review agent reading. Not stuck (lore #31), noted, no tell.
 - 2026-10-16 Round (12:58, main at e81cbca): Ship Local runs the three checks first (5170f91) and the "not nudged" quest (e81cbca) landed. The 12:45 Ship Local has not reloaded (release exe 03:54) and a `cargo test --workspace` started 12:58, after both landings, so it carries them. No second cast. Backup part 1, recall on every prompt, quest pack recall and recall off the window thread under way; Backup Settings waits on part 1.
 - 2026-10-16 Wake right after (12:52, main still at 43b29d6): log unchanged, the 12:45 Ship Local still building. Nothing to do.
 - 2026-10-16 Round (main at 43b29d6): "Memory: what the lore knows comes with a Grep or Glob" landed (9318873, 12:49). The 12:45 "Ship Local" cast has not reloaded yet and cargo started 12:51, after the landing, so it carries it. No second cast. Gave "a quest's recall off the window thread" Model: sonnet. Public still waits for the rest of Backup and recall. Last reload attempt in reload.log (04:03) failed, old Horadric did not exit: check the next ship reloads.
