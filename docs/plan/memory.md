@@ -504,7 +504,16 @@ put text before the agent (`overlap.rs` answers PostToolUse with
   shown to the session is not shown again. Inscribed in Horadrim like
   any answer.
 - **At quest start.** A recall on the quest's title and notes goes into
-  its prompt beside the context pack.
+  its prompt beside the context pack. Done 2026-10-16: `After:` and
+  `Model:` lines are left out of what is asked, the app's memory gets
+  half a second to embed and the window waits a second and a half for
+  the answer, and only hits at `recall::STRONG` come. That bar is on
+  the fused score before it is weighed, so an old note or dialogue is
+  not shut out by its age: about the first three places of words and
+  meaning at once. The yardstick prints the bar's trade (MiniLM: 40 of
+  65 questions get a hit, 1.5 each, 63% of them an answer; at 0.028
+  it is 4.5 hits and 31%). Without the model nothing is strong, so an
+  app that has not loaded it yet adds nothing.
 - **Before a search.** When an agent greps or globs for a name, what the
   lore knows of it (where it is defined, a note naming it) comes with
   the result, so the next grep is not needed.

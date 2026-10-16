@@ -2287,14 +2287,21 @@ pub(super) fn merges(dir: &Path) -> Vec<Merge> {
 }
 
 /// The context pack for `task` from the project's finished quests (Lore
-/// part 2), files no longer there left out: the text for its prompt, and
-/// its files.
+/// part 2), files no longer there left out, and beside it what memory
+/// recalls of the quest (Memory part 9): the text for its prompt, and the
+/// pack's files.
 pub(super) fn context_pack(key: &str, dir: &Path, task: &Task) -> (String, Vec<String>) {
     let list = tasks::parse(&file::read(dir));
     let quests = chronicle::quests(&store::chronicle_all(), &[], key, &list);
     let mut hints = pack::pack(task, &quests);
     hints.retain(|h| dir.join(&h.file).exists());
-    let text = pack::render(&hints);
+    let mut text = pack::render(&hints);
+    if let Some(recalled) = crate::memory::unasked(dir, &tasks::recall_query(task)) {
+        if !text.is_empty() {
+            text.push_str("\n\n");
+        }
+        text.push_str(&tasks::recalled(&recalled));
+    }
     (text, hints.into_iter().map(|h| h.file).collect())
 }
 
