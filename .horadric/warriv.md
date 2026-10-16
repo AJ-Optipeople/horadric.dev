@@ -7,6 +7,7 @@
 - A quest session silent for hours with an empty worktree after two nudges is dead and I can not restart it: hand it to the human with "restart it", who does so (settled on "OSC 7501: plain terminals", which then landed).
 
 ## Lately
+- 2026-10-16 Round (hourly, main at 33e4af7): the human cut v0.29.0 (33e4af7, Backup and recall), and the task notification quest is now under way. Nothing landed since, nothing to do.
 - 2026-10-16 Round (hourly, main at 7fcfb91): unchanged a fifth round, the task notification quest still not started, nothing landed, no v0.29.0. Nothing to do.
 - 2026-10-16 Round (hourly, main at 029c0b5): unchanged a fourth round, the task notification quest (auto mode, parallel 4) still not started, nothing landed, no v0.29.0. Nothing I can do: I start no sessions.
 - 2026-10-16 Round (hourly, main at 6b3024d): unchanged, the task notification quest still waits for the runner, nothing landed, no v0.29.0. Nothing to do.
@@ -52,4 +53,4 @@
 
 ## Open
 - Once quests run with a pack, the pack comparison resumes by itself.
-- The human's session said it will ship public when all six Backup and recall quests land ("released asap"), but no v0.29.0 came. Ship Local reloaded 13:41. Public stays with the human (the "and ships public" switch is not mine to assume). When the task notification quest lands, cast Ship Local. It has sat unstarted since about 13:40 with tasks mode auto; if the human comes back and it still has not run, tell them in the away card's terms that the runner never picked it up.
+- When "Memory: no recall on a task notification" lands, cast Ship Local.
