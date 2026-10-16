@@ -5,6 +5,7 @@
 - A quest session silent for hours with an empty worktree after two nudges is dead and I can not restart it: hand it to the human with "restart it", who does so (settled on "OSC 7501: plain terminals", which then landed).
 
 ## Lately
+- 2026-10-16 Wake: "Memory: Horadrim, sigils and the Lexicon" measured only about 10% saved on real dialogue (plan said 2x to 3x), waiting on judge.py. Told it to land if scores hold, with real numbers in memory.md part 8, off by default if they drop. Noted as Assumed.
 - 2026-10-16 Wake: "Memory: Warriv distills the day" stopped with code committed and checks green, waiting on its review agent before merging. Not stuck, no tell, noted.
 - 2026-10-16 Wake: "Memory: Horadrim, sigils and the Lexicon" stopped again with its review fixes in, clippy and yardstick running in its background, then judge.py and merge. Not stuck, no tell, noted.
 - 2026-10-16 Round (human left, main at 80e5585): only my memory since the 9ce6dd7 ship; Warriv distills and Horadrim still in their worktrees, the Scroll waits. Nothing to do.
