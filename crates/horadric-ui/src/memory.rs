@@ -16,7 +16,7 @@
 //! project's code a sync, done when nothing is asked, so a project the
 //! index has never read does not hold the first recall up.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 
 use horadric_hooks::listener::{RecallCall, Reply};
 use horadric_hooks::lore::{now, Place};
-use horadric_memory::keeper::{Answer, CodeFile, Keeper, Theirs};
+use horadric_memory::keeper::{Answer, CodeFile, Keeper, Theirs, Unasked};
 use horadric_memory::recall::{self, Ask};
 use horadric_memory::transcripts::Format;
 use horadric_memory::{models, Embedder, Kind};
@@ -38,6 +38,10 @@ const MODEL: Kind = Kind::MiniLm;
 /// How long a recall may spend embedding notes the model has not seen,
 /// well inside what `horadric mcp` waits.
 const BUDGET: Duration = Duration::from_secs(3);
+
+/// The same for a recall on a prompt, which the human waits on: the
+/// listener gives up on it after three seconds.
+const PROMPT_BUDGET: Duration = Duration::from_secs(1);
 
 /// How long a recall nobody asked for may embed, and how long the quest
 /// it is for waits on it: a quest is started from the window's thread,
@@ -93,6 +97,15 @@ enum Msg {
     /// Load the model now, for a recall that is not asked yet.
     Warm,
     Model(Result<Box<Embedder>, String>),
+}
+
+/// What a session was given by recalls on its prompts: the hits, never
+/// shown it again, and the sigils, told once. `horadric mcp` keeps its
+/// own for `lore_recall`.
+#[derive(Default)]
+struct Given {
+    seen: HashSet<String>,
+    known: Vec<String>,
 }
 
 /// Whether recall may look in other projects' memory: the Settings switch,
@@ -274,6 +287,7 @@ fn run(state: &Path, rx: Receiver<Msg>, loaded: Sender<Msg>) {
     // each was last synced.
     let mut owed: Option<String> = None;
     let mut synced: HashMap<String, Instant> = HashMap::new();
+    let mut sessions: HashMap<String, Given> = HashMap::new();
     loop {
         let msg = if behind {
             match rx.recv_timeout(REST) {
@@ -302,14 +316,17 @@ fn run(state: &Path, rx: Receiver<Msg>, loaded: Sender<Msg>) {
                 }
                 match to {
                     To::Mcp(reply) if reply.wanted() => {
-                        reply.send(match answer(&mut keeper, &body, BUDGET) {
+                        let wanted = || reply.wanted();
+                        let a = answer(&mut keeper, &body, BUDGET, &mut sessions, wanted);
+                        reply.send(match a {
                             Ok(a) => json!({ "text": a.text, "given": a.given }),
                             Err(e) => json!({ "error": e }),
                         });
                     }
                     To::Mcp(_) => {}
                     To::Unasked(reply, until) if Instant::now() < until => {
-                        let _ = reply.send(answer(&mut keeper, &body, UNASKED_BUDGET));
+                        let a = answer(&mut keeper, &body, UNASKED_BUDGET, &mut sessions, || true);
+                        let _ = reply.send(a);
                     }
                     To::Unasked(..) => {}
                 }
@@ -388,10 +405,19 @@ fn kept(
 
 /// What `horadric mcp` asked, answered: `dir` is the folder it runs in,
 /// `files` already relative to the top of its project, `known` the sigils
-/// the session was told, `unroll` a hit it wants word for word.
-/// With `strong`, only the hits strong enough to show an agent that did
-/// not ask.
-fn answer(keeper: &mut Keeper<Embedder>, body: &Value, budget: Duration) -> Result<Answer, String> {
+/// the session was told, `unroll` a hit it wants word for word. Or what
+/// the listener asks on a session's prompt (`prompt` true, with the
+/// Horadric `session` and the agent's own `agent_session`), answered
+/// only with what clears the bar and the session was not shown. With
+/// `strong`, only the hits strong enough to show an agent that did not
+/// ask.
+fn answer(
+    keeper: &mut Keeper<Embedder>,
+    body: &Value,
+    budget: Duration,
+    sessions: &mut HashMap<String, Given>,
+    wanted: impl Fn() -> bool,
+) -> Result<Answer, String> {
     let dir = body["dir"].as_str().ok_or("say which folder: dir")?;
     let place = Place::of(Path::new(dir))?;
     let lore = place.read()?;
@@ -426,6 +452,39 @@ fn answer(keeper: &mut Keeper<Embedder>, body: &Value, budget: Duration) -> Resu
             place.hash(p)
         });
     }
+    if body["prompt"].as_bool() == Some(true) {
+        // Keyed by the agent's own session: a `/clear` starts a new one,
+        // whose context holds none of what the old one was given.
+        let agent_session = body["agent_session"].as_str().filter(|s| !s.is_empty());
+        let session = agent_session
+            .or(body["session"].as_str())
+            .ok_or("say which session")?;
+        let given = sessions.entry(session.to_string()).or_default();
+        let unasked = Unasked {
+            seen: &given.seen,
+            session: agent_session,
+        };
+        let mut a = keeper.recall(
+            place.key(),
+            &lore,
+            &ask,
+            across,
+            PROMPT_BUDGET,
+            |p| place.hash(p),
+            &given.known,
+            Some(unasked),
+        )?;
+        // A reply the listener gave up on never reached the agent, so what
+        // it held was neither shown nor told.
+        if wanted() {
+            given.seen.extend(a.shown.iter().cloned());
+            given.known.extend(a.given.iter().cloned());
+        }
+        if !a.text.is_empty() {
+            a.text = format!("{}\n\n{}", recall::OFFERED, a.text);
+        }
+        return Ok(a);
+    }
     let known: Vec<String> = body["known"]
         .as_array()
         .map(|a| {
@@ -443,5 +502,6 @@ fn answer(keeper: &mut Keeper<Embedder>, body: &Value, budget: Duration) -> Resu
         budget,
         |p| place.hash(p),
         &known,
+        None,
     )
 }

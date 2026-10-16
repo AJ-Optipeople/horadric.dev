@@ -71,12 +71,26 @@ pub struct Keeper<E> {
 const RECOUNT: u64 = 3600;
 
 /// What a recall answers with.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Answer {
     pub text: String,
     /// The sigils the answer told, which the asking session knows from
     /// now on.
     pub given: Vec<String>,
+    /// The ids of the hits it showed, `#12` or `2026-10#5`.
+    pub shown: Vec<String>,
+}
+
+/// A recall nobody asked for: Horadric's own, on a prompt the human
+/// typed, see docs/plan/memory.md, part 9. Only hits close in meaning
+/// are shown ([`recall::offered`]), so without the model none are.
+#[derive(Debug, Clone, Copy)]
+pub struct Unasked<'a> {
+    /// The ids of the hits the session was shown before, never shown again.
+    pub seen: &'a HashSet<String>,
+    /// The agent's own id of the session, whose dialogue is what it was
+    /// just told and is no hit.
+    pub session: Option<&'a str>,
 }
 
 /// Whether `c` still describes the code it was made of. Anything that is
@@ -203,7 +217,8 @@ impl<E: Embed> Keeper<E> {
     /// embedded first, newest first, for at most `budget`; the rest are
     /// found by words until the background catches up. `now_hash` says
     /// what a file's hash is now, for staleness. `known` is the sigils the
-    /// asking session was told before.
+    /// asking session was told before. With `unasked` the answer is only
+    /// what clears its bar, empty when nothing does.
     // Each is a different thing the app knows of the asking session; a
     // struct of them would only be built here to be taken apart.
     #[allow(clippy::too_many_arguments)]
@@ -216,6 +231,7 @@ impl<E: Embed> Keeper<E> {
         budget: Duration,
         now_hash: impl Fn(&str) -> Option<u64>,
         known: &[String],
+        unasked: Option<Unasked>,
     ) -> Result<Answer, String> {
         let past: &[Past] = if ask.history { &lore.past } else { &[] };
         let notes: Vec<&Note> = past.iter().map(|p| &p.note).chain(&lore.notes).collect();
@@ -288,10 +304,14 @@ impl<E: Embed> Keeper<E> {
                     } else {
                         across.is_some() && noted(c)
                     };
-                    kept && current(code, &c.project, c)
+                    let said_here = unasked
+                        .and_then(|u| u.session)
+                        .is_some_and(|s| c.session.as_deref() == Some(s));
+                    kept && !said_here && current(code, &c.project, c)
                 })
                 .map(|(id, c)| Candidate::chunk(id, c, c.project == project)),
         );
+        let mut cosine: HashMap<usize, f32> = HashMap::new();
         let meaning: Vec<usize> = match &query {
             Some((tag, q)) => {
                 let mut close: Vec<(f32, usize)> = cands
@@ -307,25 +327,41 @@ impl<E: Embed> Keeper<E> {
                         (cos >= recall::LEAST_COSINE).then_some((cos, i))
                     })
                     .collect();
+                cosine.extend(close.iter().map(|&(c, i)| (i, c)));
                 close.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
                 close.truncate(recall::MOST_BY_MEANING);
                 close.into_iter().map(|(_, i)| i).collect()
             }
             None => Vec::new(),
         };
-        let found = recall::rank(ask, &cands, &meaning, |i| {
+        let mut found = recall::rank(ask, &cands, &meaning, |i| {
             !recall::changed(&cands[i], &now_hash).is_empty()
         });
+        if let Some(u) = unasked {
+            found = recall::offered(
+                &found,
+                |i| cosine.get(&i).copied(),
+                |i| u.seen.contains(&recall::id_of(&cands[i])),
+            );
+            if found.is_empty() {
+                return Ok(Answer::default());
+            }
+        }
         if found.is_empty() {
             return Ok(Answer {
                 text: recall::NOTHING.into(),
-                given: Vec::new(),
+                ..Answer::default()
             });
         }
+        let shown: Vec<String> = found
+            .iter()
+            .map(|&(i, _)| recall::id_of(&cands[i]))
+            .collect();
         let hits = recall::hits(&cands, &found, ask.now, &now_hash);
         let plain = || Answer {
             text: horadrim::plain(&hits),
             given: Vec::new(),
+            shown: shown.clone(),
         };
         if horadrim::is_off(dir) {
             return Ok(plain());
@@ -373,6 +409,7 @@ impl<E: Embed> Keeper<E> {
         Ok(Answer {
             text: inscribed.text,
             given: inscribed.given,
+            shown,
         })
     }
 
@@ -396,7 +433,7 @@ impl<E: Embed> Keeper<E> {
         self.store.refresh().map_err(|e| e.to_string())?;
         Ok(Answer {
             text: unroll(&self.store, project, lore, id, across, now, now_hash)?,
-            given: Vec::new(),
+            ..Answer::default()
         })
     }
 
@@ -509,7 +546,7 @@ pub fn lexicon(tongue: &Tongue, project: &str) -> Answer {
         return Answer {
             text: "The Lexicon of this project is empty: no name repeats enough to earn a sigil."
                 .into(),
-            given: Vec::new(),
+            ..Answer::default()
         };
     }
     let mut text = format!("The Lexicon: each {MARK} sigil and the name it stands for.\n");
@@ -521,6 +558,7 @@ pub fn lexicon(tongue: &Tongue, project: &str) -> Answer {
     Answer {
         text: text.trim_end().to_string(),
         given,
+        shown: Vec::new(),
     }
 }
 
@@ -638,6 +676,7 @@ mod tests {
                 Duration::from_secs(5),
                 |_| None,
                 &[],
+                None,
             )
             .unwrap()
             .text;
@@ -663,6 +702,7 @@ mod tests {
                 Duration::ZERO,
                 |_| None,
                 &[],
+                None,
             )
             .unwrap()
             .text;
@@ -686,7 +726,16 @@ mod tests {
         .unwrap();
         let asked = ask("where does the cat nap");
         let got = k
-            .recall("p", &l, &asked, None, Duration::from_secs(5), |_| None, &[])
+            .recall(
+                "p",
+                &l,
+                &asked,
+                None,
+                Duration::from_secs(5),
+                |_| None,
+                &[],
+                None,
+            )
             .unwrap()
             .text;
         assert!(got.starts_with("#2 (note,"), "{got}");
@@ -696,7 +745,16 @@ mod tests {
             ..asked
         };
         let got = k
-            .recall("p", &l, &then, None, Duration::from_secs(5), |_| None, &[])
+            .recall(
+                "p",
+                &l,
+                &then,
+                None,
+                Duration::from_secs(5),
+                |_| None,
+                &[],
+                None,
+            )
             .unwrap()
             .text;
         assert!(got.starts_with("#2 (note,"), "{got}");
@@ -722,8 +780,17 @@ mod tests {
             history: true,
             ..ask("where does the cat nap")
         };
-        k.recall("q", &q, &then, None, Duration::from_secs(5), |_| None, &[])
-            .unwrap();
+        k.recall(
+            "q",
+            &q,
+            &then,
+            None,
+            Duration::from_secs(5),
+            |_| None,
+            &[],
+            None,
+        )
+        .unwrap();
         let read = |p: &str| (p == "q").then(|| q.clone());
         let got = k
             .recall(
@@ -734,6 +801,7 @@ mod tests {
                 Duration::from_secs(5),
                 |_| None,
                 &[],
+                None,
             )
             .unwrap()
             .text;
@@ -749,6 +817,7 @@ mod tests {
                 Duration::from_secs(5),
                 |_| None,
                 &[],
+                None,
             )
             .unwrap()
             .text;
@@ -770,6 +839,7 @@ mod tests {
                 Duration::from_secs(5),
                 |_| None,
                 &[],
+                None,
             )
             .unwrap();
         }
@@ -785,6 +855,7 @@ mod tests {
             Duration::from_secs(5),
             |_| None,
             &[],
+            None,
         )
         .unwrap();
         assert_eq!(k.store.len(), 4);
@@ -803,6 +874,7 @@ mod tests {
             Duration::from_secs(5),
             |_| None,
             &[],
+            None,
         )
         .unwrap();
         let got = k
@@ -814,6 +886,7 @@ mod tests {
                 Duration::from_secs(5),
                 |_| None,
                 &[],
+                None,
             )
             .unwrap()
             .text;
@@ -831,13 +904,74 @@ mod tests {
             "Rain on Tuesday.",
             "The price went up.",
         ]);
-        k.recall("p", &l, &ask("cat"), None, Duration::ZERO, |_| None, &[])
-            .unwrap();
+        k.recall(
+            "p",
+            &l,
+            &ask("cat"),
+            None,
+            Duration::ZERO,
+            |_| None,
+            &[],
+            None,
+        )
+        .unwrap();
         assert_eq!(k.model.as_ref().unwrap().embedded.get(), 0);
         assert_eq!(k.catch_up(2), Ok(2));
         assert_eq!(k.catch_up(2), Ok(1));
         assert_eq!(k.catch_up(2), Ok(0));
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn unasked_only_close_hits_come_once_and_never_the_sessions_own_words() {
+        let dir = temp("unasked");
+        let mut k = keeper(&dir);
+        let l = lore(&[
+            "The kitten sleeps by the stove.",
+            "Invoices go out monthly.",
+        ]);
+        let mine = Chunk {
+            time: NOW - 60,
+            project: "p".into(),
+            kind: Kind::Dialogue,
+            session: Some("s1".into()),
+            quest: None,
+            commit: None,
+            files: Vec::new(),
+            note: None,
+            text: "Human: my puppy naps a lot".into(),
+        };
+        k.store.add(&mine, NOW).unwrap();
+        k.catch_up(10).unwrap();
+        let mut seen = HashSet::new();
+        let offer = |k: &mut Keeper<Topics>, seen: &HashSet<String>| {
+            let unasked = Unasked {
+                seen,
+                session: Some("s1"),
+            };
+            k.recall(
+                "p",
+                &l,
+                &ask("where does the puppy nap"),
+                None,
+                Duration::from_secs(5),
+                |_| None,
+                &[],
+                Some(unasked),
+            )
+            .unwrap()
+        };
+        // The invoices are about something else, and the session's own
+        // words are not offered back.
+        let got = offer(&mut k, &seen);
+        assert_eq!(got.shown, vec!["#1".to_string()], "{}", got.text);
+        assert!(got.text.starts_with("#1 (note,"), "{}", got.text);
+        seen.extend(got.shown);
+        assert_eq!(offer(&mut k, &seen), Answer::default());
+        let mut blind: Keeper<Topics> = Keeper::open(&temp("unasked-blind")).unwrap();
+        assert_eq!(offer(&mut blind, &HashSet::new()), Answer::default());
+        fs::remove_dir_all(&dir).unwrap();
+        let _ = fs::remove_dir_all(temp("unasked-blind"));
     }
 
     #[test]
@@ -872,6 +1006,7 @@ mod tests {
                 Duration::ZERO,
                 |_| Some(6),
                 &[],
+                None,
             )
             .unwrap()
             .text;
@@ -891,6 +1026,7 @@ mod tests {
                 Duration::ZERO,
                 |_| None,
                 &[],
+                None,
             )
             .unwrap()
             .text;
@@ -927,6 +1063,7 @@ mod tests {
                 Duration::ZERO,
                 |_| Some(1),
                 &[],
+                None,
             )
             .unwrap();
         assert!(
@@ -953,6 +1090,7 @@ mod tests {
                 Duration::ZERO,
                 |_| Some(1),
                 &a.given,
+                None,
             )
             .unwrap();
         assert!(
@@ -1004,6 +1142,7 @@ mod tests {
                 Duration::ZERO,
                 |_| Some(1),
                 &[],
+                None,
             )
             .unwrap();
         assert!(off.text.contains("Let me check"), "{}", off.text);
@@ -1132,6 +1271,7 @@ fn feed: fn feed(cat: Cat)",
                 Duration::ZERO,
                 |_| Some(1),
                 &[],
+                None,
             )
             .unwrap()
             .text;
@@ -1153,6 +1293,7 @@ fn feed: fn feed(dog: Dog)",
                 Duration::ZERO,
                 |_| Some(2),
                 &[],
+                None,
             )
             .unwrap()
             .text;
@@ -1169,6 +1310,7 @@ fn feed: fn feed(dog: Dog)",
                 Duration::ZERO,
                 |_| None,
                 &[],
+                None,
             )
             .unwrap()
             .text;
