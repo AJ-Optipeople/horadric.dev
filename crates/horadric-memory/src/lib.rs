@@ -4,10 +4,13 @@
 //! This part turns text into vectors. The model runs here, in Rust, with
 //! candle: nothing to install beside Horadric and no service that has to
 //! be running for recall to work. [`store`] keeps the text and the
-//! vectors on disk.
+//! vectors on disk, [`recall`] ranks what answers a question, and
+//! [`keeper::Keeper`] is all of it as the app runs it.
 
 mod gemma;
+pub mod keeper;
 pub mod models;
+pub mod recall;
 pub mod store;
 
 use std::path::Path;

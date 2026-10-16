@@ -129,6 +129,8 @@ mod glows;
 #[cfg(windows)]
 mod glyphs;
 #[cfg(windows)]
+mod memory;
+#[cfg(windows)]
 mod menu;
 #[cfg(windows)]
 mod net;

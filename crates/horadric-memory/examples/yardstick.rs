@@ -2,6 +2,8 @@
 //! question, is a passage that answers it among the first five found?
 //! Words only (as the lore matches today), BM25, each model, and each
 //! model fused with words, plus the time per chunk and the memory taken.
+//! Then the recall `lore_recall` answers with: words only (as when the
+//! app is down) and with each model's meaning, cut as the keeper cuts it.
 //!
 //! `cargo run --release -p horadric-memory --example yardstick [model...]`
 //! with models from `gemma`, `bge`, `minilm` (all when none are named).
@@ -15,12 +17,15 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use horadric_core::lore::words;
+use horadric_memory::recall::{self, Ask, Bm25, Candidate};
+use horadric_memory::store::{self, ChunkId, Month};
 use horadric_memory::{similarity, truncate, Embedder, Kind};
 use serde::Deserialize;
 
 #[derive(Deserialize)]
 struct Chunk {
     id: String,
+    kind: String,
     text: String,
 }
 
@@ -62,10 +67,68 @@ fn main() {
         println!("{name:<28} {}", recall_line(ranks, &answers, &questions));
     };
 
+    // Every chunk as the store would hold it, all of one project and all
+    // of time 0 with the asking at 0 too, so age and project weigh
+    // nothing and only the kind does.
+    let stored: Vec<store::Chunk> = corpus
+        .iter()
+        .map(|c| store::Chunk {
+            time: 0,
+            project: "p".into(),
+            kind: match c.kind.as_str() {
+                "dialogue" => store::Kind::Dialogue,
+                "note" => recall::note_kind(&c.text),
+                // A doc is curated text, written to be read, as a note is.
+                _ => store::Kind::Note,
+            },
+            session: None,
+            quest: None,
+            commit: None,
+            files: Vec::new(),
+            note: None,
+            text: c.text.clone(),
+        })
+        .collect();
+    let cands: Vec<Candidate> = stored
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let id = ChunkId {
+                month: Month {
+                    year: 2026,
+                    month: 10,
+                },
+                n: i as u32,
+            };
+            Candidate::chunk(id, c, true)
+        })
+        .collect();
+    let recall_with = |meaning: &Ranking| -> Ranking {
+        questions
+            .iter()
+            .zip(meaning)
+            .map(|(q, m)| {
+                let ask = Ask {
+                    query: q.q.clone(),
+                    ..Ask::default()
+                };
+                recall::rank(&ask, &cands, m, |_| false)
+                    .into_iter()
+                    .map(|(i, _)| i)
+                    .collect()
+            })
+            .collect()
+    };
+
     let lore = rank_lore(&corpus, &questions);
-    let bm25 = rank_bm25(&corpus, &questions);
+    let bm = Bm25::new(corpus.iter().map(|c| c.text.as_str()));
+    let bm25: Ranking = questions.iter().map(|q| bm.rank(&q.q)).collect();
     report("words (lore today)", &lore);
     report("bm25", &bm25);
+    report(
+        "recall, words only",
+        &recall_with(&vec![Vec::new(); questions.len()]),
+    );
 
     let wanted: Vec<String> = std::env::args().skip(1).collect();
     let kinds = [
@@ -139,7 +202,7 @@ fn main() {
         }
         for d in dims {
             let docs: Vec<Vec<f32>> = docs.iter().map(|v| truncate(v, d)).collect();
-            let meaning: Ranking = qs
+            let scored: Vec<Vec<(f32, usize)>> = qs
                 .iter()
                 .map(|q| {
                     let q = truncate(q, d);
@@ -148,13 +211,41 @@ fn main() {
                         .enumerate()
                         .map(|(i, v)| (similarity(&q, v), i))
                         .collect();
-                    s.sort_by(|a, b| b.0.total_cmp(&a.0));
-                    s.into_iter().map(|(_, i)| i).collect()
+                    s.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+                    s
                 })
+                .collect();
+            let meaning: Ranking = scored
+                .iter()
+                .map(|s| s.iter().map(|(_, i)| *i).collect())
                 .collect();
             report(&format!("{name} {d}"), &meaning);
             report(&format!("{name} {d} + words"), &fuse(&meaning, &lore));
             report(&format!("{name} {d} + bm25"), &fuse(&meaning, &bm25));
+            if d == full {
+                // Cut as the keeper cuts it, then once without the floor,
+                // so what the floor costs shows.
+                let cut = |floor: f32| -> Ranking {
+                    scored
+                        .iter()
+                        .map(|s| {
+                            s.iter()
+                                .filter(|(cos, _)| *cos >= floor)
+                                .take(recall::MOST_BY_MEANING)
+                                .map(|(_, i)| *i)
+                                .collect()
+                        })
+                        .collect()
+                };
+                report(
+                    &format!("{name} {d} recall"),
+                    &recall_with(&cut(recall::LEAST_COSINE)),
+                );
+                report(
+                    &format!("{name} {d} recall, no floor"),
+                    &recall_with(&cut(f32::NEG_INFINITY)),
+                );
+            }
         }
     }
 }
@@ -204,63 +295,6 @@ fn rank_lore(corpus: &[Chunk], questions: &[Question]) -> Ranking {
             s.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
             s.into_iter().map(|(_, i)| i).collect()
         })
-        .collect()
-}
-
-/// Okapi BM25 over the same words, with the usual k1 1.2 and b 0.75.
-fn rank_bm25(corpus: &[Chunk], questions: &[Question]) -> Ranking {
-    let docs: Vec<HashMap<String, f64>> = corpus
-        .iter()
-        .map(|c| {
-            let mut tf = HashMap::new();
-            for w in all_words(&c.text) {
-                *tf.entry(w).or_insert(0.0) += 1.0;
-            }
-            tf
-        })
-        .collect();
-    let lens: Vec<f64> = docs.iter().map(|d| d.values().sum()).collect();
-    let avg = lens.iter().sum::<f64>() / lens.len() as f64;
-    let mut df: HashMap<&str, f64> = HashMap::new();
-    for d in &docs {
-        for w in d.keys() {
-            *df.entry(w.as_str()).or_insert(0.0) += 1.0;
-        }
-    }
-    let n = docs.len() as f64;
-    questions
-        .iter()
-        .map(|q| {
-            let asked = words(&q.q);
-            let mut s: Vec<(f64, usize)> = docs
-                .iter()
-                .enumerate()
-                .map(|(i, d)| {
-                    let score = asked
-                        .iter()
-                        .filter_map(|w| {
-                            let tf = d.get(w)?;
-                            let df = df[w.as_str()];
-                            let idf = ((n - df + 0.5) / (df + 0.5) + 1.0).ln();
-                            Some(idf * tf * 2.2 / (tf + 1.2 * (0.25 + 0.75 * lens[i] / avg)))
-                        })
-                        .sum::<f64>();
-                    (score, i)
-                })
-                .filter(|(s, _)| *s > 0.0)
-                .collect();
-            s.sort_by(|a, b| b.0.total_cmp(&a.0));
-            s.into_iter().map(|(_, i)| i).collect()
-        })
-        .collect()
-}
-
-/// Like [`words`], but every time a word occurs, for term counts.
-fn all_words(s: &str) -> Vec<String> {
-    let keep = words(s);
-    s.split(|c: char| !(c.is_alphanumeric() || c == '_'))
-        .map(str::to_lowercase)
-        .filter(|w| keep.contains(w))
         .collect()
 }
 

@@ -13,15 +13,17 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
+use horadric_core::chronicle;
 use horadric_core::pack::Touched;
 use horadric_core::sanctuary::{self, Graph, Kind, Positions, QuestFiles};
 use horadric_core::sky::{Project, Sky};
-use horadric_core::{chronicle, lore};
 use horadric_hooks::lock::Lock;
 use horadric_hooks::lore::{now, Place};
 use horadric_hooks::tasks as tasks_file;
+use horadric_hooks::{client, COMMAND_HEADER, OWNER_ENV, RECALL_PATH};
+use horadric_memory::recall::{self, Candidate};
 use serde_json::Value;
 
 use crate::code::{self, FileIndex, Lang, Store};
@@ -57,13 +59,62 @@ fn note(args: &Value) -> Result<String, String> {
     ))
 }
 
+/// Asks the app, which holds the model and finds by meaning; when it is
+/// not running, or too busy to answer in time, finds by words here.
 fn recall(args: &Value) -> Result<String, String> {
     let query = args.get("query").and_then(Value::as_str).unwrap_or("");
+    let kind_name = args.get("kind").and_then(Value::as_str).unwrap_or("");
+    let kind = match kind_name {
+        "" => None,
+        k => Some(
+            recall::kind_named(k)
+                .ok_or_else(|| format!("kind is one of note, quest, dialogue or code, not {k}"))?,
+        ),
+    };
     let place = Place::here()?;
     let files = files(&place, args)?;
+    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    let body = serde_json::json!({
+        "dir": cwd.to_string_lossy(),
+        "query": query,
+        "files": files,
+        "kind": kind_name,
+    });
+    if let Some(text) = ask_app(&body) {
+        return Ok(text);
+    }
     let lore = place.read()?;
-    let found = lore.recall(query, &files, |p| place.hash(p));
-    Ok(lore::describe(&found, now()))
+    let ask = recall::Ask {
+        query: query.to_string(),
+        files,
+        kind,
+        now: now(),
+    };
+    let cands: Vec<Candidate> = lore.notes.iter().map(Candidate::note).collect();
+    let found = recall::rank(&ask, &cands, &[], |i| {
+        !recall::changed(&cands[i], |p| place.hash(p)).is_empty()
+    });
+    Ok(recall::describe(&cands, &found, ask.now, |p| place.hash(p)))
+}
+
+/// How long a recall waits on the app: a little more than the listener
+/// waits on the memory, so its timeout is the one heard.
+const RECALL_WAIT: Duration = Duration::from_secs(12);
+
+/// The app's answer to a recall, None when there is none to be had.
+fn ask_app(body: &Value) -> Option<String> {
+    let port = std::env::var(OWNER_ENV)
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or_else(horadric_hooks::port);
+    let headers = [(COMMAND_HEADER, "recall")];
+    let (status, text) =
+        client::ask(port, RECALL_PATH, &headers, &body.to_string(), RECALL_WAIT).ok()?;
+    if status != 200 {
+        return None;
+    }
+    let answer: Value = serde_json::from_str(&text).ok()?;
+    answer.get("text")?.as_str().map(str::to_string)
 }
 
 fn find(args: &Value) -> Result<String, String> {

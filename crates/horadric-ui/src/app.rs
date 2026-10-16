@@ -3199,6 +3199,7 @@ impl App {
                         Command::Overlap(o) => self.overlapped(&o),
                         Command::Browser(call) => self.browser_call(call),
                         Command::Know(call) => self.know_call(call),
+                        Command::Recall(call) => crate::memory::ask(call),
                     }
                 }
             }

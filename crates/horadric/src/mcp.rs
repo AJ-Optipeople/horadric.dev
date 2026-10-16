@@ -902,10 +902,12 @@ fn lore_tools() -> Vec<Value> {
         ),
         tool(
             "lore_recall",
-            "Ask the notes this project's sessions left with lore_note, before you explore: by words (a question or names), by files, or both. Answers with the notes that match, best first, each with its id and age, marked maybe stale where a file it is about changed since. With neither, the newest notes.",
+            "Ask what this project's sessions found out before you explore: the notes they left with lore_note and the summaries of finished quests. Found by meaning and by words (a question or names), by files, or both. Answers with the best matches first, each saying what it is (note, quest, dialogue, code), its id and age, marked maybe stale where a file it is about changed since. With no question and no files, the newest.",
             json!({
-                "query": { "type": "string", "description": "Words to look for" },
+                "query": { "type": "string", "description": "A question, or words and names to look for" },
                 "files": files("Files or folders the notes should be about"),
+                "kind": { "type": "string", "enum": ["note", "quest", "dialogue", "code"],
+                    "description": "Only this kind of hit" },
             }),
             &[],
         ),

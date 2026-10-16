@@ -4,8 +4,8 @@
 //! A note is a fact and the files it is about, each with a hash of what
 //! the file held when the note was taken, and the commit the project was
 //! at. A note whose file has changed since is shown as maybe stale, never
-//! hidden: it may still be true, and the agent can check. Matching is
-//! plain words and file paths, so the same question finds the same notes.
+//! hidden: it may still be true, and the agent can check. How a note is
+//! found, by meaning, words and files, is in `horadric_memory::recall`.
 
 use serde::{Deserialize, Serialize};
 
@@ -48,13 +48,6 @@ pub struct Mark {
     pub path: String,
     /// [`hash`] of its bytes, None when it did not exist.
     pub hash: Option<u64>,
-}
-
-/// A note a recall found, and which of its files changed since.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Found<'a> {
-    pub note: &'a Note,
-    pub changed: Vec<&'a str>,
 }
 
 impl Lore {
@@ -102,48 +95,17 @@ impl Lore {
         }
         Ok(id)
     }
-
-    /// The notes that match `query` (words) or are about one of `files`,
-    /// best first, at most [`MOST_FOUND`]. With neither, the newest.
-    /// `now_hash` says what a file's hash is now.
-    pub fn recall<'a>(
-        &'a self,
-        query: &str,
-        files: &[String],
-        now_hash: impl Fn(&str) -> Option<u64>,
-    ) -> Vec<Found<'a>> {
-        let asked = words(query);
-        let mut scored: Vec<(u32, &Note)> = self
-            .notes
-            .iter()
-            .map(|n| (score(n, &asked, files), n))
-            .filter(|(s, _)| asked.is_empty() && files.is_empty() || *s > 0)
-            .collect();
-        scored.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.id.cmp(&a.1.id)));
-        scored
-            .into_iter()
-            .take(MOST_FOUND)
-            .map(|(_, note)| Found {
-                note,
-                changed: note
-                    .files
-                    .iter()
-                    .filter(|m| now_hash(&m.path) != m.hash)
-                    .map(|m| m.path.as_str())
-                    .collect(),
-            })
-            .collect()
-    }
 }
 
-/// How well a note answers: a file it names counts most, then a file of
-/// the same name elsewhere, then each asked word it has.
-fn score(note: &Note, asked: &[String], files: &[String]) -> u32 {
+/// How well the files a note or passage is about match the `files` asked
+/// for: the same file counts most, then a file in an asked folder, then a
+/// file of the same name elsewhere.
+pub fn file_score<'a>(paths: impl Iterator<Item = &'a str> + Clone, files: &[String]) -> u32 {
     let mut s = 0;
     for f in files {
         let f = f.to_ascii_lowercase();
-        for m in &note.files {
-            let p = m.path.to_ascii_lowercase();
+        for p in paths.clone() {
+            let p = p.to_ascii_lowercase();
             if p == f {
                 s += 10;
             } else if p.starts_with(&format!("{f}/")) {
@@ -152,13 +114,6 @@ fn score(note: &Note, asked: &[String], files: &[String]) -> u32 {
                 s += 3;
             }
         }
-    }
-    if !asked.is_empty() {
-        let mut has = words(&note.text);
-        for m in &note.files {
-            has.extend(words(&m.path));
-        }
-        s += asked.iter().filter(|w| has.contains(w)).count() as u32 * 2;
     }
     s
 }
@@ -246,40 +201,8 @@ pub fn file_name(key: &str) -> String {
     format!("{name}-{:08x}.json", hash(key.as_bytes()) as u32)
 }
 
-/// What a recall answers with, for the agent to read.
-pub fn describe(found: &[Found], now: u64) -> String {
-    if found.is_empty() {
-        return "No notes match. When you find something out that the next session would \
-                otherwise have to find out again, leave it with lore_note."
-            .into();
-    }
-    let mut out = String::new();
-    for f in found {
-        let n = f.note;
-        out.push_str(&format!("#{} ({} ago", n.id, age(now.saturating_sub(n.at))));
-        if !n.commit.is_empty() {
-            out.push_str(&format!(", at {}", &n.commit[..n.commit.len().min(8)]));
-        }
-        out.push(')');
-        if !f.changed.is_empty() {
-            out.push_str(&format!(
-                " MAYBE STALE: {} changed since",
-                f.changed.join(", ")
-            ));
-        }
-        out.push('\n');
-        out.push_str(&n.text);
-        out.push('\n');
-        if !n.files.is_empty() {
-            let files: Vec<&str> = n.files.iter().map(|m| m.path.as_str()).collect();
-            out.push_str(&format!("Files: {}\n", files.join(", ")));
-        }
-        out.push('\n');
-    }
-    out.trim_end().to_string()
-}
-
-fn age(secs: u64) -> String {
+/// How long ago, in the words a recall says it.
+pub fn age(secs: u64) -> String {
     match secs {
         s if s < 120 => "a minute".into(),
         s if s < 7200 => format!("{} minutes", s / 60),
@@ -464,46 +387,16 @@ mod tests {
     }
 
     #[test]
-    fn a_question_finds_notes_by_their_words() {
-        let l = lore();
-        let found = l.recall("how are quest titles matched?", &[], |_| Some(2));
-        assert_eq!(found.len(), 1);
-        assert_eq!(found[0].note.id, 2);
-    }
-
-    #[test]
-    fn a_file_finds_the_notes_about_it_first() {
-        let l = lore();
-        let files = vec!["crates/horadric-ui/src/render.rs".to_string()];
-        let found = l.recall("tasks", &files, |_| Some(1));
-        assert_eq!(found[0].note.id, 1);
-        assert_eq!(found.len(), 2);
-        let by_name = l.recall("", &["src/render.rs".into()], |_| Some(1));
-        assert_eq!(by_name[0].note.id, 1);
-        let by_folder = l.recall("", &["crates/horadric-core".into()], |_| Some(2));
-        assert_eq!(by_folder[0].note.id, 2);
-    }
-
-    #[test]
-    fn nothing_asked_is_the_newest_first() {
-        let l = lore();
-        let found = l.recall("", &[], |_| None);
-        assert_eq!(found.iter().map(|f| f.note.id).collect::<Vec<_>>(), [2, 1]);
-    }
-
-    #[test]
-    fn a_note_whose_file_changed_is_maybe_stale() {
-        let l = lore();
-        let found = l.recall("stage pane", &[], |_| Some(9));
-        assert_eq!(found[0].changed, ["crates/horadric-ui/src/render.rs"]);
-        let said = describe(&found, 100 + 3 * 3600);
-        assert!(
-            said.contains("#1 (3 hours ago, at abc12345) MAYBE STALE"),
-            "{said}"
-        );
-        let fresh = l.recall("stage pane", &[], |_| Some(1));
-        assert!(fresh[0].changed.is_empty());
-        assert!(!describe(&fresh, 100).contains("STALE"));
+    fn files_match_by_path_folder_and_name() {
+        let paths = [
+            "crates/horadric-ui/src/render.rs",
+            "crates/horadric-core/src/tasks.rs",
+        ];
+        let score = |f: &str| file_score(paths.iter().copied(), &[f.to_string()]);
+        assert_eq!(score("crates/horadric-ui/src/render.rs"), 10);
+        assert_eq!(score("crates/horadric-core"), 4);
+        assert_eq!(score("src/render.rs"), 3);
+        assert_eq!(score("src/other.rs"), 0);
     }
 
     #[test]

@@ -1344,13 +1344,15 @@ impl App {
                     self.start(name, PathBuf::from(n.cwd), n.args, n.agent);
                 }
                 Command::Reload(r) => self.reload(r),
-                // The quest log, overlaps and the browser pane are not on
-                // the Mac yet. Dropping a Know call closes its reply, so
-                // the mod hears no answer at once instead of waiting.
+                // The quest log, overlaps, the browser pane and the memory
+                // are not on the Mac yet. Dropping a Know or Recall call
+                // closes its reply, so the caller hears no answer at once
+                // instead of waiting (a recall then answers by words).
                 Command::Tasks(_)
                 | Command::Overlap(_)
                 | Command::Browser(_)
-                | Command::Know(_) => {}
+                | Command::Know(_)
+                | Command::Recall(_) => {}
             }
         }
     }

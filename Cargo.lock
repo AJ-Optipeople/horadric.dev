@@ -731,6 +731,7 @@ version = "0.27.0"
 dependencies = [
  "horadric-core",
  "horadric-hooks",
+ "horadric-memory",
  "horadric-pty",
  "horadric-ui",
  "libc",
@@ -792,6 +793,7 @@ dependencies = [
  "block2",
  "horadric-core",
  "horadric-hooks",
+ "horadric-memory",
  "horadric-pty",
  "libc",
  "objc2",

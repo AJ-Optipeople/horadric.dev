@@ -197,6 +197,56 @@ weighs: the asking project above others, notes and quest summaries above
 dialogue, recent above old, maybe stale below fresh. Measured against the
 yardstick before and after.
 
+**Built 2026-10-16.** The ranking is `crates/horadric-memory/src/recall.rs`,
+pure and tested; `keeper.rs` is the store and the model as the app runs
+them. Every candidate is ranked by BM25 (its text and its files' paths),
+by meaning (cosine at least 0.2, the best 50) and, when files are asked
+for, by the lore's file match; the ranks are fused with reciprocal rank
+fusion (60), then multiplied by a weight: another project's 0.6, a note
+or quest summary 1.0, code 0.95, dialogue 0.9, age `0.7 + 0.3 * 0.5^(days
+/ 90)`, maybe stale 0.8 (checked on the best 30 only, since it reads
+their files). With no words and no files, the newest come, as before.
+A quest summary is a note that starts `Quest "..." done`.
+
+The lore's notes stay where they are; the app copies each into the store
+as a chunk of kind note or quest with the note's id (`note`, a field
+added to the format without a new version: older builds skip it), so it
+gets a vector. A copy whose text is not the note's is not used, so a lore
+started over cannot pass old vectors off as new notes. Replaced notes
+keep their copy, the start of part 7's history.
+
+The app's memory is its own thread (`horadric-ui/src/memory.rs`), started
+by the first recall: it fetches MiniLM if missing and loads it beside,
+answering by words until then. A recall embeds the asking project's new
+notes first, newest first, for at most 3 seconds; the rest, and anything
+else the store lacks, is embedded two at a time with a 100 ms rest while
+nothing is asked. `horadric mcp` posts to `/horadric/recall` (header
+`recall`, no session needed) and waits 12 seconds; with no answer it
+ranks the notes itself with BM25 and the weights, no meaning. Only the
+asking project's passages are candidates until part 6. `kind` narrows to
+note, quest, dialogue (or transcript) or code. Each hit says what it is:
+`#12 (note, 3 days ago, at 1a2b3c4d)` for a note, `2026-10#5 (dialogue,
+session 8a8cb053, a minute ago)` for a passage of the store.
+
+Measured on the yardstick (`recall` rows; docs weighed as notes, no
+ages), recall at 5:
+
+| | all | doc | note | dialogue |
+|---|---|---|---|---|
+| words, the lore before | 63.1 % | 52.2 % | 70.0 % | 68.2 % |
+| BM25 alone | 67.7 % | 60.9 % | 80.0 % | 63.6 % |
+| recall by words (the fallback) | **73.8 %** | 69.6 % | 90.0 % | 63.6 % |
+| MiniLM fused with BM25, unweighed | 87.7 % | 87.0 % | 100 % | 77.3 % |
+| recall with MiniLM | **90.8 %** | 91.3 % | 100 % | 81.8 % |
+
+The dialogue weight was set by it: 0.75 sank answers that were dialogue
+(83.1 % in all, dialogue 59.1 %), 0.9 and 0.95 tie at the top for meaning
+and 0.9 is better by words, 1.0 drops by words to BM25's 67.7 %. The
+cosine floor cost nothing on the set (the best 50 are all above it).
+
+Not yet: the background embeds with every core, which is fine for notes
+and will want a gentler pace for part 4's backfill.
+
 ### 4. Transcripts, verbatim
 
 The app reads each session's transcript as it grows (it is told by the

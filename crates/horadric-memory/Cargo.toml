@@ -9,12 +9,10 @@ description = "Long term memory for Horadric: text embedded by meaning, with can
 candle-core = "0.11"
 candle-nn = "0.11"
 candle-transformers = "0.11"
+horadric-core = { path = "../horadric-core" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokenizers = { version = "0.22", default-features = false, features = ["onig"] }
-
-[dev-dependencies]
-horadric-core = { path = "../horadric-core" }
 
 [target.'cfg(windows)'.dev-dependencies]
 windows = { version = "0.62", features = ["Win32_System_ProcessStatus", "Win32_System_Threading"] }

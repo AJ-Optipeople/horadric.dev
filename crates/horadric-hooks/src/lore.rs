@@ -34,6 +34,9 @@ pub struct Place {
     main: Option<PathBuf>,
     /// The notes, shared by every worktree of the project.
     store: PathBuf,
+    /// The project's key: its main working tree, lower case with forward
+    /// slashes, the same from every worktree.
+    key: String,
 }
 
 impl Place {
@@ -75,6 +78,7 @@ impl Place {
             cwd: cwd.to_path_buf(),
             main,
             store: dir.join(lore::file_name(&key)),
+            key,
         })
     }
 
@@ -120,6 +124,10 @@ impl Place {
         git(&self.top, &["rev-parse", "HEAD"])
             .map(|s| s.trim().to_string())
             .unwrap_or_default()
+    }
+
+    pub fn key(&self) -> &str {
+        &self.key
     }
 
     /// Where the code index is kept, beside the notes.

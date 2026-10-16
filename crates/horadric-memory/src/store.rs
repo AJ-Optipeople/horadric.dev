@@ -149,6 +149,11 @@ pub struct Chunk {
     pub commit: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub files: Vec<FileMark>,
+    /// The lore note this is a copy of, so recall finds a note's vector.
+    /// Added after version 1 shipped: a build that does not know it
+    /// skips it, so the format version stays.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<u64>,
     pub text: String,
 }
 
@@ -603,6 +608,14 @@ impl Store {
         scored
     }
 
+    /// The cosine of chunk `id`'s `tag` vector and `query`, None when it
+    /// has none yet.
+    pub fn cosine(&self, tag: &str, id: ChunkId, query: &[f32]) -> Option<f32> {
+        let model = self.models.get(tag)?;
+        (model.dims == query.len()).then_some(())?;
+        Some(dot(query, model.rows.get(&id)?))
+    }
+
     /// The months whose files a newer Horadric wrote and this one skips.
     pub fn foreign(&self) -> BTreeSet<Month> {
         let text = self
@@ -773,6 +786,7 @@ mod tests {
                 path: "src/lib.rs".into(),
                 hash: 7,
             }],
+            note: None,
             text: text.into(),
         }
     }

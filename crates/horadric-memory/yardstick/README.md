@@ -71,7 +71,9 @@ deleted is lost.
 ## Running it
 
 `cargo run --release -p horadric-memory --example yardstick [gemma|bge|minilm]`
-scores words only, BM25, each model alone and each fused with words.
+scores words only, BM25, each model alone and each fused with words,
+then `lore_recall`'s own ranking (`recall` rows): by words only, as when
+the app is down, and with each model's meaning cut as the app cuts it.
 The models are read from `%APPDATA%\Horadric-dev\models\<folder>`.
 Vectors are cached in `target\yardstick` under a hash of the corpus, so
 a second run only scores. The first results and the model chosen from

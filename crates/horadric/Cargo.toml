@@ -16,6 +16,7 @@ path = "src/horadricw.rs"
 [dependencies]
 horadric-core = { path = "../horadric-core" }
 horadric-hooks = { path = "../horadric-hooks" }
+horadric-memory = { path = "../horadric-memory" }
 horadric-pty = { path = "../horadric-pty" }
 horadric-ui = { path = "../horadric-ui" }
 serde = { workspace = true }
