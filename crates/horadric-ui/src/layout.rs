@@ -2012,47 +2012,84 @@ pub fn grid(n: usize, area: (i32, i32, i32, i32), gap: i32) -> Vec<[i32; 4]> {
         .collect()
 }
 
-/// The grid with its last pane docked on `side`: that pane `size` wide,
-/// or tall on top, or half the area without one, across the whole of that
-/// side, the rest in a grid of their own beside it. `size` is kept to
-/// leave each side at least `min`.
-/// None where the area is too small for both, so the plain grid is used.
+/// A pane standing beside the grid: its place among the panes, its side,
+/// and its width, or height on top, in pixels. None takes half.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Docked {
+    pub index: usize,
+    pub side: Side,
+    pub size: Option<i32>,
+}
+
+/// Where a docked pane was cut from the area: the pane, its side, the
+/// area it was cut from, which its seam's drag measures against, and its
+/// seam, as [`seam`] gives it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Cut {
+    pub index: usize,
+    pub side: Side,
+    pub from: (i32, i32, i32, i32),
+    pub seam: (i32, i32),
+}
+
+/// Every pane's cell with the `docks` cut from the area in turn, each
+/// across the whole of its side of what the ones before it left, and the
+/// rest in a grid in what is left over. A dock's size is kept to leave
+/// each side at least `min`. A dock the area is too small for, or that
+/// would leave the grid empty, takes its place in the grid instead.
 pub fn docked_grid(
     n: usize,
     area: (i32, i32, i32, i32),
     gap: i32,
-    side: Side,
-    size: Option<i32>,
+    docks: &[Docked],
     min: i32,
-) -> Option<Vec<[i32; 4]>> {
-    let (left, top, right, bottom) = area;
-    let span = match side {
-        Side::Left | Side::Right => right - left,
-        Side::Top => bottom - top,
-    };
-    if n < 2 || span < 2 * min + gap {
-        return None;
+) -> (Vec<[i32; 4]>, Vec<Cut>) {
+    let mut cells = vec![[0; 4]; n];
+    let mut cuts: Vec<Cut> = Vec::new();
+    let mut rest = area;
+    for d in docks {
+        let (left, top, right, bottom) = rest;
+        let span = match d.side {
+            Side::Left | Side::Right => right - left,
+            Side::Top => bottom - top,
+        };
+        if d.index >= n || n - cuts.len() < 2 || span < 2 * min + gap {
+            continue;
+        }
+        let size = d
+            .size
+            .unwrap_or((span - gap) / 2)
+            .clamp(min, span - gap - min);
+        let (cell, after) = match d.side {
+            Side::Left => (
+                [left, top, left + size, bottom],
+                (left + size + gap, top, right, bottom),
+            ),
+            Side::Right => (
+                [right - size, top, right, bottom],
+                (left, top, right - size - gap, bottom),
+            ),
+            Side::Top => (
+                [left, top, right, top + size],
+                (left, top + size + gap, right, bottom),
+            ),
+        };
+        cells[d.index] = cell;
+        cuts.push(Cut {
+            index: d.index,
+            side: d.side,
+            from: rest,
+            seam: seam(d.side, cell, gap),
+        });
+        rest = after;
     }
-    let size = size
-        .unwrap_or((span - gap) / 2)
-        .clamp(min, span - gap - min);
-    let (dock, rest) = match side {
-        Side::Left => (
-            [left, top, left + size, bottom],
-            (left + size + gap, top, right, bottom),
-        ),
-        Side::Right => (
-            [right - size, top, right, bottom],
-            (left, top, right - size - gap, bottom),
-        ),
-        Side::Top => (
-            [left, top, right, top + size],
-            (left, top + size + gap, right, bottom),
-        ),
-    };
-    let mut cells = grid(n - 1, rest, gap);
-    cells.push(dock);
-    Some(cells)
+    let in_grid: Vec<usize> = (0..n)
+        .filter(|i| !cuts.iter().any(|c| c.index == *i))
+        .collect();
+    for (&i, cell) in in_grid.iter().zip(grid(in_grid.len(), rest, gap)) {
+        cells[i] = cell;
+    }
+    (cells, cuts)
 }
 
 /// The gap between a docked pane and the grid, as its start and end
@@ -3348,6 +3385,85 @@ mod tests {
             snap((4, 615), (280, 100), WORK, &[other], SPACING),
             (0, 612)
         );
+    }
+
+    /// The last of `n` panes docked alone, as the browser was before the
+    /// sanctuary could dock too. None where it took a place in the grid.
+    fn docked_grid(
+        n: usize,
+        area: (i32, i32, i32, i32),
+        gap: i32,
+        side: Side,
+        size: Option<i32>,
+        min: i32,
+    ) -> Option<Vec<[i32; 4]>> {
+        let index = n - 1;
+        let dock = Docked { index, side, size };
+        let (cells, cuts) = super::docked_grid(n, area, gap, &[dock], min);
+        (!cuts.is_empty()).then_some(cells)
+    }
+
+    #[test]
+    fn two_docked_panes_are_cut_in_turn_and_each_seam_drags_its_own() {
+        let area = (10, 40, 1010, 840);
+        let browser = Docked {
+            index: 1,
+            side: Side::Right,
+            size: Some(300),
+        };
+        let sky = Docked {
+            index: 2,
+            side: Side::Right,
+            size: Some(250),
+        };
+        let (cells, cuts) = super::docked_grid(3, area, 8, &[browser, sky], 200);
+        assert_eq!(cells[1], [710, 40, 1010, 840], "the browser outermost");
+        assert_eq!(cells[2], [452, 40, 702, 840], "the sanctuary inside it");
+        assert_eq!(cells[0], [10, 40, 444, 840]);
+        assert_eq!(cuts.len(), 2);
+        for (cut, size) in cuts.iter().zip([300, 250]) {
+            assert_eq!(seam_size(cut.side, cut.from, 8, cut.seam.0), size);
+        }
+        // On different sides each takes its own.
+        let left = Docked {
+            side: Side::Left,
+            ..sky
+        };
+        let (cells, _) = super::docked_grid(3, area, 8, &[browser, left], 200);
+        assert_eq!(cells[2], [10, 40, 260, 840]);
+        assert_eq!(cells[0], [268, 40, 702, 840]);
+        // Docked between sessions, it still leaves the grid in order.
+        let middle = Docked { index: 1, ..left };
+        let (cells, _) = super::docked_grid(3, area, 8, &[middle], 200);
+        assert_eq!(cells[1], [10, 40, 260, 840]);
+        assert_eq!(
+            [cells[0], cells[2]][..],
+            grid(2, (268, 40, 1010, 840), 8)[..]
+        );
+        // With nothing else to show the last one fills what is left.
+        let (cells, cuts) = super::docked_grid(
+            2,
+            area,
+            8,
+            &[
+                Docked {
+                    index: 0,
+                    ..browser
+                },
+                Docked { index: 1, ..sky },
+            ],
+            200,
+        );
+        assert_eq!(cuts.len(), 1);
+        assert_eq!(cells[1], [10, 40, 702, 840]);
+        // Where the first leaves too little room the second joins the grid.
+        let wide = Docked {
+            size: Some(600),
+            ..browser
+        };
+        let (cells, cuts) = super::docked_grid(3, area, 8, &[wide, sky], 200);
+        assert_eq!(cuts.len(), 1);
+        assert_eq!([cells[0], cells[2]][..], grid(2, (10, 40, 402, 840), 8)[..]);
     }
 
     #[test]

@@ -70,6 +70,10 @@ pub struct SavedState {
     /// where it is not in it.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub page_docks: BTreeMap<String, Dock>,
+    /// Where each project's Arcane Sanctuary stands beside the stage's
+    /// grid, where it is not in it.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub sky_docks: BTreeMap<String, Dock>,
     /// Each project's browser tabs as left, so a reload or a crash opens
     /// them again. Only the address: WebView2 has no way to give a page
     /// back its history.
@@ -237,7 +241,8 @@ impl Discord {
     }
 }
 
-/// The side of the stage a browser pane stands on, beside the grid.
+/// The side of the stage a browser or Sanctuary pane stands on, beside
+/// the grid.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Side {
@@ -246,7 +251,7 @@ pub enum Side {
     Right,
 }
 
-/// A browser pane beside the grid: its side, and its width, or its height
+/// A pane beside the grid: its side, and its width, or its height
 /// on top, in DIPs. None shares the stage half and half with the grid,
 /// until the seam is dragged.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
