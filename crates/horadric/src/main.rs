@@ -12,6 +12,8 @@
 //! one per session to hold its console.
 
 #[cfg(windows)]
+mod backup;
+#[cfg(windows)]
 mod code;
 mod console;
 #[cfg(windows)]
@@ -82,6 +84,13 @@ Usage:
                                label and steps, and why any does not parse
   horadric runeword cast NAME    Cast that stone of this project's Runetome, in a session
                                of its own when it needs one
+  horadric backup now [--folder DIR]
+                               Back the memory and the lore up, encrypted, into
+                               DIR\\Horadric backup\\<this PC>; the folder is remembered
+  horadric backup status         Where backups go, how the last went, every PC's backup there
+  horadric backup restore [--from MACHINE]
+                               With Horadric quit, put a backup back (another PC's for a
+                               new one); the replaced folders are kept beside
   horadric serve                 Listen for Claude Code hook events and show a live table
   horadric hooks install         Add Horadric hooks to ~/.claude/settings.json
   horadric hooks uninstall       Remove them
@@ -197,6 +206,8 @@ fn main() -> ExitCode {
         Some("sanctuary") => lore::sanctuary(),
         #[cfg(windows)]
         Some("sky") => lore::sky(),
+        #[cfg(windows)]
+        Some("backup") => backup::run(&args[1..]),
         Some("swap") => reload::swap(&args[1..]),
         Some("install") => install_command(),
         Some("uninstall") => uninstall_command(),
