@@ -390,11 +390,20 @@ impl Store {
 
     /// Keeps `chunk`, in the segment of the month `now` falls in.
     pub fn add(&mut self, chunk: &Chunk, now: u64) -> io::Result<ChunkId> {
-        if chunk.kind == Kind::Other {
+        Ok(self.add_many(std::slice::from_ref(chunk), now)?[0])
+    }
+
+    /// Keeps all of `chunks` with one lock and one write to disk, for the
+    /// thousands a code index makes.
+    pub fn add_many(&mut self, chunks: &[Chunk], now: u64) -> io::Result<Vec<ChunkId>> {
+        if chunks.iter().any(|c| c.kind == Kind::Other) {
             return Err(io::Error::new(
                 ErrorKind::InvalidInput,
                 "a chunk of no known kind",
             ));
+        }
+        if chunks.is_empty() {
+            return Ok(Vec::new());
         }
         let month = Month::of(now);
         let _lock = Lock::take(&self.dir.join("write.lock"))?;
@@ -424,16 +433,21 @@ impl Store {
             )?;
             out.push(b'\n');
         }
-        serde_json::to_writer(&mut out, chunk)?;
-        out.push(b'\n');
+        for chunk in chunks {
+            serde_json::to_writer(&mut out, chunk)?;
+            out.push(b'\n');
+        }
         file.write_all(&out)?;
         file.sync_data()?;
         seg.read_to += out.len() as u64;
-        seg.chunks.push(Some(chunk.clone()));
-        Ok(ChunkId {
-            month,
-            n: seg.chunks.len() as u32 - 1,
-        })
+        let first = seg.chunks.len() as u32;
+        seg.chunks.extend(chunks.iter().cloned().map(Some));
+        Ok((0..chunks.len() as u32)
+            .map(|i| ChunkId {
+                month,
+                n: first + i,
+            })
+            .collect())
     }
 
     pub fn chunk(&self, id: ChunkId) -> Option<&Chunk> {

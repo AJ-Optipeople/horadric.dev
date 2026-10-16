@@ -458,6 +458,38 @@ static MEMORY: Mutex<Option<Memory>> = Mutex::new(None);
 /// Answers a question with the index of the working tree: what any
 /// session of the project read before, and what changed since read now.
 fn with_index<T>(place: &Place, ask: impl FnOnce(&code::Files) -> T) -> Result<T, String> {
+    with_keyed(place, |keyed| {
+        let files: Vec<(String, &FileIndex)> =
+            keyed.iter().map(|(rel, _, f)| (rel.clone(), *f)).collect();
+        ask(&files)
+    })
+}
+
+/// What the memory keeps of the project's code: for each file the index
+/// has read, a text for each of its symbols, and the hash of its bytes,
+/// which is what a note's marks hold too.
+pub fn code_files(dir: &Path) -> Result<Vec<horadric_memory::keeper::CodeFile>, String> {
+    with_keyed(&Place::of(dir)?, |keyed| {
+        keyed
+            .iter()
+            .filter_map(|(rel, key, f)| {
+                let hash = u64::from_str_radix(key.rsplit(':').next()?, 16).ok()?;
+                Some(horadric_memory::keeper::CodeFile {
+                    path: rel.clone(),
+                    hash,
+                    symbols: code::passages(rel, f),
+                })
+            })
+            .filter(|f| !f.symbols.is_empty())
+            .collect()
+    })
+}
+
+/// [`with_index`] with each file's key as well.
+fn with_keyed<T>(
+    place: &Place,
+    ask: impl FnOnce(&[(String, String, &FileIndex)]) -> T,
+) -> Result<T, String> {
     let mut memory = MEMORY.lock().unwrap_or_else(|e| e.into_inner());
     if memory.as_ref().is_none_or(|m| m.top != place.top) {
         // An index that can not be read is only a cache: it starts again.
@@ -528,9 +560,9 @@ fn with_index<T>(place: &Place, ask: impl FnOnce(&code::Files) -> T) -> Result<T
         // written now is written after the next question.
         m.told = change_store(&place.code_store(), |s| s.merge(fresh, &had, now())).is_ok();
     }
-    let files: Vec<(String, &FileIndex)> = tree
+    let files: Vec<(String, String, &FileIndex)> = tree
         .into_iter()
-        .filter_map(|(rel, k)| m.read.get(&k).map(|f| (rel, f)))
+        .filter_map(|(rel, k)| m.read.get(&k).map(|f| (rel, k, f)))
         .collect();
     Ok(ask(&files))
 }

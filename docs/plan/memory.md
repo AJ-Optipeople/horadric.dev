@@ -263,6 +263,8 @@ Each symbol in the lore's code index (its head and doc comment, not its
 whole body) gets a vector, refreshed when its file's hash changes, so
 "where do we roll back a failed reload" finds the function.
 
+Done: the index reads each symbol's doc comment (Rust `///`, JS and TS `/** */`, Python docstrings), and the app's memory thread, once a recall has come in, syncs the project's code when idle: one `code` chunk per symbol (path, kind, name, head, doc), added for a file whose hash the store lacks and left alone otherwise. A chunk of a file that has since changed or gone is no longer an answer. The old chunks stay in the store and are embedded too, a small waste a later compaction can remove. The binary hands the index over with `horadric_ui::memory::set_code_source`.
+
 ### 6. Across projects
 
 Every project's memory is searchable from every other, behind a switch
