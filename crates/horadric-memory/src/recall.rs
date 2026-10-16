@@ -36,6 +36,15 @@ pub const MOST_BY_MEANING: usize = 50;
 /// it MiniLM's matches are unrelated text that happens to share a topic.
 pub const LEAST_COSINE: f32 = 0.2;
 
+/// The least fused score of a hit worth showing an agent that did not ask
+/// (part 9): about the first three places of two rankings at once, by
+/// words and by meaning or by files. The first place of both is
+/// `2 / (K + 1)`, about 0.0328, and of one alone half that, so words alone
+/// never pass. Set from the yardstick with MiniLM: 40 of 65 questions get
+/// a hit, 1.5 hits each, and 63% of them answer it, where 0.028 shows 4.5
+/// hits a question and 31% answer.
+pub const STRONG: f64 = 0.032;
+
 /// How many of the best are looked at for staleness, which reads their
 /// files: enough that a stale one sinking lets the next ones up.
 const LOOKED_AT: usize = MOST_FOUND * 3;
@@ -171,6 +180,10 @@ pub struct Ask {
     /// Whether notes another replaced are candidates too, to see what was
     /// true before.
     pub history: bool,
+    /// The least fused score a hit needs, before it is weighed, 0 for
+    /// any: [`STRONG`] when the hits are put before an agent that did not
+    /// ask.
+    pub least: f64,
 }
 
 /// Okapi BM25 over a fixed set of texts, with the usual k1 1.2 and b 0.75.
@@ -302,6 +315,10 @@ pub fn rank(
     let wanted = |i: &usize| ask.kind.is_none_or(|k| cands[*i].kind == k);
     let has_words = !lore::words(&ask.query).is_empty();
     if !has_words && ask.files.is_empty() {
+        // The newest are no answer to a question nobody asked.
+        if ask.least > 0.0 {
+            return Vec::new();
+        }
         let mut newest: Vec<usize> = (0..cands.len()).filter(wanted).collect();
         newest.sort_by(|a, b| cands[*b].time.cmp(&cands[*a].time).then(b.cmp(a)));
         return newest
@@ -338,7 +355,7 @@ pub fn rank(
     };
     let mut scored: Vec<(usize, f64)> = fuse(&lists)
         .into_iter()
-        .filter(|(i, _)| wanted(i))
+        .filter(|(i, s)| wanted(i) && *s >= ask.least)
         .map(|(i, s)| (i, s * weight(&cands[i], ask.now, false)))
         .collect();
     order(&mut scored);
@@ -612,6 +629,21 @@ mod tests {
         let mut quests = ask("about");
         quests.kind = Some(Kind::Quest);
         assert_eq!(ids(&rank(&quests, &cands, &[], |_| false)), vec![1]);
+    }
+
+    #[test]
+    fn only_a_hit_two_rankings_agree_on_is_strong() {
+        let a = note(1, "the stage shows one project", &[], NOW);
+        let b = note(2, "the terminal window", &[], NOW);
+        let cands = [Candidate::note(&a), Candidate::note(&b)];
+        let mut strong = ask("terminal");
+        strong.least = STRONG;
+        // Words and meaning both put 1 first; 0 only meaning found.
+        assert_eq!(ids(&rank(&strong, &cands, &[1, 0], |_| false)), vec![1]);
+        // Words alone are never enough, however good their first place.
+        assert!(rank(&strong, &cands, &[], |_| false).is_empty());
+        strong.query = String::new();
+        assert!(rank(&strong, &cands, &[], |_| false).is_empty());
     }
 
     #[test]

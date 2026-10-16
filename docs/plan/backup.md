@@ -91,8 +91,17 @@ against the trait and tested with an in memory vault.
 - **The OAuth client** is a "Desktop app" client in a Google Cloud
   project owned by the human. Its id and secret are compiled in; for an
   installed app Google treats the secret as public. They are in
-  `crates/horadric-ui/src/google.rs` once the quest that builds sign in
-  has them.
+  `crates/horadric-ui/src/google.rs`.
+- **Built (2026-10-16):** sign in and the access token in
+  `horadric-ui/src/google.rs`, the vault in `google_drive.rs`, Credential
+  Manager in `credential.rs`, the pure half (consent URL, the loopback
+  answer, token and file list replies, Drive queries) in
+  `horadric-core/src/google.rs`. In Drive a machine's backup is one flat
+  folder: a file's name is its relative path, slash and all, so a
+  backup is listed in one call. `horadric google
+  sign-in|sign-out|status|machines|try` drives it from a terminal; `try`
+  puts, replaces (6 MB, past the simple upload limit), lists, gets and
+  deletes a file.
 
 ## Restore
 

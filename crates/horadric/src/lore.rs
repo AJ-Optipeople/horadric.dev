@@ -133,6 +133,7 @@ fn recall(args: &Value) -> Result<String, String> {
         kind,
         now: now(),
         history,
+        least: 0.0,
     };
     let mut cands: Vec<Candidate> = lore.notes.iter().map(Candidate::note).collect();
     if history {
