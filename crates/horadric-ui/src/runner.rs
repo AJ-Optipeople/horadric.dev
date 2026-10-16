@@ -706,6 +706,15 @@ impl App {
         Ok(id)
     }
 
+    /// Has memory recall for `task` on its own thread, and says whether it
+    /// is answered. A project without a folder has nothing to recall.
+    fn prepare_recall(&self, key: &str, task: &Task) -> bool {
+        match self.project_dir(key) {
+            Some(dir) => crate::memory::prepare(&dir, &tasks::recall_query(task)),
+            None => true,
+        }
+    }
+
     /// The item on `line` titled `title` in the project's list as last read.
     fn task_at(&self, key: &str, line: usize, title: &str) -> Option<Task> {
         let boards = self.shared.boards.borrow();
@@ -733,8 +742,11 @@ impl App {
         let Some(task) = self.task_at(key, line, title) else {
             return;
         };
-        let brief =
-            |app: &mut Self| ask_for(app, Menu::Brief(key.to_string(), line, title.to_string()));
+        let brief = |app: &mut Self| {
+            // The human reads the brief while memory recalls for it.
+            app.prepare_recall(key, &task);
+            ask_for(app, Menu::Brief(key.to_string(), line, title.to_string()))
+        };
         match self.row_state(&task) {
             RowState::Open | RowState::Gone => brief(self),
             _ => match self.held_session(&task) {
@@ -1307,6 +1319,7 @@ impl App {
                 if self.tasks.nudged.contains_key(&h)
                     || self.phase_of(&h) != Some(Phase::Done)
                     || self.reported(&h)
+                    || self.waiting_on_own_work(&h)
                 {
                     continue;
                 }
@@ -1318,6 +1331,15 @@ impl App {
                 self.tasks.nudged.insert(h, SystemTime::now());
             }
         }
+    }
+
+    /// The session stopped its turn with background work of its own still
+    /// running: it waits, which is neither a miss to nudge nor a stop to count.
+    fn waiting_on_own_work(&self, id: &str) -> bool {
+        self.shared
+            .registry
+            .lock()
+            .is_ok_and(|r| r.get(id).is_some_and(|s| s.loot.waiting_on_own_work()))
     }
 
     /// A tomb that already said it is done.
@@ -1337,8 +1359,9 @@ impl App {
         let Ok(r) = self.shared.registry.lock() else {
             return false;
         };
-        r.get(id)
-            .is_some_and(|s| s.phase == Phase::Done && s.since > at)
+        r.get(id).is_some_and(|s| {
+            s.phase == Phase::Done && s.since > at && !s.loot.waiting_on_own_work()
+        })
     }
 
     /// What about this list the human should hear, as keys that stay the
@@ -1471,8 +1494,13 @@ impl App {
         {
             return;
         }
-        self.tasks.started.insert(key.to_string(), Instant::now());
         let t = &b.tasks[i];
+        // The runner looks every second, so it starts the item on the first
+        // look after the recall is in, not before.
+        if matches!(next, Next::Start(_)) && !self.prepare_recall(key, t) {
+            return;
+        }
+        self.tasks.started.insert(key.to_string(), Instant::now());
         if let Next::Resume(_) = next {
             self.resume_blocked(key, t);
             return;
@@ -2288,15 +2316,15 @@ pub(super) fn merges(dir: &Path) -> Vec<Merge> {
 
 /// The context pack for `task` from the project's finished quests (Lore
 /// part 2), files no longer there left out, and beside it what memory
-/// recalls of the quest (Memory part 9): the text for its prompt, and the
-/// pack's files.
+/// recalls of the quest (Memory part 9), when [`prepare_recall`] had it
+/// ready: the text for its prompt, and the pack's files.
 pub(super) fn context_pack(key: &str, dir: &Path, task: &Task) -> (String, Vec<String>) {
     let list = tasks::parse(&file::read(dir));
     let quests = chronicle::quests(&store::chronicle_all(), &[], key, &list);
     let mut hints = pack::pack(task, &quests);
     hints.retain(|h| dir.join(&h.file).exists());
     let mut text = pack::render(&hints);
-    if let Some(recalled) = crate::memory::unasked(dir, &tasks::recall_query(task)) {
+    if let Some(recalled) = crate::memory::take_recall(dir, &tasks::recall_query(task)) {
         if !text.is_empty() {
             text.push_str("\n\n");
         }

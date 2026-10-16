@@ -7,7 +7,9 @@
 //! is fetched from Hugging Face by the first recall only, so an app
 //! nobody recalls in keeps its dialogue (part 4) without the download or
 //! the memory it takes. Until the model is loaded the keeper answers by
-//! words.
+//! words. A quest's recall is asked for ahead ([`prepare`]) and taken when
+//! ready, so no window waits on it, and the model is loaded at the app's
+//! start when its files are already on disk ([`warm`]).
 //!
 //! The code index lives in the `horadric` binary, so it hands over what
 //! the memory keeps of it with [`set_code_source`]. A recall owes the
@@ -18,7 +20,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -88,6 +90,8 @@ enum Msg {
     /// What was asked, and who to answer.
     Recall(Value, To),
     Keep(Keep),
+    /// Load the model now, for a recall that is not asked yet.
+    Warm,
     Model(Result<Box<Embedder>, String>),
 }
 
@@ -114,7 +118,7 @@ pub fn ask(call: RecallCall) {
 /// What memory recalls of `query` for the project `dir` is in, the strong
 /// hits only (part 9), for a prompt the agent did not ask it for. None
 /// when nothing is strong enough, or the memory took too long.
-pub fn unasked(dir: &Path, query: &str) -> Option<String> {
+fn unasked(dir: &Path, query: &str) -> Option<String> {
     let (tx, rx) = mpsc::channel();
     let body = json!({ "dir": dir.to_string_lossy(), "query": query, "strong": true });
     let until = Instant::now() + UNASKED_WAIT;
@@ -129,6 +133,69 @@ pub fn unasked(dir: &Path, query: &str) -> Option<String> {
             None
         }
         Err(_) => None,
+    }
+}
+
+/// A recall for a quest, asked for ahead on a thread of its own: the window
+/// must not wait on the model, so a quest is started from what is ready.
+enum Slot {
+    Asked(Instant),
+    Done(Option<String>),
+}
+
+fn slots() -> &'static Mutex<HashMap<(String, String), Slot>> {
+    static SLOTS: OnceLock<Mutex<HashMap<(String, String), Slot>>> = OnceLock::new();
+    SLOTS.get_or_init(Default::default)
+}
+
+/// Asks for the recall of `query` in `dir` once, off the caller's thread,
+/// and says whether it has been answered. A quest is not held up by a
+/// recall that has taken longer than it would ever be waited for.
+pub fn prepare(dir: &Path, query: &str) -> bool {
+    let id = (dir.to_string_lossy().to_string(), query.to_string());
+    let Ok(mut all) = slots().lock() else {
+        return true;
+    };
+    match all.get(&id) {
+        Some(Slot::Done(_)) => true,
+        Some(Slot::Asked(at)) => at.elapsed() > UNASKED_WAIT + UNASKED_BUDGET,
+        None => {
+            all.insert(id.clone(), Slot::Asked(Instant::now()));
+            let (dir, query) = (dir.to_path_buf(), query.to_string());
+            thread::spawn(move || {
+                let found = unasked(&dir, &query);
+                if let Ok(mut all) = slots().lock() {
+                    all.insert(id, Slot::Done(found));
+                }
+            });
+            false
+        }
+    }
+}
+
+/// What the recall for a quest found, if it has been answered, taken so a
+/// quest started again asks anew. Never waits.
+pub fn take_recall(dir: &Path, query: &str) -> Option<String> {
+    let id = (dir.to_string_lossy().to_string(), query.to_string());
+    let mut all = slots().lock().ok()?;
+    match all.remove(&id)? {
+        Slot::Done(found) => found,
+        asked @ Slot::Asked(_) => {
+            all.insert(id, asked);
+            None
+        }
+    }
+}
+
+/// Has the model loaded, when it is already on disk, so the first quest
+/// does not start before it. Without the files nothing is fetched until a
+/// recall asks (the app nobody recalls in downloads nothing).
+pub fn warm() {
+    let Some(state) = horadric_hooks::state_dir() else {
+        return;
+    };
+    if state.join("models").join(MODEL.folder()).is_dir() {
+        let _ = sender().send(Msg::Warm);
     }
 }
 
@@ -182,6 +249,13 @@ fn load(models: &Path) -> Result<Embedder, String> {
     Embedder::load(MODEL, &dir)
 }
 
+fn spawn_load(models: &Path, loaded: &Sender<Msg>) {
+    let (models, loaded) = (models.to_path_buf(), loaded.clone());
+    thread::spawn(move || {
+        let _ = loaded.send(Msg::Model(load(&models).map(Box::new)));
+    });
+}
+
 fn run(state: &Path, rx: Receiver<Msg>, loaded: Sender<Msg>) {
     let dir = state.join("memory");
     let models = state.join("models");
@@ -214,14 +288,17 @@ fn run(state: &Path, rx: Receiver<Msg>, loaded: Sender<Msg>) {
             }
         };
         match msg {
+            Some(Msg::Warm) => {
+                if !loading {
+                    loading = true;
+                    spawn_load(&models, &loaded);
+                }
+            }
             Some(Msg::Recall(body, to)) => {
                 // The model is wanted from the first recall on, not before.
                 if !loading {
                     loading = true;
-                    let (models, loaded) = (models.clone(), loaded.clone());
-                    thread::spawn(move || {
-                        let _ = loaded.send(Msg::Model(load(&models).map(Box::new)));
-                    });
+                    spawn_load(&models, &loaded);
                 }
                 match to {
                     To::Mcp(reply) if reply.wanted() => {

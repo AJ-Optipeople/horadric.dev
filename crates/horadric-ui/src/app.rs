@@ -754,6 +754,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
     // would point it at a build about to be replaced, and a fake install
     // with its own APPDATA has a first run of its own but shares the value.
     crate::memory::set_across(saved.recall_across);
+    crate::memory::warm();
     let mut autostart_offered = saved.autostart_offered;
     if !autostart_offered && !horadric_hooks::dev() && autostart::running_installed() {
         autostart_offered = autostart::enable();

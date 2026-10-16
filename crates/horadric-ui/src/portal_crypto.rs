@@ -40,12 +40,18 @@ impl Drop for Key {
     }
 }
 
-fn info(nonce: &[u8], tag: &mut [u8; TAG]) -> BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO {
+fn info(nonce: &[u8], tag: &mut [u8; TAG], aad: &[u8]) -> BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO {
     BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO {
         cbSize: std::mem::size_of::<BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO>() as u32,
         dwInfoVersion: 1,
         pbNonce: nonce.as_ptr() as *mut u8,
         cbNonce: nonce.len() as u32,
+        pbAuthData: if aad.is_empty() {
+            std::ptr::null_mut()
+        } else {
+            aad.as_ptr() as *mut u8
+        },
+        cbAuthData: aad.len() as u32,
         pbTag: tag.as_mut_ptr(),
         cbTag: TAG as u32,
         ..Default::default()
@@ -59,6 +65,17 @@ pub fn seal(key: &[u8; 32], plain: &[u8]) -> Vec<u8> {
     seal_with(key, &nonce, plain)
 }
 
+/// Encrypts with a fresh random nonce, bound to `aad` so that what is
+/// sealed for one purpose cannot be passed off as another: the backup
+/// binds each file to its path.
+pub fn seal_bound(key: &[u8; 32], plain: &[u8], aad: &[u8]) -> Vec<u8> {
+    let mut nonce = [0u8; NONCE];
+    random(&mut nonce);
+    let mut sealed = nonce.to_vec();
+    sealed.extend_from_slice(&gcm_bound(key, &nonce, plain, aad));
+    sealed
+}
+
 fn seal_with(key: &[u8; 32], nonce: &[u8; NONCE], plain: &[u8]) -> Vec<u8> {
     let mut sealed = nonce.to_vec();
     sealed.extend_from_slice(&gcm(key, nonce, plain));
@@ -68,9 +85,13 @@ fn seal_with(key: &[u8; 32], nonce: &[u8; NONCE], plain: &[u8]) -> Vec<u8> {
 /// AES-GCM under a 16 or 32 byte key, giving the ciphertext with its tag
 /// and no nonce, which the other side works out for itself.
 pub fn gcm(key: &[u8], nonce: &[u8; NONCE], plain: &[u8]) -> Vec<u8> {
+    gcm_bound(key, nonce, plain, &[])
+}
+
+fn gcm_bound(key: &[u8], nonce: &[u8; NONCE], plain: &[u8], aad: &[u8]) -> Vec<u8> {
     let k = Key::new(key).expect("AES key");
     let mut tag = [0u8; TAG];
-    let info = info(nonce, &mut tag);
+    let info = info(nonce, &mut tag, aad);
     let mut out = vec![0u8; plain.len()];
     let mut written = 0u32;
     let status = unsafe {
@@ -92,6 +113,12 @@ pub fn gcm(key: &[u8], nonce: &[u8; NONCE], plain: &[u8]) -> Vec<u8> {
 
 /// Decrypts, `None` when the frame is short, forged or under another key.
 pub fn open(key: &[u8], sealed: &[u8]) -> Option<Vec<u8>> {
+    open_bound(key, sealed, &[])
+}
+
+/// Decrypts what [`seal_bound`] sealed, `None` as [`open`] is, and when
+/// `aad` is not what it was sealed with.
+pub fn open_bound(key: &[u8], sealed: &[u8], aad: &[u8]) -> Option<Vec<u8>> {
     if sealed.len() < NONCE + TAG {
         return None;
     }
@@ -99,7 +126,7 @@ pub fn open(key: &[u8], sealed: &[u8]) -> Option<Vec<u8>> {
     let (cipher, tag) = rest.split_at(rest.len() - TAG);
     let mut tag: [u8; TAG] = tag.try_into().ok()?;
     let k = Key::new(key)?;
-    let info = info(nonce, &mut tag);
+    let info = info(nonce, &mut tag, aad);
     let mut out = vec![0u8; cipher.len()];
     let mut written = 0u32;
     let status = unsafe {
@@ -157,5 +184,17 @@ mod tests {
         assert_eq!(open(&key, &bent), None);
         assert_eq!(open(&key, &sealed[..20]), None);
         assert_eq!(open(&key, &seal(&key, b"")).unwrap(), b"");
+    }
+
+    #[test]
+    fn bound_frames_open_only_with_their_data() {
+        let key = [3; 32];
+        let sealed = seal_bound(&key, b"a month of memory", b"memory/2026-10.jsonl");
+        assert_eq!(
+            open_bound(&key, &sealed, b"memory/2026-10.jsonl").unwrap(),
+            b"a month of memory"
+        );
+        assert_eq!(open_bound(&key, &sealed, b"memory/2026-09.jsonl"), None);
+        assert_eq!(open(&key, &sealed), None);
     }
 }

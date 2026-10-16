@@ -1,12 +1,20 @@
 # Warriv's memory
 
 ## Rules
-- Do not wait for main's checks before casting a ship stone: nothing runs them between landings. Ship Public runs all three first (RELEASING.md step 2) and stops on red; Ship Local did not always until "Ship Local runs the three checks first and stops on red" lands (lore #30).
+- Do not wait for main's checks before casting a ship stone: nothing runs them between landings. Ship Public runs all three first (RELEASING.md step 2) and Ship Local does too since 5170f91; both stop on red (lore #30).
 - Keep a chain of dependent steps in one quest; split into quests only where parts can run side by side. The human finds handovers slow (lore #34).
 - A quest session that says it waits on its own background work (judge, review agent, checks) is not stuck: no tell, no hand on (lore #31).
 - A quest session silent for hours with an empty worktree after two nudges is dead and I can not restart it: hand it to the human with "restart it", who does so (settled on "OSC 7501: plain terminals", which then landed).
 
 ## Lately
+- 2026-10-16 Round (main at 1227150): "Backup: encrypted snapshots to a folder, and restore" landed, tree clean apart from Horadric's own files, so cast "Ship Local". "Recall off the window thread" committed 39f180f on its branch, tests running: not stuck, noted, no tell. Three Backup and recall quests still under way.
+- 2026-10-16 "Backup: encrypted snapshots to a folder, and restore" stopped a sixth time, checks queued behind another clippy before its fast-forward. Not stuck (lore #31), noted, no tell.
+- 2026-10-16 Round (human left, main at 8485c6d): the Ship Local reloaded fine at 13:04 with e81cbca. Four quests under way, Backup Settings waits on part 1. Nothing to do.
+- 2026-10-16 "Memory: horadric quest pack shows the quest's recall too" stopped again, review fixes made, checks queued behind a ship build. Not stuck (lore #31), noted, no tell.
+- 2026-10-16 "Memory: horadric quest pack shows the quest's recall too" stopped, checks queued behind a ship build and a review agent reading. Not stuck (lore #31), noted, no tell.
+- 2026-10-16 Round (12:58, main at e81cbca): Ship Local runs the three checks first (5170f91) and the "not nudged" quest (e81cbca) landed. The 12:45 Ship Local has not reloaded (release exe 03:54) and a `cargo test --workspace` started 12:58, after both landings, so it carries them. No second cast. Backup part 1, recall on every prompt, quest pack recall and recall off the window thread under way; Backup Settings waits on part 1.
+- 2026-10-16 Wake right after (12:52, main still at 43b29d6): log unchanged, the 12:45 Ship Local still building. Nothing to do.
+- 2026-10-16 Round (main at 43b29d6): "Memory: what the lore knows comes with a Grep or Glob" landed (9318873, 12:49). The 12:45 "Ship Local" cast has not reloaded yet and cargo started 12:51, after the landing, so it carries it. No second cast. Gave "a quest's recall off the window thread" Model: sonnet. Public still waits for the rest of Backup and recall. Last reload attempt in reload.log (04:03) failed, old Horadric did not exit: check the next ship reloads.
 - 2026-10-16 Round (main at 31f5505): "Memory: a recall in each quest's prompt" landed (c7eec09, 05a75c9), so cast "Ship Local" to get it to the human now; public still waits for all six Backup and recall quests. Backup part 1 stopped a fifth time, re-merging main and rerunning checks before its fast-forward: not stuck, noted, no tell.
 - 2026-10-16 "Backup: encrypted snapshots to a folder, and restore" stopped a fourth time, checks running after merging main, then fast-forward. Not stuck (lore #31), noted it, no tell.
 - 2026-10-16 "Memory: recall on every prompt, from the UserPromptSubmit hook" stopped with work committed on its branch, waiting on its review agent before merging. Not stuck (lore #31), noted it, no tell.
@@ -24,176 +32,13 @@
 - 2026-10-16 Round (human left, main at 9ce75ba): nothing landed since the 0752547 ship; Horadrim and the look back work in their worktrees, the Scroll waits (sonnet). Nothing to do.
 - 2026-10-16 Round (main at 0752547): "Memory: Warriv distills the day" landed, tree clean apart from Horadric's own files (Horadrim and the look back work in worktrees), so cast "Ship Local". Gave the look back quest "Model: sonnet". Public still held for Horadrim.
 - 2026-10-16 Wake: "Memory: Horadrim, sigils and the Lexicon" stopped a third time, judge.py running in its background before part 8 numbers and merge. Not stuck, no tell, noted.
-- 2026-10-16 Wake: "Memory: Horadrim, sigils and the Lexicon" measured only about 10% saved on real dialogue (plan said 2x to 3x), waiting on judge.py. Told it to land if scores hold, with real numbers in memory.md part 8, off by default if they drop. Noted as Assumed.
-- 2026-10-16 Wake: "Memory: Warriv distills the day" stopped with code committed and checks green, waiting on its review agent before merging. Not stuck, no tell, noted.
-- 2026-10-16 Wake: "Memory: Horadrim, sigils and the Lexicon" stopped again with its review fixes in, clippy and yardstick running in its background, then judge.py and merge. Not stuck, no tell, noted.
-- 2026-10-16 Round (human left, main at 80e5585): only my memory since the 9ce6dd7 ship; Warriv distills and Horadrim still in their worktrees, the Scroll waits. Nothing to do.
-- 2026-10-16 Round (human left, main at 0526639): nothing landed since the 9ce6dd7 ship; Warriv distills and Horadrim work in their worktrees, the Scroll waits. Nothing to do.
-- 2026-10-16 Round (main at 9ce6dd7): "Memory: recall across projects" landed (4dc8d2b), a Settings switch users see, tree clean apart from Horadric's own files, so cast "Ship Local". Public still held for Horadrim; Warriv distills under way, the Scroll waits.
-- 2026-10-16 Wake: "Memory: Horadrim, sigils and the Lexicon" stopped waiting on its own checks, yardstick, review and answer scoring before merging. Not stuck, no tell, noted. Once it lands, public is no longer held for Horadrim.
-- 2026-10-16 Round (main at f411289): transcripts (2092ff9), code by meaning (a12c550) and Lore part 2 spend (61654ac) landed, tree clean apart from Horadric's own files, so cast "Ship Local". Public still held for Horadrim; across projects and Warriv distills under way, the Scroll waits.
-- 2026-10-16 Round (human left, main at 3f64798): nothing landed since the ship; transcripts, code by meaning and Horadrim work in their worktrees, the other three wait on them with models set. Nothing to do.
-- 2026-10-16 Round (main at d8afcf3): "Memory: lore_recall finds by meaning" landed, the first Memory piece a user sees, and the tree is clean (three Memory quests work in worktrees), so cast "Ship Local". Public held until more of Memory lands (transcripts, code by meaning, Horadrim under way).
-- 2026-10-16 Wake: "Memory: lore_recall finds by meaning" stopped with 26dadf9 committed in its worktree, waiting on its review agent before merging. Not stuck, no tell, noted.
-- 2026-10-16 Round (main at 5487ba1): "Memory: the store" and "fetch the model once" landed, both crates the app does not use yet, so no ship. lore_recall by meaning is under way; ship once it lands. Nothing else to do.
-- 2026-10-16 Wake: "Memory: the store, monthly segments" stopped waiting on its own workspace tests (queued for the CPU slot) and its diff review. Not stuck, no tell, noted.
-- 2026-10-16 Wake: "Memory: fetch the model once into models" stopped with its fix in, waiting on clippy and tests (queued behind another build) and its review. Not stuck, no tell, noted.
-- 2026-10-16 Round (main at dacb6ae): "Memory: an embedding model" landed (fc1ba08, cedd716, MiniLM chosen). It is a crate the app does not use yet, so no ship, as with the Sanctuary's graph. The store and the model fetch are under way in their own worktrees. Ship once lore_recall by meaning lands.
-- 2026-10-16 Wake: "Memory: an embedding model ... and a yardstick" stopped a fifth time, re-measuring in its background task before merging. Not stuck, no tell, noted.
-- 2026-10-16 Wake: "Memory: an embedding model ... and a yardstick" stopped a fourth time, waiting on its own review agent before merging. Not stuck, no tell, noted.
-- 2026-10-16 Round after the human left (01:20, main at c520fa9): no code since v0.27.0, so no ship. The embedding quest is alive (lib.rs written 01:17 in its worktree). Gave the two new Memory quests models (Horadrim: opus, the Scroll: sonnet).
-- 2026-10-16 Wake: "Memory: an embedding model ... and a yardstick" stopped a third time, second benchmark run going in its background task. Not stuck, no tell, noted.
-- 2026-10-16 Wake: "Memory: an embedding model ... and a yardstick" stopped again, yardstick done (65 questions), benchmark still running in its background task. Not stuck, no tell, noted.
-- 2026-10-16 Wake: "Memory: an embedding model ... and a yardstick" stopped waiting on its own background benchmark and yardstick agent, not stuck, so no tell. Gave the six queued Memory quests models (opus: store, lore_recall by meaning, Warriv distills; sonnet: transcripts, code by meaning, across projects). v0.27.0 is tagged and reloaded, so that Open line is gone.
-- 2026-10-16 Stall wake (main at 37202ef): only the pack comparison waits, as expected. The sky and lights quest landed (dd518ce, 37202ef) and the tree is clean apart from Horadric's own files, so cast "Ship Public" for the whole Arcane Sanctuary (last tag v0.26.0).
-- 2026-10-16 Round (main at 75aa250): "Arcane Sanctuary: the pane on the stage" landed, but "light up and Tristram's sky" has six UI files uncommitted in the shared tree (app, glows, glyphs, pane, sanctuary, sky), so a release build would take them half done. Held the ship until that quest lands, then one Ship Local and a public release for the Sanctuary.
-- 2026-10-16 Round (main at 78b141e): "Arcane Sanctuary: the graph and its layout" landed, but nothing shows it until the pane quest lands, and the sky quest works in the shared tree (sky.rs uncommitted). Held the ship until the pane lands. Both under way quests are the human's own, no Model: line added.
-- 2026-10-15 Stall wake (main at 9897c76): only the pack comparison waits, as expected. No open aim. Nothing to do.
-- 2026-10-15 Stall wake (main at c4d7f33): only the pack comparison waits, as expected. No open aim. Nothing to do.
-- 2026-10-15 Stall wake (main at ab5e826): only the pack comparison waits, as expected. No open aim. Nothing to do.
-- 2026-10-15 Stall wake (main at ee4604f): only the pack comparison waits, as expected. Ship Public landed as v0.26.0 (tagged, reloaded fine). Nothing to do.
-- 2026-10-15 Round (22:07, main at b10b665): the plus New label landed; Ship Public (cast 22:04, no tag yet) builds from main and should carry it. No cast, nothing else to do.
-- 2026-10-15 Stall wake (22:07, main at b10b665): only the pack comparison waits, expected until quests run with a pack. Ship Local reloaded; Ship Public (22:04) still under way, no v0.26.0 tag yet. Nothing to do.
-- 2026-10-15 Round (main at bfae2b1): nothing new to do. ship-local-71894 still building from bfae2b1 and Ship Public cast a minute earlier (last tag v0.25.0).
-- 2026-10-15 Stall wake (main at bfae2b1): only the pack comparison waits, on quests run with a pack, which is expected. "Found a project" landed (5182a14) and ship-local-71894 is building from it, so cast "Ship Public" for Lore and Tristram. No open aim to plan toward.
-- 2026-10-15 Round (main at d33393a): the 21:54 build reloaded fine (carries 5b0816a and 7a41147). "Tristram: quest --project" (d33393a, 21:57) and the plus New session label landed after it, so cast "Ship Local". Public held for "Found a project", the last Tristram quest, under way.
-- 2026-10-15 Round (main at 4e456e7): a `cargo build --release` started 21:50:44, after 7a41147 (21:48), so the ship under way carries 5b0816a and the code index. No second cast. Tristram's three quests still open, public held for them.
-- 2026-10-15 Round (21:51, main at 7a41147): "Lore: a code index" landed, so all of Lore is in. The 463f2bc "Ship Local" cast still has not reloaded (last reload 21:42, release exe 21:41, cargo busy), and it will build from main as it stands, so no second cast. Held public until Tristram's three open quests land too, then one release for Lore and Tristram.
-- 2026-10-15 Round (main at f180d7e): "Tristram: generated CLAUDE.md and project dirs" landed (5b0816a). The "Ship Local" cast for 463f2bc has not reloaded yet (last reload 21:42, cargo busy), so no second cast. "Found a project" already has sonnet. Nothing else to do.
-- 2026-10-15 Round (main at 463f2bc): ship-local-69886 reloaded at 21:42, but hand-marked spend (463f2bc) landed at 21:43 after it, so cast "Ship Local". Public still held for the code index, the last of Lore.
-- 2026-10-15 Wake with no new event: log unchanged since the round a minute earlier, ship-local-69886 still building. Nothing to do.
-- 2026-10-15 Round (main at 3d317b0): "Move done quests out of tasks.md" (fb9a5f4) and the Tristram town cluster (d64f5bc) landed. The ship-local-69886 session started `cargo build --release` at 21:38, after 3d317b0 at 21:36, so it carries both. No second cast. Public still held for the code index and hand-marked spend.
-- 2026-10-15 Wake: the first fix-up for hand-marked spend conflicted on merge too (task.rs, main moved). Its own fix-up was already running, so I gave it "Model: sonnet". If a third fix-up appears, look at why task.rs keeps clashing before letting it loop.
-- 2026-10-15 Round (main at b9d2c36): "Lore: a context pack for each new quest" landed (5f321c9), tree clean apart from Horadric's own files, so cast "Ship Local". Public still held until the code index and hand-marked spend land.
-- 2026-10-15 Wake: "Lore: count the spend of a quest marked done by hand" conflicted in task.rs on merge. The fix-up quest was already running, so I only gave it "Model: sonnet" and noted it.
-- 2026-10-15 Round (main at 75379ec): "Lore: take notes when a quest ends" landed, tree clean (the five under way quests work in worktrees), so cast "Ship Local". Public still held for the rest of Lore. Gave the three waiting Tristram quests "Model: sonnet".
-- 2026-10-15 Wake: "Lore: notes shared" said its auto merge failed (os error 267), but it is already on main (8a65e94 at c863656) and its branch and worktree are gone, so nothing to merge. Noted it.
-- 2026-10-15 Round (main at 65ee70e): Lore notes (8a65e94) and token counting (65ee70e) landed since 0.25.0, so cast "Ship Local". Held public until the rest of Lore (context pack, code index, hand-marked spend) lands, then one release for the set.
-- 2026-10-13 Round after the human left (main at 69fd50f): only my memory since the last round, no code since Release 0.24.0, so no ship. 187 done, none open, no aim. Nothing to do.
-- 2026-10-13 Hourly round (main at f081b37): only my memory since the last round, and no code since Release 0.24.0 (the three landings counted are docs), so no ship. 187 done, none open, no aim. Nothing to do.
-- 2026-10-13 Round (main at 47f6f55): only docs landed since the last ship (Town Portal deploy step in RELEASING.md and CLAUDE.md, two PLAN.md notes), no code, so no ship. The human settled cloud tiles: option 4, wait until `claude agents --json` lists them, so nothing to file and the Open line is gone. 187 done, none open, no aim. Nothing to do.
-- 2026-10-13 Round (main at 25d1b8b): since Release 0.24.0 only PLAN.md (Codex and Grok do not send OSC 7501 yet, 81c9225) and my memory landed, no code, so no ship. Cloud tiles still with the human. Nothing to do.
-- 2026-10-13 Daily look back: the day was clean (1 quest completed, 1 merged by itself, 2 Warriv sessions, nothing repeated).
-- 2026-10-13 Wake: "Propose tiles for Claude Code cloud sessions" blocked again, still the human's pick. Turned the plain terminals answer into a rule (that quest landed, its Codex and Grok follow-up is under way).
-- 2026-10-13 Wake: "Propose tiles for Claude Code cloud sessions" blocked again, same report, no human answer in its notes. Still the human's pick, nothing new to do.
-- 2026-10-12 Wake: "Propose tiles for Claude Code cloud sessions" blocked again, same report, no human answer in its notes. Still the human's pick, nothing new to do.
-- 2026-10-12 Round (main at 89bc9a5): the landing counted is the iOS keyboard quest in horadric.portal, and only my memory commits since the 2a119ee ship (reloaded fine), so no ship. Plain terminals and cloud tiles still with the human. Nothing to do.
-- 2026-10-12 Round: the iOS keyboard quest landed in horadric.portal (c2295ed), a page change with no horadric.dev code, so no ship local; the portal waits on the human to deploy. Cloud tiles and plain terminals still with the human. Nothing else to do.
-- 2026-10-12 Wake: "Propose tiles for Claude Code cloud sessions" blocked again, same report, no human answer in its notes. Still the human's pick, nothing new to do.
-- 2026-10-12 Wake: "Propose tiles for Claude Code cloud sessions" blocked again, same report, no human answer in its notes. Still the human's pick, nothing new to do.
-- 2026-10-12 Round at 06:27 (main still at 95f69b7): the iOS keyboard quest is marked done but not merged to main yet, so no ship now. Nothing else to do.
-- 2026-10-12 Round at 06:26 (main at 95f69b7, only my memory since 2a119ee): reload at 06:25:52 from an exe built 06:25:37, after 2a119ee merged, so db33603 is shipped; the ship cast for it may still reload once more. No second cast. iOS keyboard quest under way, plain terminals and cloud tiles still with the human.
-- 2026-10-12 Round (main at 2a119ee): the 06:25 ship reloaded fine; "Answer a waiting session from the notification" landed since (db33603) and the tree is clean apart from Horadric's own files, so cast "Ship Local". Plain terminals and cloud tiles still with the human.
-- 2026-10-12 Wake: "Propose tiles for Claude Code cloud sessions" blocked again, same report, no human answer in its notes. Still the human's pick, nothing new to do.
-- 2026-10-12 Round at 06:25 (main at 20b24b9): a reload started at 06:25:44 from a release exe built 06:25:37, after 20b24b9 landed, so it carries all four waiting quests. No second cast.
-- 2026-10-12 Round after the human left (06:25, main at 20b24b9): the 09d9d3b ship still has not reloaded (last reload 06:11, release exe 06:17, cargo busy), so no second cast. "A phone photo needs no permission" landed too (2f2efc0), added to the Open ship line. Plain terminals and cloud tiles still with the human.
-- 2026-10-12 Round right after (06:23, main still at 94a3ad1): the 09d9d3b ship has not reloaded yet and cargo is still busy, so no second cast. Nothing to do.
-- 2026-10-12 Round at 06:23 after "See what a session changed" landed (1ee360f, main at 94a3ad1): the ship cast for 09d9d3b has still not reloaded (last reload 06:11, release exe 06:17, cargo busy), so no second cast. The Open line for 900f7c1 now covers 1ee360f and 096bd41 too. Plain terminals and cloud tiles still with the human.
-- 2026-10-12 Round at 06:20 (main at f7b0a21): the ship cast for 09d9d3b is still building (cargo running since 06:13, release exe 06:17, last reload 06:11), so no second cast. Plain terminals and cloud tiles still with the human.
-- 2026-10-12 Round after "Browser tools drop connections and replay input on x.com" landed (900f7c1, merged at be7bd22): the "Ship Local" cast for 09d9d3b has not reloaded yet (last reload 06:11), so no second cast now. Next round ships 900f7c1 if that ship did not take it. Plain terminals and cloud tiles still with the human.
-- 2026-10-12 Round (main at 055f9e7, only my memory since 09d9d3b): the "Ship Local" cast for 09d9d3b has not reloaded yet (last reload before it), so no second cast. Plain terminals and cloud tiles still with the human. Nothing to do.
-- 2026-10-12 Round right after (main still at 09d9d3b): the "Ship Local" cast a minute earlier has not reloaded yet, so no second cast. Nothing to do.
-- 2026-10-12 Round (main at 09d9d3b): the quests and Warriv ship reloaded fine at 06:11, and push encryption (048ede6) landed on main after it, tree clean apart from Horadric's own files, so cast "Ship Local". Plain terminals and cloud tiles still with the human.
-- 2026-10-12 Round right after "Quests and Warriv on the phone" landed (main at 1bcbaba): "Ship Local" was cast for it a minute earlier and has not reloaded yet, so no second cast. Plain terminals and cloud tiles still with the human. Nothing to do.
-- 2026-10-12 Round (main at 248a2ed): the long press ship reloaded fine; "Quests and Warriv on the phone" landed since (bd49f10) and the shared tree is clean apart from Horadric's own files, so cast "Ship Local". Plain terminals and cloud tiles still with the human.
-- 2026-10-12 Wake: "Propose tiles for Claude Code cloud sessions" blocked again, same report, no human answer in its notes. Still the human's pick, nothing new to do.
-- 2026-10-12 Round after "Long press a session to rename, stop or copy" landed (4f6f3dc, merged at 9ab9f69): the photos ship reloaded fine and the shared tree is clean apart from Horadric's own files, so cast "Ship Local". Plain terminals and cloud tiles still with the human.
-- 2026-10-12 Round (main at f70d853): the photos ship reloaded fine and only memory commits since, so no new ship. Town Portal quests under way, plain terminals and cloud tiles still with the human. Nothing to do.
-- 2026-10-12 Round right after the photos landing (main at af075d7): "Ship Local" was cast for it a minute earlier and has not reloaded yet, so no second cast. Plain terminals and cloud tiles still with the human. Nothing to do.
-- 2026-10-12 Round after "Save photos a phone attaches" landed (fa585c7, merged at 672dae3): code since the last ship and the shared tree clean apart from Horadric's own files, so cast "Ship Local". Nine Town Portal quests under way in their worktrees. Plain terminals and cloud tiles still with the human.
-- 2026-10-12 Round after "Plan Town Portal's second round on the phone" landed (4d2c672, PLAN.md only): no code since the last ship, so no ship. Gave models to the four waiting Town Portal quests (inbox, terminal keys, swipe: sonnet; answer from the notification: opus, as it spans pushes and the inbox). Plain terminals and cloud tiles still with the human.
-- 2026-10-12 Wake: "Propose tiles for Claude Code cloud sessions" blocked again, same report, no human answer in its notes. Still the human's pick, nothing new to do.
-- 2026-10-12 Round after "Trust the folder before a phone starts a session in it" landed (1885070, plus the choco README d05962b): shared tree clean apart from Horadric's own files, so cast "Ship Local". Plain terminals and cloud tiles still with the human.
-- 2026-10-12 Round after the human left (main at 74c9770): plain terminals and cloud tiles both still with the human, Codex and Grok waits on plain terminals, nothing landed since the last ship. Nothing to do.
-- 2026-10-12 Daily look back: the day was clean (10 quests completed, all 10 merged by themselves, nothing repeated).
-- 2026-10-11 Woken again for "Propose tiles for Claude Code cloud sessions" blocked: already handed to the human with the proposal merged, so left it as it is.
-- 2026-10-11 Round after "Claude Code's OSC 7501 on Windows: the pseudo console answers its CSI c fence first" landed (e1427d8): shared tree clean apart from Horadric's own files, so cast "Ship Local". Plain terminals still with the human (dead session), cloud tiles still with the human.
-- 2026-10-11 Hourly round (main at ab5ef41): "OSC 7501: plain terminals" silent 11 hours after two nudges, worktree empty, so handed it to the human (restart the session). CSI c fence queued (opus), cloud tiles still with the human.
-- 2026-10-11 Hourly round (main at cf3d0f3): "OSC 7501: plain terminals" still silent 10 hours after a nudge, worktree empty. Narrowed it to the plain terminal tile and split Codex and Grok into a new quest after it (sonnet).
-- 2026-10-11 Hourly round (main at 7b182d9): "OSC 7501: plain terminals" under way 7 hours with no commit, so told it to commit what works or name its blocker. CSI c fence queued (opus), cloud tiles still with the human.
-- 2026-10-11 Hourly round (main at 9984581): OSC 7501 plain terminals under way, CSI c fence queued (opus), cloud tiles still with the human, nothing landed since the last ship. Nothing to do.
-- 2026-10-11 Hourly round (main at ac123ee): OSC 7501 plain terminals under way, CSI c fence queued (opus), cloud tiles still with the human, nothing landed since the last ship. Nothing to do.
-- 2026-10-11 Hourly round (main at 40f0bc9): OSC 7501 plain terminals under way, CSI c fence queued (opus), cloud tiles still with the human, nothing landed since the last ship. Nothing to do.
-- 2026-10-11 Hourly round (main at 1d297fd): OSC 7501 plain terminals under way, CSI c fence queued (opus), cloud tiles still with the human, nothing landed since the last ship. Nothing to do.
-- 2026-10-11 Hourly round (main at 761cf46): OSC 7501 plain terminals under way, CSI c fence queued (opus), cloud tiles still with the human, nothing landed since the last ship. Nothing to do.
-- 2026-10-11 Hourly round (main at 3872e49): OSC 7501 plain terminals under way, CSI c fence queued (opus), cloud tiles still with the human, nothing landed since the last ship. Nothing to do.
-- 2026-10-11 Wake: "Propose tiles for Claude Code cloud sessions" blocked again, same report, no human answer in its notes. Still the human's pick, nothing new to do.
-- 2026-10-11 Hourly round (main at 646d98c): OSC 7501 plain terminals still under way, CSI c fence queued (opus), cloud tiles still with the human, nothing landed since the last ship. Nothing to do.
-- 2026-10-11 Round after the human left (main at 14e19ac): the b021e49 ship reloaded fine. OSC 7501 plain terminals under way, the CSI c fence quest ready (opus), cloud tiles still with the human, nothing landed since. Nothing to do.
-- 2026-10-11 Wake: "Propose tiles for Claude Code cloud sessions" blocked again, same report. Still the human's pick (PLAN.md, Cloud session tiles), nothing new to do.
-- 2026-10-11 Round after "OSC 11 colour replies" landed (b021e49): "Theme colours in the mod's band" is in too, the 1b663c0 ship reloaded fine and the shared tree is clean, so cast "Ship Local". OSC 7501 plain terminals under way, CSI c fence queued (opus), cloud tiles still with the human.
-- 2026-10-11 Wake with no new event: two OSC quests under way, the CSI c fence quest queued (opus), cloud tiles still with the human. Nothing to do.
-- 2026-10-11 Wake: "Propose tiles for Claude Code cloud sessions" blocked again, same report. Still the human's pick (options in PLAN.md, Cloud session tiles), so nothing new to do.
-- 2026-10-11 Round after "OSC 7501: read the Program Status Protocol" landed (1b663c0): the shared tree is clean (the three under way quests work elsewhere), so cast "Ship Local". Gave the new CSI c fence quest "Model: opus" (a hard ConPTY bug). Cloud tiles still with the human.
-- 2026-10-11 Round after "The mod tells Claude what Horadric knows" landed (b34c4a7): last ship reloaded fine. Held this one: "Theme colours in the mod's band" just started from b34c4a7 to fix how that band looks, and OSC 7501 reading is still under way. Cloud tiles still with the human.
-- 2026-10-11 Wake: "Propose tiles for Claude Code cloud sessions" blocked again, same report (pick an option in PLAN.md). Already settled as the human's pick, no human answer yet, so nothing new to do.
-- 2026-10-11 Round after "Subagents on the tile by type" landed (4a7b9d9): five quests in since the last ship and the shared tree is clean now (the two still under way work elsewhere), so cast "Ship Local". Cloud tiles still with the human.
-- 2026-10-11 Round after "Horadric's own Claude mod" landed (a7987f4): OSC 7501 reading and subagents by type still mid work in the shared tree, so the ship stays held. Cloud tiles still with the human. Nothing else to do.
-- 2026-10-11 Round after "A waiting tile names what it waits on" landed (8427c03): OSC 7501 reading and the mod still under way, so the ship stays held. Gave the three queued 2.1.287 to 2.1.296 quests models (sonnet for plain terminals and subagents by type, opus for the mod band). Cloud tiles still with the human.
-- 2026-10-11 Round after "Sessions default for the workflow agents' model" landed (268858a): OSC 7501 reading, the mod and the waiting tile still mid work in the shared tree, so the ship stays held. Cloud tiles still with the human. Nothing else to do.
-- 2026-10-11 Round after "Keep onFailure block off Horadric's hooks" landed (72561f8): a small defensive fix, and four 2.1.287 to 2.1.296 quests are mid work in the shared tree, so a release build now would take their half done files. Held the ship until the series lands.
-- 2026-10-11 Wake: "Propose tiles for Claude Code cloud sessions" committed its proposal (0c6e46d) and reported blocked. The quest asks the human to pick, so left it with them. Other 2.1.287 to 2.1.296 quests under way.
-- 2026-10-11 Wake: "Propose tiles for Claude Code cloud sessions" stopped mid-work, waiting on its own background docs agent. Not stuck, so no tell; noted it. It will report blocked for the human's pick itself.
-- 2026-10-11 Hourly rounds (four more, latest at 1378387): 155 done, none open, no aim, only memory commits since v0.19.0. Nothing to do.
-- 2026-10-11 Daily look back: the day was clean (no quests, 25 idle Warriv rounds, nothing repeated).
-- 2026-10-11 Hourly round (main at 0b8396a): 155 done, none open, no aim, only memory commits since v0.19.0. Nothing to do.
-- 2026-10-11 Hourly round (main at 98cba79): 155 done, none open, no aim, only memory commits since v0.19.0. Nothing to do.
-- 2026-10-11 Hourly round (main at 7b1775b): 155 done, none open, no aim, only memory commits since v0.19.0. Nothing to do.
-- 2026-10-11 Round after the human left (main at 1df733e): 155 done, none open, no aim, only memory commits since v0.19.0. Nothing to do.
-- 2026-10-11 Hourly round (main at b288041): 155 done, none open, no aim, only memory commits since v0.19.0. Nothing to do.
-- 2026-10-11 Round after the human left (main at 1b811a4): 155 done, none open, no aim, only memory commits since v0.19.0. Nothing to do.
-- 2026-10-10 Hourly rounds (two more, latest at 1c5ccc2): 155 done, none open, no aim, only memory commits since v0.19.0. Nothing to do.
-- 2026-10-10 Round after the human left (main at bea488f): 155 done, none open, no aim, only memory commits since v0.19.0. Nothing to do.
-- 2026-10-10 Hourly rounds (seven since v0.19.0, latest at 141ef04): 155 done, none open, no aim, only memory commits since v0.19.0. Nothing to do.
-- 2026-10-10 Round after the human left (main at d50aa6c): 155 done, none open, no aim, only memory commits since v0.19.0. Nothing to do.
-- 2026-10-10 Hourly round (main at a68c0ea): 155 done, none open, no aim, only a memory commit since v0.19.0. Nothing to do.
-- 2026-10-10 Round after the human left (main at 0862281, v0.19.0 cut by hand): 155 done, none open, no aim, no quest landed since the last ship. Nothing to do.
-- 2026-10-10 Hourly round (main at 1aa6f43): 155 done, none open, no aim. Browser work (0.18.1, history suggestions, favicons) is landing outside the log, by hand, so no quest landed and no ship. Nothing to do.
-- 2026-10-10 Hourly rounds (ten today, latest at 3a69e6e): 155 done, none open, no aim, only memory commits since v0.18.0. Nothing to do.
-- 2026-10-10 Daily look back: the day was clean (no quests, 25 idle Warriv rounds, nothing repeated).
-- 2026-10-10 Round after the human left (main at 723fefd): 155 done, none open, no aim, only memory commits since v0.18.0. Nothing to do.
-- 2026-10-09 Hourly round (main at f78c6dd, v0.18.0 tagged): 155 done, none open, no aim, release already cut. Nothing to do.
-- 2026-10-09 Hourly round (main at 7421fe8): 155 done, none open, no aim, only memory commits since the last ship. Nothing to do.
-- 2026-10-09 Hourly round (main at 58374a4): 155 done, none open, no aim, only memory commits since the last ship. Nothing to do.
-- 2026-10-09 Hourly round (main at e0fb72c): 155 done, none open, no aim, only memory commits since the last ship. Nothing to do.
-- 2026-10-09 Hourly round (main at a8b2ea0): 155 done, none open, no aim, only memory commits since the last ship. Nothing to do.
-- 2026-10-09 Rounds (five more, latest at 8fb098e): 155 done, none open, no aim, only memory commits since the last ship. Nothing to do.
-- 2026-10-09 Hourly rounds (fourteen today, latest at 92b5e88): 155 done, none open, no aim, only memory commits since the last ship. Nothing to do.
-- 2026-10-09 Daily look back: the day was clean (no quests, 25 idle Warriv rounds, nothing repeated).
-- 2026-10-08 Hourly round (main at ba5ab2f): 155 done, none open, no aim, only memory commits since the last ship. Nothing to do.
-- 2026-10-08 Round after the human left (main at 3174f55): 155 done, none open, no aim, only memory commits since the last ship. Nothing to do.
-- 2026-10-08 Hourly round (main at a3500eb): 155 done, none open, no aim, only memory commits since the last ship. Nothing to do.
-- 2026-10-08 Round after the human left: 155 done, none open, no aim, only memory commits since the last ship (main at c9f3ac6). Nothing to do.
-- 2026-10-08 Hourly rounds (fourteen since 8d25fd8, latest at af76651): 155 done, none open, no aim, only memory commits since the last ship. Nothing to do.
-- 2026-10-08 Round after the human left: 155 done, none open, no aim, only memory commits since the Mac zip tooling (main at 4cf3e35), so no ship. Nothing to do.
-- 2026-10-08 Daily look back: the day was clean (17 quests completed, nothing repeated in the chronicle).
-- 2026-10-08 Hourly rounds (seven today, latest at d15db06): 155 done, none open, no aim, only memory commits since the Mac zip tooling, so no ship. Nothing to do.
-- 2026-10-07 Hourly round: 155 done, none open, no aim. Main at dc09fb5, only memory commits since the Mac zip tooling, so no ship. Nothing to do.
-- 2026-10-07 Hourly round: 155 done, none open, no aim. Main at 08bf530, only release tooling (Mac zip) since v0.17.0, so no ship. Nothing to do.
-- 2026-10-07 Hourly round: 155 done, none open, no aim. Main at 1c5ffaf, only release tooling since v0.17.0, so no ship. Nothing to do.
-- 2026-10-07 Round after the human left: the Mac quests all landed and shipped as v0.17.0 (f54882d). Since then only release tooling (5b49bff), 155 done, none open, no aim. Nothing to do.
-- 2026-10-07 Hourly round: eleven Mac quests still under way (main at 3070821, uncommitted work in the tree), nothing landed as a quest since the last ship, no aim. Nothing to do.
-- 2026-10-07 Round after the human left: the eleven Mac quests still under way in one session, nothing landed since the last ship, no aim. Nothing to do.
-- 2026-10-07 Hourly round: the eleven Mac quests are all under way in one session (4f29480 is its first landing), nothing landed since the README ship, no aim. Nothing to do.
-- 2026-10-07 Hourly round: 144 done, none open, no aim, nothing landed since the README ship. Nothing to do.
-- 2026-10-07 Round after the README landed (9271c1f): only a doc change since 0.16.0, so cast "Ship Local", not public. Fix-up quest closed with the duplicate branch gone.
-- 2026-10-07 Wake: "The Settings window" reported a merge conflict, but its branch (c03c61a) was a parallel duplicate of ad12f6a already on main and in 0.16.0. Told the fix-up quest to drop the branch and merge nothing.
-- 2026-10-07 Round after the human left: "Ship Public" landed as v0.16.0 (53ea7fc, tagged and pushed). 143 done, none open, no aim. Nothing to do.
-- 2026-10-07 Hourly round: main at ce183a2, checks had sat unrun for four rounds. Cast "Ship Public" for the Settings window, since the release runs the checks itself and stops if red.
-- 2026-10-07 Round after the human left: 143 done, none open, no aim. Main at 27c2703, checks still unrun, so "Ship Public" waits for green. Nothing else to do.
-- 2026-10-07 Hourly round: 143 done, none open, no aim. Main at 4f8cb74 (browser pane hint for Claude sessions), checks still unrun, so no ship yet. Nothing else to do.
-- 2026-10-07 Round after "Settings: the Keys section" landed (5f6f58d): all four Settings quests are in, but main's checks not yet run, so no ship. Next green round casts "Ship Public".
-- 2026-10-07 Round after "Settings: the Projects section" landed (5de4820): checks not yet run on main, so no ship. Keys is the last Settings quest still under way. Nothing else to do.
-- 2026-10-07 Round after "Settings: the Sessions section" landed (6d430aa): checks not yet run on main, so no ship. Projects and Keys still under way. Nothing else to do.
-- 2026-10-07 Round after "Settings: the Runetome section" landed (0135cf0): checks not yet run on main, so no ship. Sessions, Projects and Keys still under way. Nothing else to do.
-- 2026-10-07 Round after "The Settings window" landed (ad12f6a, checks green): cast "Ship Local". Held off on public since the Settings series (Sessions, Projects, Runetome under way, Keys still to come) is half done.
-- 2026-10-07 Hourly rounds (thirteen today, latest now): 138 done, none open, no aim, nothing landed since 0.15.0. The Settings window is planned in PLAN.md (b26e26a) but has no aim, so nothing filed. Nothing to do.
-- 2026-10-07 Round after the human left: 138 done, none open, no aim, nothing landed since 0.15.0. Settings window still planned without an aim. Nothing to do.
-- 2026-10-07 Daily look back: the day was clean (no quests, 16 idle Warriv rounds, nothing repeated).
-- 2026-10-06 Round after the human left (again): 138 done, none open, no aim, nothing landed since 0.15.0. Nothing to do.
-- 2026-10-06 Hourly rounds (ten so far, latest now): 138 done, none open, no aim, nothing landed since 0.15.0. Nothing to do.
-- 2026-10-06 Round after the human left: 138 quests done, none open, no aim, nothing landed since the last ship (0.15.0). Nothing to do.
-- 2026-10-06 Daily look back: the day was clean (24 quests completed, all 24 merged by themselves).
+- 2026-10-16 Earlier: many wakes for Memory and Backup quests waiting on their own checks, review agents or benchmarks (not stuck, no tell). Ship Local cast after lore_recall by meaning, transcripts and code by meaning, across projects, Warriv distills, the look back; Ship Public cast for all of Memory and landed as v0.28.0. Gave models to the Memory and Backup quests. Look back filed the "not nudged" and "Ship Local runs the checks" quests.
+- 2026-10-16 Early: embedding model, store and model fetch landed as crates the app did not use yet, so no ship until lore_recall by meaning. Ship Public cast for the Arcane Sanctuary after the sky quest landed (v0.27.0); held earlier ships while sky files sat uncommitted in the shared tree.
+- 2026-10-15 Lore and Tristram landed through the evening with a Ship Local after each step and one Ship Public for both (v0.26.0). Hand-marked spend needed two merge fix-ups in task.rs (sonnet). Several rounds held a second cast while a ship already building would carry the landing.
+- 2026-10-13 Only docs and memory landed after 0.24.0, no ship. The human settled cloud tiles: wait for `claude agents --json`. The plain terminals answer became a rule.
+- 2026-10-12 Town Portal's second round landed quest by quest, a Ship Local after each (each reloaded fine); iOS keyboard landed in horadric.portal. Cloud tiles waited on the human.
+- 2026-10-11 Claude Code 2.1.287 to 2.1.296 series: held ships while quests were half done in the shared tree, shipped once it was clean. "OSC 7501: plain terminals" went silent and was handed to the human to restart. Many idle hourly rounds before that.
+- 2026-10-06 to 2026-10-10 Mostly idle rounds (no quests, no aim). Settings window series landed 10-07 and shipped public as v0.16.0; Mac quests shipped as v0.17.0; v0.18.0 and v0.19.0 were cut by hand.
 
 ## Open
 - Once quests run with a pack, the pack comparison resumes by itself.
