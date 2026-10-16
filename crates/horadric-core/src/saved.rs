@@ -128,6 +128,10 @@ pub struct SavedState {
     /// tray. Kept per instance, so a dev one stays off on its own.
     #[serde(default, skip_serializing_if = "Discord::is_off")]
     pub discord: Discord,
+    /// Recall may answer from other projects' memory, off until turned on
+    /// in Settings (docs/plan/memory.md, part 6).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub recall_across: bool,
     /// The run of work the Discord presence counts from, so a reload
     /// carries on the clock on the profile instead of starting at zero.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -774,6 +778,7 @@ mod tests {
             sounds: true,
             town_hidden: true,
             discord: Discord::Named,
+            recall_across: true,
             run: Some(SavedRun {
                 start: 100,
                 last_work: 160,
@@ -793,6 +798,7 @@ mod tests {
         };
         let back = SavedState::from_json(state.to_json().as_bytes());
         assert_eq!(back.version, VERSION);
+        assert_eq!(back.recall_across, state.recall_across);
         assert_eq!(back.runewords, state.runewords);
         assert_eq!(back.sessions, state.sessions);
         assert_eq!(back.clusters, state.clusters);
@@ -844,6 +850,7 @@ mod tests {
     #[test]
     fn discord_starts_off_and_a_value_it_does_not_know_turns_it_off() {
         assert_eq!(SavedState::default().discord, Discord::Off);
+        assert!(!SavedState::default().recall_across);
         assert!(!SavedState::default().to_json().contains("discord"));
         let unnamed = SavedState::from_json(br#"{"discord": "unnamed"}"#);
         assert_eq!(unnamed.discord, Discord::Unnamed);

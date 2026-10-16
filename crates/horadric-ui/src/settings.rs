@@ -117,6 +117,8 @@ pub enum Field {
     Updates,
     Version,
     Discord,
+    /// Whether recall looks in other projects' memory too.
+    Recall,
     /// Whether a click on a stone asks before it casts.
     Ask,
     /// Brings back every built in stone put away.
@@ -182,6 +184,7 @@ pub struct Values {
     /// None where the switch is not offered, a dev instance.
     pub autostart: Option<bool>,
     pub discord: Discord,
+    pub recall_across: bool,
     /// A newer release a check found.
     pub update: Option<String>,
     pub checking: bool,
@@ -366,12 +369,18 @@ pub fn lines(section: Section, v: &Values) -> Vec<Line> {
             rows.push(line(Field::KeysNote, "", &keys_note(v), Control::Note));
             rows
         }
-        Section::Privacy => vec![line(
-            Field::Discord,
-            "Show on Discord",
-            v.discord.label(),
-            Control::List,
-        )],
+        Section::Privacy => {
+            let (across, a) = switch(v.recall_across);
+            vec![
+                line(
+                    Field::Discord,
+                    "Show on Discord",
+                    v.discord.label(),
+                    Control::List,
+                ),
+                line(Field::Recall, "Recall across projects", across, a),
+            ]
+        }
         Section::Runetome => {
             let (ask, a) = switch(v.ask);
             let hidden = match v.hidden {
@@ -1061,6 +1070,7 @@ mod tests {
             offered: None,
             autostart: Some(true),
             discord: Discord::Unnamed,
+            recall_across: false,
             update: None,
             checking: false,
             version: "0.9.0".into(),
@@ -1115,7 +1125,10 @@ mod tests {
                 Field::Offered,
             ]
         );
-        assert_eq!(fields(Section::Privacy, &v), [Field::Discord]);
+        assert_eq!(
+            fields(Section::Privacy, &v),
+            [Field::Discord, Field::Recall]
+        );
         assert_eq!(fields(Section::Runetome, &v), [Field::Ask, Field::Hidden]);
         assert_eq!(
             fields(Section::Keys, &v),

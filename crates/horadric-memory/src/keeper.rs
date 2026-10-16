@@ -113,6 +113,7 @@ impl<E: Embed> Keeper<E> {
         project: &str,
         lore: &Lore,
         ask: &Ask,
+        across: bool,
         budget: Duration,
         now_hash: impl Fn(&str) -> Option<u64>,
     ) -> Result<String, String> {
@@ -141,12 +142,20 @@ impl<E: Embed> Keeper<E> {
             }
         }
         let mut cands: Vec<Candidate> = lore.notes.iter().map(Candidate::note).collect();
-        // Other projects' passages wait for the switch of part 6.
+        // The asking project's notes are the lore's own, read above. Other
+        // projects' passages, and the copies of their notes, only with the
+        // switch of part 6.
         cands.extend(
             store
                 .chunks()
-                .filter(|(_, c)| c.note.is_none() && c.project == project)
-                .map(|(id, c)| Candidate::chunk(id, c, true)),
+                .filter(|(_, c)| {
+                    if c.project == project {
+                        c.note.is_none()
+                    } else {
+                        across
+                    }
+                })
+                .map(|(id, c)| Candidate::chunk(id, c, c.project == project)),
         );
         let meaning: Vec<usize> = match &query {
             Some((tag, q)) => {
@@ -341,6 +350,7 @@ mod tests {
                 "p",
                 &l,
                 &ask("where does the puppy nap"),
+                false,
                 Duration::from_secs(5),
                 |_| None,
             )
@@ -359,7 +369,14 @@ mod tests {
             "Invoices go out monthly.",
         ]);
         let got = k
-            .recall("p", &l, &ask("monthly invoices"), Duration::ZERO, |_| None)
+            .recall(
+                "p",
+                &l,
+                &ask("monthly invoices"),
+                false,
+                Duration::ZERO,
+                |_| None,
+            )
             .unwrap();
         assert!(got.starts_with("#2 (note,"), "{got}");
         assert!(!got.contains("kitten"), "{got}");
@@ -372,15 +389,29 @@ mod tests {
         let mut k = keeper(&dir);
         let l = lore(&["The kitten sleeps.", "Rain on Tuesday."]);
         for _ in 0..2 {
-            k.recall("p", &l, &ask("storm"), Duration::from_secs(5), |_| None)
-                .unwrap();
+            k.recall(
+                "p",
+                &l,
+                &ask("storm"),
+                false,
+                Duration::from_secs(5),
+                |_| None,
+            )
+            .unwrap();
         }
         assert_eq!(k.store.len(), 2);
         assert_eq!(k.model.as_ref().unwrap().embedded.get(), 2);
         assert_eq!(k.catch_up(10), Ok(0));
         // Another project's notes are its own copies.
-        k.recall("q", &l, &ask("storm"), Duration::from_secs(5), |_| None)
-            .unwrap();
+        k.recall(
+            "q",
+            &l,
+            &ask("storm"),
+            false,
+            Duration::from_secs(5),
+            |_| None,
+        )
+        .unwrap();
         assert_eq!(k.store.len(), 4);
         fs::remove_dir_all(&dir).unwrap();
     }
@@ -393,6 +424,7 @@ mod tests {
             "p",
             &lore(&["The kitten sleeps."]),
             &ask("cat"),
+            false,
             Duration::from_secs(5),
             |_| None,
         )
@@ -402,6 +434,7 @@ mod tests {
                 "p",
                 &lore(&["All week it will rain."]),
                 &ask("storm"),
+                false,
                 Duration::from_secs(5),
                 |_| None,
             )
@@ -420,7 +453,7 @@ mod tests {
             "Rain on Tuesday.",
             "The price went up.",
         ]);
-        k.recall("p", &l, &ask("cat"), Duration::ZERO, |_| None)
+        k.recall("p", &l, &ask("cat"), false, Duration::ZERO, |_| None)
             .unwrap();
         assert_eq!(k.model.as_ref().unwrap().embedded.get(), 0);
         assert_eq!(k.catch_up(2), Ok(2));
@@ -453,13 +486,23 @@ mod tests {
         k.store.add(&elsewhere, NOW).unwrap();
         k.catch_up(10).unwrap();
         let got = k
-            .recall("p", &lore(&[]), &ask("rain"), Duration::ZERO, |_| Some(6))
+            .recall("p", &lore(&[]), &ask("rain"), false, Duration::ZERO, |_| {
+                Some(6)
+            })
             .unwrap();
         assert!(
             got.starts_with("2026-10#0 (dialogue, session 8a8cb053, a minute ago) MAYBE STALE: src/a.rs changed since"),
             "{got}"
         );
         assert!(!got.contains("2026-10#1"), "{got}");
+        // With the switch on, the other project's passage is a candidate
+        // too, and says whose it is.
+        let got = k
+            .recall("p", &lore(&[]), &ask("rain"), true, Duration::ZERO, |_| {
+                None
+            })
+            .unwrap();
+        assert!(got.contains("2026-10#1 (dialogue, from q,"), "{got}");
         fs::remove_dir_all(&dir).unwrap();
     }
 

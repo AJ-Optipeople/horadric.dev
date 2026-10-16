@@ -752,6 +752,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
     // the installed copy decides: a dev instance or a build run from target
     // would point it at a build about to be replaced, and a fake install
     // with its own APPDATA has a first run of its own but shares the value.
+    crate::memory::set_across(saved.recall_across);
     let mut autostart_offered = saved.autostart_offered;
     if !autostart_offered && !horadric_hooks::dev() && autostart::running_installed() {
         autostart_offered = autostart::enable();
@@ -911,6 +912,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             sounds: saved.sounds,
             town_hidden: saved.town_hidden,
             discord: saved.discord,
+            recall_across: saved.recall_across,
             rich: None,
             run: presence::Run::from_saved(saved.run),
             tome: runner::runeword::Tome::new(&saved, reload),
@@ -3047,6 +3049,8 @@ struct App {
     /// What the Discord profile may show, from the Settings window.
     /// Changed only through [`App::set_discord`].
     discord: Discord,
+    /// Recall may look in other projects, told to the memory thread.
+    recall_across: bool,
     /// The Rich Presence client, kept while [`App::discord`] is on.
     rich: Option<crate::discord::Discord>,
     /// When the current run of work began, which the profile counts from.
@@ -4893,6 +4897,7 @@ impl App {
             }),
             autostart: (!horadric_hooks::dev()).then(autostart::is_enabled),
             discord: self.discord,
+            recall_across: self.recall_across,
             update: self.update.as_ref().map(|m| m.version.clone()),
             checking: self.checking,
             version: env!("CARGO_PKG_VERSION").to_string(),
@@ -5201,6 +5206,11 @@ impl App {
             Field::Version | Field::KeysNote => {}
             Field::Ask => {
                 self.tome.ask = !self.tome.ask;
+                self.save();
+            }
+            Field::Recall => {
+                self.recall_across = !self.recall_across;
+                crate::memory::set_across(self.recall_across);
                 self.save();
             }
             Field::Hidden => self.hide_stone(None),
@@ -6628,6 +6638,7 @@ impl App {
             sounds: self.sounds,
             town_hidden: self.town_hidden,
             discord: self.discord,
+            recall_across: self.recall_across,
             run: self.run.saved(),
             cube: self.cube_on,
             font_family: self.font_family.clone(),

@@ -11,6 +11,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::OnceLock;
 use std::thread;
@@ -49,6 +50,14 @@ enum Msg {
     Recall(RecallCall),
     Keep(Keep),
     Model(Result<Box<Embedder>, String>),
+}
+
+/// Whether recall may look in other projects' memory: the Settings switch,
+/// off until turned on.
+static ACROSS: AtomicBool = AtomicBool::new(false);
+
+pub fn set_across(on: bool) {
+    ACROSS.store(on, Ordering::Relaxed);
 }
 
 fn sender() -> &'static Sender<Msg> {
@@ -229,5 +238,12 @@ fn answer(keeper: &mut Keeper<Embedder>, body: &Value) -> Result<String, String>
         kind,
         now: now(),
     };
-    keeper.recall(place.key(), &lore, &ask, BUDGET, |p| place.hash(p))
+    keeper.recall(
+        place.key(),
+        &lore,
+        &ask,
+        ACROSS.load(Ordering::Relaxed),
+        BUDGET,
+        |p| place.hash(p),
+    )
 }

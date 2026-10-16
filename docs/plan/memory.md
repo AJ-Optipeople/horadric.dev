@@ -223,7 +223,7 @@ else the store lacks, is embedded two at a time with a 100 ms rest while
 nothing is asked. `horadric mcp` posts to `/horadric/recall` (header
 `recall`, no session needed) and waits 12 seconds; with no answer it
 ranks the notes itself with BM25 and the weights, no meaning. Only the
-asking project's passages are candidates until part 6. `kind` narrows to
+asking project's passages are candidates unless part 6's switch is on. `kind` narrows to
 note, quest, dialogue (or transcript) or code. Each hit says what it is:
 `#12 (note, 3 days ago, at 1a2b3c4d)` for a note, `2026-10#5 (dialogue,
 session 8a8cb053, a minute ago)` for a passage of the store.
@@ -306,6 +306,15 @@ whole body) gets a vector, refreshed when its file's hash changes, so
 
 Every project's memory is searchable from every other, behind a switch
 in Settings, off by default. Hits from another project say which.
+
+**Built 2026-10-16.** The switch is "Recall across projects" in Settings,
+Privacy, kept in the saved state as `recall_across` and told to the memory
+thread (`memory::set_across`). Off, only the asking project's passages are
+candidates, as before. On, every other project's chunks in the store are
+too (dialogue, code, and the copies of notes that project's recalls made),
+weighed 0.6 as already built, and a hit says `from <project>` in its head.
+A project whose notes were never recalled has no copies yet, so its notes
+only appear once something has recalled in it.
 
 ### 7. Validity and consolidation
 
