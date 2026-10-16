@@ -7,6 +7,8 @@
 - A quest session silent for hours with an empty worktree after two nudges is dead and I can not restart it: hand it to the human with "restart it", who does so (settled on "OSC 7501: plain terminals", which then landed).
 
 ## Lately
+- 2026-10-16 Wake right after (12:52, main still at 43b29d6): log unchanged, the 12:45 Ship Local still building. Nothing to do.
+- 2026-10-16 Round (main at 43b29d6): "Memory: what the lore knows comes with a Grep or Glob" landed (9318873, 12:49). The 12:45 "Ship Local" cast has not reloaded yet and cargo started 12:51, after the landing, so it carries it. No second cast. Gave "a quest's recall off the window thread" Model: sonnet. Public still waits for the rest of Backup and recall. Last reload attempt in reload.log (04:03) failed, old Horadric did not exit: check the next ship reloads.
 - 2026-10-16 Round (main at 31f5505): "Memory: a recall in each quest's prompt" landed (c7eec09, 05a75c9), so cast "Ship Local" to get it to the human now; public still waits for all six Backup and recall quests. Backup part 1 stopped a fifth time, re-merging main and rerunning checks before its fast-forward: not stuck, noted, no tell.
 - 2026-10-16 "Backup: encrypted snapshots to a folder, and restore" stopped a fourth time, checks running after merging main, then fast-forward. Not stuck (lore #31), noted it, no tell.
 - 2026-10-16 "Memory: recall on every prompt, from the UserPromptSubmit hook" stopped with work committed on its branch, waiting on its review agent before merging. Not stuck (lore #31), noted it, no tell.
@@ -197,4 +199,5 @@
 
 ## Open
 - Once quests run with a pack, the pack comparison resumes by itself.
+- The 12:45 Ship Local should reload with 43b29d6; reload.log's last entry (04:03) was a failed reload. If it fails again, hand it to the human.
 - The human's session said it will ship public when all six Backup and recall quests land ("released asap"). If it has not when they land, cast "Ship Local" and leave public to the human.
