@@ -5,6 +5,8 @@
 - A quest session silent for hours with an empty worktree after two nudges is dead and I can not restart it: hand it to the human with "restart it", who does so (settled on "OSC 7501: plain terminals", which then landed).
 
 ## Lately
+- 2026-10-16 Wake: "Memory: Horadrim, sigils and the Lexicon" stopped a fourth time, judge.py still running in its background before part 8 numbers and merge. Not stuck, no tell, noted.
+- 2026-10-16 Round (human left, main at 9ce75ba): nothing landed since the 0752547 ship; Horadrim and the look back work in their worktrees, the Scroll waits (sonnet). Nothing to do.
 - 2026-10-16 Round (main at 0752547): "Memory: Warriv distills the day" landed, tree clean apart from Horadric's own files (Horadrim and the look back work in worktrees), so cast "Ship Local". Gave the look back quest "Model: sonnet". Public still held for Horadrim.
 - 2026-10-16 Wake: "Memory: Horadrim, sigils and the Lexicon" stopped a third time, judge.py running in its background before part 8 numbers and merge. Not stuck, no tell, noted.
 - 2026-10-16 Wake: "Memory: Horadrim, sigils and the Lexicon" measured only about 10% saved on real dialogue (plan said 2x to 3x), waiting on judge.py. Told it to land if scores hold, with real numbers in memory.md part 8, off by default if they drop. Noted as Assumed.
