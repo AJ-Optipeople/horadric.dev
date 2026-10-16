@@ -95,6 +95,9 @@ fn current(code: &HashMap<String, HashMap<String, u64>>, project: &str, c: &Chun
     }
 }
 
+/// Reads another project's lore by its key, None when it cannot be read.
+pub type Theirs<'a> = &'a dyn Fn(&str) -> Option<Lore>;
+
 /// Where the keeper remembers how much of each transcript it has kept.
 const CURSORS: &str = "transcripts.json";
 
@@ -195,11 +198,12 @@ impl<E: Embed> Keeper<E> {
 
     /// Answers `ask` for `project` from its `lore` and what the store
     /// keeps of it, with the notes `lore` replaced when history is asked
-    /// for. Notes the model has not embedded yet are embedded first,
-    /// newest first, for at most `budget`; the rest are found by words
-    /// until the background catches up. `now_hash` says what a file's hash
-    /// is now, for staleness. `known` is the sigils the asking session was
-    /// told before.
+    /// for. With `across`, which reads another project's lore, other
+    /// projects' memory too. Notes the model has not embedded yet are
+    /// embedded first, newest first, for at most `budget`; the rest are
+    /// found by words until the background catches up. `now_hash` says
+    /// what a file's hash is now, for staleness. `known` is the sigils the
+    /// asking session was told before.
     // Each is a different thing the app knows of the asking session; a
     // struct of them would only be built here to be taken apart.
     #[allow(clippy::too_many_arguments)]
@@ -208,7 +212,7 @@ impl<E: Embed> Keeper<E> {
         project: &str,
         lore: &Lore,
         ask: &Ask,
-        across: bool,
+        across: Option<Theirs>,
         budget: Duration,
         now_hash: impl Fn(&str) -> Option<u64>,
         known: &[String],
@@ -249,13 +253,42 @@ impl<E: Embed> Keeper<E> {
         cands.extend(past.iter().map(Candidate::past));
         // The asking project's notes are the lore's own, read above. Other
         // projects' passages, and the copies of their notes, only with the
-        // switch of part 6.
+        // switch of part 6, and a copy only while its note is current
+        // there: one replaced since is not what that project knows now.
+        let mut theirs: HashMap<&str, HashMap<u64, &str>> = HashMap::new();
+        let lores: HashMap<&str, Option<Lore>> = match across {
+            Some(read) => store
+                .chunks()
+                .filter(|(_, c)| c.project != project && c.note.is_some())
+                .map(|(_, c)| c.project.as_str())
+                .collect::<HashSet<&str>>()
+                .into_iter()
+                .map(|p| (p, read(p)))
+                .collect(),
+            None => HashMap::new(),
+        };
+        for (&p, l) in &lores {
+            let notes = l.iter().flat_map(|l| &l.notes);
+            theirs.insert(p, notes.map(|n| (n.id, n.text.as_str())).collect());
+        }
+        let noted = |c: &Chunk| match c.note {
+            None => true,
+            Some(n) => theirs
+                .get(c.project.as_str())
+                .and_then(|t| t.get(&n))
+                .is_some_and(|t| *t == c.text),
+        };
         cands.extend(
             store
                 .chunks()
                 .filter(|(_, c)| {
                     let own = c.project == project;
-                    (across || own) && (!own || c.note.is_none()) && current(code, &c.project, c)
+                    let kept = if own {
+                        c.note.is_none()
+                    } else {
+                        across.is_some() && noted(c)
+                    };
+                    kept && current(code, &c.project, c)
                 })
                 .map(|(id, c)| Candidate::chunk(id, c, c.project == project)),
         );
@@ -601,7 +634,7 @@ mod tests {
                 "p",
                 &l,
                 &ask("where does the puppy nap"),
-                false,
+                None,
                 Duration::from_secs(5),
                 |_| None,
                 &[],
@@ -626,7 +659,7 @@ mod tests {
                 "p",
                 &l,
                 &ask("monthly invoices"),
-                false,
+                None,
                 Duration::ZERO,
                 |_| None,
                 &[],
@@ -653,15 +686,7 @@ mod tests {
         .unwrap();
         let asked = ask("where does the cat nap");
         let got = k
-            .recall(
-                "p",
-                &l,
-                &asked,
-                false,
-                Duration::from_secs(5),
-                |_| None,
-                &[],
-            )
+            .recall("p", &l, &asked, None, Duration::from_secs(5), |_| None, &[])
             .unwrap()
             .text;
         assert!(got.starts_with("#2 (note,"), "{got}");
@@ -671,11 +696,63 @@ mod tests {
             ..asked
         };
         let got = k
-            .recall("p", &l, &then, false, Duration::from_secs(5), |_| None, &[])
+            .recall("p", &l, &then, None, Duration::from_secs(5), |_| None, &[])
             .unwrap()
             .text;
         assert!(got.starts_with("#2 (note,"), "{got}");
         assert!(got.contains("REPLACED by #2"), "{got}");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn across_projects_only_their_current_notes_come_in() {
+        let dir = temp("across");
+        let mut k = keeper(&dir);
+        let mut q = lore(&["The kitten sleeps in the box."]);
+        q.add(
+            "The kitten sleeps on the sofa now.",
+            Vec::new(),
+            "",
+            NOW,
+            &[1],
+        )
+        .unwrap();
+        // Asking q for its history copies both of its notes into the store.
+        let then = Ask {
+            history: true,
+            ..ask("where does the cat nap")
+        };
+        k.recall("q", &q, &then, None, Duration::from_secs(5), |_| None, &[])
+            .unwrap();
+        let read = |p: &str| (p == "q").then(|| q.clone());
+        let got = k
+            .recall(
+                "p",
+                &lore(&[]),
+                &ask("where does the cat nap"),
+                Some(&read),
+                Duration::from_secs(5),
+                |_| None,
+                &[],
+            )
+            .unwrap()
+            .text;
+        assert!(got.contains("sofa"), "{got}");
+        assert!(!got.contains("box"), "{got}");
+        // A project whose notes cannot be read lends none.
+        let got = k
+            .recall(
+                "p",
+                &lore(&[]),
+                &ask("where does the cat nap"),
+                Some(&|_| None),
+                Duration::from_secs(5),
+                |_| None,
+                &[],
+            )
+            .unwrap()
+            .text;
+        assert!(!got.contains("sofa"), "{got}");
         fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -689,7 +766,7 @@ mod tests {
                 "p",
                 &l,
                 &ask("storm"),
-                false,
+                None,
                 Duration::from_secs(5),
                 |_| None,
                 &[],
@@ -704,7 +781,7 @@ mod tests {
             "q",
             &l,
             &ask("storm"),
-            false,
+            None,
             Duration::from_secs(5),
             |_| None,
             &[],
@@ -722,7 +799,7 @@ mod tests {
             "p",
             &lore(&["The kitten sleeps."]),
             &ask("cat"),
-            false,
+            None,
             Duration::from_secs(5),
             |_| None,
             &[],
@@ -733,7 +810,7 @@ mod tests {
                 "p",
                 &lore(&["All week it will rain."]),
                 &ask("storm"),
-                false,
+                None,
                 Duration::from_secs(5),
                 |_| None,
                 &[],
@@ -754,7 +831,7 @@ mod tests {
             "Rain on Tuesday.",
             "The price went up.",
         ]);
-        k.recall("p", &l, &ask("cat"), false, Duration::ZERO, |_| None, &[])
+        k.recall("p", &l, &ask("cat"), None, Duration::ZERO, |_| None, &[])
             .unwrap();
         assert_eq!(k.model.as_ref().unwrap().embedded.get(), 0);
         assert_eq!(k.catch_up(2), Ok(2));
@@ -791,7 +868,7 @@ mod tests {
                 "p",
                 &lore(&[]),
                 &ask("rain"),
-                false,
+                None,
                 Duration::ZERO,
                 |_| Some(6),
                 &[],
@@ -810,7 +887,7 @@ mod tests {
                 "p",
                 &lore(&[]),
                 &ask("rain"),
-                true,
+                Some(&|_| None),
                 Duration::ZERO,
                 |_| None,
                 &[],
@@ -846,7 +923,7 @@ mod tests {
                 "p",
                 &l,
                 &ask("ranking weighs"),
-                false,
+                None,
                 Duration::ZERO,
                 |_| Some(1),
                 &[],
@@ -872,7 +949,7 @@ mod tests {
                 "p",
                 &l,
                 &ask("ranking"),
-                false,
+                None,
                 Duration::ZERO,
                 |_| Some(1),
                 &a.given,
@@ -923,7 +1000,7 @@ mod tests {
                 "p",
                 &l,
                 &ask("weighs"),
-                false,
+                None,
                 Duration::ZERO,
                 |_| Some(1),
                 &[],
@@ -1051,7 +1128,7 @@ fn feed: fn feed(cat: Cat)",
                 "p",
                 &lore(&[]),
                 &ask("puppy"),
-                false,
+                None,
                 Duration::ZERO,
                 |_| Some(1),
                 &[],
@@ -1072,7 +1149,7 @@ fn feed: fn feed(dog: Dog)",
                 "p",
                 &lore(&[]),
                 &ask("puppy"),
-                false,
+                None,
                 Duration::ZERO,
                 |_| Some(2),
                 &[],
@@ -1088,7 +1165,7 @@ fn feed: fn feed(dog: Dog)",
                 "p",
                 &lore(&[]),
                 &ask("puppy"),
-                false,
+                None,
                 Duration::ZERO,
                 |_| None,
                 &[],

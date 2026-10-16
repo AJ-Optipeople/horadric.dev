@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 
 use horadric_hooks::listener::RecallCall;
 use horadric_hooks::lore::{now, Place};
-use horadric_memory::keeper::{Answer, CodeFile, Keeper};
+use horadric_memory::keeper::{Answer, CodeFile, Keeper, Theirs};
 use horadric_memory::recall::{self, Ask};
 use horadric_memory::transcripts::Format;
 use horadric_memory::{models, Embedder, Kind};
@@ -289,9 +289,12 @@ fn answer(keeper: &mut Keeper<Embedder>, body: &Value) -> Result<Answer, String>
         now: now(),
         history: body["history"].as_bool() == Some(true),
     };
-    let across = ACROSS.load(Ordering::Relaxed);
+    let theirs = |key: &str| horadric_hooks::lore::of_key(key).ok();
+    let across: Option<Theirs> = ACROSS.load(Ordering::Relaxed).then_some(&theirs);
     if let Some(id) = body["unroll"].as_str().filter(|u| !u.trim().is_empty()) {
-        return keeper.unroll(place.key(), &lore, id, across, ask.now, |p| place.hash(p));
+        return keeper.unroll(place.key(), &lore, id, across.is_some(), ask.now, |p| {
+            place.hash(p)
+        });
     }
     let known: Vec<String> = body["known"]
         .as_array()
