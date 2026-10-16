@@ -5,6 +5,9 @@
 - A quest session silent for hours with an empty worktree after two nudges is dead and I can not restart it: hand it to the human with "restart it", who does so (settled on "OSC 7501: plain terminals", which then landed).
 
 ## Lately
+- 2026-10-16 Wake: "Memory: the store, monthly segments" stopped waiting on its own workspace tests (queued for the CPU slot) and its diff review. Not stuck, no tell, noted.
+- 2026-10-16 Wake: "Memory: fetch the model once into models" stopped with its fix in, waiting on clippy and tests (queued behind another build) and its review. Not stuck, no tell, noted.
+- 2026-10-16 Round (main at dacb6ae): "Memory: an embedding model" landed (fc1ba08, cedd716, MiniLM chosen). It is a crate the app does not use yet, so no ship, as with the Sanctuary's graph. The store and the model fetch are under way in their own worktrees. Ship once lore_recall by meaning lands.
 - 2026-10-16 Wake: "Memory: an embedding model ... and a yardstick" stopped a fifth time, re-measuring in its background task before merging. Not stuck, no tell, noted.
 - 2026-10-16 Wake: "Memory: an embedding model ... and a yardstick" stopped a fourth time, waiting on its own review agent before merging. Not stuck, no tell, noted.
 - 2026-10-16 Round after the human left (01:20, main at c520fa9): no code since v0.27.0, so no ship. The embedding quest is alive (lib.rs written 01:17 in its worktree). Gave the two new Memory quests models (Horadrim: opus, the Scroll: sonnet).
@@ -163,4 +166,4 @@
 
 ## Open
 - Once quests run with a pack, the pack comparison resumes by itself.
-- If "Memory: an embedding model" stays silent with its benchmark done and nothing committed, nudge it to pick the model and commit.
+- Hold shipping the Memory work until "Memory: lore_recall finds by meaning" lands, the first piece a user sees; ship local then (public too if the switch says so).

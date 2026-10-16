@@ -95,7 +95,8 @@ in `crates/horadric-memory/yardstick/`: 1,686 chunks (705 from the docs,
 16 lore notes, 965 of dialogue from September and October transcripts)
 and 65 hand written questions. Run it with `cargo run --release -p
 horadric-memory --example yardstick`. The models are read from the dev
-state folder's `models\`, fetched by hand for now.
+state folder's `models\`: MiniLM is fetched there when missing, the
+other two by hand.
 
 Measured on this machine (i7-11700K, CPU shared with other sessions),
 chunks of 759 characters on average, recall at 5:
@@ -138,9 +139,15 @@ Weights: sentence-transformers/all-MiniLM-L6-v2 at commit
 `config.json` `953f9c0d463486b10a6871cc2fd59f223b2c70184f49815e7efbcab5d8908b41`
 (Apache 2.0). Google's own EmbeddingGemma repository is gated behind a
 licence click; the measurement used the ungated `unsloth` copy, whose
-output matches Google's model card to three decimals. Fetching the
-weights into `models\` and checking these hashes is a quest of its own,
-before part 3.
+output matches Google's model card to three decimals.
+
+**Fetched 2026-10-16.** `horadric_memory::models::ensure` puts the three
+files in `models\all-MiniLM-L6-v2\` from the pinned commit, checks each
+against the hashes above before it takes its own name, and writes a
+`verified` mark so later starts check sizes only. The download is passed
+in: part 3 hands it WinHTTP (`horadric-ui`'s `net::get`), the yardstick
+curl. SHA-256 is written out in the module, its one use, instead of a
+crate.
 
 ### 2. The store
 

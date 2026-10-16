@@ -7,6 +7,7 @@
 //! vectors on disk.
 
 mod gemma;
+pub mod models;
 pub mod store;
 
 use std::path::Path;

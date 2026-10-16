@@ -5,7 +5,9 @@
 //!
 //! `cargo run --release -p horadric-memory --example yardstick [model...]`
 //! with models from `gemma`, `bge`, `minilm` (all when none are named).
-//! The models are read from `%APPDATA%\Horadric-dev\models\<folder>`.
+//! The models are read from `%APPDATA%\Horadric-dev\models\<folder>`;
+//! MiniLM is fetched there and checked by hash when it is missing, the
+//! others are fetched by hand.
 //! Vectors are cached in `target\yardstick`, so a second run only scores.
 
 use std::collections::HashMap;
@@ -87,6 +89,9 @@ fn main() {
         println!();
         let before = memory_mb();
         let t = Instant::now();
+        if kind.pinned().is_some() {
+            horadric_memory::models::ensure(kind, &models, curl).expect("fetch");
+        }
         let e = Embedder::load(kind, &models.join(kind.folder())).expect("model");
         println!(
             "{name}: loaded in {:.1?}, memory {:.0} MB more",
@@ -306,4 +311,21 @@ fn process_memory() -> (f64, f64) {
 #[cfg(not(windows))]
 fn process_memory() -> (f64, f64) {
     (0.0, 0.0)
+}
+
+/// The download for `models::ensure`. The app passes WinHTTP; an example
+/// has curl, which Windows ships.
+fn curl(url: &str, limit: usize) -> Result<Vec<u8>, String> {
+    println!("fetching {url}");
+    let out = std::process::Command::new("curl")
+        .args(["-fsSL", "--max-filesize", &limit.to_string(), url])
+        .output()
+        .map_err(|e| format!("cannot run curl: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "curl failed on {url}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        ));
+    }
+    Ok(out.stdout)
 }
