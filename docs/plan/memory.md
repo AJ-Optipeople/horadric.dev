@@ -153,6 +153,35 @@ one is written. The note store's lock file pattern guards writers. A
 format version in each file header, and a test that reads files written
 by every earlier version.
 
+**Built 2026-10-16**, in `crates/horadric-memory/src/store.rs`. A
+segment is `memory\2026-10.jsonl`: a header line naming the format and
+its version, then one JSON line per chunk (time, project, kind, session,
+quest, commit, files with their hashes, the text). A chunk's id is its
+month and line, `2026-10#12`, and never changes. Each model's vectors
+are `2026-10.<tag>.vec`: a header with the version, the number of
+dimensions and the model's tag, then the line number and the vector in
+int8 per chunk (a quarter of f32, and the cosine within 0.01). The tag
+is the model and its weights' commit, `all-MiniLM-L6-v2@1110a243`.
+
+Decided while building it: a chunk goes into the month it is **written**
+in, not the month it speaks of, so an ended month's text never changes (its vector files do when a
+new model catches up: they are a cache); a
+backfill lands in the month it ran, and the chunk's own time says when
+it was said. A write that died half way leaves a torn tail, ignored when
+read and cut by the next write. A line that cannot be read keeps its
+place, so the ids after it hold. A file from a newer format (a reload
+rolled back) is skipped when read and refused when written, never
+misread, and holds up no other month. A tag is letters, digits, `-`,
+`_` and `@` only, so it is its own file name. Writers take turns by the
+lore's lock file; only the app writes, so its three second takeover of a
+stale lock is enough. `Store::catch_up` embeds what a model has not yet, a few at a
+time so the background work can stop between calls, and
+`Store::forget` drops an old model's vectors once the new one has caught
+up. `tests/formats/v1` is a store written by version 1, frozen, and
+`tests/formats.rs` reads it; a version 2 adds a folder beside it. The
+search is a scan of every int8 vector; the bit vector prefilter waits
+until a store is big enough to need it.
+
 ### 3. Recall by meaning
 
 `lore_recall` scores each hit by words (BM25, written here, it is small)

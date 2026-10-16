@@ -3,9 +3,11 @@
 //!
 //! This part turns text into vectors. The model runs here, in Rust, with
 //! candle: nothing to install beside Horadric and no service that has to
-//! be running for recall to work.
+//! be running for recall to work. [`store`] keeps the text and the
+//! vectors on disk.
 
 mod gemma;
+pub mod store;
 
 use std::path::Path;
 
@@ -35,6 +37,17 @@ impl Kind {
             Kind::EmbeddingGemma => "embeddinggemma-300m",
             Kind::BgeSmall => "bge-small-en-v1.5",
             Kind::MiniLm => "all-MiniLM-L6-v2",
+        }
+    }
+
+    /// The name a vector made by this model is kept under: the model and
+    /// the weights' commit where one is pinned. A new one means the kept
+    /// text is embedded again.
+    pub fn tag(self) -> &'static str {
+        match self {
+            Kind::EmbeddingGemma => "embeddinggemma-300m",
+            Kind::BgeSmall => "bge-small-en-v1.5",
+            Kind::MiniLm => "all-MiniLM-L6-v2@1110a243",
         }
     }
 
