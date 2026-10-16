@@ -54,7 +54,8 @@ usage: horadric quest done [\"summary\"]  The quest this session works is comple
                                         last commit
        horadric quest spend             What done quests spent, those started with a
                                         context pack beside those without
-       horadric quest pack \"title\"      The context pack that quest gets when it starts";
+       horadric quest pack \"title\"      The context pack and recall that quest
+                                        gets when it starts";
 
 /// What the errors call the list, which may still be the old file.
 const NO_LOG: &str = "no quest log (.horadric/quests.md or .horadric/tasks.md) above here";
@@ -724,6 +725,12 @@ fn show_pack(cwd: &Path, title: &str) -> Result<(), String> {
     match pack::render(&hints) {
         t if t.is_empty() => println!("No finished quest is like it."),
         t => println!("{t}"),
+    }
+    #[cfg(windows)]
+    match crate::lore::recall_strong(&project, &tasks::recall_query(task)) {
+        Some(Some(recalled)) => println!("\n{}", tasks::recalled(&recalled)),
+        Some(None) => println!("\nMemory recalls nothing strong of it."),
+        None => println!("\nNo running Horadric answered, so memory was not asked."),
     }
     Ok(())
 }
