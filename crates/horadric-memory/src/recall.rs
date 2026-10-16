@@ -17,6 +17,7 @@ use std::collections::HashMap;
 
 use horadric_core::lore::{self, Note};
 
+use crate::horadrim::{self, Hit};
 use crate::store::{Chunk, ChunkId, Kind};
 
 /// The most hits one recall answers with.
@@ -343,53 +344,71 @@ pub fn describe(
     now_hash: impl Fn(&str) -> Option<u64>,
 ) -> String {
     if found.is_empty() {
-        return "Nothing matches. When you find something out that the next session would \
-                otherwise have to find out again, leave it with lore_note."
-            .into();
+        return NOTHING.into();
     }
-    let mut out = String::new();
-    for &(i, _) in found {
-        let c = &cands[i];
-        let ago = lore::age(now.saturating_sub(c.time));
-        let (head, commit) = match c.source {
-            Source::Note(n) => (
-                format!("#{} ({}", n.id, kind_name(c.kind)),
-                n.commit.as_str(),
-            ),
-            Source::Chunk(id, ch) => {
-                let mut head = format!("{id} ({}", kind_name(c.kind));
-                if !c.own {
-                    head.push_str(&format!(", from {}", ch.project));
+    horadrim::plain(&hits(cands, found, now, now_hash))
+}
+
+/// The answer when nothing is found.
+pub const NOTHING: &str = "Nothing matches. When you find something out that the next session                            would otherwise have to find out again, leave it with lore_note.";
+
+/// The hits of `found` as an answer shows them, before they are written
+/// out word for word ([`describe`]) or inscribed
+/// ([`horadrim::inscribe`]).
+pub fn hits(
+    cands: &[Candidate],
+    found: &[(usize, f64)],
+    now: u64,
+    now_hash: impl Fn(&str) -> Option<u64>,
+) -> Vec<Hit> {
+    found
+        .iter()
+        .map(|&(i, _)| {
+            let c = &cands[i];
+            let mut head = id_of(c);
+            head.push_str(&format!(" ({}", kind_name(c.kind)));
+            let commit = match c.source {
+                Source::Note(n) => n.commit.as_str(),
+                Source::Chunk(_, ch) => {
+                    if !c.own {
+                        head.push_str(&format!(", from {}", ch.project));
+                    }
+                    if let Some(s) = &ch.session {
+                        head.push_str(&format!(", session {}", short(s)));
+                    }
+                    ch.commit.as_deref().unwrap_or("")
                 }
-                if let Some(s) = &ch.session {
-                    head.push_str(&format!(", session {}", short(s)));
-                }
-                (head, ch.commit.as_deref().unwrap_or(""))
+            };
+            let ago = lore::age(now.saturating_sub(c.time));
+            head.push_str(&format!(", {ago} ago"));
+            if !commit.is_empty() {
+                head.push_str(&format!(", at {}", short(commit)));
             }
-        };
-        out.push_str(&format!("{head}, {ago} ago"));
-        if !commit.is_empty() {
-            out.push_str(&format!(", at {}", short(commit)));
-        }
-        out.push(')');
-        let changed = changed(c, &now_hash);
-        if !changed.is_empty() {
-            out.push_str(&format!(
-                " MAYBE STALE: {} changed since",
-                changed.join(", ")
-            ));
-        }
-        out.push('\n');
-        out.push_str(c.text().trim_end());
-        out.push('\n');
-        let files = c.files();
-        if !files.is_empty() {
-            let names: Vec<&str> = files.iter().map(|f| f.0).collect();
-            out.push_str(&format!("Files: {}\n", names.join(", ")));
-        }
-        out.push('\n');
+            head.push(')');
+            let changed = changed(c, &now_hash);
+            if !changed.is_empty() {
+                head.push_str(&format!(
+                    " MAYBE STALE: {} changed since",
+                    changed.join(", ")
+                ));
+            }
+            Hit {
+                head,
+                kind: c.kind,
+                text: c.text().to_string(),
+                files: c.files().iter().map(|f| f.0.to_string()).collect(),
+            }
+        })
+        .collect()
+}
+
+/// How a hit is named, and asked for again with `unroll`: `#12` for a
+/// note, `2026-10#5` for a passage of the store.
+pub fn id_of(c: &Candidate) -> String {
+    match c.source {
+        Source::Note(n) => format!("#{}", n.id),
+        Source::Chunk(id, _) => id.to_string(),
     }
-    out.trim_end().to_string()
 }
 
 /// A commit or session id as a hit shows it: its first eight characters.

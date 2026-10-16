@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime};
 
 use horadric_core::chronicle;
@@ -23,7 +23,10 @@ use horadric_hooks::lock::Lock;
 use horadric_hooks::lore::{now, Place};
 use horadric_hooks::tasks as tasks_file;
 use horadric_hooks::{client, COMMAND_HEADER, OWNER_ENV, RECALL_PATH};
+use horadric_memory::horadrim::Tongue;
+use horadric_memory::keeper;
 use horadric_memory::recall::{self, Candidate};
+use horadric_memory::store::Store as MemoryStore;
 use serde_json::Value;
 
 use crate::code::{self, FileIndex, Lang, Store};
@@ -71,6 +74,7 @@ fn recall(args: &Value) -> Result<String, String> {
                 .ok_or_else(|| format!("kind is one of note, quest, dialogue or code, not {k}"))?,
         ),
     };
+    let unroll = args.get("unroll").and_then(Value::as_str).unwrap_or("");
     let place = Place::here()?;
     let files = files(&place, args)?;
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
@@ -79,11 +83,28 @@ fn recall(args: &Value) -> Result<String, String> {
         "query": query,
         "files": files,
         "kind": kind_name,
+        "unroll": unroll,
+        "known": known().clone(),
     });
-    if let Some(text) = ask_app(&body) {
+    if let Some((text, given)) = ask_app(&body) {
+        known().extend(given);
         return Ok(text);
     }
     let lore = place.read()?;
+    if !unroll.trim().is_empty() {
+        // Inscribed hits come only from the app, so what is unrolled here
+        // is a note, a passage the app kept, or the Lexicon.
+        let dir = horadric_hooks::state_dir()
+            .ok_or("no state folder")?
+            .join("memory");
+        if unroll.trim() == "lexicon" {
+            let a = keeper::lexicon(&Tongue::load(&dir), place.key());
+            known().extend(a.given);
+            return Ok(a.text);
+        }
+        let store = MemoryStore::open(&dir).map_err(|e| e.to_string())?;
+        return keeper::unroll(&store, place.key(), &lore, unroll, now(), |p| place.hash(p));
+    }
     let ask = recall::Ask {
         query: query.to_string(),
         files,
@@ -101,8 +122,17 @@ fn recall(args: &Value) -> Result<String, String> {
 /// waits on the memory, so its timeout is the one heard.
 const RECALL_WAIT: Duration = Duration::from_secs(12);
 
-/// The app's answer to a recall, None when there is none to be had.
-fn ask_app(body: &Value) -> Option<String> {
+/// The sigils of Horadrim this session was told, so the app tells each
+/// once. One `horadric mcp` runs per session, so its memory is the
+/// session's.
+fn known() -> MutexGuard<'static, Vec<String>> {
+    static KNOWN: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    KNOWN.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// The app's answer to a recall and the sigils it told, None when there
+/// is none to be had.
+fn ask_app(body: &Value) -> Option<(String, Vec<String>)> {
     let port = std::env::var(OWNER_ENV)
         .ok()
         .and_then(|p| p.parse().ok())
@@ -114,7 +144,16 @@ fn ask_app(body: &Value) -> Option<String> {
         return None;
     }
     let answer: Value = serde_json::from_str(&text).ok()?;
-    answer.get("text")?.as_str().map(str::to_string)
+    let given = answer["given"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    Some((answer.get("text")?.as_str()?.to_string(), given))
 }
 
 fn find(args: &Value) -> Result<String, String> {

@@ -8,6 +8,7 @@
 //! [`keeper::Keeper`] is all of it as the app runs it.
 
 mod gemma;
+pub mod horadrim;
 pub mod keeper;
 pub mod models;
 pub mod recall;

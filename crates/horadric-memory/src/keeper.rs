@@ -4,16 +4,18 @@
 //! at a time when nothing is asked.
 //!
 //! The model is passed in once it is loaded, so recall answers by words
-//! alone until then. See docs/plan/memory.md, part 3.
+//! alone until then. See docs/plan/memory.md, part 3. Answers are
+//! inscribed in Horadrim unless the tongue is off, see part 8.
 
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use horadric_core::lore::{Lore, Note};
 
+use crate::horadrim::{self, Tongue, MARK, TOLD};
 use crate::recall::{self, Ask, Candidate, Source};
 use crate::store::{Chunk, ChunkId, FileMark, Store};
 use crate::Embedder;
@@ -41,14 +43,29 @@ impl Embed for Embedder {
 }
 
 pub struct Keeper<E> {
+    dir: PathBuf,
     store: Store,
     model: Option<E>,
+}
+
+/// How often a project's memory is counted for names that earn a sigil:
+/// counting reads every passage, and a name earns one over weeks.
+const RECOUNT: u64 = 3600;
+
+/// What a recall answers with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Answer {
+    pub text: String,
+    /// The sigils the answer told, which the asking session knows from
+    /// now on.
+    pub given: Vec<String>,
 }
 
 impl<E: Embed> Keeper<E> {
     /// The keeper of the store in `dir`, with no model yet.
     pub fn open(dir: &Path) -> io::Result<Keeper<E>> {
         Ok(Keeper {
+            dir: dir.to_path_buf(),
             store: Store::open(dir)?,
             model: None,
         })
@@ -93,7 +110,8 @@ impl<E: Embed> Keeper<E> {
     /// keeps of it. Notes the model has not embedded yet are embedded
     /// first, newest first, for at most `budget`; the rest are found by
     /// words until the background catches up. `now_hash` says what a
-    /// file's hash is now, for staleness.
+    /// file's hash is now, for staleness. `known` is the sigils the
+    /// asking session was told before.
     pub fn recall(
         &mut self,
         project: &str,
@@ -101,11 +119,12 @@ impl<E: Embed> Keeper<E> {
         ask: &Ask,
         budget: Duration,
         now_hash: impl Fn(&str) -> Option<u64>,
-    ) -> Result<String, String> {
+        known: &[String],
+    ) -> Result<Answer, String> {
         let copies = self
             .copies(project, &lore.notes, ask.now)
             .map_err(|e| e.to_string())?;
-        let Keeper { store, model } = self;
+        let Keeper { store, model, dir } = self;
         let mut query = None;
         if let Some(m) = model {
             let tag = m.tag().to_string();
@@ -157,16 +176,148 @@ impl<E: Embed> Keeper<E> {
         let found = recall::rank(ask, &cands, &meaning, |i| {
             !recall::changed(&cands[i], &now_hash).is_empty()
         });
-        Ok(recall::describe(&cands, &found, ask.now, &now_hash))
+        if found.is_empty() {
+            return Ok(Answer {
+                text: recall::NOTHING.into(),
+                given: Vec::new(),
+            });
+        }
+        let hits = recall::hits(&cands, &found, ask.now, &now_hash);
+        // Read again each time: the Scroll turns the tongue off from
+        // another thread.
+        let mut tongue = Tongue::load(dir);
+        if tongue.off {
+            return Ok(Answer {
+                text: horadrim::plain(&hits),
+                given: Vec::new(),
+            });
+        }
+        let lex = tongue.projects.entry(project.to_string()).or_default();
+        if ask.now.saturating_sub(lex.counted) >= RECOUNT {
+            let texts: Vec<String> = cands
+                .iter()
+                .map(|c| {
+                    let mut t = c.text().to_string();
+                    for (path, _) in c.files() {
+                        t.push(' ');
+                        t.push_str(path);
+                    }
+                    t
+                })
+                .collect();
+            lex.grow(
+                texts.iter().map(String::as_str),
+                |p| now_hash(p).is_some(),
+                ask.now,
+            );
+        }
+        let inscribed = horadrim::inscribe(lex, known, &hits, ask.now);
+        // The answer stands without its counts, so a write that fails is
+        // only told.
+        if let Err(e) = tongue.save(dir) {
+            eprintln!(
+                "horadric: the Lexicon in {} cannot be kept: {e}",
+                dir.display()
+            );
+        }
+        Ok(Answer {
+            text: inscribed.text,
+            given: inscribed.given,
+        })
+    }
+
+    /// What `lore_recall` with `unroll` answers: the hit named `id`
+    /// (`#12` or `2026-10#5`) word for word, or with `lexicon` every
+    /// sigil of the project in use.
+    pub fn unroll(
+        &mut self,
+        project: &str,
+        lore: &Lore,
+        id: &str,
+        now: u64,
+        now_hash: impl Fn(&str) -> Option<u64>,
+    ) -> Result<Answer, String> {
+        if id.trim() == "lexicon" {
+            return Ok(lexicon(&Tongue::load(&self.dir), project));
+        }
+        self.store.refresh().map_err(|e| e.to_string())?;
+        Ok(Answer {
+            text: unroll(&self.store, project, lore, id, now, now_hash)?,
+            given: Vec::new(),
+        })
     }
 
     /// Embeds up to `most` chunks the model has not, oldest first, and
     /// says how many. 0 when there is nothing left or no model yet.
     pub fn catch_up(&mut self, most: usize) -> Result<usize, String> {
-        let Keeper { store, model } = self;
+        let Keeper { store, model, .. } = self;
         let Some(m) = model else { return Ok(0) };
         let tag = m.tag().to_string();
         store.catch_up(&tag, most, |text| m.document(text))
+    }
+}
+
+/// The hit named `id` of `project`, from its lore or the store, word for
+/// word as recall shows it with the tongue off. `horadric mcp` uses it
+/// too, when the app is not running.
+pub fn unroll(
+    store: &Store,
+    project: &str,
+    lore: &Lore,
+    id: &str,
+    now: u64,
+    now_hash: impl Fn(&str) -> Option<u64>,
+) -> Result<String, String> {
+    let id = id.trim();
+    let cand = if let Some(n) = id.strip_prefix('#') {
+        let n: u64 = n.parse().map_err(|_| format!("no hit {id}"))?;
+        let note = lore
+            .notes
+            .iter()
+            .find(|note| note.id == n)
+            .ok_or_else(|| format!("no note {id}: it may have been replaced"))?;
+        Candidate::note(note)
+    } else {
+        let chunk_id = ChunkId::parse(id)
+            .ok_or_else(|| format!("{id} is not a hit's id, which looks like #12 or 2026-10#5"))?;
+        let chunk = store
+            .chunk(chunk_id)
+            .filter(|c| c.project == project)
+            .ok_or_else(|| format!("no passage {id} in this project"))?;
+        Candidate::chunk(chunk_id, chunk, true)
+    };
+    Ok(horadrim::plain(&recall::hits(
+        &[cand],
+        &[(0, 0.0)],
+        now,
+        now_hash,
+    )))
+}
+
+/// Every sigil of `project` in use, for a session that lost them (its
+/// context was compacted) or wants them all.
+pub fn lexicon(tongue: &Tongue, project: &str) -> Answer {
+    let sigils: Vec<&horadrim::Sigil> = tongue
+        .projects
+        .get(project)
+        .map(|l| l.sigils.iter().filter(|s| !s.retired).collect())
+        .unwrap_or_default();
+    if sigils.is_empty() {
+        return Answer {
+            text: "The Lexicon of this project is empty: no name repeats enough to earn a sigil."
+                .into(),
+            given: Vec::new(),
+        };
+    }
+    let mut text = format!("The Lexicon: each {MARK} sigil and the name it stands for.\n");
+    let mut given = vec![TOLD.to_string()];
+    for s in sigils {
+        text.push_str(&format!("{} = {}\n", s.sigil, s.name));
+        given.push(s.sigil.clone());
+    }
+    Answer {
+        text: text.trim_end().to_string(),
+        given,
     }
 }
 
@@ -283,8 +434,10 @@ mod tests {
                 &ask("where does the puppy nap"),
                 Duration::from_secs(5),
                 |_| None,
+                &[],
             )
-            .unwrap();
+            .unwrap()
+            .text;
         assert!(got.starts_with("#1 (note,"), "{got}");
         assert!(!got.contains("Invoices"), "{got}");
         fs::remove_dir_all(&dir).unwrap();
@@ -299,8 +452,16 @@ mod tests {
             "Invoices go out monthly.",
         ]);
         let got = k
-            .recall("p", &l, &ask("monthly invoices"), Duration::ZERO, |_| None)
-            .unwrap();
+            .recall(
+                "p",
+                &l,
+                &ask("monthly invoices"),
+                Duration::ZERO,
+                |_| None,
+                &[],
+            )
+            .unwrap()
+            .text;
         assert!(got.starts_with("#2 (note,"), "{got}");
         assert!(!got.contains("kitten"), "{got}");
         fs::remove_dir_all(&dir).unwrap();
@@ -312,15 +473,31 @@ mod tests {
         let mut k = keeper(&dir);
         let l = lore(&["The kitten sleeps.", "Rain on Tuesday."]);
         for _ in 0..2 {
-            k.recall("p", &l, &ask("storm"), Duration::from_secs(5), |_| None)
-                .unwrap();
+            k.recall(
+                "p",
+                &l,
+                &ask("storm"),
+                Duration::from_secs(5),
+                |_| None,
+                &[],
+            )
+            .unwrap()
+            .text;
         }
         assert_eq!(k.store.len(), 2);
         assert_eq!(k.model.as_ref().unwrap().embedded.get(), 2);
         assert_eq!(k.catch_up(10), Ok(0));
         // Another project's notes are its own copies.
-        k.recall("q", &l, &ask("storm"), Duration::from_secs(5), |_| None)
-            .unwrap();
+        k.recall(
+            "q",
+            &l,
+            &ask("storm"),
+            Duration::from_secs(5),
+            |_| None,
+            &[],
+        )
+        .unwrap()
+        .text;
         assert_eq!(k.store.len(), 4);
         fs::remove_dir_all(&dir).unwrap();
     }
@@ -335,8 +512,10 @@ mod tests {
             &ask("cat"),
             Duration::from_secs(5),
             |_| None,
+            &[],
         )
-        .unwrap();
+        .unwrap()
+        .text;
         let got = k
             .recall(
                 "p",
@@ -344,8 +523,10 @@ mod tests {
                 &ask("storm"),
                 Duration::from_secs(5),
                 |_| None,
+                &[],
             )
-            .unwrap();
+            .unwrap()
+            .text;
         assert!(got.contains("All week it will rain."), "{got}");
         assert_eq!(k.store.len(), 2);
         fs::remove_dir_all(&dir).unwrap();
@@ -360,8 +541,9 @@ mod tests {
             "Rain on Tuesday.",
             "The price went up.",
         ]);
-        k.recall("p", &l, &ask("cat"), Duration::ZERO, |_| None)
-            .unwrap();
+        k.recall("p", &l, &ask("cat"), Duration::ZERO, |_| None, &[])
+            .unwrap()
+            .text;
         assert_eq!(k.model.as_ref().unwrap().embedded.get(), 0);
         assert_eq!(k.catch_up(2), Ok(2));
         assert_eq!(k.catch_up(2), Ok(1));
@@ -393,13 +575,104 @@ mod tests {
         k.store.add(&elsewhere, NOW).unwrap();
         k.catch_up(10).unwrap();
         let got = k
-            .recall("p", &lore(&[]), &ask("rain"), Duration::ZERO, |_| Some(6))
-            .unwrap();
+            .recall(
+                "p",
+                &lore(&[]),
+                &ask("rain"),
+                Duration::ZERO,
+                |_| Some(6),
+                &[],
+            )
+            .unwrap()
+            .text;
         assert!(
             got.starts_with("2026-10#0 (dialogue, session 8a8cb053, a minute ago) MAYBE STALE: src/a.rs changed since"),
             "{got}"
         );
         assert!(!got.contains("2026-10#1"), "{got}");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn hits_are_inscribed_and_unrolled_word_for_word() {
+        let dir = temp("inscribed");
+        let mut k = keeper(&dir);
+        let path = "crates/horadric-memory/src/recall.rs";
+        let said = Chunk {
+            time: NOW - 60,
+            project: "p".into(),
+            kind: Kind::Dialogue,
+            session: None,
+            quest: None,
+            commit: None,
+            files: Vec::new(),
+            note: None,
+            text: format!("Agent: Let me check. {path} ranks, {path} weighs."),
+        };
+        k.store.add(&said, NOW).unwrap();
+        let first = format!("{path} holds the ranking");
+        let others = [format!("{path} again"), format!("and {path}")];
+        let l = lore(&[&first, &others[0], &others[1]]);
+        let a = k
+            .recall(
+                "p",
+                &l,
+                &ask("ranking weighs"),
+                Duration::ZERO,
+                |_| Some(1),
+                &[],
+            )
+            .unwrap();
+        assert!(
+            a.text.contains(&format!("\n§recall = {path}\n")),
+            "{}",
+            a.text
+        );
+        assert!(
+            a.text.contains("Agent: §recall ranks, §recall weighs."),
+            "{}",
+            a.text
+        );
+        assert_eq!(a.given, vec!["§", "§recall"]);
+        // Told already, so not again.
+        let again = k
+            .recall(
+                "p",
+                &l,
+                &ask("ranking"),
+                Duration::ZERO,
+                |_| Some(1),
+                &a.given,
+            )
+            .unwrap();
+        assert!(again.text.starts_with("#1 (note,"), "{}", again.text);
+        assert!(again.given.is_empty());
+
+        let back = k.unroll("p", &l, "2026-10#0", NOW, |_| Some(1)).unwrap();
+        assert!(back.text.ends_with(&said.text), "{}", back.text);
+        let note = k.unroll("p", &l, " #1", NOW, |_| Some(1)).unwrap();
+        assert!(note.text.ends_with(&first), "{}", note.text);
+        let lex = k.unroll("p", &l, "lexicon", NOW, |_| None).unwrap();
+        assert!(
+            lex.text.ends_with(&format!("§recall = {path}")),
+            "{}",
+            lex.text
+        );
+        assert_eq!(lex.given, vec!["§", "§recall"]);
+        for wrong in ["2026-10#9", "#99", "nonsense"] {
+            assert!(k.unroll("p", &l, wrong, NOW, |_| None).is_err(), "{wrong}");
+        }
+        assert!(k.unroll("q", &l, "2026-10#0", NOW, |_| None).is_err());
+
+        let mut tongue = Tongue::load(&dir);
+        assert_eq!(tongue.projects["p"].sigils[0].uses, 2);
+        tongue.off = true;
+        tongue.save(&dir).unwrap();
+        let off = k
+            .recall("p", &l, &ask("weighs"), Duration::ZERO, |_| Some(1), &[])
+            .unwrap();
+        assert!(off.text.contains("Let me check"), "{}", off.text);
+        assert!(off.given.is_empty());
         fs::remove_dir_all(&dir).unwrap();
     }
 

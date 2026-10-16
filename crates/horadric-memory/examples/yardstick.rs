@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use horadric_core::lore::words;
+use horadric_memory::horadrim::{self, Lexicon};
 use horadric_memory::recall::{self, Ask, Bm25, Candidate};
 use horadric_memory::store::{self, ChunkId, Month};
 use horadric_memory::{similarity, truncate, Embedder, Kind};
@@ -237,17 +238,103 @@ fn main() {
                         })
                         .collect()
                 };
-                report(
-                    &format!("{name} {d} recall"),
-                    &recall_with(&cut(recall::LEAST_COSINE)),
-                );
+                let found = recall_with(&cut(recall::LEAST_COSINE));
+                report(&format!("{name} {d} recall"), &found);
                 report(
                     &format!("{name} {d} recall, no floor"),
                     &recall_with(&cut(f32::NEG_INFINITY)),
                 );
+                if kind == Kind::MiniLm {
+                    inscribe(
+                        &cands,
+                        &found,
+                        &questions,
+                        &answers,
+                        &corpus,
+                        &here.join("../.."),
+                        &cache.join("horadrim.jsonl"),
+                    );
+                }
             }
         }
     }
+}
+
+/// How many questions a session asks, for the tokens a session saves:
+/// sigils are told once a session, so a session that recalls more pays
+/// less for each.
+const SESSION: usize = 5;
+
+/// Horadrim on the answers recall gave: tokens per hit word for word and
+/// inscribed, by this crate's estimate, for a session asking one question
+/// and one asking [`SESSION`]. Each question's answer both ways goes to
+/// `out`, for `yardstick/judge.py` to count with Claude's own tokenizer
+/// and to have answered from each. The Lexicon is counted from the
+/// corpus, as the app counts it from the memory.
+fn inscribe(
+    cands: &[Candidate],
+    found: &Ranking,
+    questions: &[Question],
+    answers: &[Vec<usize>],
+    corpus: &[Chunk],
+    top: &Path,
+    out: &Path,
+) {
+    let mut lex = Lexicon::default();
+    lex.grow(cands.iter().map(|c| c.text()), |p| top.join(p).is_file(), 0);
+    println!("\nhoradrim: {} sigils", lex.sigils.len());
+    let (mut hits_n, mut verbatim_t, mut alone_t, mut session_t) = (0, 0, 0, 0);
+    let mut known: Vec<String> = Vec::new();
+    let mut lines = String::new();
+    for (i, q) in questions.iter().enumerate() {
+        let shown: Vec<(usize, f64)> = found[i]
+            .iter()
+            .take(recall::MOST_FOUND)
+            .map(|&c| (c, 0.0))
+            .collect();
+        let hits = recall::hits(cands, &shown, 0, |_| None);
+        let verbatim = horadrim::plain(&hits);
+        let alone = horadrim::inscribe(&mut lex.clone(), &[], &hits, 0);
+        if i % SESSION == 0 {
+            known.clear();
+        }
+        let in_session = horadrim::inscribe(&mut lex, &known, &hits, 0);
+        known.extend(in_session.given.iter().cloned());
+        hits_n += hits.len();
+        verbatim_t += horadrim::tokens(&verbatim);
+        alone_t += horadrim::tokens(&alone.text);
+        session_t += horadrim::tokens(&in_session.text);
+        let row = serde_json::json!({
+            "q": q.q,
+            "from": q.from,
+            "hits": hits.len(),
+            "found": shown.iter().any(|(c, _)| answers[i].contains(c)),
+            "reference": answers[i].iter().map(|&c| corpus[c].text.as_str()).collect::<Vec<_>>(),
+            "verbatim": verbatim,
+            "inscribed": alone.text,
+            "session": in_session.text,
+        });
+        lines.push_str(&row.to_string());
+        lines.push('\n');
+    }
+    std::fs::write(out, lines).expect("horadrim rows");
+    let per = |t: usize| t as f64 / hits_n.max(1) as f64;
+    println!(
+        "horadrim, tokens a hit (estimated): verbatim {:.0}, inscribed alone {:.0} ({:.2}x), \
+         in a session of {SESSION} {:.0} ({:.2}x)",
+        per(verbatim_t),
+        per(alone_t),
+        verbatim_t as f64 / alone_t.max(1) as f64,
+        per(session_t),
+        verbatim_t as f64 / session_t.max(1) as f64,
+    );
+    let mut used: Vec<&horadric_memory::horadrim::Sigil> =
+        lex.sigils.iter().filter(|s| s.uses > 0).collect();
+    used.sort_by(|a, b| b.uses.cmp(&a.uses));
+    for s in used.iter().take(12) {
+        println!("  {} = {} ({} answers)", s.sigil, s.name, s.uses);
+    }
+    println!("horadrim rows in {}", out.display());
 }
 
 fn lines<T: for<'a> Deserialize<'a>>(path: &Path) -> Vec<T> {

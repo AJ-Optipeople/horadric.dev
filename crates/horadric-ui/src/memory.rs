@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use horadric_hooks::listener::RecallCall;
 use horadric_hooks::lore::{now, Place};
-use horadric_memory::keeper::Keeper;
+use horadric_memory::keeper::{Answer, Keeper};
 use horadric_memory::recall::{self, Ask};
 use horadric_memory::{models, Embedder, Kind};
 use serde_json::{json, Value};
@@ -92,7 +92,7 @@ fn run(dir: &Path, rx: Receiver<Msg>) {
             Some(Msg::Recall(call)) => {
                 if call.reply.wanted() {
                     let body = match answer(&mut keeper, &call.body) {
-                        Ok(text) => json!({ "text": text }),
+                        Ok(a) => json!({ "text": a.text, "given": a.given }),
                         Err(e) => json!({ "error": e }),
                     };
                     call.reply.send(body);
@@ -116,8 +116,9 @@ fn run(dir: &Path, rx: Receiver<Msg>) {
 }
 
 /// What `horadric mcp` asked, answered: `dir` is the folder it runs in,
-/// `files` already relative to the top of its project.
-fn answer(keeper: &mut Keeper<Embedder>, body: &Value) -> Result<String, String> {
+/// `files` already relative to the top of its project, `known` the sigils
+/// the session was told, `unroll` a hit it wants word for word.
+fn answer(keeper: &mut Keeper<Embedder>, body: &Value) -> Result<Answer, String> {
     let dir = body["dir"].as_str().ok_or("say which folder: dir")?;
     let place = Place::of(Path::new(dir))?;
     let lore = place.read()?;
@@ -139,5 +140,17 @@ fn answer(keeper: &mut Keeper<Embedder>, body: &Value) -> Result<String, String>
         kind,
         now: now(),
     };
-    keeper.recall(place.key(), &lore, &ask, BUDGET, |p| place.hash(p))
+    if let Some(id) = body["unroll"].as_str().filter(|u| !u.trim().is_empty()) {
+        return keeper.unroll(place.key(), &lore, id, ask.now, |p| place.hash(p));
+    }
+    let known: Vec<String> = body["known"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    keeper.recall(place.key(), &lore, &ask, BUDGET, |p| place.hash(p), &known)
 }

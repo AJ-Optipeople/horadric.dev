@@ -902,12 +902,14 @@ fn lore_tools() -> Vec<Value> {
         ),
         tool(
             "lore_recall",
-            "Ask what this project's sessions found out before you explore: the notes they left with lore_note and the summaries of finished quests. Found by meaning and by words (a question or names), by files, or both. Answers with the best matches first, each saying what it is (note, quest, dialogue, code), its id and age, marked maybe stale where a file it is about changed since. With no question and no files, the newest.",
+            "Ask what this project's sessions found out before you explore: the notes they left with lore_note and the summaries of finished quests. Found by meaning and by words (a question or names), by files, or both. Answers with the best matches first, each saying what it is (note, quest, dialogue, code), its id and age, marked maybe stale where a file it is about changed since. With no question and no files, the newest. Hits come inscribed: long names bound to § sigils, each told the first time it is used, and chatter left out of dialogue; unroll gives a hit back word for word.",
             json!({
                 "query": { "type": "string", "description": "A question, or words and names to look for" },
                 "files": files("Files or folders the notes should be about"),
                 "kind": { "type": "string", "enum": ["note", "quest", "dialogue", "code"],
                     "description": "Only this kind of hit" },
+                "unroll": { "type": "string",
+                    "description": "A hit's id (#12 or 2026-10#5) for its original text word for word, or \"lexicon\" for every § sigil and its name" },
             }),
             &[],
         ),
