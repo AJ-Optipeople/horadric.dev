@@ -7,6 +7,7 @@
 - A quest session silent for hours with an empty worktree after two nudges is dead and I can not restart it: hand it to the human with "restart it", who does so (settled on "OSC 7501: plain terminals", which then landed).
 
 ## Lately
+- 2026-10-16 Round (main at 31f5505): "Memory: a recall in each quest's prompt" landed (c7eec09, 05a75c9), so cast "Ship Local" to get it to the human now; public still waits for all six Backup and recall quests. Backup part 1 stopped a fifth time, re-merging main and rerunning checks before its fast-forward: not stuck, noted, no tell.
 - 2026-10-16 "Backup: encrypted snapshots to a folder, and restore" stopped a fourth time, checks running after merging main, then fast-forward. Not stuck (lore #31), noted it, no tell.
 - 2026-10-16 "Memory: recall on every prompt, from the UserPromptSubmit hook" stopped with work committed on its branch, waiting on its review agent before merging. Not stuck (lore #31), noted it, no tell.
 - 2026-10-16 "Backup: encrypted snapshots to a folder, and restore" stopped a third time, full checks running in its background before commit and merge. Not stuck (lore #31), noted it, no tell.
