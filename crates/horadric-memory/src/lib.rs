@@ -6,6 +6,7 @@
 //! be running for recall to work.
 
 mod gemma;
+pub mod models;
 
 use std::path::Path;
 
