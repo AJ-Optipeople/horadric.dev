@@ -50,6 +50,22 @@ pub struct Loot {
     /// open until the human picks one of the tombs.
     #[serde(default)]
     pub finished: bool,
+    /// Work the session started in the background and has not heard end.
+    #[serde(default)]
+    pub background: Background,
+}
+
+/// Whether a session has work of its own running in the background. Hooks
+/// say when it starts but not when it ends, so the end is a later turn that
+/// stops having started none: the finished work is what woke it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Background {
+    #[default]
+    Nothing,
+    /// Started in the turn that is running.
+    Started,
+    /// A turn stopped with it running: the stop is a wait, not a report.
+    Running,
 }
 
 /// The tools that write files. A shell command may too, which the
@@ -60,6 +76,13 @@ impl Loot {
     /// Takes in a tool that finished, well or not. Subagents count: what
     /// they change is the session's work.
     pub fn hear(&mut self, event: &HookEvent) {
+        if event.hook_event_name == "Stop" && !event.is_subagent() {
+            self.background = match self.background {
+                Background::Started => Background::Running,
+                _ => Background::Nothing,
+            };
+            return;
+        }
         let ok = match event.hook_event_name.as_str() {
             "PostToolUse" => true,
             "PostToolUseFailure" => false,
@@ -80,6 +103,9 @@ impl Loot {
         };
         // One sent to the background reports back at once, before it ran.
         if input.get("run_in_background").and_then(Value::as_bool) == Some(true) {
+            if ok {
+                self.background = Background::Started;
+            }
             return;
         }
         let Some(command) = input.get("command").and_then(Value::as_str) else {
@@ -91,6 +117,12 @@ impl Loot {
         if ok && commits(command) {
             self.committed = true;
         }
+    }
+
+    /// Whether the last turn stopped with work of its own still running,
+    /// which a nudge would only interrupt.
+    pub fn waiting_on_own_work(&self) -> bool {
+        self.background == Background::Running
     }
 
     /// Whether git should be asked if its work landed.
@@ -241,6 +273,29 @@ mod tests {
         l.hear(&tool("PostToolUseFailure", "Edit", json!({})));
         l.hear(&tool("PreToolUse", "Write", json!({})));
         assert_eq!(rarity(&l, false), Rarity::Normal);
+    }
+
+    #[test]
+    fn a_stop_with_background_work_running_is_a_wait() {
+        let mut l = Loot::default();
+        l.hear(&tool(
+            "PostToolUse",
+            "Bash",
+            json!({ "command": "sleep 60", "run_in_background": true }),
+        ));
+        l.hear(&tool("Stop", "", json!({})));
+        assert!(l.waiting_on_own_work());
+        // Woken by the work ending, the next stop starts nothing more.
+        l.hear(&tool("PostToolUse", "Read", json!({})));
+        l.hear(&tool("Stop", "", json!({})));
+        assert!(!l.waiting_on_own_work());
+    }
+
+    #[test]
+    fn a_stop_without_background_work_is_not_a_wait() {
+        let mut l = Loot::default();
+        l.hear(&tool("Stop", "", json!({})));
+        assert!(!l.waiting_on_own_work());
     }
 
     #[test]

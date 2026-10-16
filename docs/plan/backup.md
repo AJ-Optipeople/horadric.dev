@@ -42,7 +42,9 @@ one Google account never overwrite each other. In it:
   and rounds, and per file its relative path, plaintext SHA-256, size,
   and when it was backed up. No content and no file names beyond the
   store's own (`2026-10.jsonl`, `lore/<project>-<hash>.json`).
-- One blob per file, `<relative path>.hbk`: 12 bytes of nonce, the
+- One blob per file, `<relative path>.<first 16 hex of its SHA-256>.hbk`
+  (named for its content so a new version is put beside the old one,
+  which goes only after the new manifest is in): 12 bytes of nonce, the
   ciphertext, its 16 byte tag, with the relative path as associated data
   so a blob cannot be swapped for another.
 
@@ -121,5 +123,13 @@ now, and Restore. Off by default.
 
 1. The backup itself, to a folder, and restore: format, crypto, the
    `Vault` trait, the folder vault, `horadric backup now|status|restore`.
+   Done 2026-10-16, in `crates/horadric-ui/src/backup/`. Beyond the
+   above: the manifest carries a value sealed under the key, so a wrong
+   passphrase is caught even before the first blob; a file gone from the
+   store stays in the backup, since an emptied store is the moment the
+   backup must not follow it; the Sanctuary's layout
+   (`lore\*.sanctuary.json`) is left out with the code index; and the
+   command line's restore asks for Horadric to be quit, stopping only
+   the memory thread is for the Settings button.
 2. Google Drive: sign in, WinHTTP's other verbs, the Drive vault.
 3. The Settings section and the schedule in the app.

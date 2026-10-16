@@ -486,11 +486,21 @@ fn handle(
             .and_then(|mut c| c.hear(&horadric_id, event, SystemTime::now())),
         None => None,
     };
-    // A prompt is answered once, below; an overlap only comes of an edit.
-    match (&overlap, &prompt) {
-        (_, Some(_)) => {}
-        (Some(o), None) => respond_with(&stream, "200 OK", &overlap::reply(&overlap::context(o)))?,
-        (None, None) => respond(&stream, "200 OK")?,
+    let known = match (&overlap, &parsed, commands) {
+        (None, Some(event), Some(commands)) => before_search(&horadric_id, event, commands),
+        _ => None,
+    };
+    // A prompt is answered once, below; an overlap only comes of an edit,
+    // and what the lore knows only before a search.
+    match (&overlap, known, &prompt) {
+        (_, _, Some(_)) => {}
+        (Some(o), _, None) => {
+            respond_with(&stream, "200 OK", &overlap::reply(&overlap::context(o)))?
+        }
+        (None, Some(text), None) => {
+            respond_with(&stream, "200 OK", &overlap::reply_to("PreToolUse", &text))?
+        }
+        (None, None, None) => respond(&stream, "200 OK")?,
     }
     if let (Some(o), Some(commands)) = (overlap, commands) {
         let _ = commands.send(Command::Overlap(o));
@@ -597,19 +607,86 @@ fn offer(stream: &TcpStream, ask: Value, commands: &Sender<Command>) -> io::Resu
     if text.is_empty() {
         return respond(stream, "200 OK");
     }
-    respond_with(stream, "200 OK", &prompt_reply(&text))
+    respond_with(
+        stream,
+        "200 OK",
+        &overlap::reply_to("UserPromptSubmit", &text),
+    )
 }
 
-/// The reply to a `UserPromptSubmit` hook that puts `text` before the
-/// agent with the prompt.
-fn prompt_reply(text: &str) -> String {
-    json!({
-        "hookSpecificOutput": {
-            "hookEventName": "UserPromptSubmit",
-            "additionalContext": text,
+/// The longest a search is held for what the lore knows. The tool waits on
+/// it, so a memory that is busy is not worth waiting on.
+const SEARCH_WAIT: Duration = Duration::from_millis(if cfg!(test) { 300 } else { 1500 });
+
+/// The most of the lore's answer put before an agent that only searched.
+const SEARCH_CONTEXT: usize = 1200;
+
+/// The name a Grep or Glob looks for, when it is a name: an identifier,
+/// maybe with `::` or `.` in it, of at least three characters. A pattern
+/// that is a real regex or a path wildcard says nothing the lore can match.
+pub fn searched_name(tool: &str, input: &Value) -> Option<String> {
+    let raw = match tool {
+        "Grep" => input.get("pattern")?.as_str()?.to_string(),
+        // `**/overlap*.rs` looks for `overlap`: the file's own name.
+        "Glob" => {
+            let file = input.get("pattern")?.as_str()?.rsplit(['/', '\\']).next()?;
+            file.split('.').next()?.replace('*', "")
         }
-    })
-    .to_string()
+        _ => return None,
+    };
+    let name = raw.trim().trim_start_matches("\\b").trim_end_matches("\\b");
+    let name = name.trim_end_matches('(');
+    let shaped = name.len() >= 3
+        && name
+            .chars()
+            .all(|c| c.is_alphanumeric() || "_:.-".contains(c))
+        && name.chars().any(char::is_alphabetic);
+    shaped.then(|| name.to_string())
+}
+
+/// Names a session was told about already, so a second search for one
+/// brings nothing new.
+fn told() -> &'static Mutex<std::collections::HashSet<(String, String)>> {
+    static TOLD: OnceLock<Mutex<std::collections::HashSet<(String, String)>>> = OnceLock::new();
+    TOLD.get_or_init(Default::default)
+}
+
+/// Before an agent greps or globs for a name, what the lore knows of it
+/// (where it is defined, notes naming it), so the next search is not
+/// needed. None when it knows nothing strong, or the memory was slow.
+fn before_search(session: &str, event: &HookEvent, commands: &Sender<Command>) -> Option<String> {
+    if event.hook_event_name != "PreToolUse" || event.cwd.is_empty() {
+        return None;
+    }
+    let name = searched_name(event.tool_name.as_deref()?, event.tool_input.as_ref()?)?;
+    if !told()
+        .lock()
+        .ok()?
+        .insert((session.to_string(), name.to_lowercase()))
+    {
+        return None;
+    }
+    let (reply, rx) = Reply::new();
+    let gone = Arc::clone(&reply.gone);
+    let body = json!({ "dir": event.cwd, "query": name, "strong": true });
+    commands
+        .send(Command::Recall(RecallCall { body, reply }))
+        .ok()?;
+    let answer = rx.recv_timeout(SEARCH_WAIT).inspect_err(|_| {
+        gone.store(true, Ordering::Relaxed);
+    });
+    let answer: Value = serde_json::from_str(&answer.ok()?).ok()?;
+    let text = answer.get("text")?.as_str()?;
+    if text.starts_with("Nothing matches") {
+        return None;
+    }
+    let mut text: String = text.chars().take(SEARCH_CONTEXT).collect();
+    if text.len() < answer["text"].as_str()?.len() {
+        text.push_str(" ...");
+    }
+    Some(format!(
+        "Horadric: the lore knows this of `{name}` already:\n{text}"
+    ))
 }
 
 /// Hands what a lore tool showed a session to the app as a
@@ -741,6 +818,46 @@ mod tests {
     use super::*;
     use std::net::TcpStream;
     use std::sync::mpsc;
+
+    #[test]
+    fn a_search_for_a_name_is_a_name_and_a_regex_is_not() {
+        let grep = |p: &str| searched_name("Grep", &json!({ "pattern": p }));
+        let glob = |p: &str| searched_name("Glob", &json!({ "pattern": p }));
+        assert_eq!(grep("overlap").as_deref(), Some("overlap"));
+        assert_eq!(grep("\\bRecallCall\\b").as_deref(), Some("RecallCall"));
+        assert_eq!(grep("fn recall(").as_deref(), None);
+        assert_eq!(grep("a.*b|c"), None);
+        assert_eq!(grep("ab"), None);
+        assert_eq!(glob("crates/**/overlap*.rs").as_deref(), Some("overlap"));
+        assert_eq!(glob("**/*.rs"), None);
+        assert_eq!(
+            searched_name("Read", &json!({ "pattern": "overlap" })),
+            None
+        );
+    }
+
+    #[test]
+    fn a_search_brings_what_the_lore_knows_once() {
+        let (tx, rx) = mpsc::channel();
+        let app = thread::spawn(move || {
+            if let Ok(Command::Recall(call)) = rx.recv_timeout(Duration::from_secs(2)) {
+                assert_eq!(call.body["strong"], true);
+                call.reply.send(json!({ "text": "Defined in a.rs" }));
+            }
+        });
+        let event = HookEvent {
+            session_id: "s".into(),
+            hook_event_name: "PreToolUse".into(),
+            cwd: "/p".into(),
+            tool_name: Some("Grep".into()),
+            tool_input: Some(json!({ "pattern": "UniqueSearchedName" })),
+            ..Default::default()
+        };
+        let text = before_search("once", &event, &tx).unwrap();
+        assert!(text.contains("Defined in a.rs"), "{text}");
+        app.join().unwrap();
+        assert!(before_search("once", &event, &tx).is_none());
+    }
 
     fn post(port: u16, headers: &str, body: &str) -> String {
         let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();

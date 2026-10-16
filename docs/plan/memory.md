@@ -513,10 +513,18 @@ put text before the agent (`overlap.rs` answers PostToolUse with
   meaning at once. The yardstick prints the bar's trade (MiniLM: 40 of
   65 questions get a hit, 1.5 each, 63% of them an answer; at 0.028
   it is 4.5 hits and 31%). Without the model nothing is strong, so an
-  app that has not loaded it yet adds nothing.
+  app that has not loaded it yet adds nothing. Since then the recall is
+  asked for ahead on a thread of its own (when the brief opens, or the
+  runner first sees the item) and taken when ready, so no window waits
+  on it, and the model is loaded at the app's start when its files are
+  already on disk, so the first quest has it.
 - **Before a search.** When an agent greps or globs for a name, what the
   lore knows of it (where it is defined, a note naming it) comes with
-  the result, so the next grep is not needed.
+  the result, so the next grep is not needed. Done 2026-10-16: the
+  listener answers PreToolUse for Grep and Glob (`additionalContext`,
+  waits 1.5 s at most) when the pattern is a name, asking the app's
+  memory for the strong hits only, once per name per session, and adds
+  nothing when the lore knows nothing.
 
 Judged by `horadric quest spend`: tokens and calls per quest with these
 against without, and how often an injected hit's files or ids show up in
