@@ -7,6 +7,7 @@
 - A quest session silent for hours with an empty worktree after two nudges is dead and I can not restart it: hand it to the human with "restart it", who does so (settled on "OSC 7501: plain terminals", which then landed).
 
 ## Lately
+- 2026-10-16 Round (human left, main at 46a863e): same picture as 13:42, one quest open waiting for the runner, nothing landed. Nothing to do.
 - 2026-10-16 Round (13:42, human left, main at 1a453fc): the 13:40 Ship Local reloaded fine at 13:41 with all six Backup and recall quests. One quest open (task notification recall, sonnet), waiting for the runner. No v0.29.0 yet; public stays with the human. Nothing else to do.
 - 2026-10-16 Round (13:40, human left, main at 9e0ebc1): no v0.29.0 tag, installed build is 13:26 (before dd1c08f), the 13:35 release build never reloaded and no cargo runs. Cast "Ship Local" per Open. Gave the new "no recall on a task notification" quest Model: sonnet.
 - 2026-10-16 Round (13:32, main at dd1c08f): "Backup: the Settings section" landed, the last of the six. A `cargo build --release` started 13:32, after the landing, so a ship already carries it. No cast. No tag past v0.28.0 yet: next round check whether the human's session shipped public.
