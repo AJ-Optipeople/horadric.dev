@@ -7,6 +7,7 @@
 - A quest session silent for hours with an empty worktree after two nudges is dead and I can not restart it: hand it to the human with "restart it", who does so (settled on "OSC 7501: plain terminals", which then landed).
 
 ## Lately
+- 2026-10-16 Round (main at 1227150): "Backup: encrypted snapshots to a folder, and restore" landed, tree clean apart from Horadric's own files, so cast "Ship Local". "Recall off the window thread" committed 39f180f on its branch, tests running: not stuck, noted, no tell. Three Backup and recall quests still under way.
 - 2026-10-16 "Backup: encrypted snapshots to a folder, and restore" stopped a sixth time, checks queued behind another clippy before its fast-forward. Not stuck (lore #31), noted, no tell.
 - 2026-10-16 Round (human left, main at 8485c6d): the Ship Local reloaded fine at 13:04 with e81cbca. Four quests under way, Backup Settings waits on part 1. Nothing to do.
 - 2026-10-16 "Memory: horadric quest pack shows the quest's recall too" stopped again, review fixes made, checks queued behind a ship build. Not stuck (lore #31), noted, no tell.
