@@ -64,18 +64,20 @@ pub enum Section {
     Keys,
     Startup,
     Privacy,
+    Scroll,
     Runetome,
     Projects,
 }
 
 impl Section {
-    pub const ALL: [Section; 8] = [
+    pub const ALL: [Section; 9] = [
         Section::Appearance,
         Section::Notifications,
         Section::Sessions,
         Section::Keys,
         Section::Startup,
         Section::Privacy,
+        Section::Scroll,
         Section::Runetome,
         Section::Projects,
     ];
@@ -88,6 +90,7 @@ impl Section {
             Section::Keys => "Keys",
             Section::Startup => "Startup and updates",
             Section::Privacy => "Privacy",
+            Section::Scroll => "The Scroll",
             Section::Runetome => "Runetome",
             Section::Projects => "Projects",
         }
@@ -119,6 +122,8 @@ pub enum Field {
     Discord,
     /// Whether recall looks in other projects' memory too.
     Recall,
+    /// Whether recall's answers are written in the Horadrim's tongue.
+    Horadrim,
     /// Whether a click on a stone asks before it casts.
     Ask,
     /// Brings back every built in stone put away.
@@ -185,6 +190,7 @@ pub struct Values {
     pub autostart: Option<bool>,
     pub discord: Discord,
     pub recall_across: bool,
+    pub scroll: Scroll,
     /// A newer release a check found.
     pub update: Option<String>,
     pub checking: bool,
@@ -202,6 +208,53 @@ pub struct Values {
     pub projects: Vec<String>,
     /// The one picked, None when there are none.
     pub project: Option<Project>,
+}
+
+/// What the Scroll section reads of the tongue: see docs/plan/memory.md,
+/// part 8.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Scroll {
+    /// The tongue is turned off.
+    pub off: bool,
+    /// The project whose Lexicon this is, "" when none is picked.
+    pub project: String,
+    /// Sigils in use, and the most used few: sigil, name, uses.
+    pub sigils: usize,
+    pub top: Vec<(String, String, u64)>,
+    /// Tokens saved this week in this project.
+    pub saved: i64,
+}
+
+/// How the yardstick scored recall's answers (docs/plan/memory.md, part 8,
+/// `yardstick/judge.py`): right out of 65 questions, in the tongue and
+/// verbatim.
+const SCORE: &str = "59 of 65, verbatim 52";
+
+/// `n` with a comma between thousands.
+fn thousands(n: i64) -> String {
+    let digits = n.unsigned_abs().to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    if n < 0 {
+        out.insert(0, '-');
+    }
+    out
+}
+
+/// A sigil of the Lexicon in a note's room.
+fn sigil_line(sigil: &str, name: &str, uses: u64) -> String {
+    let name: String = if name.chars().count() > 34 {
+        let head: String = name.chars().take(33).collect();
+        format!("{head}\u{2026}")
+    } else {
+        name.to_string()
+    };
+    format!("{sigil}  {name}, used {uses}")
 }
 
 /// The settings of the project the Projects section shows.
@@ -380,6 +433,41 @@ pub fn lines(section: Section, v: &Values) -> Vec<Line> {
                 ),
                 line(Field::Recall, "Recall across projects", across, a),
             ]
+        }
+        Section::Scroll => {
+            let sc = &v.scroll;
+            let (word, c) = switch(!sc.off);
+            let lexicon = match (sc.project.as_str(), sc.sigils) {
+                ("", _) => "No project".to_string(),
+                (p, 0) => format!("{p}, no sigils yet"),
+                (p, n) => format!("{p}, {n} sigils"),
+            };
+            let mut rows = vec![
+                line(
+                    Field::KeysNote,
+                    "",
+                    "Recall's hits are inscribed: long names bound to sigils.",
+                    Control::Note,
+                ),
+                line(Field::Project, "Lexicon", &lexicon, Control::Fixed),
+            ];
+            rows.extend(sc.top.iter().take(2).map(|(sigil, name, uses)| {
+                line(
+                    Field::KeysNote,
+                    "",
+                    &sigil_line(sigil, name, *uses),
+                    Control::Note,
+                )
+            }));
+            rows.push(line(
+                Field::Version,
+                "Saved this week",
+                &format!("{} tokens", thousands(sc.saved)),
+                Control::Fixed,
+            ));
+            rows.push(line(Field::Version, "Answers right", SCORE, Control::Fixed));
+            rows.push(line(Field::Horadrim, "The tongue", word, c));
+            rows
         }
         Section::Runetome => {
             let (ask, a) = switch(v.ask);
@@ -807,6 +895,7 @@ impl SettingsWindow {
                 .unwrap_or(0),
             heading: self.section.get().label(),
             rows: &rows,
+            scroll: self.section.get() == Section::Scroll,
             hot: self.hot.get(),
             pressed: self.pressed.get(),
         };
@@ -1071,6 +1160,7 @@ mod tests {
             autostart: Some(true),
             discord: Discord::Unnamed,
             recall_across: false,
+            scroll: Scroll::default(),
             update: None,
             checking: false,
             version: "0.9.0".into(),
@@ -1131,6 +1221,16 @@ mod tests {
         );
         assert_eq!(fields(Section::Runetome, &v), [Field::Ask, Field::Hidden]);
         assert_eq!(
+            fields(Section::Scroll, &v),
+            [
+                Field::KeysNote,
+                Field::Project,
+                Field::Version,
+                Field::Version,
+                Field::Horadrim
+            ]
+        );
+        assert_eq!(
             fields(Section::Keys, &v),
             [
                 Field::Key(Action::Next),
@@ -1152,6 +1252,33 @@ mod tests {
             ]
         );
         assert_eq!(tallest(&v), PROJECT_ROWS);
+    }
+
+    #[test]
+    fn the_scroll_reads_the_lexicon_and_its_switch() {
+        let mut v = values();
+        v.scroll = Scroll {
+            off: false,
+            project: "app".into(),
+            sigils: 3,
+            top: vec![("\u{a7}lore".into(), "horadric-memory".into(), 12)],
+            saved: 12_345,
+        };
+        let rows = lines(Section::Scroll, &v);
+        assert_eq!(rows[1].value, "app, 3 sigils");
+        assert_eq!(rows[2].value, "\u{a7}lore  horadric-memory, used 12");
+        assert_eq!(rows[3].value, "12,345 tokens");
+        assert_eq!(rows.last().unwrap().control, Control::Switch(true));
+        v.scroll.off = true;
+        assert_eq!(lines(Section::Scroll, &v).last().unwrap().value, "Off");
+    }
+
+    #[test]
+    fn thousands_are_set_apart() {
+        assert_eq!(thousands(0), "0");
+        assert_eq!(thousands(999), "999");
+        assert_eq!(thousands(1_000), "1,000");
+        assert_eq!(thousands(-1_234_567), "-1,234,567");
     }
 
     #[test]

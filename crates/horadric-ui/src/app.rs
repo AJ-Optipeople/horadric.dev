@@ -4898,6 +4898,7 @@ impl App {
             autostart: (!horadric_hooks::dev()).then(autostart::is_enabled),
             discord: self.discord,
             recall_across: self.recall_across,
+            scroll: self.scroll_values(),
             update: self.update.as_ref().map(|m| m.version.clone()),
             checking: self.checking,
             version: env!("CARGO_PKG_VERSION").to_string(),
@@ -4912,6 +4913,42 @@ impl App {
             projects: projects.into_iter().map(|(_, name)| name).collect(),
             project,
         }
+    }
+
+    /// What the Scroll section shows: the tongue's switch and the Lexicon
+    /// of the project the Projects section has picked.
+    fn scroll_values(&self) -> settings::Scroll {
+        let Some(dir) = horadric_hooks::state_dir().map(|d| d.join("memory")) else {
+            return settings::Scroll::default();
+        };
+        let mut scroll = settings::Scroll {
+            off: horadric_memory::horadrim::is_off(&dir),
+            ..Default::default()
+        };
+        let Some(key) = self.settings_key() else {
+            return scroll;
+        };
+        scroll.project = project_name(&key);
+        let lexicon = self
+            .project_dir(&key)
+            .and_then(|d| horadric_hooks::lore::Place::of(Path::new(&d)).ok())
+            .and_then(|place| {
+                horadric_memory::horadrim::Tongue::load(&dir)
+                    .ok()?
+                    .projects
+                    .remove(place.key())
+            });
+        if let Some(lex) = lexicon {
+            let mut live: Vec<_> = lex.sigils.iter().filter(|s| !s.retired).collect();
+            scroll.sigils = live.len();
+            live.sort_by_key(|s| std::cmp::Reverse(s.uses));
+            scroll.top = live
+                .iter()
+                .map(|s| (s.sigil.clone(), s.name.clone(), s.uses))
+                .collect();
+            scroll.saved = lex.saved_this_week(horadric_hooks::lore::now());
+        }
+        scroll
     }
 
     /// Every project the Projects section offers, by key and name: the
@@ -5212,6 +5249,12 @@ impl App {
                 self.recall_across = !self.recall_across;
                 crate::memory::set_across(self.recall_across);
                 self.save();
+            }
+            Field::Horadrim => {
+                if let Some(dir) = horadric_hooks::state_dir().map(|d| d.join("memory")) {
+                    let off = horadric_memory::horadrim::is_off(&dir);
+                    let _ = horadric_memory::horadrim::set_off(&dir, !off);
+                }
             }
             Field::Hidden => self.hide_stone(None),
             Field::Key(action) => self.listen_for_key(action),

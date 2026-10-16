@@ -439,6 +439,8 @@ pub struct SettingsScene<'a> {
     pub section: usize,
     pub heading: &'a str,
     pub rows: &'a [SettingsLook],
+    /// The section is the Scroll, drawn on parchment.
+    pub scroll: bool,
     pub hot: SettingsHit,
     pub pressed: Option<SettingsHit>,
 }
@@ -1811,6 +1813,16 @@ impl Painter<'_> {
         let heading = Rect::new(h.x + 4.0, h.y, h.w - 8.0, h.h);
         self.text(&gpu.small, theme::legend(), scene.heading, heading);
         self.group(&l.group, m.tile_radius);
+        if scene.scroll {
+            // Parchment over the group, a roll at each end: an unrolled scroll.
+            let g = &l.group;
+            let parchment = Color::rgb(0xd9c89a);
+            self.fill_rounded(g, m.tile_radius, parchment.with_alpha(0.14));
+            for y in [g.y - 1.0, g.bottom() - 5.0] {
+                let roll = Rect::new(g.x - 3.0, y, g.w + 6.0, 6.0);
+                self.fill_rounded(&roll, 3.0, parchment.with_alpha(0.55));
+            }
+        }
         for (i, (row, look)) in l.rows.iter().zip(scene.rows).enumerate() {
             if look.control == Control::Note {
                 let r = &row.line;
