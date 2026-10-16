@@ -245,7 +245,8 @@ and 0.9 is better by words, 1.0 drops by words to BM25's 67.7 %. The
 cosine floor cost nothing on the set (the best 50 are all above it).
 
 Not yet: the background embeds with every core, which is fine for notes
-and will want a gentler pace for part 4's backfill.
+and will want a gentler pace once the backfill's chunks are waiting for
+vectors (part 4 only keeps the text, and rests between files).
 
 ### 4. Transcripts, verbatim
 
@@ -256,6 +257,44 @@ name and the files it named. Codex rollouts the same way. A backfill
 reads what is on disk now. Anything that looks like a secret (see
 [secrets.md](secrets.md)) is left out before it is written, since this
 lives for years.
+
+**Built 2026-10-16.** The reading is `crates/horadric-memory/src/transcripts.rs`
+(pure, tested), the keeping is `Keeper::ingest`, and `horadric-ui/src/memory.rs`
+is the thread that runs both. On Stop, PreCompact and SessionEnd the app
+hands the transcript's path and folder to the memory thread (not for a
+subagent's hooks, not for Grok). A transcript's cursor, bytes read to the
+end of the last whole line, is kept in `memory	ranscripts.json`, so each
+read takes only what was added, a restart goes on where it was, and a
+file rewritten shorter is read again. What is kept: the human's prompts
+and the agent's text, `You: ...` and `Agent: ...`, each tool call as
+`Agent: used Edit: src/a.rs` (the name and the files its input named, never
+the input or the output), packed into chunks of about a thousand
+characters of kind dialogue with the session id and the time of the last
+thing said. Left out: tool results, meta lines, Claude Code's own compact
+summaries, the reminders hooks append to a prompt, `/clear` and
+interrupt notes. Codex is read from its rollouts (an event or an item per
+message, said once; `function_call` and `apply_patch` as tools).
+
+The backfill is the same ingest over every transcript on disk, newest
+first, one file each time nothing else is asked, with the 100 ms rest, so
+it shares the CPU politely: at the first start of the memory it reads
+`~/.claude/projects/*/*.jsonl` and Codex's `sessions`, and the cursors make
+a second start free. A chunk's project is the one git says the transcript's
+folder belongs to (the same key as the lore's); a worktree since deleted
+keeps its own folder as a key, a loose end for part 6.
+
+Secrets are cut before a chunk is written (`redact`): the well known token
+shapes (GitHub, Slack, Stripe, AWS, npm, Hugging Face, Google, JWTs), PEM
+private keys, a value after a name that sounds like a secret (`TOKEN=`,
+`"api_key":`, `password:`), a bearer token, a password in a link, and any
+long mixed case run of letters and digits. Pure hex is left, since commits
+and hashes are worth keeping. It cannot catch a password that reads as a
+word, which is why `docs/plan/secrets.md` keeps agents from seeing them.
+It does not yet know the vault's own values.
+
+The model is now fetched by the first recall, not the first keep: an app
+nobody recalls in keeps its dialogue without the download, and its chunks
+are embedded when a recall first loads the model.
 
 ### 5. Code by meaning
 

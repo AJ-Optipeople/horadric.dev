@@ -12,6 +12,7 @@ pub mod keeper;
 pub mod models;
 pub mod recall;
 pub mod store;
+pub mod transcripts;
 
 use std::path::Path;
 

@@ -537,6 +537,32 @@ pub(crate) fn push(input: Input) {
 
 /// Tells the UI the registry changed, unless it has yet to hear of the
 /// last change, when it will see this one with it.
+/// Hands a session's transcript to the memory when a hook says it is a
+/// good moment: the turn ended, the context is about to be compacted, or
+/// the session is over. A subagent's hooks are its own, not the session's.
+fn keep_transcript(t: &Tagged) {
+    use horadric_memory::transcripts::Format;
+    let e = &t.event;
+    if !matches!(
+        e.hook_event_name.as_str(),
+        "Stop" | "PreCompact" | "SessionEnd"
+    ) || e.transcript_path.is_empty()
+        || e.agent_id.is_some()
+    {
+        return;
+    }
+    let format = match t.agent {
+        Agent::Claude => Format::Claude,
+        Agent::Codex => Format::Codex,
+        Agent::Grok => return,
+    };
+    crate::memory::keep(crate::memory::Keep {
+        path: e.transcript_path.clone().into(),
+        cwd: e.cwd.clone(),
+        format,
+    });
+}
+
 fn post_event(window: isize, phase: bool) {
     let flags = EVENTS_DUE | if phase { EVENTS_PHASE } else { 0 };
     if EVENTS.fetch_or(flags, Ordering::AcqRel) & EVENTS_DUE == 0 {
@@ -652,6 +678,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
                 }
                 continue;
             }
+            keep_transcript(&t);
             if let Some(limits) = t.limits.filter(|l| !l.is_empty()) {
                 let now = unix_now();
                 let heard = |held: Option<&Usage>| Usage {

@@ -7,15 +7,16 @@
 //! alone until then. See docs/plan/memory.md, part 3.
 
 use std::collections::hash_map::Entry;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use horadric_core::lore::{Lore, Note};
 
 use crate::recall::{self, Ask, Candidate, Source};
 use crate::store::{Chunk, ChunkId, FileMark, Store};
+use crate::transcripts::{self, Format};
 use crate::Embedder;
 
 /// What the keeper embeds with: the model, or a stand in for tests.
@@ -43,14 +44,27 @@ impl Embed for Embedder {
 pub struct Keeper<E> {
     store: Store,
     model: Option<E>,
+    dir: PathBuf,
+    /// How far each transcript has been kept, by path: bytes, to the end
+    /// of a whole line.
+    cursors: BTreeMap<String, u64>,
 }
+
+/// Where the keeper remembers how much of each transcript it has kept.
+const CURSORS: &str = "transcripts.json";
 
 impl<E: Embed> Keeper<E> {
     /// The keeper of the store in `dir`, with no model yet.
     pub fn open(dir: &Path) -> io::Result<Keeper<E>> {
+        let cursors = std::fs::read(dir.join(CURSORS))
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default();
         Ok(Keeper {
             store: Store::open(dir)?,
             model: None,
+            dir: dir.to_path_buf(),
+            cursors,
         })
     }
 
@@ -105,7 +119,7 @@ impl<E: Embed> Keeper<E> {
         let copies = self
             .copies(project, &lore.notes, ask.now)
             .map_err(|e| e.to_string())?;
-        let Keeper { store, model } = self;
+        let Keeper { store, model, .. } = self;
         let mut query = None;
         if let Some(m) = model {
             let tag = m.tag().to_string();
@@ -160,10 +174,56 @@ impl<E: Embed> Keeper<E> {
         Ok(recall::describe(&cands, &found, ask.now, &now_hash))
     }
 
+    /// Keeps what a transcript has gained since it was last read: its
+    /// dialogue, as chunks of the project `project_of` names from the
+    /// folder the transcript says it was held in (`cwd` where the lines do
+    /// not). Says how many chunks it kept. A transcript no project claims
+    /// is passed over, not read again.
+    pub fn ingest(
+        &mut self,
+        path: &Path,
+        format: Format,
+        cwd: Option<&str>,
+        project_of: impl FnOnce(&str) -> Option<String>,
+        now: u64,
+    ) -> Result<usize, String> {
+        let key = path.to_string_lossy().to_lowercase();
+        let from = self.cursors.get(&key).copied().unwrap_or(0);
+        let scan = transcripts::scan(path, format, from).map_err(|e| e.to_string())?;
+        let mut kept = 0;
+        let project = scan
+            .cwd
+            .as_deref()
+            .or(cwd)
+            .filter(|_| !scan.turns.is_empty())
+            .and_then(project_of);
+        if let Some(project) = project {
+            let session = scan.session.clone().unwrap_or_else(|| {
+                path.file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            });
+            let cs = transcripts::chunks(&scan.turns, &project, &session, now);
+            kept = cs.len();
+            self.store.add_all(&cs, now).map_err(|e| e.to_string())?;
+        }
+        // After the chunks: a crash between the two keeps some twice, never
+        // loses any.
+        self.cursors.insert(key, scan.end);
+        self.save_cursors().map_err(|e| e.to_string())?;
+        Ok(kept)
+    }
+
+    fn save_cursors(&self) -> io::Result<()> {
+        let tmp = self.dir.join(format!("{CURSORS}.tmp"));
+        std::fs::write(&tmp, serde_json::to_vec(&self.cursors)?)?;
+        std::fs::rename(&tmp, self.dir.join(CURSORS))
+    }
+
     /// Embeds up to `most` chunks the model has not, oldest first, and
     /// says how many. 0 when there is nothing left or no model yet.
     pub fn catch_up(&mut self, most: usize) -> Result<usize, String> {
-        let Keeper { store, model } = self;
+        let Keeper { store, model, .. } = self;
         let Some(m) = model else { return Ok(0) };
         let tag = m.tag().to_string();
         store.catch_up(&tag, most, |text| m.document(text))
@@ -401,6 +461,72 @@ mod tests {
         );
         assert!(!got.contains("2026-10#1"), "{got}");
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_transcript_is_kept_once_and_then_only_what_it_gains() {
+        let dir = temp("ingest");
+        let file = dir.with_extension("jsonl");
+        let line = |who: &str, text: &str| {
+            format!(
+                "{}\n",
+                serde_json::json!({"type": who, "cwd": "C:\\proj", "sessionId": "s1",
+                    "message": {"content": text}})
+            )
+        };
+        fs::write(
+            &file,
+            line("user", "my cat is sick")
+                + &line("assistant", "token ghp_abcdefghijklmnopqrstuvwxyz0123"),
+        )
+        .unwrap();
+        let mut k: Keeper<Topics> = Keeper::open(&dir).unwrap();
+        let project = |cwd: &str| Some(cwd.to_lowercase());
+        assert_eq!(
+            k.ingest(&file, Format::Claude, None, project, NOW).unwrap(),
+            1
+        );
+        assert_eq!(
+            k.ingest(&file, Format::Claude, None, project, NOW).unwrap(),
+            0
+        );
+        let mut text = fs::read_to_string(&file).unwrap();
+        text += &line("user", "and a dog");
+        fs::write(&file, text).unwrap();
+        // A restart remembers how far it had read.
+        drop(k);
+        let mut k: Keeper<Topics> = Keeper::open(&dir).unwrap();
+        assert_eq!(
+            k.ingest(&file, Format::Claude, None, project, NOW).unwrap(),
+            1
+        );
+        let kept: Vec<&Chunk> = k.store.chunks().map(|(_, c)| c).collect();
+        assert_eq!(kept.len(), 2);
+        assert_eq!(kept[0].project, "c:\\proj");
+        assert_eq!(kept[0].session.as_deref(), Some("s1"));
+        assert!(kept[0].text.contains("You: my cat is sick"));
+        assert!(
+            kept[0].text.contains("Agent: token [secret]"),
+            "{}",
+            kept[0].text
+        );
+        assert_eq!(kept[1].text, "You: and a dog");
+        // A transcript no project claims is passed over, and not read again.
+        let other = dir.with_extension("other.jsonl");
+        fs::write(&other, line("user", "hello")).unwrap();
+        assert_eq!(
+            k.ingest(&other, Format::Claude, None, |_| None, NOW)
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            k.ingest(&other, Format::Claude, None, project, NOW)
+                .unwrap(),
+            0
+        );
+        fs::remove_dir_all(&dir).unwrap();
+        fs::remove_file(&file).unwrap();
+        fs::remove_file(&other).unwrap();
     }
 
     #[test]

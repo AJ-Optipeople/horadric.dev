@@ -36,6 +36,16 @@ pub fn history(cwd: &str, skip: &[String], limit: usize) -> Vec<Past> {
     list_in(&root, cwd, skip, limit)
 }
 
+/// Every Codex rollout on disk, newest first.
+pub fn files() -> Vec<PathBuf> {
+    let Some(root) = codex_home() else {
+        return Vec::new();
+    };
+    let mut found = rollouts(&root.join("sessions"));
+    found.sort_by_key(|f| std::cmp::Reverse(f.1));
+    found.into_iter().map(|(p, ..)| p).collect()
+}
+
 /// Codex's home: `$CODEX_HOME`, or `~/.codex`.
 pub fn codex_home() -> Option<PathBuf> {
     home(
