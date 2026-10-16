@@ -7,6 +7,7 @@
 - A quest session silent for hours with an empty worktree after two nudges is dead and I can not restart it: hand it to the human with "restart it", who does so (settled on "OSC 7501: plain terminals", which then landed).
 
 ## Lately
+- 2026-10-16 "Memory: recall on every prompt, from the UserPromptSubmit hook" stopped with work committed on its branch, waiting on its review agent before merging. Not stuck (lore #31), noted it, no tell.
 - 2026-10-16 "Backup: encrypted snapshots to a folder, and restore" stopped a third time, full checks running in its background before commit and merge. Not stuck (lore #31), noted it, no tell.
 - 2026-10-16 "Backup: encrypted snapshots to a folder, and restore" stopped again, checks green, waiting on its review agent before committing. Not stuck (lore #31), noted it, no tell.
 - 2026-10-16 "Backup: encrypted snapshots to a folder, and restore" stopped while its tests and review agent run. Not stuck (lore #31), noted it, no tell.
