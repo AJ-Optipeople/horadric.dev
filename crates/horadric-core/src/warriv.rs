@@ -654,12 +654,22 @@ pub struct Brief {
     pub looked: Option<Looked>,
 }
 
-/// What a look back is given: the day in a line and what happened more
-/// than once.
+/// What a look back is given: the day in a line, what happened more than
+/// once, and where the day's dialogue was written for it to distill.
 #[derive(Debug, Clone, Default)]
 pub struct Looked {
     pub day: String,
     pub patterns: Vec<String>,
+    pub said: Option<Said>,
+}
+
+/// The day's dialogue, written to a file for the look back to read.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Said {
+    pub path: String,
+    pub passages: usize,
+    /// Older passages that did not fit.
+    pub left_out: usize,
 }
 
 /// What a round sees of the project beside its memory, as the app finds
@@ -1025,6 +1035,9 @@ fn look_back(l: Option<&Looked>) -> String {
             one_line(&l.day)
         ));
     }
+    if let Some(s) = l.said.as_ref().filter(|s| s.passages > 0) {
+        out.push_str(&distill(s));
+    }
     if l.patterns.is_empty() {
         out.push_str(
             "  The chronicle shows nothing that happened twice. Write one line to Lately \
@@ -1043,6 +1056,43 @@ fn look_back(l: Option<&Looked>) -> String {
          holds from now on. Write the look back to Lately in one line.\n",
     );
     out
+}
+
+/// What the look back is asked to make of the day's dialogue: the
+/// decisions and lessons in it as notes, which is how the memory keeps
+/// what is true rather than only what was said. See docs/plan/memory.md,
+/// part 7.
+fn distill(s: &Said) -> String {
+    let mut out = format!(
+        "  The day's dialogue, {} of what the human and the sessions said, is in {}, each \
+         headed by its id.",
+        plural(s.passages, "passage"),
+        s.path
+    );
+    if s.left_out > 0 {
+        out.push_str(&format!(
+            " {} did not fit and are left out.",
+            plural(s.left_out, "older passage")
+        ));
+    }
+    out.push_str(
+        " Read it for what was decided and what was learned that the next session would \
+         otherwise have to find out again: a choice and its reason, a trap, how a part \
+         works or is run. Leave out what the code, the plan or git already say, and what \
+         was only tried on the way. For each, ask lore_recall first, then keep it with \
+         lore_note, one fact a note, naming the passages it came from in sources and the \
+         files it is about. Where it contradicts or outdates a note, name that note in \
+         replaces, so the old one is kept as history with when it stopped being true. \
+         Say in Lately how many notes the day gave.\n",
+    );
+    out
+}
+
+fn plural(n: usize, word: &str) -> String {
+    match n {
+        1 => format!("1 {word}"),
+        n => format!("{n} {word}s"),
+    }
 }
 
 /// The last `n` characters of `s`, marked as cut when they are.
@@ -1975,7 +2025,9 @@ mod tests {
         let p = look(Some(Looked {
             day: "3 quests completed".into(),
             patterns: vec!["2 merges stopped on a conflict".into()],
+            said: None,
         }));
+        assert!(!p.contains("lore_note"));
         assert!(p.contains("first round after 04:00"));
         assert!(p.contains("Since the last look back, a day at most: 3 quests completed.\n"));
         assert!(p.contains("    - 2 merges stopped on a conflict\n"));
@@ -1987,6 +2039,25 @@ mod tests {
         let clean = look(Some(Looked::default()));
         assert!(clean.contains("nothing that happened twice"));
         assert!(!clean.contains("File one quest"));
+        let talked = look(Some(Looked {
+            said: Some(Said {
+                path: "C:/state/memory/day/p.md".into(),
+                passages: 12,
+                left_out: 1,
+            }),
+            ..Looked::default()
+        }));
+        assert!(talked.contains(
+            "The day's dialogue, 12 passages of what the human and the sessions said, is in \
+             C:/state/memory/day/p.md, each headed by its id. 1 older passage did not fit"
+        ));
+        assert!(talked.contains("naming the passages it came from in sources"));
+        assert!(talked.contains("nothing that happened twice"));
+        let quiet = look(Some(Looked {
+            said: Some(Said::default()),
+            ..Looked::default()
+        }));
+        assert!(!quiet.contains("lore_note"));
     }
 
     #[test]

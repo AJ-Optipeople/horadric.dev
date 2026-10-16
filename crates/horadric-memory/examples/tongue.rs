@@ -18,9 +18,12 @@ use horadric_memory::store::{Kind, Store};
 const ANSWER: usize = 10;
 
 fn main() {
-    let dir = std::env::args().nth(1).map(PathBuf::from).unwrap_or_else(|| {
-        PathBuf::from(std::env::var("APPDATA").expect("APPDATA")).join("Horadric/memory")
-    });
+    let dir = std::env::args()
+        .nth(1)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(std::env::var("APPDATA").expect("APPDATA")).join("Horadric/memory")
+        });
     let store = Store::open(&dir).expect("store");
     let mut by_project: BTreeMap<&str, Vec<Hit>> = BTreeMap::new();
     for (id, c) in store.chunks() {
@@ -29,6 +32,7 @@ fn main() {
             kind: c.kind,
             text: c.text.clone(),
             files: c.files.iter().map(|f| f.path.clone()).collect(),
+            sources: Vec::new(),
         });
     }
     for (project, hits) in by_project {

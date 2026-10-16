@@ -13,7 +13,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use horadric_core::lore::{Lore, Note};
+use horadric_core::lore::{Lore, Note, Past};
 
 use crate::horadrim::{self, Tongue, MARK, TOLD};
 use crate::recall::{self, Ask, Candidate, Source};
@@ -172,7 +172,7 @@ impl<E: Embed> Keeper<E> {
     fn copies(
         &mut self,
         project: &str,
-        notes: &[Note],
+        notes: &[&Note],
         now: u64,
     ) -> io::Result<HashMap<u64, ChunkId>> {
         self.store.refresh()?;
@@ -185,7 +185,7 @@ impl<E: Embed> Keeper<E> {
                 }
             }
         }
-        for note in notes {
+        for &note in notes {
             if let Entry::Vacant(e) = have.entry(note.id) {
                 e.insert(self.store.add(&copy(project, note), now)?);
             }
@@ -194,22 +194,29 @@ impl<E: Embed> Keeper<E> {
     }
 
     /// Answers `ask` for `project` from its `lore` and what the store
-    /// keeps of it. Notes the model has not embedded yet are embedded
-    /// first, newest first, for at most `budget`; the rest are found by
-    /// words until the background catches up. `now_hash` says what a
-    /// file's hash is now, for staleness. `known` is the sigils the
-    /// asking session was told before.
+    /// keeps of it, with the notes `lore` replaced when history is asked
+    /// for. Notes the model has not embedded yet are embedded first,
+    /// newest first, for at most `budget`; the rest are found by words
+    /// until the background catches up. `now_hash` says what a file's hash
+    /// is now, for staleness. `known` is the sigils the asking session was
+    /// told before.
+    // Each is a different thing the app knows of the asking session; a
+    // struct of them would only be built here to be taken apart.
+    #[allow(clippy::too_many_arguments)]
     pub fn recall(
         &mut self,
         project: &str,
         lore: &Lore,
         ask: &Ask,
+        across: bool,
         budget: Duration,
         now_hash: impl Fn(&str) -> Option<u64>,
         known: &[String],
     ) -> Result<Answer, String> {
+        let past: &[Past] = if ask.history { &lore.past } else { &[] };
+        let notes: Vec<&Note> = past.iter().map(|p| &p.note).chain(&lore.notes).collect();
         let copies = self
-            .copies(project, &lore.notes, ask.now)
+            .copies(project, &notes, ask.now)
             .map_err(|e| e.to_string())?;
         let Keeper {
             store,
@@ -223,7 +230,7 @@ impl<E: Embed> Keeper<E> {
             let tag = m.tag().to_string();
             let missing: HashSet<ChunkId> = store.missing(&tag).into_iter().collect();
             let start = Instant::now();
-            for note in lore.notes.iter().rev() {
+            for note in notes.iter().rev() {
                 let id = copies[&note.id];
                 if !missing.contains(&id) {
                     continue;
@@ -239,14 +246,18 @@ impl<E: Embed> Keeper<E> {
             }
         }
         let mut cands: Vec<Candidate> = lore.notes.iter().map(Candidate::note).collect();
-        // Other projects' passages wait for the switch of part 6.
+        cands.extend(past.iter().map(Candidate::past));
+        // The asking project's notes are the lore's own, read above. Other
+        // projects' passages, and the copies of their notes, only with the
+        // switch of part 6.
         cands.extend(
             store
                 .chunks()
                 .filter(|(_, c)| {
-                    c.note.is_none() && c.project == project && current(code, project, c)
+                    let own = c.project == project;
+                    (across || own) && (!own || c.note.is_none()) && current(code, &c.project, c)
                 })
-                .map(|(id, c)| Candidate::chunk(id, c, true)),
+                .map(|(id, c)| Candidate::chunk(id, c, c.project == project)),
         );
         let meaning: Vec<usize> = match &query {
             Some((tag, q)) => {
@@ -254,9 +265,10 @@ impl<E: Embed> Keeper<E> {
                     .iter()
                     .enumerate()
                     .filter_map(|(i, c)| {
-                        let id = match c.source {
-                            Source::Note(n) => copies[&n.id],
-                            Source::Chunk(id, _) => id,
+                        let id = match (c.note_of(), c.source) {
+                            (Some(n), _) => copies[&n.id],
+                            (None, Source::Chunk(id, _)) => id,
+                            (None, _) => return None,
                         };
                         let cos = store.cosine(tag, id, q)?;
                         (cos >= recall::LEAST_COSINE).then_some((cos, i))
@@ -333,12 +345,14 @@ impl<E: Embed> Keeper<E> {
 
     /// What `lore_recall` with `unroll` answers: the hit named `id`
     /// (`#12` or `2026-10#5`) word for word, or with `lexicon` every
-    /// sigil of the project in use.
+    /// sigil of the project in use. `across` is part 6's switch, under
+    /// which other projects' passages are hits too.
     pub fn unroll(
         &mut self,
         project: &str,
         lore: &Lore,
         id: &str,
+        across: bool,
         now: u64,
         now_hash: impl Fn(&str) -> Option<u64>,
     ) -> Result<Answer, String> {
@@ -348,7 +362,7 @@ impl<E: Embed> Keeper<E> {
         }
         self.store.refresh().map_err(|e| e.to_string())?;
         Ok(Answer {
-            text: unroll(&self.store, project, lore, id, now, now_hash)?,
+            text: unroll(&self.store, project, lore, id, across, now, now_hash)?,
             given: Vec::new(),
         })
     }
@@ -417,26 +431,30 @@ pub fn unroll(
     project: &str,
     lore: &Lore,
     id: &str,
+    across: bool,
     now: u64,
     now_hash: impl Fn(&str) -> Option<u64>,
 ) -> Result<String, String> {
     let id = id.trim();
     let cand = if let Some(n) = id.strip_prefix('#') {
         let n: u64 = n.parse().map_err(|_| format!("no hit {id}"))?;
-        let note = lore
-            .notes
-            .iter()
-            .find(|note| note.id == n)
-            .ok_or_else(|| format!("no note {id}: it may have been replaced"))?;
-        Candidate::note(note)
+        match lore.notes.iter().find(|note| note.id == n) {
+            Some(note) => Candidate::note(note),
+            None => Candidate::past(
+                lore.past
+                    .iter()
+                    .find(|p| p.note.id == n)
+                    .ok_or_else(|| format!("no note {id}"))?,
+            ),
+        }
     } else {
         let chunk_id = ChunkId::parse(id)
             .ok_or_else(|| format!("{id} is not a hit's id, which looks like #12 or 2026-10#5"))?;
         let chunk = store
             .chunk(chunk_id)
-            .filter(|c| c.project == project)
+            .filter(|c| across || c.project == project)
             .ok_or_else(|| format!("no passage {id} in this project"))?;
-        Candidate::chunk(chunk_id, chunk, true)
+        Candidate::chunk(chunk_id, chunk, chunk.project == project)
     };
     Ok(horadrim::plain(&recall::hits(
         &[cand],
@@ -583,6 +601,7 @@ mod tests {
                 "p",
                 &l,
                 &ask("where does the puppy nap"),
+                false,
                 Duration::from_secs(5),
                 |_| None,
                 &[],
@@ -607,6 +626,7 @@ mod tests {
                 "p",
                 &l,
                 &ask("monthly invoices"),
+                false,
                 Duration::ZERO,
                 |_| None,
                 &[],
@@ -615,6 +635,47 @@ mod tests {
             .text;
         assert!(got.starts_with("#2 (note,"), "{got}");
         assert!(!got.contains("kitten"), "{got}");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_replaced_note_is_found_only_when_history_is_asked_for() {
+        let dir = temp("history");
+        let mut k = keeper(&dir);
+        let mut l = lore(&["The kitten sleeps in the box."]);
+        l.add(
+            "The kitten sleeps on the sofa now.",
+            Vec::new(),
+            "",
+            NOW,
+            &[1],
+        )
+        .unwrap();
+        let asked = ask("where does the cat nap");
+        let got = k
+            .recall(
+                "p",
+                &l,
+                &asked,
+                false,
+                Duration::from_secs(5),
+                |_| None,
+                &[],
+            )
+            .unwrap()
+            .text;
+        assert!(got.starts_with("#2 (note,"), "{got}");
+        assert!(!got.contains("box"), "{got}");
+        let then = Ask {
+            history: true,
+            ..asked
+        };
+        let got = k
+            .recall("p", &l, &then, false, Duration::from_secs(5), |_| None, &[])
+            .unwrap()
+            .text;
+        assert!(got.starts_with("#2 (note,"), "{got}");
+        assert!(got.contains("REPLACED by #2"), "{got}");
         fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -628,6 +689,7 @@ mod tests {
                 "p",
                 &l,
                 &ask("storm"),
+                false,
                 Duration::from_secs(5),
                 |_| None,
                 &[],
@@ -642,6 +704,7 @@ mod tests {
             "q",
             &l,
             &ask("storm"),
+            false,
             Duration::from_secs(5),
             |_| None,
             &[],
@@ -659,6 +722,7 @@ mod tests {
             "p",
             &lore(&["The kitten sleeps."]),
             &ask("cat"),
+            false,
             Duration::from_secs(5),
             |_| None,
             &[],
@@ -669,6 +733,7 @@ mod tests {
                 "p",
                 &lore(&["All week it will rain."]),
                 &ask("storm"),
+                false,
                 Duration::from_secs(5),
                 |_| None,
                 &[],
@@ -689,7 +754,7 @@ mod tests {
             "Rain on Tuesday.",
             "The price went up.",
         ]);
-        k.recall("p", &l, &ask("cat"), Duration::ZERO, |_| None, &[])
+        k.recall("p", &l, &ask("cat"), false, Duration::ZERO, |_| None, &[])
             .unwrap();
         assert_eq!(k.model.as_ref().unwrap().embedded.get(), 0);
         assert_eq!(k.catch_up(2), Ok(2));
@@ -726,6 +791,7 @@ mod tests {
                 "p",
                 &lore(&[]),
                 &ask("rain"),
+                false,
                 Duration::ZERO,
                 |_| Some(6),
                 &[],
@@ -737,6 +803,21 @@ mod tests {
             "{got}"
         );
         assert!(!got.contains("2026-10#1"), "{got}");
+        // With the switch on, the other project's passage is a candidate
+        // too, and says whose it is.
+        let got = k
+            .recall(
+                "p",
+                &lore(&[]),
+                &ask("rain"),
+                true,
+                Duration::ZERO,
+                |_| None,
+                &[],
+            )
+            .unwrap()
+            .text;
+        assert!(got.contains("2026-10#1 (dialogue, from q,"), "{got}");
         fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -765,6 +846,7 @@ mod tests {
                 "p",
                 &l,
                 &ask("ranking weighs"),
+                false,
                 Duration::ZERO,
                 |_| Some(1),
                 &[],
@@ -790,6 +872,7 @@ mod tests {
                 "p",
                 &l,
                 &ask("ranking"),
+                false,
                 Duration::ZERO,
                 |_| Some(1),
                 &a.given,
@@ -806,11 +889,13 @@ mod tests {
         );
         assert!(again.given.is_empty());
 
-        let back = k.unroll("p", &l, "2026-10#0", NOW, |_| Some(1)).unwrap();
+        let back = k
+            .unroll("p", &l, "2026-10#0", false, NOW, |_| Some(1))
+            .unwrap();
         assert!(back.text.ends_with(&said.text), "{}", back.text);
-        let note = k.unroll("p", &l, " #1", NOW, |_| Some(1)).unwrap();
+        let note = k.unroll("p", &l, " #1", false, NOW, |_| Some(1)).unwrap();
         assert!(note.text.ends_with(&first), "{}", note.text);
-        let lex = k.unroll("p", &l, "lexicon", NOW, |_| None).unwrap();
+        let lex = k.unroll("p", &l, "lexicon", false, NOW, |_| None).unwrap();
         assert!(
             lex.text.ends_with(&format!("§recall = {path}")),
             "{}",
@@ -821,15 +906,28 @@ mod tests {
             vec!["§", "§recall=crates/horadric-memory/src/recall.rs"]
         );
         for wrong in ["2026-10#9", "#99", "nonsense"] {
-            assert!(k.unroll("p", &l, wrong, NOW, |_| None).is_err(), "{wrong}");
+            assert!(
+                k.unroll("p", &l, wrong, false, NOW, |_| None).is_err(),
+                "{wrong}"
+            );
         }
-        assert!(k.unroll("q", &l, "2026-10#0", NOW, |_| None).is_err());
+        assert!(k
+            .unroll("q", &l, "2026-10#0", false, NOW, |_| None)
+            .is_err());
 
         let tongue = Tongue::load(&dir).unwrap();
         assert_eq!(tongue.projects["p"].sigils[0].uses, 2);
         horadrim::set_off(&dir, true).unwrap();
         let off = k
-            .recall("p", &l, &ask("weighs"), Duration::ZERO, |_| Some(1), &[])
+            .recall(
+                "p",
+                &l,
+                &ask("weighs"),
+                false,
+                Duration::ZERO,
+                |_| Some(1),
+                &[],
+            )
             .unwrap();
         assert!(off.text.contains("Let me check"), "{}", off.text);
         assert!(off.given.is_empty());
@@ -953,6 +1051,7 @@ fn feed: fn feed(cat: Cat)",
                 "p",
                 &lore(&[]),
                 &ask("puppy"),
+                false,
                 Duration::ZERO,
                 |_| Some(1),
                 &[],
@@ -973,6 +1072,7 @@ fn feed: fn feed(dog: Dog)",
                 "p",
                 &lore(&[]),
                 &ask("puppy"),
+                false,
                 Duration::ZERO,
                 |_| Some(2),
                 &[],
@@ -988,6 +1088,7 @@ fn feed: fn feed(dog: Dog)",
                 "p",
                 &lore(&[]),
                 &ask("puppy"),
+                false,
                 Duration::ZERO,
                 |_| None,
                 &[],

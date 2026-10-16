@@ -589,6 +589,8 @@ pub struct Hit {
     pub kind: Kind,
     pub text: String,
     pub files: Vec<String>,
+    /// For a note distilled from passages, the ids it came from.
+    pub sources: Vec<String>,
 }
 
 /// `hits` written out word for word, as `lore_recall` answered before the
@@ -596,18 +598,21 @@ pub struct Hit {
 pub fn plain(hits: &[Hit]) -> String {
     let mut out = String::new();
     for h in hits {
-        write_hit(&mut out, &h.head, &h.text, &h.files);
+        write_hit(&mut out, h, &h.text);
     }
     out.trim_end().to_string()
 }
 
-fn write_hit(out: &mut String, head: &str, text: &str, files: &[String]) {
-    out.push_str(head);
+fn write_hit(out: &mut String, h: &Hit, text: &str) {
+    out.push_str(&h.head);
     out.push('\n');
     out.push_str(text.trim_end());
     out.push('\n');
-    if !files.is_empty() {
-        out.push_str(&format!("Files: {}\n", files.join(", ")));
+    if !h.files.is_empty() {
+        out.push_str(&format!("Files: {}\n", h.files.join(", ")));
+    }
+    if !h.sources.is_empty() {
+        out.push_str(&format!("From: {}\n", h.sources.join(", ")));
     }
     out.push('\n');
 }
@@ -637,7 +642,7 @@ pub fn inscribe(lex: &mut Lexicon, known: &[String], hits: &[Hit], now: u64) -> 
         } else {
             h.text.clone()
         };
-        write_hit(&mut body, &h.head, &text, &h.files);
+        write_hit(&mut body, h, &text);
     }
     let body = body.trim_end().to_string();
     let known: HashSet<&str> = known.iter().map(String::as_str).collect();
@@ -774,6 +779,7 @@ mod tests {
             kind,
             text: text.into(),
             files: files.iter().map(|f| (*f).into()).collect(),
+            sources: Vec::new(),
         }
     }
 

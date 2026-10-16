@@ -16,6 +16,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::OnceLock;
 use std::thread;
@@ -69,6 +70,14 @@ enum Msg {
     Recall(RecallCall),
     Keep(Keep),
     Model(Result<Box<Embedder>, String>),
+}
+
+/// Whether recall may look in other projects' memory: the Settings switch,
+/// off until turned on.
+static ACROSS: AtomicBool = AtomicBool::new(false);
+
+pub fn set_across(on: bool) {
+    ACROSS.store(on, Ordering::Relaxed);
 }
 
 fn sender() -> &'static Sender<Msg> {
@@ -278,9 +287,11 @@ fn answer(keeper: &mut Keeper<Embedder>, body: &Value) -> Result<Answer, String>
             .unwrap_or_default(),
         kind,
         now: now(),
+        history: body["history"].as_bool() == Some(true),
     };
+    let across = ACROSS.load(Ordering::Relaxed);
     if let Some(id) = body["unroll"].as_str().filter(|u| !u.trim().is_empty()) {
-        return keeper.unroll(place.key(), &lore, id, ask.now, |p| place.hash(p));
+        return keeper.unroll(place.key(), &lore, id, across, ask.now, |p| place.hash(p));
     }
     let known: Vec<String> = body["known"]
         .as_array()
@@ -291,5 +302,13 @@ fn answer(keeper: &mut Keeper<Embedder>, body: &Value) -> Result<Answer, String>
                 .collect()
         })
         .unwrap_or_default();
-    keeper.recall(place.key(), &lore, &ask, BUDGET, |p| place.hash(p), &known)
+    keeper.recall(
+        place.key(),
+        &lore,
+        &ask,
+        across,
+        BUDGET,
+        |p| place.hash(p),
+        &known,
+    )
 }

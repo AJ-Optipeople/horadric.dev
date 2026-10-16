@@ -211,6 +211,37 @@ impl Store {
         Ok(store)
     }
 
+    /// The text of the months from `from` on, without the vectors, for a
+    /// reader that wants what was said lately and not years of it: the
+    /// look back, and a note naming the passages it came from. Only read,
+    /// never written to; a store not made yet is empty.
+    pub fn text_since(dir: &Path, from: Month) -> io::Result<Store> {
+        let mut store = Store {
+            dir: dir.to_path_buf(),
+            segments: BTreeMap::new(),
+            models: BTreeMap::new(),
+            unreadable: BTreeSet::new(),
+        };
+        let entries = match fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(e) if e.kind() == ErrorKind::NotFound => return Ok(store),
+            Err(e) => return Err(e),
+        };
+        let mut months = Vec::new();
+        for entry in entries {
+            let name = entry?.file_name();
+            let month = name
+                .to_str()
+                .and_then(|n| n.strip_suffix(".jsonl"))
+                .and_then(Month::parse);
+            months.extend(month.filter(|m| *m >= from));
+        }
+        for month in months {
+            store.read_segment(month)?;
+        }
+        Ok(store)
+    }
+
     /// Reads what other writers added since the last read: new months,
     /// new lines, new vectors.
     pub fn refresh(&mut self) -> io::Result<()> {

@@ -15,7 +15,7 @@
 
 use std::collections::HashMap;
 
-use horadric_core::lore::{self, Note};
+use horadric_core::lore::{self, Note, Past};
 
 use crate::horadrim::{self, Hit};
 use crate::store::{Chunk, ChunkId, Kind};
@@ -44,6 +44,8 @@ const LOOKED_AT: usize = MOST_FOUND * 3;
 #[derive(Debug, Clone, Copy)]
 pub enum Source<'a> {
     Note(&'a Note),
+    /// A note another replaced, found only when history is asked for.
+    Past(&'a Past),
     Chunk(ChunkId, &'a Chunk),
 }
 
@@ -68,6 +70,13 @@ impl<'a> Candidate<'a> {
         }
     }
 
+    pub fn past(past: &'a Past) -> Candidate<'a> {
+        Candidate {
+            source: Source::Past(past),
+            ..Candidate::note(&past.note)
+        }
+    }
+
     pub fn chunk(id: ChunkId, chunk: &'a Chunk, own: bool) -> Candidate<'a> {
         Candidate {
             source: Source::Chunk(id, chunk),
@@ -77,10 +86,20 @@ impl<'a> Candidate<'a> {
         }
     }
 
-    pub fn text(&self) -> &'a str {
+    /// The note it is, current or replaced.
+    pub fn note_of(&self) -> Option<&'a Note> {
         match self.source {
-            Source::Note(n) => &n.text,
-            Source::Chunk(_, c) => &c.text,
+            Source::Note(n) => Some(n),
+            Source::Past(p) => Some(&p.note),
+            Source::Chunk(..) => None,
+        }
+    }
+
+    pub fn text(&self) -> &'a str {
+        match (self.note_of(), self.source) {
+            (Some(n), _) => &n.text,
+            (None, Source::Chunk(_, c)) => &c.text,
+            (None, _) => "",
         }
     }
 
@@ -88,7 +107,9 @@ impl<'a> Candidate<'a> {
     /// that was not there).
     pub fn files(&self) -> Vec<(&'a str, Option<u64>)> {
         match self.source {
-            Source::Note(n) => n.files.iter().map(|m| (m.path.as_str(), m.hash)).collect(),
+            Source::Note(n) | Source::Past(Past { note: n, .. }) => {
+                n.files.iter().map(|m| (m.path.as_str(), m.hash)).collect()
+            }
             Source::Chunk(_, c) => c
                 .files
                 .iter()
@@ -147,6 +168,9 @@ pub struct Ask {
     pub kind: Option<Kind>,
     /// Unix seconds.
     pub now: u64,
+    /// Whether notes another replaced are candidates too, to see what was
+    /// true before.
+    pub history: bool,
 }
 
 /// Okapi BM25 over a fixed set of texts, with the usual k1 1.2 and b 0.75.
@@ -256,7 +280,12 @@ pub fn weight(c: &Candidate, now: u64, stale: bool) -> f64 {
     let days = now.saturating_sub(c.time) as f64 / 86_400.0;
     let age = 0.7 + 0.3 * 0.5f64.powf(days / 90.0);
     let fresh = if stale { 0.8 } else { 1.0 };
-    project * kind * age * fresh
+    // What was true before comes below what is true now, asked for or not.
+    let current = match c.source {
+        Source::Past(_) => 0.7,
+        _ => 1.0,
+    };
+    project * kind * age * fresh * current
 }
 
 /// The candidates that answer `ask`, best first, at most [`MOST_FOUND`],
@@ -368,7 +397,7 @@ pub fn hits(
             let mut head = id_of(c);
             head.push_str(&format!(" ({}", kind_name(c.kind)));
             let commit = match c.source {
-                Source::Note(n) => n.commit.as_str(),
+                Source::Note(n) | Source::Past(Past { note: n, .. }) => n.commit.as_str(),
                 Source::Chunk(_, ch) => {
                     if !c.own {
                         head.push_str(&format!(", from {}", ch.project));
@@ -381,6 +410,14 @@ pub fn hits(
             };
             let ago = lore::age(now.saturating_sub(c.time));
             head.push_str(&format!(", {ago} ago"));
+            if let Some(n) = c.note_of().filter(|n| n.since() < n.at) {
+                let since = lore::age(now.saturating_sub(n.since()));
+                head.push_str(&format!(", true since {since} ago"));
+            }
+            if let Source::Past(p) = c.source {
+                let until = lore::age(now.saturating_sub(p.until));
+                head.push_str(&format!(", REPLACED by #{} {until} ago", p.by));
+            }
             if !commit.is_empty() {
                 head.push_str(&format!(", at {}", short(commit)));
             }
@@ -397,16 +434,17 @@ pub fn hits(
                 kind: c.kind,
                 text: c.text().to_string(),
                 files: c.files().iter().map(|f| f.0.to_string()).collect(),
+                sources: c.note_of().map(|n| n.sources.clone()).unwrap_or_default(),
             }
         })
         .collect()
 }
 
 /// How a hit is named, and asked for again with `unroll`: `#12` for a
-/// note, `2026-10#5` for a passage of the store.
+/// note (or a note since replaced), `2026-10#5` for a passage of the store.
 pub fn id_of(c: &Candidate) -> String {
     match c.source {
-        Source::Note(n) => format!("#{}", n.id),
+        Source::Note(n) | Source::Past(Past { note: n, .. }) => format!("#{}", n.id),
         Source::Chunk(id, _) => id.to_string(),
     }
 }
@@ -438,6 +476,8 @@ mod tests {
                 .collect(),
             commit: "0123456789ab".into(),
             at,
+            since: None,
+            sources: Vec::new(),
         }
     }
 
@@ -615,5 +655,33 @@ mod tests {
              Files: src/b.rs"
         );
         assert!(describe(&cands, &[], NOW, |_| None).starts_with("Nothing matches"));
+    }
+
+    #[test]
+    fn a_note_says_since_when_and_a_replaced_one_until_when() {
+        let mut now = note(12, "Titles match exactly.", &[], NOW - DAY);
+        now.since = Some(NOW - 3 * DAY);
+        now.sources = vec!["2026-10#3".into(), "2026-10#9".into()];
+        let before = Past {
+            note: note(7, "Titles match case blind.", &[], NOW - 10 * DAY),
+            until: NOW - DAY,
+            by: 12,
+        };
+        let cands = [Candidate::note(&now), Candidate::past(&before)];
+        let text = describe(&cands, &[(0, 1.0), (1, 0.5)], NOW, |_| None);
+        assert_eq!(
+            text,
+            "#12 (note, 24 hours ago, true since 3 days ago, at 01234567)\n\
+             Titles match exactly.\n\
+             From: 2026-10#3, 2026-10#9\n\n\
+             #7 (note, 10 days ago, REPLACED by #12 24 hours ago, at 01234567)\n\
+             Titles match case blind."
+        );
+        // Asked the same, what is true now comes first.
+        let got = rank(&ask("titles match"), &cands, &[1, 0], |_| false);
+        assert_eq!(ids(&got), vec![0, 1]);
+        let p = Candidate::past(&before);
+        assert_eq!(p.kind, Kind::Note);
+        assert!(weight(&p, NOW, false) < weight(&Candidate::note(&before.note), NOW, false));
     }
 }

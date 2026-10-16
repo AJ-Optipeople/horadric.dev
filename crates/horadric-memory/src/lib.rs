@@ -7,6 +7,7 @@
 //! vectors on disk, [`recall`] ranks what answers a question, and
 //! [`keeper::Keeper`] is all of it as the app runs it.
 
+pub mod distill;
 mod gemma;
 pub mod horadrim;
 pub mod keeper;

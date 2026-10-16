@@ -594,6 +594,8 @@ mod tests {
                 .collect(),
             commit: String::new(),
             at: 0,
+            since: None,
+            sources: Vec::new(),
         }
     }
 

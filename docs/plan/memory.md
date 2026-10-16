@@ -223,7 +223,7 @@ else the store lacks, is embedded two at a time with a 100 ms rest while
 nothing is asked. `horadric mcp` posts to `/horadric/recall` (header
 `recall`, no session needed) and waits 12 seconds; with no answer it
 ranks the notes itself with BM25 and the weights, no meaning. Only the
-asking project's passages are candidates until part 6. `kind` narrows to
+asking project's passages are candidates unless part 6's switch is on. `kind` narrows to
 note, quest, dialogue (or transcript) or code. Each hit says what it is:
 `#12 (note, 3 days ago, at 1a2b3c4d)` for a note, `2026-10#5 (dialogue,
 session 8a8cb053, a minute ago)` for a passage of the store.
@@ -309,6 +309,15 @@ Done: the index reads each symbol's doc comment (Rust `///`, JS and TS `/** */`,
 Every project's memory is searchable from every other, behind a switch
 in Settings, off by default. Hits from another project say which.
 
+**Built 2026-10-16.** The switch is "Recall across projects" in Settings,
+Privacy, kept in the saved state as `recall_across` and told to the memory
+thread (`memory::set_across`). Off, only the asking project's passages are
+candidates, as before. On, every other project's chunks in the store are
+too (dialogue, code, and the copies of notes that project's recalls made),
+weighed 0.6 as already built, and a hit says `from <project>` in its head.
+A project whose notes were never recalled has no copies yet, so its notes
+only appear once something has recalled in it.
+
 ### 7. Validity and consolidation
 
 Transcripts are a record of what was said then, not of what is true now.
@@ -320,6 +329,36 @@ shows the current one and can be asked for history. This is the step
 that makes the memory intelligent rather than a pile, and it is done by
 an agent in the open, with its notes readable, never by a hidden
 rewrite of the kept text.
+
+**Built 2026-10-16.** A note keeps `since`, when what it says became
+true, and `sources`, the ids of the passages it came from
+(`horadric_core::lore`). `lore_note` takes `sources`: the passages are
+looked up in the store before the note is kept, an id that names none
+is refused, and the note is true from the earliest of them. A note that
+`replaces` others no longer drops them: they move to the lore's `past`,
+each with `until` (when the new note was written) and `by` (its id), at
+most 1,000 kept, and ids are never given again. `lore_recall` answers
+with current notes only; `history: true` adds the replaced ones,
+weighed at 0.7 so what is true now comes first, each saying `REPLACED
+by #12 a day ago`. A current hit says `true since ...` when that is
+before it was written, and `From: 2026-10#3, ...` for its sources.
+
+The look back (`horadric_core::lookback`, Warriv's first round after
+04:00) is now handed the day's dialogue too: the app reads the months
+of the store since the last look back (`Store::text_since`, text only,
+no vectors), keeps the project's dialogue said since, leaves out the
+conversations of Warriv's own wakes and errands (they talk about the
+quest log, not the project), and writes it to
+`memory\day\<project>.md`, each passage headed by its id, the newest
+160,000 characters (about 40k tokens) when the day said more. The
+prompt names the file and asks Warriv to keep what was decided and
+learned with `lore_note`, one fact a note, recalling first, with its
+sources, replacing what it contradicts. The pure parts are
+`horadric_memory::distill`.
+
+Not yet: the older passages of a day too long to fit are left out for
+good, since the next look back starts where this one did; the
+yardstick has no questions about validity yet.
 
 ### 8. Horadrim, the written tongue
 
