@@ -125,6 +125,8 @@ pub use {
     store::{chronicle, chronicle_all, spent},
 };
 #[cfg(windows)]
+pub mod backup;
+#[cfg(windows)]
 mod dropdown;
 #[cfg(windows)]
 mod glows;
