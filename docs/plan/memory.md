@@ -223,7 +223,7 @@ else the store lacks, is embedded two at a time with a 100 ms rest while
 nothing is asked. `horadric mcp` posts to `/horadric/recall` (header
 `recall`, no session needed) and waits 12 seconds; with no answer it
 ranks the notes itself with BM25 and the weights, no meaning. Only the
-asking project's passages are candidates until part 6. `kind` narrows to
+asking project's passages are candidates unless part 6's switch is on. `kind` narrows to
 note, quest, dialogue (or transcript) or code. Each hit says what it is:
 `#12 (note, 3 days ago, at 1a2b3c4d)` for a note, `2026-10#5 (dialogue,
 session 8a8cb053, a minute ago)` for a passage of the store.
@@ -302,10 +302,21 @@ Each symbol in the lore's code index (its head and doc comment, not its
 whole body) gets a vector, refreshed when its file's hash changes, so
 "where do we roll back a failed reload" finds the function.
 
+Done: the index reads each symbol's doc comment (Rust `///`, JS and TS `/** */`, Python docstrings), and the app's memory thread, once a recall has come in, syncs the project's code when idle: one `code` chunk per symbol (path, kind, name, head, doc), added for a file whose hash the store lacks and left alone otherwise. A chunk of a file that has since changed or gone is no longer an answer. The old chunks stay in the store and are embedded too, a small waste a later compaction can remove. The binary hands the index over with `horadric_ui::memory::set_code_source`.
+
 ### 6. Across projects
 
 Every project's memory is searchable from every other, behind a switch
 in Settings, off by default. Hits from another project say which.
+
+**Built 2026-10-16.** The switch is "Recall across projects" in Settings,
+Privacy, kept in the saved state as `recall_across` and told to the memory
+thread (`memory::set_across`). Off, only the asking project's passages are
+candidates, as before. On, every other project's chunks in the store are
+too (dialogue, code, and the copies of notes that project's recalls made),
+weighed 0.6 as already built, and a hit says `from <project>` in its head.
+A project whose notes were never recalled has no copies yet, so its notes
+only appear once something has recalled in it.
 
 ### 7. Validity and consolidation
 

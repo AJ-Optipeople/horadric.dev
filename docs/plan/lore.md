@@ -70,8 +70,18 @@ what a quest would get.
 those without, and first fills in the spend and files of quests done
 before either was kept, from their last conversation. The baseline on
 2026-10-15, 63 quests without a pack: median 6.5M tokens and 60 calls,
-Read 8%. The comparison with a pack waits for enough quests to run with
-one.
+Read 8%.
+
+The comparison on 2026-10-16, once 10 quests had run with a pack: with
+a pack, median 4.9M tokens and 45 calls, Read 6%; without (73 quests by
+then), median 6.3M tokens and 55 calls, Read 7%. That is about 22%
+fewer tokens and 18% fewer calls. Read's share barely moved, so the
+saving is less reading than less looking: fewer searches before the
+agent knows where to work. Ten quests is a small sample, and they are
+the latest ten, run while more of the lore (notes, the code index) came
+in beside the pack, so the pack alone does not own the whole drop. It
+points the right way, and the pack stays on. Run `quest spend` again
+past 30 packed quests before tuning the pack's size or weights.
 
 ## 3. Notes shared between sessions
 

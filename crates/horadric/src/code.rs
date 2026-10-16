@@ -16,7 +16,7 @@ use tree_sitter::{Language, Node, Parser, Query, QueryCursor, StreamingIterator}
 
 /// Bumped whenever what is read from a file changes, so an index kept by
 /// an older build is read again rather than trusted.
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 
 /// A file larger than this is taken to be generated (a bundle, a minified
 /// script) and left out.
@@ -51,6 +51,10 @@ pub struct Symbol {
     /// Its head: what comes before its body, on one line.
     #[serde(rename = "h")]
     pub head: String,
+    /// Its doc comment as one line, cut short: what it is for, which the
+    /// head does not say.
+    #[serde(rename = "d", default, skip_serializing_if = "String::is_empty")]
+    pub doc: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -267,6 +271,7 @@ pub fn read(lang: Lang, src: &[u8]) -> FileIndex {
                         end: node.end_position().row as u32 + 1,
                         parent: None,
                         head: head(node, src),
+                        doc: doc(lang, node, src),
                     },
                 ));
             }
@@ -320,6 +325,81 @@ fn bare_type(ty: &str) -> String {
     let ty = ty.split('<').next().unwrap_or(ty).trim();
     let ty = ty.trim_start_matches('&').trim_start_matches("mut ").trim();
     ty.rsplit("::").next().unwrap_or(ty).to_string()
+}
+
+/// The longest doc comment kept, in characters.
+const LONGEST_DOC: usize = 300;
+
+/// A definition's doc comment on one line: the comments right above it
+/// (Rust `///`, JavaScript and TypeScript `/** */` or `//`), or a Python
+/// docstring.
+fn doc(lang: Lang, node: Node, src: &[u8]) -> String {
+    let text = |n: Node| String::from_utf8_lossy(&src[n.byte_range()]).into_owned();
+    let mut found = if lang == Lang::Python {
+        node.child_by_field_name("body")
+            .and_then(|b| b.named_child(0))
+            .filter(|s| s.kind() == "expression_statement")
+            .and_then(|s| s.named_child(0))
+            .filter(|s| s.kind() == "string")
+            .map(|s| clean_doc(text(s).trim_matches(['"', '\''])))
+            .unwrap_or_default()
+    } else {
+        let mut at = node;
+        if let Some(p) = at.parent().filter(|p| p.kind() == "export_statement") {
+            at = p;
+        }
+        let mut next = at.start_position().row;
+        let mut parts: Vec<String> = Vec::new();
+        let mut prev = at.prev_sibling();
+        while let Some(p) = prev {
+            if p.end_position().row + 1 < next {
+                break;
+            }
+            match p.kind() {
+                "attribute_item" => {}
+                "line_comment" | "block_comment" | "comment" => {
+                    let t = text(p);
+                    let doc = if lang == Lang::Rust {
+                        t.starts_with("///") || t.starts_with("/**")
+                    } else {
+                        t.starts_with("/**") || t.starts_with("//")
+                    };
+                    if !doc {
+                        break;
+                    }
+                    parts.push(clean_doc(&t));
+                }
+                _ => break,
+            }
+            next = p.start_position().row;
+            prev = p.prev_sibling();
+        }
+        parts.reverse();
+        parts.join(" ")
+    };
+    found = found.split_whitespace().collect::<Vec<_>>().join(" ");
+    if found.chars().count() > LONGEST_DOC {
+        found = found.chars().take(LONGEST_DOC - 1).collect::<String>() + "…";
+    }
+    found
+}
+
+/// A comment's words without its markers.
+fn clean_doc(raw: &str) -> String {
+    raw.lines()
+        .map(|l| {
+            let l = l.trim();
+            let l = l
+                .trim_start_matches("/**")
+                .trim_start_matches("///")
+                .trim_start_matches("//")
+                .trim_start_matches('*')
+                .trim_end_matches("*/");
+            l.trim().to_string()
+        })
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// What comes before a definition's body, on one line: its signature.
@@ -694,6 +774,24 @@ fn callees(files: &Files, asked: &Asked, out: &mut String) {
     if !any {
         out.push_str(&format!("No `{}` is defined in the project.\n", asked.name));
     }
+}
+
+/// What one file's symbols say for the memory to find them by meaning: one
+/// text each, its place, head and doc comment, never its body. An `impl`
+/// says nothing its methods do not.
+pub fn passages(path: &str, f: &FileIndex) -> Vec<String> {
+    f.symbols
+        .iter()
+        .filter(|s| s.kind != "impl")
+        .map(|s| {
+            let mut text = format!("{path}\n{} {}: {}", s.kind, full(f, s), s.head);
+            if !s.doc.is_empty() {
+                text.push('\n');
+                text.push_str(&s.doc);
+            }
+            text
+        })
+        .collect()
 }
 
 /// A file's symbols with their heads and lines, nested as in the file,
@@ -1136,5 +1234,56 @@ impl T { fn take(&self) {} }
         let f = read(Lang::Rust, RS.as_bytes());
         let back: FileIndex = serde_json::from_str(&serde_json::to_string(&f).unwrap()).unwrap();
         assert_eq!(back, f);
+    }
+
+    #[test]
+    fn a_doc_comment_is_read_past_attributes_and_exports() {
+        let f = read(
+            Lang::Rust,
+            b"/// Rolls back
+/// a failed reload.
+#[derive(Debug)]
+pub struct Roll;
+
+// plain
+fn plain() {}
+",
+        );
+        assert_eq!(f.symbols[0].doc, "Rolls back a failed reload.");
+        assert_eq!(f.symbols[1].doc, "");
+        let f = read(
+            Lang::TypeScript,
+            b"/** Opens the door. */
+export function open() {}
+",
+        );
+        assert_eq!(f.symbols[0].doc, "Opens the door.");
+        let f = read(
+            Lang::Python,
+            b"def run():
+    \"\"\"Starts the run.\"\"\"
+    pass
+",
+        );
+        assert_eq!(f.symbols[0].doc, "Starts the run.");
+    }
+
+    #[test]
+    fn a_passage_says_where_what_and_what_for_but_not_the_body() {
+        let f = read(
+            Lang::Rust,
+            b"impl T {
+    /// Rolls back.
+    fn undo(&self) { secret(); }
+}
+",
+        );
+        let got = passages("src/a.rs", &f);
+        assert_eq!(
+            got,
+            ["src/a.rs
+fn T::undo: fn undo(&self)
+Rolls back."]
+        );
     }
 }

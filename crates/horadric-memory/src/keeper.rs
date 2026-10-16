@@ -4,7 +4,7 @@
 //! at a time when nothing is asked.
 //!
 //! The model is passed in once it is loaded, so recall answers by words
-//! alone until then. See docs/plan/memory.md, part 3.
+//! alone until then. See docs/plan/memory.md, parts 3 and 5.
 
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use horadric_core::lore::{Lore, Note, Past};
 
 use crate::recall::{self, Ask, Candidate, Source};
-use crate::store::{Chunk, ChunkId, FileMark, Store};
+use crate::store::{Chunk, ChunkId, FileMark, Kind, Store};
 use crate::transcripts::{self, Format};
 use crate::Embedder;
 
@@ -41,6 +41,16 @@ impl Embed for Embedder {
     }
 }
 
+/// One source file of a project's code index, as the memory takes it in:
+/// the hash of its bytes and a text for each symbol (see
+/// docs/plan/memory.md, part 5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodeFile {
+    pub path: String,
+    pub hash: u64,
+    pub symbols: Vec<String>,
+}
+
 pub struct Keeper<E> {
     store: Store,
     model: Option<E>,
@@ -48,6 +58,26 @@ pub struct Keeper<E> {
     /// How far each transcript has been kept, by path: bytes, to the end
     /// of a whole line.
     cursors: BTreeMap<String, u64>,
+    /// Each project's files as the last [`Keeper::sync_code`] saw them,
+    /// path to hash. A code chunk of a file that has changed since is
+    /// replaced by a new one, so it is not an answer any more.
+    code: HashMap<String, HashMap<String, u64>>,
+}
+
+/// Whether `c` still describes the code it was made of. Anything that is
+/// not code does, and so does code of a project not synced yet, which the
+/// staleness mark then speaks for.
+fn current(code: &HashMap<String, HashMap<String, u64>>, project: &str, c: &Chunk) -> bool {
+    if c.kind != Kind::Code {
+        return true;
+    }
+    match code.get(project) {
+        None => true,
+        Some(files) => c
+            .files
+            .first()
+            .is_some_and(|f| files.get(&f.path) == Some(&f.hash)),
+    }
 }
 
 /// Where the keeper remembers how much of each transcript it has kept.
@@ -63,9 +93,54 @@ impl<E: Embed> Keeper<E> {
         Ok(Keeper {
             store: Store::open(dir)?,
             model: None,
+            code: HashMap::new(),
             dir: dir.to_path_buf(),
             cursors,
         })
+    }
+
+    /// Makes the store hold a chunk for each symbol of `files`, the
+    /// project's code now: a file whose hash the store already has is left
+    /// as it is, one that changed gets new chunks (and the old ones stop
+    /// being answers), one that is gone drops out. The vectors come with
+    /// [`Keeper::catch_up`]. Says how many chunks it added.
+    pub fn sync_code(&mut self, project: &str, files: &[CodeFile], now: u64) -> io::Result<usize> {
+        self.store.refresh()?;
+        let have: HashSet<(&str, u64)> = self
+            .store
+            .chunks()
+            .filter(|(_, c)| c.kind == Kind::Code && c.project == project)
+            .filter_map(|(_, c)| c.files.first().map(|f| (f.path.as_str(), f.hash)))
+            .collect();
+        let mut add = Vec::new();
+        for f in files
+            .iter()
+            .filter(|f| !have.contains(&(f.path.as_str(), f.hash)))
+        {
+            for text in &f.symbols {
+                add.push(Chunk {
+                    time: now,
+                    project: project.to_string(),
+                    kind: Kind::Code,
+                    session: None,
+                    quest: None,
+                    commit: None,
+                    files: vec![FileMark {
+                        path: f.path.clone(),
+                        hash: f.hash,
+                    }],
+                    note: None,
+                    text: text.clone(),
+                });
+            }
+        }
+        let added = add.len();
+        self.store.add_all(&add, now)?;
+        self.code.insert(
+            project.to_string(),
+            files.iter().map(|f| (f.path.clone(), f.hash)).collect(),
+        );
+        Ok(added)
     }
 
     pub fn set_model(&mut self, model: E) {
@@ -114,6 +189,7 @@ impl<E: Embed> Keeper<E> {
         project: &str,
         lore: &Lore,
         ask: &Ask,
+        across: bool,
         budget: Duration,
         now_hash: impl Fn(&str) -> Option<u64>,
     ) -> Result<String, String> {
@@ -122,7 +198,9 @@ impl<E: Embed> Keeper<E> {
         let copies = self
             .copies(project, &notes, ask.now)
             .map_err(|e| e.to_string())?;
-        let Keeper { store, model, .. } = self;
+        let Keeper {
+            store, model, code, ..
+        } = self;
         let mut query = None;
         if let Some(m) = model {
             let tag = m.tag().to_string();
@@ -145,12 +223,17 @@ impl<E: Embed> Keeper<E> {
         }
         let mut cands: Vec<Candidate> = lore.notes.iter().map(Candidate::note).collect();
         cands.extend(past.iter().map(Candidate::past));
-        // Other projects' passages wait for the switch of part 6.
+        // The asking project's notes are the lore's own, read above. Other
+        // projects' passages, and the copies of their notes, only with the
+        // switch of part 6.
         cands.extend(
             store
                 .chunks()
-                .filter(|(_, c)| c.note.is_none() && c.project == project)
-                .map(|(id, c)| Candidate::chunk(id, c, true)),
+                .filter(|(_, c)| {
+                    let own = c.project == project;
+                    (across || own) && (!own || c.note.is_none()) && current(code, &c.project, c)
+                })
+                .map(|(id, c)| Candidate::chunk(id, c, c.project == project)),
         );
         let meaning: Vec<usize> = match &query {
             Some((tag, q)) => {
@@ -262,7 +345,6 @@ fn copy(project: &str, note: &Note) -> Chunk {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::Kind;
     use horadric_core::lore::Mark;
     use std::cell::Cell;
     use std::fs;
@@ -346,6 +428,7 @@ mod tests {
                 "p",
                 &l,
                 &ask("where does the puppy nap"),
+                false,
                 Duration::from_secs(5),
                 |_| None,
             )
@@ -364,7 +447,14 @@ mod tests {
             "Invoices go out monthly.",
         ]);
         let got = k
-            .recall("p", &l, &ask("monthly invoices"), Duration::ZERO, |_| None)
+            .recall(
+                "p",
+                &l,
+                &ask("monthly invoices"),
+                false,
+                Duration::ZERO,
+                |_| None,
+            )
             .unwrap();
         assert!(got.starts_with("#2 (note,"), "{got}");
         assert!(!got.contains("kitten"), "{got}");
@@ -386,7 +476,7 @@ mod tests {
         .unwrap();
         let asked = ask("where does the cat nap");
         let got = k
-            .recall("p", &l, &asked, Duration::from_secs(5), |_| None)
+            .recall("p", &l, &asked, false, Duration::from_secs(5), |_| None)
             .unwrap();
         assert!(got.starts_with("#2 (note,"), "{got}");
         assert!(!got.contains("box"), "{got}");
@@ -395,7 +485,7 @@ mod tests {
             ..asked
         };
         let got = k
-            .recall("p", &l, &then, Duration::from_secs(5), |_| None)
+            .recall("p", &l, &then, false, Duration::from_secs(5), |_| None)
             .unwrap();
         assert!(got.starts_with("#2 (note,"), "{got}");
         assert!(got.contains("REPLACED by #2"), "{got}");
@@ -408,15 +498,29 @@ mod tests {
         let mut k = keeper(&dir);
         let l = lore(&["The kitten sleeps.", "Rain on Tuesday."]);
         for _ in 0..2 {
-            k.recall("p", &l, &ask("storm"), Duration::from_secs(5), |_| None)
-                .unwrap();
+            k.recall(
+                "p",
+                &l,
+                &ask("storm"),
+                false,
+                Duration::from_secs(5),
+                |_| None,
+            )
+            .unwrap();
         }
         assert_eq!(k.store.len(), 2);
         assert_eq!(k.model.as_ref().unwrap().embedded.get(), 2);
         assert_eq!(k.catch_up(10), Ok(0));
         // Another project's notes are its own copies.
-        k.recall("q", &l, &ask("storm"), Duration::from_secs(5), |_| None)
-            .unwrap();
+        k.recall(
+            "q",
+            &l,
+            &ask("storm"),
+            false,
+            Duration::from_secs(5),
+            |_| None,
+        )
+        .unwrap();
         assert_eq!(k.store.len(), 4);
         fs::remove_dir_all(&dir).unwrap();
     }
@@ -429,6 +533,7 @@ mod tests {
             "p",
             &lore(&["The kitten sleeps."]),
             &ask("cat"),
+            false,
             Duration::from_secs(5),
             |_| None,
         )
@@ -438,6 +543,7 @@ mod tests {
                 "p",
                 &lore(&["All week it will rain."]),
                 &ask("storm"),
+                false,
                 Duration::from_secs(5),
                 |_| None,
             )
@@ -456,7 +562,7 @@ mod tests {
             "Rain on Tuesday.",
             "The price went up.",
         ]);
-        k.recall("p", &l, &ask("cat"), Duration::ZERO, |_| None)
+        k.recall("p", &l, &ask("cat"), false, Duration::ZERO, |_| None)
             .unwrap();
         assert_eq!(k.model.as_ref().unwrap().embedded.get(), 0);
         assert_eq!(k.catch_up(2), Ok(2));
@@ -489,13 +595,23 @@ mod tests {
         k.store.add(&elsewhere, NOW).unwrap();
         k.catch_up(10).unwrap();
         let got = k
-            .recall("p", &lore(&[]), &ask("rain"), Duration::ZERO, |_| Some(6))
+            .recall("p", &lore(&[]), &ask("rain"), false, Duration::ZERO, |_| {
+                Some(6)
+            })
             .unwrap();
         assert!(
             got.starts_with("2026-10#0 (dialogue, session 8a8cb053, a minute ago) MAYBE STALE: src/a.rs changed since"),
             "{got}"
         );
         assert!(!got.contains("2026-10#1"), "{got}");
+        // With the switch on, the other project's passage is a candidate
+        // too, and says whose it is.
+        let got = k
+            .recall("p", &lore(&[]), &ask("rain"), true, Duration::ZERO, |_| {
+                None
+            })
+            .unwrap();
+        assert!(got.contains("2026-10#1 (dialogue, from q,"), "{got}");
         fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -591,5 +707,70 @@ mod tests {
                 hash: 3
             }]
         );
+    }
+
+    #[test]
+    fn code_is_found_by_meaning_and_a_changed_file_replaces_its_symbols() {
+        let dir = temp("code");
+        let mut k = keeper(&dir);
+        let file = |hash, text: &str| CodeFile {
+            path: "src/pets.rs".into(),
+            hash,
+            symbols: vec![text.into()],
+        };
+        let old = [file(
+            1,
+            "src/pets.rs
+fn feed: fn feed(cat: Cat)",
+        )];
+        assert_eq!(k.sync_code("p", &old, NOW).unwrap(), 1);
+        // Same hash, nothing to add.
+        assert_eq!(k.sync_code("p", &old, NOW).unwrap(), 0);
+        k.catch_up(10).unwrap();
+        let got = k
+            .recall(
+                "p",
+                &lore(&[]),
+                &ask("puppy"),
+                false,
+                Duration::ZERO,
+                |_| Some(1),
+            )
+            .unwrap();
+        assert!(got.contains("fn feed(cat: Cat)"), "{got}");
+        assert!(got.starts_with("2026-10#0 (code,"), "{got}");
+        let new = [file(
+            2,
+            "src/pets.rs
+fn feed: fn feed(dog: Dog)",
+        )];
+        assert_eq!(k.sync_code("p", &new, NOW).unwrap(), 1);
+        k.catch_up(10).unwrap();
+        let got = k
+            .recall(
+                "p",
+                &lore(&[]),
+                &ask("puppy"),
+                false,
+                Duration::ZERO,
+                |_| Some(2),
+            )
+            .unwrap();
+        assert!(got.contains("fn feed(dog: Dog)"), "{got}");
+        assert!(!got.contains("Cat"), "{got}");
+        // A file that is gone is not an answer either.
+        k.sync_code("p", &[], NOW).unwrap();
+        let got = k
+            .recall(
+                "p",
+                &lore(&[]),
+                &ask("puppy"),
+                false,
+                Duration::ZERO,
+                |_| None,
+            )
+            .unwrap();
+        assert!(got.starts_with("Nothing matches"), "{got}");
+        fs::remove_dir_all(&dir).unwrap();
     }
 }

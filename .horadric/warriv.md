@@ -5,6 +5,13 @@
 - A quest session silent for hours with an empty worktree after two nudges is dead and I can not restart it: hand it to the human with "restart it", who does so (settled on "OSC 7501: plain terminals", which then landed).
 
 ## Lately
+- 2026-10-16 Wake: "Memory: Warriv distills the day" stopped with code committed and checks green, waiting on its review agent before merging. Not stuck, no tell, noted.
+- 2026-10-16 Wake: "Memory: Horadrim, sigils and the Lexicon" stopped again with its review fixes in, clippy and yardstick running in its background, then judge.py and merge. Not stuck, no tell, noted.
+- 2026-10-16 Round (human left, main at 80e5585): only my memory since the 9ce6dd7 ship; Warriv distills and Horadrim still in their worktrees, the Scroll waits. Nothing to do.
+- 2026-10-16 Round (human left, main at 0526639): nothing landed since the 9ce6dd7 ship; Warriv distills and Horadrim work in their worktrees, the Scroll waits. Nothing to do.
+- 2026-10-16 Round (main at 9ce6dd7): "Memory: recall across projects" landed (4dc8d2b), a Settings switch users see, tree clean apart from Horadric's own files, so cast "Ship Local". Public still held for Horadrim; Warriv distills under way, the Scroll waits.
+- 2026-10-16 Wake: "Memory: Horadrim, sigils and the Lexicon" stopped waiting on its own checks, yardstick, review and answer scoring before merging. Not stuck, no tell, noted. Once it lands, public is no longer held for Horadrim.
+- 2026-10-16 Round (main at f411289): transcripts (2092ff9), code by meaning (a12c550) and Lore part 2 spend (61654ac) landed, tree clean apart from Horadric's own files, so cast "Ship Local". Public still held for Horadrim; across projects and Warriv distills under way, the Scroll waits.
 - 2026-10-16 Round (human left, main at 3f64798): nothing landed since the ship; transcripts, code by meaning and Horadrim work in their worktrees, the other three wait on them with models set. Nothing to do.
 - 2026-10-16 Round (main at d8afcf3): "Memory: lore_recall finds by meaning" landed, the first Memory piece a user sees, and the tree is clean (three Memory quests work in worktrees), so cast "Ship Local". Public held until more of Memory lands (transcripts, code by meaning, Horadrim under way).
 - 2026-10-16 Wake: "Memory: lore_recall finds by meaning" stopped with 26dadf9 committed in its worktree, waiting on its review agent before merging. Not stuck, no tell, noted.
@@ -170,4 +177,4 @@
 
 ## Open
 - Once quests run with a pack, the pack comparison resumes by itself.
-- Memory shipped local at d8afcf3 (lore_recall by meaning). Cast "Ship Public" for Memory once transcripts, code by meaning and Horadrim have landed.
+- Memory shipped local at f411289 (recall by meaning, transcripts, code by meaning), and cast again at 9ce6dd7 for recall across projects. Cast "Ship Public" for Memory once Horadrim has landed.
