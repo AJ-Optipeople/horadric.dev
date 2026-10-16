@@ -134,7 +134,13 @@ impl Lore {
         {
             return Err(format!("there is no note {gone} to replace"));
         }
-        if origin.sources.len() > MOST_SOURCES {
+        let mut sources: Vec<String> = Vec::new();
+        for s in origin.sources {
+            if !sources.contains(&s) {
+                sources.push(s);
+            }
+        }
+        if sources.len() > MOST_SOURCES {
             return Err(format!(
                 "a note names at most {MOST_SOURCES} sources; name the ones that say it"
             ));
@@ -158,8 +164,6 @@ impl Lore {
             let over = self.past.len() - MOST_PAST;
             self.past.drain(..over);
         }
-        let mut sources = origin.sources;
-        sources.dedup();
         self.notes.push(Note {
             id,
             text: text.to_string(),
