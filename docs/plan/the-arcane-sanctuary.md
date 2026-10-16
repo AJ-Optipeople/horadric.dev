@@ -53,6 +53,15 @@ button in its header that every pane has, to fill the stage. One per
 project. It is opened from the cluster header's menu and from a key on
 the stage, and it is kept in the grid order like any pane.
 
+Like the browser it can stand beside the grid, on the left, along the
+top or on the right, from the three place buttons in its header, and
+both can stand there at once. Each docked pane is cut from what the one
+before it left, the browser first, so two on the same side stand one
+inside the other and a browser on the right with the sanctuary on top
+leaves the sessions the bottom left. Its seam drags its size, and the
+side and size are kept per project (`sky_docks` in the state, beside
+the browser's `page_docks`). Added 2026-10-16.
+
 In Tristram it shows every project at once: each project a galaxy of
 its own, placed apart, lit by all sessions everywhere. A click on a
 galaxy goes into that project's sanctuary.

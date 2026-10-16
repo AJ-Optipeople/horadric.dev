@@ -303,6 +303,17 @@ pub fn bar(hit: BarHit, docked: Option<Side>) -> Option<&'static str> {
     })
 }
 
+/// What a place button of the sanctuary's header does, `docked` naming
+/// the side of the stage it stands on.
+pub fn sky_place(side: Side, docked: Option<Side>) -> &'static str {
+    match side {
+        _ if docked == Some(side) => "Put the Arcane Sanctuary back in the grid",
+        Side::Left => "Stand the Arcane Sanctuary on the left of the stage",
+        Side::Top => "Stand the Arcane Sanctuary along the top of the stage",
+        Side::Right => "Stand the Arcane Sanctuary on the right of the stage",
+    }
+}
+
 /// What a part of the browser's tab strip does.
 pub fn tab(hit: TabHit) -> &'static str {
     match hit {

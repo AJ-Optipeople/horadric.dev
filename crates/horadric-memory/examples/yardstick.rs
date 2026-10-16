@@ -3,10 +3,10 @@
 //! Words only (as the lore matches today), BM25, each model, and each
 //! model fused with words, plus the time per chunk and the memory taken.
 //! Then the recall `lore_recall` answers with: words only (as when the
-//! app is down) and with each model's meaning, cut as the keeper cuts it.
-//! For MiniLM, what recall puts before an agent unasked at each cosine
-//! bar, on the questions and on `chatter.jsonl`, prompts it has nothing
-//! for.
+//! app is down) and with each model's meaning, cut as the keeper cuts it,
+//! and with MiniLM where the bar of a recall nobody asked for sits,
+//! and what a prompt recall offers at each cosine bar, on the questions
+//! and on `chatter.jsonl`, prompts it has nothing for.
 //!
 //! `cargo run --release -p horadric-memory --example yardstick [model...]`
 //! with models from `gemma`, `bge`, `minilm` (all when none are named).
@@ -248,6 +248,7 @@ fn main() {
                     &recall_with(&cut(f32::NEG_INFINITY)),
                 );
                 if kind == Kind::MiniLm {
+                    strong(&cands, &cut(recall::LEAST_COSINE), &questions, &answers);
                     let chatter: Vec<Question> = lines::<Chatter>(&set.join("chatter.jsonl"))
                         .into_iter()
                         .map(|c| Question {
@@ -303,7 +304,7 @@ fn unasked(
     chatter: &[Question],
     idle: &[Vec<(f32, usize)>],
 ) {
-    let offer = |q: &Question, s: &[(f32, usize)], bar: f32| -> Vec<usize> {
+    let offer = |q: &Question, s: &[(f32, usize)], bar: f32, least: f64| -> Vec<usize> {
         let cos: HashMap<usize, f32> = s.iter().map(|(c, i)| (*i, *c)).collect();
         let meaning: Vec<usize> = s
             .iter()
@@ -313,6 +314,7 @@ fn unasked(
             .collect();
         let ask = Ask {
             query: q.q.clone(),
+            least,
             ..Ask::default()
         };
         let found = recall::rank(&ask, cands, &meaning, |_| false);
@@ -323,12 +325,17 @@ fn unasked(
             .map(|(i, _)| *i)
             .collect()
     };
-    println!("\nunasked, at most {} hits a prompt:", recall::MOST_OFFERED);
-    for step in 0..9 {
-        let bar = 0.3 + 0.05 * step as f32;
+    println!(
+        "\nunasked, at most {} hits a prompt, by cosine bar, then with the fused floor {}:",
+        recall::MOST_OFFERED,
+        recall::STRONG
+    );
+    let bars = (0..9).map(|step| (0.3 + 0.05 * step as f32, 0.0));
+    let floored = [0.0, 0.4, 0.45, 0.5].map(|bar| (bar, recall::STRONG));
+    for (bar, least) in bars.chain(floored) {
         let (mut useful, mut shown, mut right) = (0, 0, 0);
         for (i, q) in questions.iter().enumerate() {
-            let o = offer(q, &scored[i], bar);
+            let o = offer(q, &scored[i], bar, least);
             shown += o.len();
             let r = o.iter().filter(|c| answers[i].contains(c)).count();
             right += r;
@@ -337,17 +344,18 @@ fn unasked(
         let noisy = chatter
             .iter()
             .zip(idle)
-            .filter(|(q, s)| !offer(q, s, bar).is_empty())
+            .filter(|(q, s)| !offer(q, s, bar, least).is_empty())
             .count();
         let pct = |a: usize, b: usize| 100.0 * a as f64 / b.max(1) as f64;
-        let mark = if (bar - recall::OFFER_BAR).abs() < 0.01 {
+        let mark = if (bar - recall::OFFER_BAR).abs() < 0.01 && least == 0.0 {
             " <"
         } else {
             ""
         };
         println!(
-            "  bar {bar:.2}: answer offered {:>5.1}%, offered hits that answer {:>5.1}% ({shown}), \
+            "  bar {bar:.2}{}: answer offered {:>5.1}%, offered hits that answer {:>5.1}% ({shown}), \
              chatter offered anything {:>5.1}%{mark}",
+            if least > 0.0 { " + floor" } else { "" },
             pct(useful, questions.len()),
             pct(right, shown),
             pct(noisy, chatter.len()),
@@ -447,6 +455,33 @@ fn lines<T: for<'a> Deserialize<'a>>(path: &Path) -> Vec<T> {
         .filter(|l| !l.trim().is_empty())
         .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("{l}: {e}")))
         .collect()
+}
+
+/// Where the bar of a recall nobody asked for sits (part 9): at each bar,
+/// how many questions get a hit at all, and how many of the hits shown
+/// answer their question. The set has no question without an answer, so
+/// a hit that is not one stands in for the noise an unasked recall adds.
+fn strong(cands: &[Candidate], meaning: &Ranking, questions: &[Question], answers: &[Vec<usize>]) {
+    println!("\nunasked recall, by its bar (now {}):", recall::STRONG);
+    for least in [0.016, 0.024, 0.028, 0.029, 0.030, 0.031, 0.032] {
+        let (mut asked, mut shown, mut right) = (0, 0, 0);
+        for (i, q) in questions.iter().enumerate() {
+            let ask = Ask {
+                query: q.q.clone(),
+                least,
+                ..Ask::default()
+            };
+            let found = recall::rank(&ask, cands, &meaning[i], |_| false);
+            asked += usize::from(!found.is_empty());
+            shown += found.len();
+            right += found.iter().filter(|(c, _)| answers[i].contains(c)).count();
+        }
+        println!(
+            "  {least:.3}: {asked:>3} of {} questions get hits, {shown:>4} hits, {:>5.1}% answer",
+            questions.len(),
+            100.0 * right as f64 / shown.max(1) as f64
+        );
+    }
 }
 
 /// Recall at 5 and 10 over all questions, then at 5 by where each came from.

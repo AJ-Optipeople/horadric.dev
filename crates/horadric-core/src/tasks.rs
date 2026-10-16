@@ -1401,6 +1401,28 @@ pub fn prompt(task: &Task, pack: &str, horadric: &str, file: &str) -> String {
     out
 }
 
+/// What memory is asked of a quest as it starts: its title and its
+/// notes, without the `After:` and `Model:` lines, which say how it is
+/// run and not what it is about.
+pub fn recall_query(task: &Task) -> String {
+    let mut out = task.title.clone();
+    for n in &task.notes {
+        if after_line(n).is_none() && model_line(n).is_none() {
+            out.push('\n');
+            out.push_str(n);
+        }
+    }
+    out
+}
+
+/// What memory recalled of a quest, as its prompt shows it.
+pub fn recalled(answer: &str) -> String {
+    format!(
+        "Memory: what the lore recalls of this quest, the strong hits only. \
+         Ask lore_recall for more, or to unroll one word for word.\n{answer}"
+    )
+}
+
 /// Whether a session runs with permission prompts bypassed: only when it
 /// holds a quest in a worktree of its own. In the main tree a wrong
 /// command touches what the human and other agents work in, so a quest
@@ -2445,6 +2467,15 @@ mod tests {
         )[0];
         assert_eq!(t.title, "Kør tests");
         assert_eq!(t.holder.as_deref(), Some("kør-tests"));
+    }
+
+    #[test]
+    fn memory_is_asked_what_a_quest_is_about_not_how_it_runs() {
+        let t = &parse(
+            "- [ ] Fix the redirect\n  After: Login\n  model: haiku\n  Only when expired.\n",
+        )[0];
+        assert_eq!(recall_query(t), "Fix the redirect\nOnly when expired.");
+        assert!(recalled("#3 (note) x").ends_with("\n#3 (note) x"));
     }
 
     #[test]

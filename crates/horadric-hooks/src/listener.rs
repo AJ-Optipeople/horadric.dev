@@ -569,6 +569,7 @@ fn prompt_recall(horadric_id: &str, event: &HookEvent, body: &[u8]) -> Option<Va
         "dir": event.cwd,
         "query": query,
         "prompt": true,
+        "strong": true,
         "session": horadric_id,
         "agent_session": event.session_id,
     }))

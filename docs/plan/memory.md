@@ -504,7 +504,16 @@ put text before the agent (`overlap.rs` answers PostToolUse with
   shown to the session is not shown again. Inscribed in Horadrim like
   any answer.
 - **At quest start.** A recall on the quest's title and notes goes into
-  its prompt beside the context pack.
+  its prompt beside the context pack. Done 2026-10-16: `After:` and
+  `Model:` lines are left out of what is asked, the app's memory gets
+  half a second to embed and the window waits a second and a half for
+  the answer, and only hits at `recall::STRONG` come. That bar is on
+  the fused score before it is weighed, so an old note or dialogue is
+  not shut out by its age: about the first three places of words and
+  meaning at once. The yardstick prints the bar's trade (MiniLM: 40 of
+  65 questions get a hit, 1.5 each, 63% of them an answer; at 0.028
+  it is 4.5 hits and 31%). Without the model nothing is strong, so an
+  app that has not loaded it yet adds nothing.
 - **Before a search.** When an agent greps or globs for a name, what the
   lore knows of it (where it is defined, a note naming it) comes with
   the result, so the next grep is not needed.
@@ -525,10 +534,11 @@ installed Horadric passes to a dev instance waits for the dev one's
 answer. Nothing changed in the installed hooks: `UserPromptSubmit` was
 one of them already, and `reload` writes them again anyway.
 
-The bar is on meaning alone, the cosine of hit and prompt, since fused
-ranks say which hit is best, not whether any is good: so without the
-model nothing is offered. Recall ranks as for `lore_recall`, then keeps
-at most 3 hits at cosine 0.5 or more that the session was not shown (the
+The bar is two: the fused floor the quest's recall uses (`STRONG`,
+words and meaning agreeing on a hit) and the cosine of hit and prompt,
+0.45 or more; so without the model nothing is offered. Recall ranks as
+for `lore_recall` with the floor, then keeps at most 3 hits at that
+cosine that the session was not shown (the
 app keeps the shown ids and told sigils by the agent's session id while
 it runs, so a `/clear` starts afresh), and never the session's own
 dialogue, which it was just told. Measured on the
@@ -537,14 +547,17 @@ prompts it has nothing for, `chatter.jsonl`:
 
 | bar | answer offered | offered hits that answer | chatter offered anything |
 |---|---|---|---|
-| 0.40 | 64.6 % | 34.8 % | 10.0 % |
-| 0.45 | 67.7 % | 41.3 % | 6.7 % |
-| **0.50** | **53.8 %** | **43.7 %** | **3.3 %** |
-| 0.55 | 35.4 % | 50.0 % | 0 % |
-| 0.60 | 15.4 % | 59.1 % | 0 % |
+| cosine 0.45 | 67.7 % | 41.3 % | 6.7 % |
+| cosine 0.50 | 53.8 % | 43.7 % | 3.3 % |
+| cosine 0.55 | 35.4 % | 50.0 % | 0 % |
+| floor alone | 49.2 % | 63.3 % | 16.7 % |
+| floor and cosine 0.40 | 44.6 % | 62.5 % | 3.3 % |
+| **floor and cosine 0.45** | **44.6 %** | **66.0 %** | **3.3 %** |
+| floor and cosine 0.50 | 38.5 % | 69.8 % | 0 % |
 
 Most of what a human types is chatter ("ok", "commit it"), so the bar
-is set where one such prompt in thirty gets anything and still half the
-real questions are offered their answer, 1.6 hits a question on
-average. The middle column is a floor: a hit not on a question's list
-may still help.
+is set where one such prompt in thirty gets anything, and two in three
+hits offered answer the question. The floor alone, right for a quest's
+title, lets through one chatter prompt in six; the cosine alone offers
+more but fewer that answer. The middle column is a floor too: a hit not
+on a question's list may still help.

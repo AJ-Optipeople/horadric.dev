@@ -108,6 +108,8 @@ mod clipboard;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod console;
 #[cfg(windows)]
+pub mod credential;
+#[cfg(windows)]
 mod cube;
 #[cfg(windows)]
 mod dialog;
@@ -123,11 +125,17 @@ pub use {
     store::{chronicle, chronicle_all, spent},
 };
 #[cfg(windows)]
+pub mod backup;
+#[cfg(windows)]
 mod dropdown;
 #[cfg(windows)]
 mod glows;
 #[cfg(windows)]
 mod glyphs;
+#[cfg(windows)]
+pub mod google;
+#[cfg(windows)]
+pub mod google_drive;
 #[cfg(windows)]
 pub mod memory;
 #[cfg(windows)]

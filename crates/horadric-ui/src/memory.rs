@@ -22,7 +22,7 @@ use std::sync::OnceLock;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use horadric_hooks::listener::RecallCall;
+use horadric_hooks::listener::{RecallCall, Reply};
 use horadric_hooks::lore::{now, Place};
 use horadric_memory::keeper::{Answer, CodeFile, Keeper, Theirs, Unasked};
 use horadric_memory::recall::{self, Ask};
@@ -40,6 +40,13 @@ const BUDGET: Duration = Duration::from_secs(3);
 /// The same for a recall on a prompt, which the human waits on: the
 /// listener gives up on it after three seconds.
 const PROMPT_BUDGET: Duration = Duration::from_secs(1);
+
+/// How long a recall nobody asked for may embed, and how long the quest
+/// it is for waits on it: a quest is started from the window's thread,
+/// and notes the model has not seen are caught up in the background
+/// anyway.
+const UNASKED_BUDGET: Duration = Duration::from_millis(500);
+const UNASKED_WAIT: Duration = Duration::from_millis(1500);
 
 /// How many chunks the background embeds between looks for a recall,
 /// and how long it rests after: the model takes every core while it runs,
@@ -70,8 +77,20 @@ pub struct Keep {
     pub format: Format,
 }
 
+/// Who a recall answers.
+enum To {
+    /// A session's `lore_recall`, by `horadric mcp`.
+    Mcp(Reply),
+    /// Horadric itself, for a prompt the agent did not ask it for, by the
+    /// time it stops waiting. One found later is not worked out: quests
+    /// started in a burst would queue recalls nobody reads, ahead of the
+    /// sessions' own.
+    Unasked(Sender<Result<Answer, String>>, Instant),
+}
+
 enum Msg {
-    Recall(RecallCall),
+    /// What was asked, and who to answer.
+    Recall(Value, To),
     Keep(Keep),
     Model(Result<Box<Embedder>, String>),
 }
@@ -102,7 +121,28 @@ fn sender() -> &'static Sender<Msg> {
 pub fn ask(call: RecallCall) {
     // A send that fails drops the call, which closes its reply: the server
     // hears so at once and answers by words.
-    let _ = sender().send(Msg::Recall(call));
+    let _ = sender().send(Msg::Recall(call.body, To::Mcp(call.reply)));
+}
+
+/// What memory recalls of `query` for the project `dir` is in, the strong
+/// hits only (part 9), for a prompt the agent did not ask it for. None
+/// when nothing is strong enough, or the memory took too long.
+pub fn unasked(dir: &Path, query: &str) -> Option<String> {
+    let (tx, rx) = mpsc::channel();
+    let body = json!({ "dir": dir.to_string_lossy(), "query": query, "strong": true });
+    let until = Instant::now() + UNASKED_WAIT;
+    sender()
+        .send(Msg::Recall(body, To::Unasked(tx, until)))
+        .ok()?;
+    match rx.recv_timeout(UNASKED_WAIT) {
+        Ok(Ok(a)) if a.text != recall::NOTHING => Some(a.text),
+        Ok(Ok(_)) => None,
+        Ok(Err(e)) => {
+            eprintln!("horadric: memory could not recall for a quest: {e}");
+            None
+        }
+        Err(_) => None,
+    }
 }
 
 /// Keeps what a transcript gained, on the memory's thread. Told by the
@@ -188,7 +228,7 @@ fn run(state: &Path, rx: Receiver<Msg>, loaded: Sender<Msg>) {
             }
         };
         match msg {
-            Some(Msg::Recall(call)) => {
+            Some(Msg::Recall(body, to)) => {
                 // The model is wanted from the first recall on, not before.
                 if !loading {
                     loading = true;
@@ -197,15 +237,23 @@ fn run(state: &Path, rx: Receiver<Msg>, loaded: Sender<Msg>) {
                         let _ = loaded.send(Msg::Model(load(&models).map(Box::new)));
                     });
                 }
-                if call.reply.wanted() {
-                    let wanted = || call.reply.wanted();
-                    let body = match answer(&mut keeper, &call.body, &mut sessions, wanted) {
-                        Ok(a) => json!({ "text": a.text, "given": a.given }),
-                        Err(e) => json!({ "error": e }),
-                    };
-                    call.reply.send(body);
+                match to {
+                    To::Mcp(reply) if reply.wanted() => {
+                        let wanted = || reply.wanted();
+                        let a = answer(&mut keeper, &body, BUDGET, &mut sessions, wanted);
+                        reply.send(match a {
+                            Ok(a) => json!({ "text": a.text, "given": a.given }),
+                            Err(e) => json!({ "error": e }),
+                        });
+                    }
+                    To::Mcp(_) => {}
+                    To::Unasked(reply, until) if Instant::now() < until => {
+                        let a = answer(&mut keeper, &body, UNASKED_BUDGET, &mut sessions, || true);
+                        let _ = reply.send(a);
+                    }
+                    To::Unasked(..) => {}
                 }
-                if let Some(dir) = call.body["dir"].as_str() {
+                if let Some(dir) = body["dir"].as_str() {
                     if CODE.get().is_some()
                         && synced.get(dir).is_none_or(|t| t.elapsed() >= SYNC_EVERY)
                     {
@@ -283,10 +331,13 @@ fn kept(
 /// the session was told, `unroll` a hit it wants word for word. Or what
 /// the listener asks on a session's prompt (`prompt` true, with the
 /// Horadric `session` and the agent's own `agent_session`), answered
-/// only with what clears the bar and the session was not shown.
+/// only with what clears the bar and the session was not shown. With
+/// `strong`, only the hits strong enough to show an agent that did not
+/// ask.
 fn answer(
     keeper: &mut Keeper<Embedder>,
     body: &Value,
+    budget: Duration,
     sessions: &mut HashMap<String, Given>,
     wanted: impl Fn() -> bool,
 ) -> Result<Answer, String> {
@@ -311,6 +362,11 @@ fn answer(
         kind,
         now: now(),
         history: body["history"].as_bool() == Some(true),
+        least: if body["strong"] == true {
+            recall::STRONG
+        } else {
+            0.0
+        },
     };
     let theirs = |key: &str| horadric_hooks::lore::of_key(key).ok();
     let across: Option<Theirs> = ACROSS.load(Ordering::Relaxed).then_some(&theirs);
@@ -366,7 +422,7 @@ fn answer(
         &lore,
         &ask,
         across,
-        BUDGET,
+        budget,
         |p| place.hash(p),
         &known,
         None,
