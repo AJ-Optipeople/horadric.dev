@@ -7,24 +7,26 @@
 //! is fetched from Hugging Face by the first recall only, so an app
 //! nobody recalls in keeps its dialogue (part 4) without the download or
 //! the memory it takes. Until the model is loaded the keeper answers by
-//! words.
+//! words. A quest's recall is asked for ahead ([`prepare`]) and taken when
+//! ready, so no window waits on it, and the model is loaded at the app's
+//! start when its files are already on disk ([`warm`]).
 //!
 //! The code index lives in the `horadric` binary, so it hands over what
 //! the memory keeps of it with [`set_code_source`]. A recall owes the
 //! project's code a sync, done when nothing is asked, so a project the
 //! index has never read does not hold the first recall up.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use horadric_hooks::listener::{RecallCall, Reply};
 use horadric_hooks::lore::{now, Place};
-use horadric_memory::keeper::{Answer, CodeFile, Keeper, Theirs};
+use horadric_memory::keeper::{Answer, CodeFile, Keeper, Theirs, Unasked};
 use horadric_memory::recall::{self, Ask};
 use horadric_memory::transcripts::Format;
 use horadric_memory::{models, Embedder, Kind};
@@ -36,6 +38,10 @@ const MODEL: Kind = Kind::MiniLm;
 /// How long a recall may spend embedding notes the model has not seen,
 /// well inside what `horadric mcp` waits.
 const BUDGET: Duration = Duration::from_secs(3);
+
+/// The same for a recall on a prompt, which the human waits on: the
+/// listener gives up on it after three seconds.
+const PROMPT_BUDGET: Duration = Duration::from_secs(1);
 
 /// How long a recall nobody asked for may embed, and how long the quest
 /// it is for waits on it: a quest is started from the window's thread,
@@ -88,7 +94,18 @@ enum Msg {
     /// What was asked, and who to answer.
     Recall(Value, To),
     Keep(Keep),
+    /// Load the model now, for a recall that is not asked yet.
+    Warm,
     Model(Result<Box<Embedder>, String>),
+}
+
+/// What a session was given by recalls on its prompts: the hits, never
+/// shown it again, and the sigils, told once. `horadric mcp` keeps its
+/// own for `lore_recall`.
+#[derive(Default)]
+struct Given {
+    seen: HashSet<String>,
+    known: Vec<String>,
 }
 
 /// Whether recall may look in other projects' memory: the Settings switch,
@@ -114,7 +131,7 @@ pub fn ask(call: RecallCall) {
 /// What memory recalls of `query` for the project `dir` is in, the strong
 /// hits only (part 9), for a prompt the agent did not ask it for. None
 /// when nothing is strong enough, or the memory took too long.
-pub fn unasked(dir: &Path, query: &str) -> Option<String> {
+fn unasked(dir: &Path, query: &str) -> Option<String> {
     let (tx, rx) = mpsc::channel();
     let body = json!({ "dir": dir.to_string_lossy(), "query": query, "strong": true });
     let until = Instant::now() + UNASKED_WAIT;
@@ -129,6 +146,69 @@ pub fn unasked(dir: &Path, query: &str) -> Option<String> {
             None
         }
         Err(_) => None,
+    }
+}
+
+/// A recall for a quest, asked for ahead on a thread of its own: the window
+/// must not wait on the model, so a quest is started from what is ready.
+enum Slot {
+    Asked(Instant),
+    Done(Option<String>),
+}
+
+fn slots() -> &'static Mutex<HashMap<(String, String), Slot>> {
+    static SLOTS: OnceLock<Mutex<HashMap<(String, String), Slot>>> = OnceLock::new();
+    SLOTS.get_or_init(Default::default)
+}
+
+/// Asks for the recall of `query` in `dir` once, off the caller's thread,
+/// and says whether it has been answered. A quest is not held up by a
+/// recall that has taken longer than it would ever be waited for.
+pub fn prepare(dir: &Path, query: &str) -> bool {
+    let id = (dir.to_string_lossy().to_string(), query.to_string());
+    let Ok(mut all) = slots().lock() else {
+        return true;
+    };
+    match all.get(&id) {
+        Some(Slot::Done(_)) => true,
+        Some(Slot::Asked(at)) => at.elapsed() > UNASKED_WAIT + UNASKED_BUDGET,
+        None => {
+            all.insert(id.clone(), Slot::Asked(Instant::now()));
+            let (dir, query) = (dir.to_path_buf(), query.to_string());
+            thread::spawn(move || {
+                let found = unasked(&dir, &query);
+                if let Ok(mut all) = slots().lock() {
+                    all.insert(id, Slot::Done(found));
+                }
+            });
+            false
+        }
+    }
+}
+
+/// What the recall for a quest found, if it has been answered, taken so a
+/// quest started again asks anew. Never waits.
+pub fn take_recall(dir: &Path, query: &str) -> Option<String> {
+    let id = (dir.to_string_lossy().to_string(), query.to_string());
+    let mut all = slots().lock().ok()?;
+    match all.remove(&id)? {
+        Slot::Done(found) => found,
+        asked @ Slot::Asked(_) => {
+            all.insert(id, asked);
+            None
+        }
+    }
+}
+
+/// Has the model loaded, when it is already on disk, so the first quest
+/// does not start before it. Without the files nothing is fetched until a
+/// recall asks (the app nobody recalls in downloads nothing).
+pub fn warm() {
+    let Some(state) = horadric_hooks::state_dir() else {
+        return;
+    };
+    if state.join("models").join(MODEL.folder()).is_dir() {
+        let _ = sender().send(Msg::Warm);
     }
 }
 
@@ -182,6 +262,13 @@ fn load(models: &Path) -> Result<Embedder, String> {
     Embedder::load(MODEL, &dir)
 }
 
+fn spawn_load(models: &Path, loaded: &Sender<Msg>) {
+    let (models, loaded) = (models.to_path_buf(), loaded.clone());
+    thread::spawn(move || {
+        let _ = loaded.send(Msg::Model(load(&models).map(Box::new)));
+    });
+}
+
 fn run(state: &Path, rx: Receiver<Msg>, loaded: Sender<Msg>) {
     let dir = state.join("memory");
     let models = state.join("models");
@@ -200,6 +287,7 @@ fn run(state: &Path, rx: Receiver<Msg>, loaded: Sender<Msg>) {
     // each was last synced.
     let mut owed: Option<String> = None;
     let mut synced: HashMap<String, Instant> = HashMap::new();
+    let mut sessions: HashMap<String, Given> = HashMap::new();
     loop {
         let msg = if behind {
             match rx.recv_timeout(REST) {
@@ -214,25 +302,31 @@ fn run(state: &Path, rx: Receiver<Msg>, loaded: Sender<Msg>) {
             }
         };
         match msg {
+            Some(Msg::Warm) => {
+                if !loading {
+                    loading = true;
+                    spawn_load(&models, &loaded);
+                }
+            }
             Some(Msg::Recall(body, to)) => {
                 // The model is wanted from the first recall on, not before.
                 if !loading {
                     loading = true;
-                    let (models, loaded) = (models.clone(), loaded.clone());
-                    thread::spawn(move || {
-                        let _ = loaded.send(Msg::Model(load(&models).map(Box::new)));
-                    });
+                    spawn_load(&models, &loaded);
                 }
                 match to {
                     To::Mcp(reply) if reply.wanted() => {
-                        reply.send(match answer(&mut keeper, &body, BUDGET) {
+                        let wanted = || reply.wanted();
+                        let a = answer(&mut keeper, &body, BUDGET, &mut sessions, wanted);
+                        reply.send(match a {
                             Ok(a) => json!({ "text": a.text, "given": a.given }),
                             Err(e) => json!({ "error": e }),
                         });
                     }
                     To::Mcp(_) => {}
                     To::Unasked(reply, until) if Instant::now() < until => {
-                        let _ = reply.send(answer(&mut keeper, &body, UNASKED_BUDGET));
+                        let a = answer(&mut keeper, &body, UNASKED_BUDGET, &mut sessions, || true);
+                        let _ = reply.send(a);
                     }
                     To::Unasked(..) => {}
                 }
@@ -311,10 +405,19 @@ fn kept(
 
 /// What `horadric mcp` asked, answered: `dir` is the folder it runs in,
 /// `files` already relative to the top of its project, `known` the sigils
-/// the session was told, `unroll` a hit it wants word for word.
-/// With `strong`, only the hits strong enough to show an agent that did
-/// not ask.
-fn answer(keeper: &mut Keeper<Embedder>, body: &Value, budget: Duration) -> Result<Answer, String> {
+/// the session was told, `unroll` a hit it wants word for word. Or what
+/// the listener asks on a session's prompt (`prompt` true, with the
+/// Horadric `session` and the agent's own `agent_session`), answered
+/// only with what clears the bar and the session was not shown. With
+/// `strong`, only the hits strong enough to show an agent that did not
+/// ask.
+fn answer(
+    keeper: &mut Keeper<Embedder>,
+    body: &Value,
+    budget: Duration,
+    sessions: &mut HashMap<String, Given>,
+    wanted: impl Fn() -> bool,
+) -> Result<Answer, String> {
     let dir = body["dir"].as_str().ok_or("say which folder: dir")?;
     let place = Place::of(Path::new(dir))?;
     let lore = place.read()?;
@@ -349,6 +452,39 @@ fn answer(keeper: &mut Keeper<Embedder>, body: &Value, budget: Duration) -> Resu
             place.hash(p)
         });
     }
+    if body["prompt"].as_bool() == Some(true) {
+        // Keyed by the agent's own session: a `/clear` starts a new one,
+        // whose context holds none of what the old one was given.
+        let agent_session = body["agent_session"].as_str().filter(|s| !s.is_empty());
+        let session = agent_session
+            .or(body["session"].as_str())
+            .ok_or("say which session")?;
+        let given = sessions.entry(session.to_string()).or_default();
+        let unasked = Unasked {
+            seen: &given.seen,
+            session: agent_session,
+        };
+        let mut a = keeper.recall(
+            place.key(),
+            &lore,
+            &ask,
+            across,
+            PROMPT_BUDGET,
+            |p| place.hash(p),
+            &given.known,
+            Some(unasked),
+        )?;
+        // A reply the listener gave up on never reached the agent, so what
+        // it held was neither shown nor told.
+        if wanted() {
+            given.seen.extend(a.shown.iter().cloned());
+            given.known.extend(a.given.iter().cloned());
+        }
+        if !a.text.is_empty() {
+            a.text = format!("{}\n\n{}", recall::OFFERED, a.text);
+        }
+        return Ok(a);
+    }
     let known: Vec<String> = body["known"]
         .as_array()
         .map(|a| {
@@ -366,5 +502,6 @@ fn answer(keeper: &mut Keeper<Embedder>, body: &Value, budget: Duration) -> Resu
         budget,
         |p| place.hash(p),
         &known,
+        None,
     )
 }

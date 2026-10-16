@@ -36,6 +36,17 @@ pub const MOST_BY_MEANING: usize = 50;
 /// it MiniLM's matches are unrelated text that happens to share a topic.
 pub const LEAST_COSINE: f32 = 0.2;
 
+/// The least cosine a hit needs to be put before an agent with a prompt
+/// it did not ask recall about, beside [`STRONG`]: the floor alone lets
+/// one prompt in six that memory has nothing for ("commit it") through,
+/// the two together one in thirty. Set from the yardstick (`unasked`
+/// lines): see docs/plan/memory.md, part 9.
+pub const OFFER_BAR: f32 = 0.45;
+
+/// The most hits put before an agent with one prompt: a few lines it may
+/// skip, not a recall's whole answer.
+pub const MOST_OFFERED: usize = 3;
+
 /// The least fused score of a hit worth showing an agent that did not ask
 /// (part 9): about the first three places of two rankings at once, by
 /// words and by meaning or by files. The first place of both is
@@ -370,6 +381,23 @@ pub fn rank(
     scored
 }
 
+/// The hits of `found` (best first) worth putting before an agent
+/// unasked: those whose `cosine` with the prompt clears [`OFFER_BAR`] and
+/// that `seen` says the session was not shown yet, at most
+/// [`MOST_OFFERED`]. None without a cosine, so without the model.
+pub fn offered(
+    found: &[(usize, f64)],
+    cosine: impl Fn(usize) -> Option<f32>,
+    seen: impl Fn(usize) -> bool,
+) -> Vec<(usize, f64)> {
+    found
+        .iter()
+        .filter(|(i, _)| cosine(*i).is_some_and(|c| c >= OFFER_BAR) && !seen(*i))
+        .take(MOST_OFFERED)
+        .copied()
+        .collect()
+}
+
 /// The files of a candidate whose hash is not what it was, by `now_hash`.
 pub fn changed<'a>(c: &Candidate<'a>, now_hash: impl Fn(&str) -> Option<u64>) -> Vec<&'a str> {
     c.files()
@@ -394,6 +422,10 @@ pub fn describe(
     }
     horadrim::plain(&hits(cands, found, now, now_hash))
 }
+
+/// What heads the hits put before an agent unasked, so it knows where
+/// they came from and that it may pass them by.
+pub const OFFERED: &str = "Horadric's memory, recalled on this prompt unasked (skip what does not bear on it; lore_recall with unroll and a hit's id gives it word for word):";
 
 /// The answer when nothing is found.
 pub const NOTHING: &str = "Nothing matches. When you find something out that the next session would otherwise have to find out again, leave it with lore_note.";
@@ -652,6 +684,15 @@ mod tests {
         let b = note(2, "new", &[], NOW);
         let cands = [Candidate::note(&a), Candidate::note(&b)];
         assert_eq!(ids(&rank(&ask(""), &cands, &[], |_| false)), vec![1, 0]);
+    }
+
+    #[test]
+    fn only_close_hits_not_shown_before_are_offered() {
+        let found: Vec<(usize, f64)> = (0..6).map(|i| (i, 1.0 - i as f64 / 10.0)).collect();
+        let cos = [0.9, 0.3, 0.7, 0.6, 0.8, 0.95];
+        let offer = offered(&found, |i| Some(cos[i]), |i| i == 2);
+        assert_eq!(ids(&offer), vec![0, 3, 4]);
+        assert!(offered(&found, |_| None, |_| false).is_empty());
     }
 
     #[test]

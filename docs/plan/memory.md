@@ -513,7 +513,11 @@ put text before the agent (`overlap.rs` answers PostToolUse with
   meaning at once. The yardstick prints the bar's trade (MiniLM: 40 of
   65 questions get a hit, 1.5 each, 63% of them an answer; at 0.028
   it is 4.5 hits and 31%). Without the model nothing is strong, so an
-  app that has not loaded it yet adds nothing.
+  app that has not loaded it yet adds nothing. Since then the recall is
+  asked for ahead on a thread of its own (when the brief opens, or the
+  runner first sees the item) and taken when ready, so no window waits
+  on it, and the model is loaded at the app's start when its files are
+  already on disk, so the first quest has it.
 - **Before a search.** When an agent greps or globs for a name, what the
   lore knows of it (where it is defined, a note naming it) comes with
   the result, so the next grep is not needed. Done 2026-10-16: the
@@ -525,3 +529,43 @@ put text before the agent (`overlap.rs` answers PostToolUse with
 Judged by `horadric quest spend`: tokens and calls per quest with these
 against without, and how often an injected hit's files or ids show up in
 what the agent did next.
+
+**On every prompt, built 2026-10-16.** The listener answers a Claude
+Code `UserPromptSubmit` of a session Horadric started by asking the
+app's memory, after handing the event on so the tile turns at once, and
+waits at most 3 seconds (the hook has 5; the memory spends at most one
+of them embedding notes it has not seen). What it gets back goes before
+the agent as `additionalContext`, headed by a line saying it is
+Horadric's memory, recalled unasked. A slash command is not recalled on,
+nor more than the first 2,000 characters of a prompt. An event the
+installed Horadric passes to a dev instance waits for the dev one's
+answer. Nothing changed in the installed hooks: `UserPromptSubmit` was
+one of them already, and `reload` writes them again anyway.
+
+The bar is two: the fused floor the quest's recall uses (`STRONG`,
+words and meaning agreeing on a hit) and the cosine of hit and prompt,
+0.45 or more; so without the model nothing is offered. Recall ranks as
+for `lore_recall` with the floor, then keeps at most 3 hits at that
+cosine that the session was not shown (the
+app keeps the shown ids and told sigils by the agent's session id while
+it runs, so a `/clear` starts afresh), and never the session's own
+dialogue, which it was just told. Measured on the
+yardstick (`unasked` lines, MiniLM, at most 3 hits a prompt) with 30
+prompts it has nothing for, `chatter.jsonl`:
+
+| bar | answer offered | offered hits that answer | chatter offered anything |
+|---|---|---|---|
+| cosine 0.45 | 67.7 % | 41.3 % | 6.7 % |
+| cosine 0.50 | 53.8 % | 43.7 % | 3.3 % |
+| cosine 0.55 | 35.4 % | 50.0 % | 0 % |
+| floor alone | 49.2 % | 63.3 % | 16.7 % |
+| floor and cosine 0.40 | 44.6 % | 62.5 % | 3.3 % |
+| **floor and cosine 0.45** | **44.6 %** | **66.0 %** | **3.3 %** |
+| floor and cosine 0.50 | 38.5 % | 69.8 % | 0 % |
+
+Most of what a human types is chatter ("ok", "commit it"), so the bar
+is set where one such prompt in thirty gets anything, and two in three
+hits offered answer the question. The floor alone, right for a quest's
+title, lets through one chatter prompt in six; the cosine alone offers
+more but fewer that answer. The middle column is a floor too: a hit not
+on a question's list may still help.
