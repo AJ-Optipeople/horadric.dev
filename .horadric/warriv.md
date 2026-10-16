@@ -5,6 +5,7 @@
 - A quest session silent for hours with an empty worktree after two nudges is dead and I can not restart it: hand it to the human with "restart it", who does so (settled on "OSC 7501: plain terminals", which then landed).
 
 ## Lately
+- 2026-10-16 Round (main at 9ce6dd7): "Memory: recall across projects" landed (4dc8d2b), a Settings switch users see, tree clean apart from Horadric's own files, so cast "Ship Local". Public still held for Horadrim; Warriv distills under way, the Scroll waits.
 - 2026-10-16 Wake: "Memory: Horadrim, sigils and the Lexicon" stopped waiting on its own checks, yardstick, review and answer scoring before merging. Not stuck, no tell, noted. Once it lands, public is no longer held for Horadrim.
 - 2026-10-16 Round (main at f411289): transcripts (2092ff9), code by meaning (a12c550) and Lore part 2 spend (61654ac) landed, tree clean apart from Horadric's own files, so cast "Ship Local". Public still held for Horadrim; across projects and Warriv distills under way, the Scroll waits.
 - 2026-10-16 Round (human left, main at 3f64798): nothing landed since the ship; transcripts, code by meaning and Horadrim work in their worktrees, the other three wait on them with models set. Nothing to do.
@@ -172,4 +173,4 @@
 
 ## Open
 - Once quests run with a pack, the pack comparison resumes by itself.
-- Memory shipped local at f411289 (recall by meaning, transcripts, code by meaning). Cast "Ship Public" for Memory once Horadrim has landed.
+- Memory shipped local at f411289 (recall by meaning, transcripts, code by meaning), and cast again at 9ce6dd7 for recall across projects. Cast "Ship Public" for Memory once Horadrim has landed.
