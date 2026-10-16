@@ -490,3 +490,25 @@ how often it was used), and the numbers (tokens saved this week, the
 yardstick's answer score in Horadrim against verbatim). It is read only;
 a switch to turn the tongue off sits at its foot, for when an answer
 seems wrong and the human wants to see if the tongue is why.
+
+### 9. Recall without being asked
+
+Asked for on 2026-10-16. An agent has to remember to call `lore_recall`,
+and the cheapest recall is the one Horadric makes for it. Hooks already
+put text before the agent (`overlap.rs` answers PostToolUse with
+`additionalContext`), so the same pipe carries memory:
+
+- **On every prompt.** The UserPromptSubmit hook recalls on what the
+  human typed and adds the best hits only when they score above a bar
+  set from the yardstick, so most prompts get nothing. A hit already
+  shown to the session is not shown again. Inscribed in Horadrim like
+  any answer.
+- **At quest start.** A recall on the quest's title and notes goes into
+  its prompt beside the context pack.
+- **Before a search.** When an agent greps or globs for a name, what the
+  lore knows of it (where it is defined, a note naming it) comes with
+  the result, so the next grep is not needed.
+
+Judged by `horadric quest spend`: tokens and calls per quest with these
+against without, and how often an injected hit's files or ids show up in
+what the agent did next.

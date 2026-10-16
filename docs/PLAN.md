@@ -108,6 +108,7 @@ one. The registry is an `Arc<Mutex<Registry>>`, each console's grid an
 - [Lore](plan/lore.md): Fewer tokens per quest: spend counts, context packs, shared notes, a code outline and index, a shorter quest log.
 - [The Arcane Sanctuary](plan/the-arcane-sanctuary.md): The lore drawn as a living graph in a stage pane, lit by what agents read and change.
 - [Memory](plan/memory.md): Long term memory by meaning, in Rust with candle: notes, transcripts kept verbatim, code, across projects, and Horadrim, a compressed tongue for recall's answers.
+- [Backup](plan/backup.md): The memory backed up encrypted, to Google Drive with one click sign in, or to a folder.
 
 ## Not in any step yet, but needed before daily use
 
