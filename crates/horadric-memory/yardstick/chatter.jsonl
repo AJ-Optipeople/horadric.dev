@@ -1,0 +1,30 @@
+{"q": "ok"}
+{"q": "yes, go ahead"}
+{"q": "continue"}
+{"q": "thanks, that works"}
+{"q": "commit it"}
+{"q": "push"}
+{"q": "looks good"}
+{"q": "do it"}
+{"q": "no, the other one"}
+{"q": "try again"}
+{"q": "what time is it in Tokyo right now?"}
+{"q": "write me a haiku about autumn leaves"}
+{"q": "how do I make a sourdough starter?"}
+{"q": "translate 'good morning' into Danish"}
+{"q": "explain the difference between a mutex and a semaphore"}
+{"q": "what is the capital of Australia?"}
+{"q": "summarize what you just did in two sentences"}
+{"q": "can you make that shorter?"}
+{"q": "never mind, revert that"}
+{"q": "why did you do that?"}
+{"q": "add a unit test for the parser"}
+{"q": "rename the variable to something clearer"}
+{"q": "fix the typo in the README"}
+{"q": "what does this error mean: index out of bounds: the len is 3 but the index is 5"}
+{"q": "set up a new Next.js project with Tailwind"}
+{"q": "write a SQL query that counts orders per customer"}
+{"q": "how many weeks until Christmas?"}
+{"q": "stop"}
+{"q": "please be more careful next time"}
+{"q": "what's a good name for a cat?"}

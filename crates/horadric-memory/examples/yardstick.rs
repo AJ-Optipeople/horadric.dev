@@ -4,6 +4,9 @@
 //! model fused with words, plus the time per chunk and the memory taken.
 //! Then the recall `lore_recall` answers with: words only (as when the
 //! app is down) and with each model's meaning, cut as the keeper cuts it.
+//! For MiniLM, what recall puts before an agent unasked at each cosine
+//! bar, on the questions and on `chatter.jsonl`, prompts it has nothing
+//! for.
 //!
 //! `cargo run --release -p horadric-memory --example yardstick [model...]`
 //! with models from `gemma`, `bge`, `minilm` (all when none are named).
@@ -245,6 +248,28 @@ fn main() {
                     &recall_with(&cut(f32::NEG_INFINITY)),
                 );
                 if kind == Kind::MiniLm {
+                    let chatter: Vec<Question> = lines::<Chatter>(&set.join("chatter.jsonl"))
+                        .into_iter()
+                        .map(|c| Question {
+                            q: c.q,
+                            answers: Vec::new(),
+                            from: "chatter".into(),
+                        })
+                        .collect();
+                    let idle: Vec<Vec<(f32, usize)>> = chatter
+                        .iter()
+                        .map(|c| {
+                            let q = e.query(&c.q).expect("embed");
+                            let mut s: Vec<(f32, usize)> = docs
+                                .iter()
+                                .enumerate()
+                                .map(|(i, v)| (similarity(&q, v), i))
+                                .collect();
+                            s.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+                            s
+                        })
+                        .collect();
+                    unasked(&cands, &questions, &answers, &scored, &chatter, &idle);
                     inscribe(
                         &cands,
                         &found,
@@ -257,6 +282,76 @@ fn main() {
                 }
             }
         }
+    }
+}
+
+#[derive(Deserialize)]
+struct Chatter {
+    q: String,
+}
+
+/// What recall would put before an agent unasked, at bars around
+/// [`recall::OFFER_BAR`]: the share of questions offered an answer, the
+/// share of offered hits that are answers, and the share of `chatter`,
+/// prompts the corpus has nothing for, offered anything. `scored` and
+/// `idle` are each prompt's chunks by cosine, best first.
+fn unasked(
+    cands: &[Candidate],
+    questions: &[Question],
+    answers: &[Vec<usize>],
+    scored: &[Vec<(f32, usize)>],
+    chatter: &[Question],
+    idle: &[Vec<(f32, usize)>],
+) {
+    let offer = |q: &Question, s: &[(f32, usize)], bar: f32| -> Vec<usize> {
+        let cos: HashMap<usize, f32> = s.iter().map(|(c, i)| (*i, *c)).collect();
+        let meaning: Vec<usize> = s
+            .iter()
+            .filter(|(c, _)| *c >= recall::LEAST_COSINE)
+            .take(recall::MOST_BY_MEANING)
+            .map(|(_, i)| *i)
+            .collect();
+        let ask = Ask {
+            query: q.q.clone(),
+            ..Ask::default()
+        };
+        let found = recall::rank(&ask, cands, &meaning, |_| false);
+        found
+            .iter()
+            .filter(|(i, _)| cos[i] >= bar)
+            .take(recall::MOST_OFFERED)
+            .map(|(i, _)| *i)
+            .collect()
+    };
+    println!("\nunasked, at most {} hits a prompt:", recall::MOST_OFFERED);
+    for step in 0..9 {
+        let bar = 0.3 + 0.05 * step as f32;
+        let (mut useful, mut shown, mut right) = (0, 0, 0);
+        for (i, q) in questions.iter().enumerate() {
+            let o = offer(q, &scored[i], bar);
+            shown += o.len();
+            let r = o.iter().filter(|c| answers[i].contains(c)).count();
+            right += r;
+            useful += usize::from(r > 0);
+        }
+        let noisy = chatter
+            .iter()
+            .zip(idle)
+            .filter(|(q, s)| !offer(q, s, bar).is_empty())
+            .count();
+        let pct = |a: usize, b: usize| 100.0 * a as f64 / b.max(1) as f64;
+        let mark = if (bar - recall::OFFER_BAR).abs() < 0.01 {
+            " <"
+        } else {
+            ""
+        };
+        println!(
+            "  bar {bar:.2}: answer offered {:>5.1}%, offered hits that answer {:>5.1}% ({shown}), \
+             chatter offered anything {:>5.1}%{mark}",
+            pct(useful, questions.len()),
+            pct(right, shown),
+            pct(noisy, chatter.len()),
+        );
     }
 }
 

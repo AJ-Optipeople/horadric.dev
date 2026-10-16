@@ -5,7 +5,8 @@
 //! `POST /horadric/browser`, `POST /horadric/recall` and
 //! `POST /horadric/glow` from `horadric mcp` and `POST /horadric/know` from
 //! Horadric's Claude mod. The browser, recall and the mod's are the ones
-//! that wait for the app's answer.
+//! that wait for the app's answer, and so does a Claude Code prompt's
+//! hook, which the memory answers with what it recalls on the prompt.
 //!
 //! Hand rolled on `std::net` because the whole protocol we need is a request
 //! line, a handful of headers, a `Content-Length` body and a fixed reply. A
@@ -240,6 +241,15 @@ const KNOW_WAIT: Duration = Duration::from_secs(2);
 /// seen. Past this the server answers by words itself.
 const RECALL_WAIT: Duration = Duration::from_secs(if cfg!(test) { 1 } else { 10 });
 
+/// A recall on a prompt holds the human's prompt up, and Claude Code
+/// gives the hook five seconds in all: past this the prompt goes on
+/// without it.
+pub(crate) const PROMPT_WAIT: Duration = Duration::from_secs(3);
+
+/// The most of a prompt a recall reads: a pasted log is not a question,
+/// and its first lines say what it is about.
+const PROMPT_CHARS: usize = 2000;
+
 /// What the command line can ask the running app for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
@@ -461,8 +471,14 @@ fn handle(
     }
 
     // Parsing is all that happens before the reply, which tells an agent
-    // that just edited a file another session is still changing.
+    // that just edited a file another session is still changing. A
+    // prompt's reply waits for the memory instead, after the event is
+    // handed on, so the tile turns to working at once.
     let parsed = agent.unwrap_or_default().event(&body);
+    let prompt = parsed
+        .as_ref()
+        .filter(|_| agent.unwrap_or_default() == Agent::Claude && !horadric_id.is_empty())
+        .and_then(|e| prompt_recall(&horadric_id, e, &body));
     let overlap = match &parsed {
         Some(event) => claims()
             .lock()
@@ -470,9 +486,10 @@ fn handle(
             .and_then(|mut c| c.hear(&horadric_id, event, SystemTime::now())),
         None => None,
     };
-    match &overlap {
-        Some(o) => respond_with(&stream, "200 OK", &overlap::reply(&overlap::context(o)))?,
-        None => respond(&stream, "200 OK")?,
+    match (&overlap, &prompt) {
+        (Some(o), _) => respond_with(&stream, "200 OK", &overlap::reply(&overlap::context(o)))?,
+        (None, None) => respond(&stream, "200 OK")?,
+        (None, Some(_)) => {}
     }
     if let (Some(o), Some(commands)) = (overlap, commands) {
         let _ = commands.send(Command::Overlap(o));
@@ -491,8 +508,18 @@ fn handle(
             (SESSION_HEADER, horadric_id.as_str()),
             (AGENT_HEADER, agent),
         ];
-        let _ = client::post(owner, HOOK_PATH, &headers, &body);
-        return Ok(());
+        if prompt.is_none() {
+            let _ = client::post(owner, HOOK_PATH, &headers, &body);
+            return Ok(());
+        }
+        // The owner's memory answers its own session's prompt.
+        let answer = client::ask(owner, HOOK_PATH, &headers, &body, PROMPT_WAIT)
+            .ok()
+            .filter(|(status, _)| *status == 200);
+        return match answer {
+            Some((_, reply)) => respond_with(&stream, "200 OK", &reply),
+            None => respond(&stream, "200 OK"),
+        };
     }
     if let Some(mut event) = parsed {
         if event.may_retitle() {
@@ -513,7 +540,71 @@ fn handle(
             limits,
         });
     }
-    Ok(())
+    match (prompt, commands) {
+        (Some(ask), Some(commands)) => offer(&stream, ask, commands),
+        (Some(_), None) => respond(&stream, "200 OK"),
+        (None, _) => Ok(()),
+    }
+}
+
+/// What the memory is asked on a Claude Code prompt of session
+/// `horadric_id`, or None when `event` is no prompt worth a recall: a
+/// slash command is an order to Claude Code, not a question. Claude Code
+/// names the text `prompt`, which [`HookEvent`] does not read.
+fn prompt_recall(horadric_id: &str, event: &HookEvent, body: &[u8]) -> Option<Value> {
+    if event.hook_event_name != "UserPromptSubmit" {
+        return None;
+    }
+    let raw: Value = serde_json::from_slice(body).ok()?;
+    let text = raw.get("prompt")?.as_str()?.trim();
+    if text.is_empty() || text.starts_with('/') {
+        return None;
+    }
+    let query: String = text.chars().take(PROMPT_CHARS).collect();
+    Some(json!({
+        "dir": event.cwd,
+        "query": query,
+        "prompt": true,
+        "session": horadric_id,
+        "agent_session": event.session_id,
+    }))
+}
+
+/// Answers a prompt's hook with what the memory recalls on it, or with
+/// nothing when it recalls nothing close or takes too long.
+fn offer(stream: &TcpStream, ask: Value, commands: &Sender<Command>) -> io::Result<()> {
+    let (reply, rx) = Reply::new();
+    let gone = Arc::clone(&reply.gone);
+    let call = RecallCall { body: ask, reply };
+    if commands.send(Command::Recall(call)).is_err() {
+        return respond(stream, "200 OK");
+    }
+    let text = match rx.recv_timeout(PROMPT_WAIT) {
+        Ok(answer) => serde_json::from_str::<Value>(&answer)
+            .ok()
+            .and_then(|v| v.get("text")?.as_str().map(str::to_string))
+            .unwrap_or_default(),
+        Err(_) => {
+            gone.store(true, Ordering::Relaxed);
+            String::new()
+        }
+    };
+    if text.is_empty() {
+        return respond(stream, "200 OK");
+    }
+    respond_with(stream, "200 OK", &prompt_reply(&text))
+}
+
+/// The reply to a `UserPromptSubmit` hook that puts `text` before the
+/// agent with the prompt.
+fn prompt_reply(text: &str) -> String {
+    json!({
+        "hookSpecificOutput": {
+            "hookEventName": "UserPromptSubmit",
+            "additionalContext": text,
+        }
+    })
+    .to_string()
 }
 
 /// Hands what a lore tool showed a session to the app as a
@@ -962,6 +1053,62 @@ X-Horadric-Port: {dev}
             reply.ends_with(r##"{"text":"#1 (note, a minute ago)"}"##),
             "{reply}"
         );
+    }
+
+    #[test]
+    fn a_prompt_is_answered_with_what_the_memory_recalls_on_it() {
+        let (port, rx) = start_with_new();
+        let app = thread::spawn(move || match rx.recv_timeout(Duration::from_secs(2)) {
+            Ok(Command::Recall(call)) => {
+                assert_eq!(call.body["prompt"], true);
+                assert_eq!(call.body["query"], "how does reload work?");
+                assert_eq!(call.body["session"], "tile-3");
+                assert_eq!(call.body["agent_session"], "c");
+                assert_eq!(call.body["dir"], "C:/p");
+                call.reply
+                    .send(json!({ "text": "#1 (note, a minute ago)" }));
+            }
+            other => panic!("{other:?}"),
+        });
+        let reply = post(
+            port,
+            "X-Horadric-Session: tile-3\r\n",
+            r#"{"session_id":"c","hook_event_name":"UserPromptSubmit","cwd":"C:/p",
+                "prompt":"how does reload work?"}"#,
+        );
+        app.join().unwrap();
+        assert!(reply.starts_with("HTTP/1.1 200"), "{reply}");
+        let body: Value = serde_json::from_str(reply.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        let out = &body["hookSpecificOutput"];
+        assert_eq!(out["hookEventName"], "UserPromptSubmit");
+        assert_eq!(out["additionalContext"], "#1 (note, a minute ago)");
+    }
+
+    #[test]
+    fn a_prompt_with_nothing_close_or_no_question_goes_on_bare() {
+        let (port, rx) = start_with_new();
+        let app = thread::spawn(move || {
+            match rx.recv_timeout(Duration::from_secs(2)) {
+                Ok(Command::Recall(call)) => call.reply.send(json!({ "text": "" })),
+                other => panic!("{other:?}"),
+            }
+            rx
+        });
+        let prompt = |text: &str| {
+            format!(
+                r#"{{"session_id":"c","hook_event_name":"UserPromptSubmit","cwd":"C:/p","prompt":"{text}"}}"#
+            )
+        };
+        let reply = post(port, "X-Horadric-Session: tile-3\r\n", &prompt("why?"));
+        let rx = app.join().unwrap();
+        assert!(reply.ends_with("\r\n\r\n{}"), "{reply}");
+        // A slash command, or a claude Horadric did not start, is not asked
+        // about at all.
+        let reply = post(port, "X-Horadric-Session: tile-3\r\n", &prompt("/compact"));
+        assert!(reply.ends_with("\r\n\r\n{}"), "{reply}");
+        let reply = post(port, "", &prompt("why?"));
+        assert!(reply.ends_with("\r\n\r\n{}"), "{reply}");
+        assert!(rx.recv_timeout(Duration::from_millis(200)).is_err());
     }
 
     #[test]

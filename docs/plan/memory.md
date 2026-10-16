@@ -512,3 +512,38 @@ put text before the agent (`overlap.rs` answers PostToolUse with
 Judged by `horadric quest spend`: tokens and calls per quest with these
 against without, and how often an injected hit's files or ids show up in
 what the agent did next.
+
+**On every prompt, built 2026-10-16.** The listener answers a Claude
+Code `UserPromptSubmit` of a session Horadric started by asking the
+app's memory, after handing the event on so the tile turns at once, and
+waits at most 3 seconds (the hook has 5; the memory spends at most one
+of them embedding notes it has not seen). What it gets back goes before
+the agent as `additionalContext`, headed by a line saying it is
+Horadric's memory, recalled unasked. A slash command is not recalled on,
+nor more than the first 2,000 characters of a prompt. An event the
+installed Horadric passes to a dev instance waits for the dev one's
+answer. Nothing changed in the installed hooks: `UserPromptSubmit` was
+one of them already, and `reload` writes them again anyway.
+
+The bar is on meaning alone, the cosine of hit and prompt, since fused
+ranks say which hit is best, not whether any is good: so without the
+model nothing is offered. Recall ranks as for `lore_recall`, then keeps
+at most 3 hits at cosine 0.5 or more that the session was not shown (the
+app keeps each session's shown ids and told sigils while it runs), and
+never the session's own dialogue, which it was just told. Measured on the
+yardstick (`unasked` lines, MiniLM, at most 3 hits a prompt) with 30
+prompts it has nothing for, `chatter.jsonl`:
+
+| bar | answer offered | offered hits that answer | chatter offered anything |
+|---|---|---|---|
+| 0.40 | 64.6 % | 34.8 % | 10.0 % |
+| 0.45 | 67.7 % | 41.3 % | 6.7 % |
+| **0.50** | **53.8 %** | **43.7 %** | **3.3 %** |
+| 0.55 | 35.4 % | 50.0 % | 0 % |
+| 0.60 | 15.4 % | 59.1 % | 0 % |
+
+Most of what a human types is chatter ("ok", "commit it"), so the bar
+is set where one such prompt in thirty gets anything and still half the
+real questions are offered their answer, 1.6 hits a question on
+average. The middle column is a floor: a hit not on a question's list
+may still help.

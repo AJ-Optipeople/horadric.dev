@@ -585,6 +585,13 @@ mod tests {
     }
 
     #[test]
+    fn a_prompt_waits_on_the_memory_inside_its_hooks_time() {
+        let timeout = handler(43117)["timeout"].as_u64().unwrap();
+        assert!(crate::listener::PROMPT_WAIT.as_secs() + 1 < timeout);
+        assert!(EVENTS.contains(&"UserPromptSubmit"));
+    }
+
+    #[test]
     fn our_hooks_never_carry_on_failure() {
         let mut s = json!({
             "hooks": {
