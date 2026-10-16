@@ -80,6 +80,13 @@ pub fn sign_in() -> Result<String, String> {
         1 << 20,
     )?;
     let tokens = google::parse_tokens(&answer.body)?;
+    if !tokens.grants_drive() {
+        return Err(
+            "Google was not given Drive: sign in again and tick the box that lets \
+                    Horadric see, edit and create its own Drive files"
+                .into(),
+        );
+    }
     let refresh = tokens
         .refresh
         .ok_or("Google sent no refresh token, so the backup could not run on its own")?;

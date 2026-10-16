@@ -123,7 +123,22 @@ pub struct Tokens {
     pub refresh: Option<String>,
     /// From the id token, only when `openid email` was asked for.
     pub email: Option<String>,
+    /// What the human granted, space separated. Google's consent page
+    /// lets them untick Drive, which still signs in.
+    pub scope: Option<String>,
 }
+
+impl Tokens {
+    /// False when Drive was unticked on the consent page. A reply that
+    /// names no scopes is taken at its word, as a refresh may leave them out.
+    pub fn grants_drive(&self) -> bool {
+        self.scope
+            .as_deref()
+            .is_none_or(|s| s.split(' ').any(|g| g == DRIVE_SCOPE))
+    }
+}
+
+pub const DRIVE_SCOPE: &str = "https://www.googleapis.com/auth/drive.file";
 
 /// Reads a token reply, or says why Google refused in its own words.
 pub fn parse_tokens(body: &[u8]) -> Result<Tokens, String> {
@@ -141,6 +156,7 @@ pub fn parse_tokens(body: &[u8]) -> Result<Tokens, String> {
         expires_in: v.get("expires_in").and_then(|x| x.as_u64()).unwrap_or(3600),
         refresh: text("refresh_token"),
         email: text("id_token").and_then(|t| email_in_id_token(&t)),
+        scope: text("scope"),
     })
 }
 
@@ -307,8 +323,21 @@ mod tests {
                 expires_in: 3599,
                 refresh: Some("1//r".into()),
                 email: Some("a@b.dk".into()),
+                scope: None,
             })
         );
+    }
+
+    #[test]
+    fn drive_unticked_on_the_consent_page_is_seen() {
+        let reply = |scope: &str| {
+            parse_tokens(format!(r#"{{"access_token":"a","scope":"{scope}"}}"#).as_bytes()).unwrap()
+        };
+        assert!(!reply("openid https://www.googleapis.com/auth/userinfo.email").grants_drive());
+        assert!(reply("openid https://www.googleapis.com/auth/drive.file").grants_drive());
+        assert!(parse_tokens(br#"{"access_token":"a"}"#)
+            .unwrap()
+            .grants_drive());
     }
 
     #[test]
