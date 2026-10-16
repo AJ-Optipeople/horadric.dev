@@ -1307,6 +1307,7 @@ impl App {
                 if self.tasks.nudged.contains_key(&h)
                     || self.phase_of(&h) != Some(Phase::Done)
                     || self.reported(&h)
+                    || self.waiting_on_own_work(&h)
                 {
                     continue;
                 }
@@ -1318,6 +1319,15 @@ impl App {
                 self.tasks.nudged.insert(h, SystemTime::now());
             }
         }
+    }
+
+    /// The session stopped its turn with background work of its own still
+    /// running: it waits, which is neither a miss to nudge nor a stop to count.
+    fn waiting_on_own_work(&self, id: &str) -> bool {
+        self.shared
+            .registry
+            .lock()
+            .is_ok_and(|r| r.get(id).is_some_and(|s| s.loot.waiting_on_own_work()))
     }
 
     /// A tomb that already said it is done.
@@ -1337,8 +1347,9 @@ impl App {
         let Ok(r) = self.shared.registry.lock() else {
             return false;
         };
-        r.get(id)
-            .is_some_and(|s| s.phase == Phase::Done && s.since > at)
+        r.get(id).is_some_and(|s| {
+            s.phase == Phase::Done && s.since > at && !s.loot.waiting_on_own_work()
+        })
     }
 
     /// What about this list the human should hear, as keys that stay the
