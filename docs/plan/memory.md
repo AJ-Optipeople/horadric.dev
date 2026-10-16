@@ -516,7 +516,11 @@ put text before the agent (`overlap.rs` answers PostToolUse with
   app that has not loaded it yet adds nothing.
 - **Before a search.** When an agent greps or globs for a name, what the
   lore knows of it (where it is defined, a note naming it) comes with
-  the result, so the next grep is not needed.
+  the result, so the next grep is not needed. Done 2026-10-16: the
+  listener answers PreToolUse for Grep and Glob (`additionalContext`,
+  waits 1.5 s at most) when the pattern is a name, asking the app's
+  memory for the strong hits only, once per name per session, and adds
+  nothing when the lore knows nothing.
 
 Judged by `horadric quest spend`: tokens and calls per quest with these
 against without, and how often an injected hit's files or ids show up in
