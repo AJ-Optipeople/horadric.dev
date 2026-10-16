@@ -486,10 +486,11 @@ fn handle(
             .and_then(|mut c| c.hear(&horadric_id, event, SystemTime::now())),
         None => None,
     };
+    // A prompt is answered once, below; an overlap only comes of an edit.
     match (&overlap, &prompt) {
-        (Some(o), _) => respond_with(&stream, "200 OK", &overlap::reply(&overlap::context(o)))?,
+        (_, Some(_)) => {}
+        (Some(o), None) => respond_with(&stream, "200 OK", &overlap::reply(&overlap::context(o)))?,
         (None, None) => respond(&stream, "200 OK")?,
-        (None, Some(_)) => {}
     }
     if let (Some(o), Some(commands)) = (overlap, commands) {
         let _ = commands.send(Command::Overlap(o));
@@ -557,7 +558,10 @@ fn prompt_recall(horadric_id: &str, event: &HookEvent, body: &[u8]) -> Option<Va
     }
     let raw: Value = serde_json::from_slice(body).ok()?;
     let text = raw.get("prompt")?.as_str()?.trim();
-    if text.is_empty() || text.starts_with('/') {
+    // `/compact` is a command, `/src/a.rs is broken` a path.
+    let first = text.split_whitespace().next().unwrap_or("");
+    let command = first.starts_with('/') && !first[1..].contains('/');
+    if text.is_empty() || command {
         return None;
     }
     let query: String = text.chars().take(PROMPT_CHARS).collect();

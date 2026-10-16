@@ -198,7 +198,8 @@ fn run(state: &Path, rx: Receiver<Msg>, loaded: Sender<Msg>) {
                     });
                 }
                 if call.reply.wanted() {
-                    let body = match answer(&mut keeper, &call.body, &mut sessions) {
+                    let wanted = || call.reply.wanted();
+                    let body = match answer(&mut keeper, &call.body, &mut sessions, wanted) {
                         Ok(a) => json!({ "text": a.text, "given": a.given }),
                         Err(e) => json!({ "error": e }),
                     };
@@ -287,6 +288,7 @@ fn answer(
     keeper: &mut Keeper<Embedder>,
     body: &Value,
     sessions: &mut HashMap<String, Given>,
+    wanted: impl Fn() -> bool,
 ) -> Result<Answer, String> {
     let dir = body["dir"].as_str().ok_or("say which folder: dir")?;
     let place = Place::of(Path::new(dir))?;
@@ -318,11 +320,16 @@ fn answer(
         });
     }
     if body["prompt"].as_bool() == Some(true) {
-        let session = body["session"].as_str().ok_or("say which session")?;
+        // Keyed by the agent's own session: a `/clear` starts a new one,
+        // whose context holds none of what the old one was given.
+        let agent_session = body["agent_session"].as_str().filter(|s| !s.is_empty());
+        let session = agent_session
+            .or(body["session"].as_str())
+            .ok_or("say which session")?;
         let given = sessions.entry(session.to_string()).or_default();
         let unasked = Unasked {
             seen: &given.seen,
-            session: body["agent_session"].as_str().filter(|s| !s.is_empty()),
+            session: agent_session,
         };
         let mut a = keeper.recall(
             place.key(),
@@ -334,8 +341,12 @@ fn answer(
             &given.known,
             Some(unasked),
         )?;
-        given.seen.extend(a.shown.iter().cloned());
-        given.known.extend(a.given.iter().cloned());
+        // A reply the listener gave up on never reached the agent, so what
+        // it held was neither shown nor told.
+        if wanted() {
+            given.seen.extend(a.shown.iter().cloned());
+            given.known.extend(a.given.iter().cloned());
+        }
         if !a.text.is_empty() {
             a.text = format!("{}\n\n{}", recall::OFFERED, a.text);
         }

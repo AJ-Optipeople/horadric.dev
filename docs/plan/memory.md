@@ -529,8 +529,9 @@ The bar is on meaning alone, the cosine of hit and prompt, since fused
 ranks say which hit is best, not whether any is good: so without the
 model nothing is offered. Recall ranks as for `lore_recall`, then keeps
 at most 3 hits at cosine 0.5 or more that the session was not shown (the
-app keeps each session's shown ids and told sigils while it runs), and
-never the session's own dialogue, which it was just told. Measured on the
+app keeps the shown ids and told sigils by the agent's session id while
+it runs, so a `/clear` starts afresh), and never the session's own
+dialogue, which it was just told. Measured on the
 yardstick (`unasked` lines, MiniLM, at most 3 hits a prompt) with 30
 prompts it has nothing for, `chatter.jsonl`:
 
