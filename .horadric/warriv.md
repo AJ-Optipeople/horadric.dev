@@ -7,6 +7,7 @@
 - A quest session silent for hours with an empty worktree after two nudges is dead and I can not restart it: hand it to the human with "restart it", who does so (settled on "OSC 7501: plain terminals", which then landed).
 
 ## Lately
+- 2026-10-16 Round (13:42, human left, main at 1a453fc): the 13:40 Ship Local reloaded fine at 13:41 with all six Backup and recall quests. One quest open (task notification recall, sonnet), waiting for the runner. No v0.29.0 yet; public stays with the human. Nothing else to do.
 - 2026-10-16 Round (13:40, human left, main at 9e0ebc1): no v0.29.0 tag, installed build is 13:26 (before dd1c08f), the 13:35 release build never reloaded and no cargo runs. Cast "Ship Local" per Open. Gave the new "no recall on a task notification" quest Model: sonnet.
 - 2026-10-16 Round (13:32, main at dd1c08f): "Backup: the Settings section" landed, the last of the six. A `cargo build --release` started 13:32, after the landing, so a ship already carries it. No cast. No tag past v0.28.0 yet: next round check whether the human's session shipped public.
 - 2026-10-16 Round (13:20, main at aa829d1): "Recall on every prompt" landed. The 13:06 Ship Local has not built yet (release exe 13:04) and builds from the shared tree, so it carries aa829d1. No second cast. Only "Backup: the Settings section" left, running its tests; then public per Open.
@@ -46,4 +47,4 @@
 
 ## Open
 - Once quests run with a pack, the pack comparison resumes by itself.
-- The human's session said it will ship public when all six Backup and recall quests land ("released asap"), but no v0.29.0 came. Cast Ship Local 13:40: next round check reload.log says reloaded after 13:40. Public stays with the human (the "and ships public" switch is not mine to assume).
+- The human's session said it will ship public when all six Backup and recall quests land ("released asap"), but no v0.29.0 came. Ship Local reloaded 13:41. Public stays with the human (the "and ships public" switch is not mine to assume). When the task notification quest lands, cast Ship Local.
