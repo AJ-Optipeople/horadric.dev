@@ -5,6 +5,7 @@
 - A quest session silent for hours with an empty worktree after two nudges is dead and I can not restart it: hand it to the human with "restart it", who does so (settled on "OSC 7501: plain terminals", which then landed).
 
 ## Lately
+- 2026-10-16 Round (main at d9b8dd7): "Memory: Horadrim, sigils and the Lexicon" landed (63eb633), tree clean apart from Horadric's own files, so cast "Ship Local". Held public one more quest: the Scroll (its Settings section, under way) finishes Memory, then one release for it all.
 - 2026-10-16 Round (main at 229fa02): "Memory: the look back misses no dialogue" landed (60c4e32), tree clean apart from Horadric's own files, so cast "Ship Local". Horadrim still under way, the Scroll waits (sonnet). Public still held for Horadrim.
 - 2026-10-16 Wake: "Memory: Horadrim, sigils and the Lexicon" stopped a fourth time, judge.py still running in its background before part 8 numbers and merge. Not stuck, no tell, noted.
 - 2026-10-16 Round (human left, main at 9ce75ba): nothing landed since the 0752547 ship; Horadrim and the look back work in their worktrees, the Scroll waits (sonnet). Nothing to do.
@@ -183,4 +184,4 @@
 
 ## Open
 - Once quests run with a pack, the pack comparison resumes by itself.
-- Memory shipped local at f411289 (recall by meaning, transcripts, code by meaning), and cast again at 9ce6dd7 for recall across projects at 0752547 for Warriv distills and at 229fa02 for the look back. Cast "Ship Public" for Memory once Horadrim has landed.
+- Memory shipped local several times, last cast at d9b8dd7 for Horadrim. Cast "Ship Public" for Memory (last tag v0.27.0) once "Memory: the Scroll" lands.
