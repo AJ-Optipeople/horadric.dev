@@ -5,6 +5,8 @@
 - A quest session silent for hours with an empty worktree after two nudges is dead and I can not restart it: hand it to the human with "restart it", who does so (settled on "OSC 7501: plain terminals", which then landed).
 
 ## Lately
+- 2026-10-16 Wake: "Memory: lore_recall finds by meaning" stopped with 26dadf9 committed in its worktree, waiting on its review agent before merging. Not stuck, no tell, noted.
+- 2026-10-16 Round (main at 5487ba1): "Memory: the store" and "fetch the model once" landed, both crates the app does not use yet, so no ship. lore_recall by meaning is under way; ship once it lands. Nothing else to do.
 - 2026-10-16 Wake: "Memory: the store, monthly segments" stopped waiting on its own workspace tests (queued for the CPU slot) and its diff review. Not stuck, no tell, noted.
 - 2026-10-16 Wake: "Memory: fetch the model once into models" stopped with its fix in, waiting on clippy and tests (queued behind another build) and its review. Not stuck, no tell, noted.
 - 2026-10-16 Round (main at dacb6ae): "Memory: an embedding model" landed (fc1ba08, cedd716, MiniLM chosen). It is a crate the app does not use yet, so no ship, as with the Sanctuary's graph. The store and the model fetch are under way in their own worktrees. Ship once lore_recall by meaning lands.
