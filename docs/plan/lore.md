@@ -64,7 +64,8 @@ had one. Alike is shared title and notes words weighed by rarity, one
 `After:` the other or both the same quest, and the same plan parts
 named. Warriv writes or corrects a pack through the quest's notes: a
 path named there leads the pack. `horadric quest pack "title"` shows
-what a quest would get.
+what a quest would get, the memory's strong recall of it too, asked of
+the running app (it says so when no app answered).
 
 `horadric quest spend` sets done quests started with a pack beside
 those without, and first fills in the spend and files of quests done

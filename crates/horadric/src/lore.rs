@@ -157,6 +157,16 @@ fn known() -> MutexGuard<'static, Vec<String>> {
     KNOWN.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// What the app's memory recalls of `query` for the project `dir` is in,
+/// the strong hits only, as a quest's prompt gets them: None inside when
+/// nothing is strong enough, None outside when the app did not answer.
+/// Without the model nothing is strong, so finding by words here would
+/// show what no quest gets.
+pub fn recall_strong(dir: &Path, query: &str) -> Option<Option<String>> {
+    let body = serde_json::json!({ "dir": dir.to_string_lossy(), "query": query, "strong": true });
+    ask_app(&body).map(|(text, _)| Some(text).filter(|t| t != recall::NOTHING))
+}
+
 /// The app's answer to a recall and the sigils it told, None when there
 /// is none to be had.
 fn ask_app(body: &Value) -> Option<(String, Vec<String>)> {
