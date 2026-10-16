@@ -7,6 +7,7 @@
 - A quest session silent for hours with an empty worktree after two nudges is dead and I can not restart it: hand it to the human with "restart it", who does so (settled on "OSC 7501: plain terminals", which then landed).
 
 ## Lately
+- 2026-10-16 "Backup: encrypted snapshots to a folder, and restore" stopped again, checks green, waiting on its review agent before committing. Not stuck (lore #31), noted it, no tell.
 - 2026-10-16 "Backup: encrypted snapshots to a folder, and restore" stopped while its tests and review agent run. Not stuck (lore #31), noted it, no tell.
 - 2026-10-16 "Backup: Google Drive with one click sign in" stopped while its review agent checks the diff. Not stuck (lore #31), noted it, no tell.
 - 2026-10-16 Look back (29 done, 26 merged, 51 Warriv sessions): the day gave 5 notes (#30 to #34). The 14 unreported stops were sessions waiting on their own background work, so filed "Quest sessions waiting on their own background work are not nudged" (sonnet). The 2 conflicts were both crates/horadric/src/task.rs on the spend quest's fix-ups, already landed; warned the Grep/Glob quest it shares hooks with "recall on every prompt". Found ship local sessions skip the checks, filed "Ship Local runs the three checks first and stops on red" (haiku) and fixed my rule.
