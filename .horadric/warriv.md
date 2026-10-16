@@ -5,6 +5,7 @@
 - A quest session silent for hours with an empty worktree after two nudges is dead and I can not restart it: hand it to the human with "restart it", who does so (settled on "OSC 7501: plain terminals", which then landed).
 
 ## Lately
+- 2026-10-16 Round (main at d8afcf3): "Memory: lore_recall finds by meaning" landed, the first Memory piece a user sees, and the tree is clean (three Memory quests work in worktrees), so cast "Ship Local". Public held until more of Memory lands (transcripts, code by meaning, Horadrim under way).
 - 2026-10-16 Wake: "Memory: lore_recall finds by meaning" stopped with 26dadf9 committed in its worktree, waiting on its review agent before merging. Not stuck, no tell, noted.
 - 2026-10-16 Round (main at 5487ba1): "Memory: the store" and "fetch the model once" landed, both crates the app does not use yet, so no ship. lore_recall by meaning is under way; ship once it lands. Nothing else to do.
 - 2026-10-16 Wake: "Memory: the store, monthly segments" stopped waiting on its own workspace tests (queued for the CPU slot) and its diff review. Not stuck, no tell, noted.
@@ -168,4 +169,4 @@
 
 ## Open
 - Once quests run with a pack, the pack comparison resumes by itself.
-- Hold shipping the Memory work until "Memory: lore_recall finds by meaning" lands, the first piece a user sees; ship local then (public too if the switch says so).
+- Memory shipped local at d8afcf3 (lore_recall by meaning). Cast "Ship Public" for Memory once transcripts, code by meaning and Horadrim have landed.
