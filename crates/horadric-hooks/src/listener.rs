@@ -1,9 +1,11 @@
-//! A minimal HTTP/1.1 server for seven purposes: accept `POST /horadric/hook`
+//! A minimal HTTP/1.1 server for nine purposes: accept `POST /horadric/hook`
 //! from Claude Code, `POST /horadric/status` from its status line,
 //! `POST /horadric/new` from `horadric new`, `POST /horadric/reload` from
 //! `horadric reload`, `POST /horadric/tasks` from `horadric quest`,
-//! `POST /horadric/browser` from `horadric mcp` and `POST /horadric/know`
-//! from Horadric's Claude mod, the two that wait for the app's answer.
+//! `POST /horadric/browser`, `POST /horadric/recall` and
+//! `POST /horadric/glow` from `horadric mcp` and `POST /horadric/know` from
+//! Horadric's Claude mod. The browser, recall and the mod's are the ones
+//! that wait for the app's answer.
 //!
 //! Hand rolled on `std::net` because the whole protocol we need is a request
 //! line, a handful of headers, a `Content-Length` body and a fixed reply. A
@@ -22,8 +24,9 @@ use horadric_core::{Agent, HookEvent, Limits, Status};
 use serde_json::{json, Value};
 
 use crate::{
-    client, transcript, AGENT_HEADER, BROWSER_PATH, COMMAND_HEADER, HOOK_PATH, KNOW_PATH, NEW_PATH,
-    OWNER_HEADER, RELOAD_PATH, SESSION_HEADER, STATE_HEADER, STATUS_PATH, TASKS_PATH,
+    client, transcript, AGENT_HEADER, BROWSER_PATH, COMMAND_HEADER, GLOW_PATH, HOOK_PATH,
+    KNOW_PATH, NEW_PATH, OWNER_HEADER, RECALL_PATH, RELOAD_PATH, SESSION_HEADER, STATE_HEADER,
+    STATUS_PATH, TASKS_PATH,
 };
 
 /// A hook event together with the Horadric session id from the header.
@@ -176,6 +179,15 @@ pub struct KnowCall {
     pub reply: Reply,
 }
 
+/// A `lore_recall` from `horadric mcp`, for the app's memory. Any agent's
+/// may ask, Horadric's session or not: the notes are the project's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecallCall {
+    /// What was asked, as `horadric mcp` wrote it.
+    pub body: Value,
+    pub reply: Reply,
+}
+
 /// Where the app sends its answer, a JSON body. It is not part of what was
 /// asked, so any two are equal.
 #[derive(Debug, Clone)]
@@ -224,6 +236,10 @@ const BROWSER_WAIT: Duration = Duration::from_secs(if cfg!(test) { 1 } else { 90
 /// this is not worth waiting on.
 const KNOW_WAIT: Duration = Duration::from_secs(2);
 
+/// A recall waits on the model, which may be embedding notes it has not
+/// seen. Past this the server answers by words itself.
+const RECALL_WAIT: Duration = Duration::from_secs(if cfg!(test) { 1 } else { 10 });
+
 /// What the command line can ask the running app for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
@@ -235,6 +251,7 @@ pub enum Command {
     Overlap(Overlap),
     Browser(BrowserCall),
     Know(KnowCall),
+    Recall(RecallCall),
 }
 
 /// Starts listening on 127.0.0.1 and forwards every tagged event on `tx`,
@@ -338,6 +355,8 @@ fn handle(
         TASKS_PATH,
         BROWSER_PATH,
         KNOW_PATH,
+        GLOW_PATH,
+        RECALL_PATH,
     ];
     if method != "POST" || !paths.contains(&path) {
         return respond(&stream, "404 Not Found");
@@ -395,6 +414,8 @@ fn handle(
             NEW_PATH => "new",
             TASKS_PATH => "tasks",
             BROWSER_PATH => "browser",
+            GLOW_PATH => "glow",
+            RECALL_PATH => "recall",
             _ => "reload",
         };
         if from_browser || command != wanted {
@@ -409,11 +430,17 @@ fn handle(
                 &json!({ "error": why }).to_string(),
             );
         }
+        if path == GLOW_PATH {
+            return glow(&stream, horadric_id, &body, tx);
+        }
         let Some(commands) = commands else {
             return respond(&stream, "503 Service Unavailable");
         };
         if path == BROWSER_PATH {
             return browser(&stream, horadric_id, &body, commands);
+        }
+        if path == RECALL_PATH {
+            return recall(&stream, &body, commands);
         }
         let request = match path {
             NEW_PATH => NewSession::from_json(&body).map(Command::New),
@@ -489,6 +516,29 @@ fn handle(
     Ok(())
 }
 
+/// Hands what a lore tool showed a session to the app as a
+/// [`HookEvent::GLOW`]. Nothing waits on it: it is light, not work.
+fn glow(stream: &TcpStream, session: String, body: &[u8], tx: &Sender<Tagged>) -> io::Result<()> {
+    let Ok(input) = serde_json::from_slice::<Value>(body) else {
+        return respond(stream, "400 Bad Request");
+    };
+    if session.is_empty() {
+        return respond(stream, "400 Bad Request");
+    }
+    respond(stream, "200 OK")?;
+    let event = HookEvent {
+        tool_input: Some(input),
+        ..HookEvent::synthetic(HookEvent::GLOW)
+    };
+    let _ = tx.send(Tagged {
+        horadric_id: session,
+        event,
+        agent: Agent::Claude,
+        limits: None,
+    });
+    Ok(())
+}
+
 /// Hands an agent's browser call to the app and answers with what the app
 /// answers. Only a session's: the page is its project's.
 fn browser(
@@ -517,6 +567,33 @@ fn browser(
         Ok(answer) => respond_with(stream, "200 OK", &answer),
         Err(_) => {
             reply.give_up();
+            respond(stream, "504 Gateway Timeout")
+        }
+    }
+}
+
+/// Hands a recall to the app and answers with what the app answers.
+fn recall(stream: &TcpStream, body: &[u8], commands: &Sender<Command>) -> io::Result<()> {
+    let Ok(body) = serde_json::from_slice::<Value>(body) else {
+        return respond(stream, "400 Bad Request");
+    };
+    let (reply, rx) = Reply::new();
+    // The flag, not the reply, is kept: an app that drops the call (the
+    // Mac has no memory yet) closes the reply, and the caller hears at once.
+    let gone = Arc::clone(&reply.gone);
+    if commands
+        .send(Command::Recall(RecallCall { body, reply }))
+        .is_err()
+    {
+        return respond(stream, "503 Service Unavailable");
+    }
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
+    match rx.recv_timeout(RECALL_WAIT) {
+        Ok(answer) => respond_with(stream, "200 OK", &answer),
+        Err(_) => {
+            // The server answers by words now; a recall still queued
+            // behind others is not worth the memory's time.
+            gone.store(true, Ordering::Relaxed);
             respond(stream, "504 Gateway Timeout")
         }
     }
@@ -861,6 +938,48 @@ X-Horadric-Port: {dev}
         assert!(reply.ends_with(r#"{"open":false}"#), "{reply}");
     }
 
+    #[test]
+    fn a_recall_is_answered_with_what_the_app_answers() {
+        let (port, rx) = start_with_new();
+        let app = thread::spawn(move || match rx.recv_timeout(Duration::from_secs(2)) {
+            Ok(Command::Recall(call)) => {
+                assert_eq!(call.body["query"], "reload");
+                call.reply
+                    .send(json!({ "text": "#1 (note, a minute ago)" }));
+            }
+            other => panic!("{other:?}"),
+        });
+        let reply = post_to(
+            port,
+            RECALL_PATH,
+            "X-Horadric-Command: recall
+",
+            r#"{"query":"reload"}"#,
+        );
+        app.join().unwrap();
+        assert!(reply.starts_with("HTTP/1.1 200"), "{reply}");
+        assert!(
+            reply.ends_with(r##"{"text":"#1 (note, a minute ago)"}"##),
+            "{reply}"
+        );
+    }
+
+    #[test]
+    fn a_recall_needs_its_header_and_no_origin() {
+        let (port, rx) = start_with_new();
+        for headers in [
+            "X-Horadric-Command: browser
+",
+            "X-Horadric-Command: recall
+Origin: https://a.b
+",
+        ] {
+            let reply = post_to(port, RECALL_PATH, headers, "{}");
+            assert!(reply.starts_with("HTTP/1.1 403"), "{headers}: {reply}");
+        }
+        assert!(rx.recv_timeout(Duration::from_millis(200)).is_err());
+    }
+
     /// The app starts gits and sessions while a call waits on it. None of
     /// them may hold the caller's connection open: the caller would wait
     /// past its answer, or be reset when the child exits, with its call
@@ -923,6 +1042,40 @@ X-Horadric-Session: tile-2
             "X-Horadric-Command: browser\r\nX-Horadric-Session: t\r\nOrigin: https://a.b\r\n",
         ] {
             let reply = post_to(port, BROWSER_PATH, headers, r#"{"op":"info"}"#);
+            assert!(reply.starts_with("HTTP/1.1 4"), "{headers}: {reply}");
+        }
+        assert!(rx.recv_timeout(Duration::from_millis(200)).is_err());
+    }
+
+    #[test]
+    fn a_glow_is_passed_on_as_an_event_of_its_session() {
+        let (port, rx) = start();
+        let body = r#"{"nodes":["note:3"],"touch":"recall"}"#;
+        let headers = "X-Horadric-Command: glow
+X-Horadric-Session: tile-g
+";
+        let reply = post_to(port, GLOW_PATH, headers, body);
+        assert!(reply.starts_with("HTTP/1.1 200"), "{reply}");
+        let t = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(t.horadric_id, "tile-g");
+        assert_eq!(t.event.hook_event_name, HookEvent::GLOW);
+        assert_eq!(t.event.tool_input.unwrap()["nodes"][0], "note:3");
+    }
+
+    #[test]
+    fn a_glow_needs_its_header_a_session_and_no_origin() {
+        let (port, rx) = start();
+        for headers in [
+            "X-Horadric-Session: tile-g
+",
+            "X-Horadric-Command: glow
+",
+            "X-Horadric-Command: glow
+X-Horadric-Session: t
+Origin: https://a.b
+",
+        ] {
+            let reply = post_to(port, GLOW_PATH, headers, "{}");
             assert!(reply.starts_with("HTTP/1.1 4"), "{headers}: {reply}");
         }
         assert!(rx.recv_timeout(Duration::from_millis(200)).is_err());

@@ -47,6 +47,13 @@ pub const WAKES_AN_HOUR: usize = 6;
 /// The span the wakes are counted in, in seconds.
 pub const HOUR: u64 = 60 * 60;
 
+/// How long a round brought by landings waits for the next one, so quests
+/// landing close together share a wake instead of one each.
+pub const SETTLE: u64 = 3 * 60;
+
+/// The longest a landing's round waits while landings keep coming.
+pub const SETTLE_MOST: u64 = 10 * 60;
+
 /// At most this many quests filed for the aims a wake.
 pub const FILE_AT_MOST: usize = 8;
 
@@ -302,9 +309,9 @@ pub struct Desk {
     wakes: Vec<u64>,
     /// The budget ran out and the human was told so, until it frees up.
     tired: bool,
-    /// Events that went to the human: the budget was spent, or Warriv
-    /// ended its turn with them still holding. Kept while they hold.
-    human: Vec<Event>,
+    /// Events that went to the human, by key: the budget was spent, or
+    /// Warriv ended its turn with them still holding. Kept while they hold.
+    human: BTreeSet<String>,
     /// Wakes in a row for the aims that filed nothing.
     dry: usize,
     /// Warriv drives the project, which lifts the budget on its wakes.
@@ -312,6 +319,9 @@ pub struct Desk {
     /// When the last round was due, while it drives: the next by the
     /// clock is [`HOUR`] after.
     round_at: Option<u64>,
+    /// The first and the latest landing of a round that waits for
+    /// landings only, while it settles ([`SETTLE`]).
+    settling: Option<(u64, u64)>,
 }
 
 /// Why a round is due.
@@ -347,6 +357,22 @@ pub enum Dried {
     Human,
 }
 
+/// What a [`Desk`] has heard, kept in `state.json` so a reload does not
+/// wake Warriv for events it already took or handed to the human.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Heard {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub seen: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub human: Vec<String>,
+}
+
+impl Heard {
+    pub fn is_empty(&self) -> bool {
+        self.seen.is_empty() && self.human.is_empty()
+    }
+}
+
 /// What to do with the events waiting.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Wake {
@@ -360,6 +386,30 @@ pub enum Wake {
 }
 
 impl Desk {
+    /// A desk that has already heard what a run before this one heard.
+    pub fn after(heard: Heard) -> Desk {
+        Desk {
+            seen: heard.seen.into_iter().collect(),
+            human: heard.human.into_iter().collect(),
+            ..Desk::default()
+        }
+    }
+
+    /// What to keep across a reload. An event still waiting to be told
+    /// was never told, so the next run hears it again.
+    pub fn heard(&self) -> Heard {
+        let waiting: BTreeSet<String> = self.queue.iter().map(Event::key).collect();
+        Heard {
+            seen: self
+                .seen
+                .iter()
+                .filter(|k| !waiting.contains(*k))
+                .cloned()
+                .collect(),
+            human: self.human.iter().cloned().collect(),
+        }
+    }
+
     /// Takes the events the log holds now. A new one waits for Warriv,
     /// unless it showed up while Warriv was `working` and could be its own
     /// doing. One that no longer holds is forgotten, so it is heard again
@@ -367,7 +417,7 @@ impl Desk {
     pub fn hear(&mut self, now: Vec<Event>, working: bool) {
         let keys: BTreeSet<String> = now.iter().map(Event::key).collect();
         self.seen.retain(|k| keys.contains(k));
-        self.human.retain(|e| keys.contains(&e.key()));
+        self.human.retain(|k| keys.contains(k));
         // A failed merge, a round and a look back are not in the log: they
         // hold until told.
         self.queue.retain(|e| {
@@ -396,9 +446,7 @@ impl Desk {
     /// An event Warriv could not settle, which is the human's while it
     /// holds and never goes to Warriv again.
     pub fn hand(&mut self, e: Event) {
-        if !self.human.contains(&e) {
-            self.human.push(e);
-        }
+        self.human.insert(e.key());
     }
 
     /// The quests among the events `now` that Warriv has, so they need
@@ -406,7 +454,7 @@ impl Desk {
     /// Warriv handed on is no event, so it is the human's too.
     pub fn holding(&self, now: &[Event]) -> BTreeSet<String> {
         now.iter()
-            .filter(|e| !e.title.is_empty() && !self.human.contains(e))
+            .filter(|e| !e.title.is_empty() && !self.human.contains(&e.key()))
             .map(|e| e.title.clone())
             .collect()
     }
@@ -438,6 +486,7 @@ impl Desk {
         self.driving = on;
         if !on {
             self.round_at = None;
+            self.settling = None;
             self.queue
                 .retain(|e| !matches!(e.kind, Kind::Round | Kind::LookBack));
         }
@@ -467,6 +516,12 @@ impl Desk {
             return;
         }
         self.round_at = Some(now);
+        let waits = self.queue.iter().any(|e| e.kind == Kind::Round);
+        self.settling = match (why, self.settling) {
+            (Why::Landed, Some((first, _))) => Some((first, now)),
+            (Why::Landed, None) if !waits => Some((now, now)),
+            _ => None,
+        };
         let says = why.says();
         match self.queue.iter_mut().find(|e| e.kind == Kind::Round) {
             Some(e) if e.detail.split("; ").any(|d| d == says) => {}
@@ -498,11 +553,22 @@ impl Desk {
     }
 
     /// Takes every waiting event, as one wake at `now` when the budget
-    /// allows, else for the human.
+    /// allows, else for the human. A round brought only by landings waits
+    /// while they settle, unless something else wakes Warriv anyway.
     pub fn wake(&mut self, now: u64) -> Wake {
         if self.queue.is_empty() {
             return Wake::Nothing;
         }
+        let only_rounds = self
+            .queue
+            .iter()
+            .all(|e| matches!(e.kind, Kind::Round | Kind::LookBack));
+        if let Some((first, last)) = self.settling {
+            if only_rounds && now < (last + SETTLE).min(first + SETTLE_MOST) {
+                return Wake::Nothing;
+            }
+        }
+        self.settling = None;
         let events = std::mem::take(&mut self.queue);
         self.wakes.retain(|&at| at + HOUR > now);
         if self.wakes.len() >= WAKES_AN_HOUR && !self.driving {
@@ -588,12 +654,22 @@ pub struct Brief {
     pub looked: Option<Looked>,
 }
 
-/// What a look back is given: the day in a line and what happened more
-/// than once.
+/// What a look back is given: the day in a line, what happened more than
+/// once, and where the day's dialogue was written for it to distill.
 #[derive(Debug, Clone, Default)]
 pub struct Looked {
     pub day: String,
     pub patterns: Vec<String>,
+    pub said: Option<Said>,
+}
+
+/// The day's dialogue, written to a file for the look back to read.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Said {
+    pub path: String,
+    pub passages: usize,
+    /// Older passages that did not fit.
+    pub left_out: usize,
 }
 
 /// What a round sees of the project beside its memory, as the app finds
@@ -959,6 +1035,9 @@ fn look_back(l: Option<&Looked>) -> String {
             one_line(&l.day)
         ));
     }
+    if let Some(s) = l.said.as_ref().filter(|s| s.passages > 0) {
+        out.push_str(&distill(s));
+    }
     if l.patterns.is_empty() {
         out.push_str(
             "  The chronicle shows nothing that happened twice. Write one line to Lately \
@@ -977,6 +1056,43 @@ fn look_back(l: Option<&Looked>) -> String {
          holds from now on. Write the look back to Lately in one line.\n",
     );
     out
+}
+
+/// What the look back is asked to make of the day's dialogue: the
+/// decisions and lessons in it as notes, which is how the memory keeps
+/// what is true rather than only what was said. See docs/plan/memory.md,
+/// part 7.
+fn distill(s: &Said) -> String {
+    let mut out = format!(
+        "  The day's dialogue, {} of what the human and the sessions said, is in {}, each \
+         headed by its id.",
+        plural(s.passages, "passage"),
+        s.path
+    );
+    if s.left_out > 0 {
+        out.push_str(&format!(
+            " {} did not fit and are left out.",
+            plural(s.left_out, "older passage")
+        ));
+    }
+    out.push_str(
+        " Read it for what was decided and what was learned that the next session would \
+         otherwise have to find out again: a choice and its reason, a trap, how a part \
+         works or is run. Leave out what the code, the plan or git already say, and what \
+         was only tried on the way. For each, ask lore_recall first, then keep it with \
+         lore_note, one fact a note, naming the passages it came from in sources and the \
+         files it is about. Where it contradicts or outdates a note, name that note in \
+         replaces, so the old one is kept as history with when it stopped being true. \
+         Say in Lately how many notes the day gave.\n",
+    );
+    out
+}
+
+fn plural(n: usize, word: &str) -> String {
+    match n {
+        1 => format!("1 {word}"),
+        n => format!("{n} {word}s"),
+    }
 }
 
 /// The last `n` characters of `s`, marked as cut when they are.
@@ -1788,6 +1904,37 @@ mod tests {
     }
 
     #[test]
+    fn landings_close_together_share_one_round() {
+        let mut d = Desk::default();
+        d.drive(true);
+        d.hourly(0);
+        d.round(Why::Landed, 100);
+        assert_eq!(d.wake(100), Wake::Nothing);
+        d.round(Why::Landed, 100 + SETTLE - 1);
+        assert_eq!(d.wake(100 + SETTLE), Wake::Nothing);
+        assert_eq!(
+            d.wake(99 + 2 * SETTLE),
+            Wake::Go(vec![a_round("a quest landed on main")])
+        );
+        // Landings that never stop still bring a round in time.
+        let mut d = Desk::default();
+        d.drive(true);
+        let mut at = 0;
+        while at < SETTLE_MOST {
+            d.round(Why::Landed, at);
+            assert_eq!(d.wake(at), Wake::Nothing);
+            at += SETTLE / 2;
+        }
+        assert!(matches!(d.wake(SETTLE_MOST), Wake::Go(_)));
+        // Anything else waiting takes the round along at once.
+        let mut d = Desk::default();
+        d.drive(true);
+        d.round(Why::Landed, 0);
+        d.hear(vec![blocked("A", "x")], false);
+        assert!(matches!(d.wake(1), Wake::Go(_)));
+    }
+
+    #[test]
     fn a_round_due_while_warriv_is_awake_folds_into_its_next_stop() {
         let mut d = Desk::default();
         d.drive(true);
@@ -1878,7 +2025,9 @@ mod tests {
         let p = look(Some(Looked {
             day: "3 quests completed".into(),
             patterns: vec!["2 merges stopped on a conflict".into()],
+            said: None,
         }));
+        assert!(!p.contains("lore_note"));
         assert!(p.contains("first round after 04:00"));
         assert!(p.contains("Since the last look back, a day at most: 3 quests completed.\n"));
         assert!(p.contains("    - 2 merges stopped on a conflict\n"));
@@ -1890,6 +2039,44 @@ mod tests {
         let clean = look(Some(Looked::default()));
         assert!(clean.contains("nothing that happened twice"));
         assert!(!clean.contains("File one quest"));
+        let talked = look(Some(Looked {
+            said: Some(Said {
+                path: "C:/state/memory/day/p.md".into(),
+                passages: 12,
+                left_out: 1,
+            }),
+            ..Looked::default()
+        }));
+        assert!(talked.contains(
+            "The day's dialogue, 12 passages of what the human and the sessions said, is in \
+             C:/state/memory/day/p.md, each headed by its id. 1 older passage did not fit"
+        ));
+        assert!(talked.contains("naming the passages it came from in sources"));
+        assert!(talked.contains("nothing that happened twice"));
+        let quiet = look(Some(Looked {
+            said: Some(Said::default()),
+            ..Looked::default()
+        }));
+        assert!(!quiet.contains("lore_note"));
+    }
+
+    #[test]
+    fn a_reload_wakes_warriv_only_for_what_it_never_heard() {
+        let ev = |t: &str| Event {
+            kind: Kind::Blocked,
+            title: t.into(),
+            detail: "why".into(),
+        };
+        let mut d = Desk::default();
+        d.hear(vec![ev("Taken"), ev("Handed")], false);
+        assert!(matches!(d.wake(0), Wake::Go(_)));
+        d.hand(ev("Handed"));
+        d.hear(vec![ev("Taken"), ev("Handed"), ev("Waiting")], false);
+        let mut after = Desk::after(d.heard());
+        after.hear(vec![ev("Taken"), ev("Handed"), ev("Waiting")], false);
+        assert_eq!(after.wake(1), Wake::Go(vec![ev("Waiting")]));
+        let holding = after.holding(&[ev("Taken"), ev("Handed")]);
+        assert_eq!(holding, BTreeSet::from(["Taken".to_string()]));
     }
 
     #[test]

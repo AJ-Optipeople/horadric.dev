@@ -309,6 +309,10 @@ fn listen(port: u16, registry: Arc<Mutex<Registry>>, requests: Arc<Mutex<Vec<Com
     });
     thread::spawn(move || {
         for t in rx {
+            // The Mac has no sanctuary to light yet.
+            if t.event.hook_event_name == HookEvent::GLOW {
+                continue;
+            }
             let target =
                 registry
                     .lock()
@@ -1340,13 +1344,15 @@ impl App {
                     self.start(name, PathBuf::from(n.cwd), n.args, n.agent);
                 }
                 Command::Reload(r) => self.reload(r),
-                // The quest log, overlaps and the browser pane are not on
-                // the Mac yet. Dropping a Know call closes its reply, so
-                // the mod hears no answer at once instead of waiting.
+                // The quest log, overlaps, the browser pane and the memory
+                // are not on the Mac yet. Dropping a Know or Recall call
+                // closes its reply, so the caller hears no answer at once
+                // instead of waiting (a recall then answers by words).
                 Command::Tasks(_)
                 | Command::Overlap(_)
                 | Command::Browser(_)
-                | Command::Know(_) => {}
+                | Command::Know(_)
+                | Command::Recall(_) => {}
             }
         }
     }

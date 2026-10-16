@@ -2,3 +2,4 @@
 *.rs text eol=lf
 *.dll binary
 *.exe binary
+crates/horadric-memory/tests/formats/** -text

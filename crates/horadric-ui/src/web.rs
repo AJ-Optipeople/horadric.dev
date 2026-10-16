@@ -79,7 +79,12 @@ browser_navigate, browser_snapshot, browser_click, browser_type, browser_screens
 Use them whenever a task needs a web page, testing a site you built included, in place of \
 Playwright, Puppeteer, the Chrome DevTools MCP, Claude in Chrome, or starting Chrome, Edge or a \
 headless browser yourself. The user sees that pane, and not a browser you start. Use another \
-browser only when the user asks for one.";
+browser only when the user asks for one. The pane is also your hands in web dashboards: when a \
+task means changing a setting in a service's console (turning on sign-in methods in Clerk, an \
+environment variable in Vercel, a DNS record, an OAuth app), go and do it there yourself instead \
+of writing the user a list of steps. The user is usually logged in already. Stop and ask only \
+when a login needs their password or a code, or before a step that costs money, deletes \
+something or cannot be undone.";
 
 use crate::app::{self, Input, WebAsk};
 use crate::favicon::{self, Favicon};
@@ -407,19 +412,33 @@ pub enum Pick {
 }
 
 /// A session keeps to the tab it works in, whichever one the user shows.
-/// Without one it takes the shown tab when no other agent has it, so "look
-/// at this page" works. Otherwise, to open a page it gets a tab of its
-/// own, and to read one it looks at the shown tab without taking it.
-pub fn pick_tab(drivers: &[Option<&str>], active: usize, session: &str, make: bool) -> Pick {
+/// Without one it takes the shown tab when it is blank and no other agent
+/// has it. A shown page no agent has is the user's: taking it would lose
+/// their work the moment the agent opens a page of its own. So, as with
+/// another agent's tab, to open a page it gets a tab of its own, and to
+/// read or act on one it looks at the shown tab without taking it, which
+/// is what "look at this page" means.
+pub fn pick_tab(
+    drivers: &[Option<&str>],
+    active: usize,
+    shown_blank: bool,
+    session: &str,
+    make: bool,
+) -> Pick {
     if let Some(i) = drivers.iter().position(|d| *d == Some(session)) {
         return Pick::At(i);
     }
     match drivers.get(active) {
-        Some(None) => Pick::Claim(active),
+        Some(None) if shown_blank => Pick::Claim(active),
         _ if make => Pick::New,
-        Some(Some(_)) => Pick::At(active),
+        Some(_) => Pick::At(active),
         None => Pick::Nothing,
     }
+}
+
+/// Whether a tab shows no page and is not on its way to one.
+fn is_blank(url: &str, pending: Option<&str>) -> bool {
+    pending.is_none_or(|p| p == "about:blank") && (url.is_empty() || url == "about:blank")
 }
 
 /// The tab `session`'s agent works in, opening one for it when `make` and
@@ -436,7 +455,11 @@ pub fn agent_tab(key: &str, session: &str, live: impl Fn(&str) -> bool, make: bo
             .iter()
             .map(|t| t.driver.as_deref().filter(|d| live(d)))
             .collect();
-        match pick_tab(&drivers, web.active, session, make) {
+        let shown_blank = web
+            .tabs
+            .get(web.active)
+            .is_some_and(|t| is_blank(&t.url, t.pending.as_deref()));
+        match pick_tab(&drivers, web.active, shown_blank, session, make) {
             Pick::At(i) => Ok(Some((web.tabs[i].id, false))),
             Pick::Claim(i) => {
                 web.tabs[i].driver = Some(session.to_string());
@@ -1981,16 +2004,45 @@ mod tests {
     #[test]
     fn an_agent_keeps_to_its_own_tab() {
         // Its own tab, though the user shows another.
-        assert_eq!(pick_tab(&[Some("a"), None], 1, "a", true), Pick::At(0));
-        // None of its own: the shown tab no agent has becomes its.
-        assert_eq!(pick_tab(&[Some("b"), None], 1, "a", true), Pick::Claim(1));
+        assert_eq!(
+            pick_tab(&[Some("a"), None], 1, false, "a", true),
+            Pick::At(0)
+        );
+        // None of its own: the blank shown tab no agent has becomes its.
+        assert_eq!(
+            pick_tab(&[Some("b"), None], 1, true, "a", true),
+            Pick::Claim(1)
+        );
+        assert_eq!(
+            pick_tab(&[Some("b"), None], 1, true, "a", false),
+            Pick::Claim(1)
+        );
         // The shown tab is another agent's: a tab of its own to open a
         // page, a look at the shown one to read.
-        assert_eq!(pick_tab(&[Some("b"), None], 0, "a", true), Pick::New);
-        assert_eq!(pick_tab(&[Some("b"), None], 0, "a", false), Pick::At(0));
+        assert_eq!(pick_tab(&[Some("b"), None], 0, false, "a", true), Pick::New);
+        assert_eq!(
+            pick_tab(&[Some("b"), None], 0, false, "a", false),
+            Pick::At(0)
+        );
         // No page at all.
-        assert_eq!(pick_tab(&[], 0, "a", true), Pick::New);
-        assert_eq!(pick_tab(&[], 0, "a", false), Pick::Nothing);
+        assert_eq!(pick_tab(&[], 0, true, "a", true), Pick::New);
+        assert_eq!(pick_tab(&[], 0, true, "a", false), Pick::Nothing);
+    }
+
+    #[test]
+    fn an_agent_leaves_the_users_page_alone() {
+        // The user's page: looked at in place, never taken.
+        assert_eq!(pick_tab(&[None], 0, false, "a", false), Pick::At(0));
+        assert_eq!(pick_tab(&[None], 0, false, "a", true), Pick::New);
+    }
+
+    #[test]
+    fn a_tab_is_blank_without_a_page_or_one_coming() {
+        assert!(is_blank("", None));
+        assert!(is_blank("about:blank", None));
+        assert!(is_blank("", Some("about:blank")));
+        assert!(!is_blank("", Some("https://example.com")));
+        assert!(!is_blank("https://example.com/", None));
     }
 
     #[test]

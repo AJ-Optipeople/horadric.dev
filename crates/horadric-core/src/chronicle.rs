@@ -18,6 +18,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::journal::{self, Commit};
 use crate::merge::Failure;
+use crate::pack::Touched;
+use crate::spend::{self, Sitting, Spend};
 use crate::tasks::{Mark, Task};
 use crate::warriv::Kind;
 use crate::{tombs, Agent};
@@ -81,6 +83,21 @@ pub enum Happened {
         #[serde(default, skip_serializing_if = "String::is_empty")]
         name: String,
     },
+    /// What the quest's conversations spent in tokens, by `horadric quest
+    /// done`. A later one, after the quest came back, counts them all
+    /// again, so it replaces the earlier.
+    Spent { sittings: Vec<Sitting> },
+    /// The files the quest's conversations read and changed, by `horadric
+    /// quest done`, for the packs of quests like it. A later one replaces
+    /// the earlier, as [`Happened::Spent`] does.
+    Touched {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        read: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        changed: Vec<String>,
+    },
+    /// The quest was started with a context pack of these files.
+    Packed { files: Vec<String> },
     /// The commits made under the quest, newest first.
     Commits { commits: Vec<Commit> },
     /// The quest's branch went into the main tree. `checked` is the
@@ -272,6 +289,47 @@ pub fn worked_by<'a>(list: &'a [Task], session: &str) -> Option<&'a Task> {
     let quest = quest_of(session);
     list.iter()
         .find(|t| t.holder.as_deref().is_some_and(|h| quest_of(h) == quest))
+}
+
+/// The conversations the chronicle saw a turn of under the quest `id`
+/// of `project`, or a tomb of its batch, each with the folder it ran in,
+/// in the order they first showed up.
+pub fn conversations(records: &[Record], project: &str, id: &str) -> Vec<(String, String)> {
+    let quest = quest_of(id);
+    let mut out: Vec<(String, String)> = Vec::new();
+    for r in records {
+        if r.project != project || quest_of(&r.quest) != quest {
+            continue;
+        }
+        if let Happened::Turn {
+            conversation, cwd, ..
+        } = &r.what
+        {
+            if !conversation.is_empty() && !out.iter().any(|(c, _)| c == conversation) {
+                out.push((conversation.clone(), cwd.clone()));
+            }
+        }
+    }
+    out
+}
+
+/// Whether the quest `id` of `project` had its spend kept since it was
+/// last taken. `horadric quest done` keeps it before it marks the quest,
+/// so a quest marked done any other way is one that has not.
+pub fn spent_since_taken(records: &[Record], project: &str, id: &str) -> bool {
+    let quest = quest_of(id);
+    let mut spent = false;
+    for r in records {
+        if r.project != project || quest_of(&r.quest) != quest {
+            continue;
+        }
+        match r.what {
+            Happened::Accepted { .. } => spent = false,
+            Happened::Spent { .. } => spent = true,
+            _ => {}
+        }
+    }
+    spent
 }
 
 /// The records for what changed between two reads of a project's list:
@@ -736,6 +794,13 @@ pub struct Quest {
     /// The conversation id and its folder, to read it or carry it on.
     pub conversation: Option<(String, String)>,
     pub commits: Vec<Commit>,
+    /// What its conversations spent, when it was reported done.
+    pub spend: Option<Spend>,
+    /// The files its conversations read and changed, when it was reported
+    /// done.
+    pub touched: Option<Touched>,
+    /// The files of the context pack it was started with.
+    pub packed: Option<Vec<String>>,
     /// The branch it was merged from, when it had one.
     pub merged: Option<String>,
     /// The quest it grew out of, an index into the same list.
@@ -754,7 +819,7 @@ pub struct Quest {
 }
 
 impl Quest {
-    fn new(id: &str, title: &str) -> Self {
+    pub(crate) fn new(id: &str, title: &str) -> Self {
         Self {
             id: id.to_string(),
             title: title.to_string(),
@@ -768,6 +833,9 @@ impl Quest {
             last: String::new(),
             conversation: None,
             commits: Vec::new(),
+            spend: None,
+            touched: None,
+            packed: None,
             merged: None,
             parent: None,
             added_by: None,
@@ -855,6 +923,14 @@ pub fn quests(
                 }
             }
             Happened::Commits { commits } => q.commits = commits.clone(),
+            Happened::Spent { sittings } => q.spend = Some(spend::total(sittings)),
+            Happened::Touched { read, changed } => {
+                q.touched = Some(Touched {
+                    read: read.clone(),
+                    changed: changed.clone(),
+                })
+            }
+            Happened::Packed { files } => q.packed = Some(files.clone()),
             Happened::Merged { branch, .. } => q.merged = Some(branch.clone()),
             Happened::Shipped | Happened::Assumed { .. } | Happened::NotMerged { .. } => {}
         }
@@ -1549,6 +1625,87 @@ mod tests {
             end(Happened::slept("w", "", true, vec!["A".into()])),
             WakeEnd::CutShort
         );
+    }
+
+    #[test]
+    fn the_last_spend_reported_is_the_quests() {
+        let sitting = |conversation: &str, calls| Sitting {
+            conversation: conversation.into(),
+            spend: Spend {
+                calls,
+                ..Spend::default()
+            },
+        };
+        let records = [
+            accepted(1, "a-1", "A"),
+            rec(
+                2,
+                "a-1",
+                "",
+                Happened::Spent {
+                    sittings: vec![sitting("c1", 3)],
+                },
+            ),
+            rec(
+                3,
+                "a-1",
+                "",
+                Happened::Spent {
+                    sittings: vec![sitting("c1", 4), sitting("c2", 5)],
+                },
+            ),
+            accepted(4, "b-1", "B"),
+        ];
+        let q = quests(&records, &[], "p", &[]);
+        assert_eq!(q[0].spend.as_ref().map(|s| s.calls), Some(9));
+        assert_eq!(q[1].spend, None);
+        let line = records[2].line();
+        assert_eq!(parse(&line), vec![records[2].clone()]);
+    }
+
+    #[test]
+    fn a_quests_conversations_are_its_tombs_turns_once_each() {
+        let turn = |at, quest: &str, conversation: &str, cwd: &str| {
+            rec(
+                at,
+                quest,
+                "",
+                Happened::Turn {
+                    line: String::new(),
+                    conversation: conversation.into(),
+                    cwd: cwd.into(),
+                    name: String::new(),
+                },
+            )
+        };
+        let mut other = turn(5, "a-1.x2", "c9", "elsewhere");
+        other.project = "q".into();
+        let records = [
+            turn(1, "a-1.x2.1", "c1", "w1"),
+            turn(2, "a-1.x2.2", "c2", "w2"),
+            turn(3, "a-1.x2.1", "c1", "w1"),
+            turn(4, "b-1", "c3", "w3"),
+            turn(6, "a-1.x2", "", "w"),
+            other,
+        ];
+        assert_eq!(
+            conversations(&records, "p", "a-1.x2"),
+            vec![("c1".into(), "w1".into()), ("c2".into(), "w2".into())]
+        );
+        assert_eq!(conversations(&records, "p", "a-1.x2.2").len(), 2);
+    }
+
+    #[test]
+    fn a_spend_counts_only_until_the_quest_is_taken_again() {
+        let spent = |at, quest: &str| rec(at, quest, "", Happened::Spent { sittings: vec![] });
+        let mut records = vec![accepted(1, "a-1.x2", "A")];
+        assert!(!spent_since_taken(&records, "p", "a-1.x2"));
+        records.push(spent(2, "a-1.x2.1"));
+        records.push(marked(3, "a-1.x2", Outcome::Done));
+        assert!(spent_since_taken(&records, "p", "a-1.x2"));
+        assert!(!spent_since_taken(&records, "p", "b-1"));
+        records.push(accepted(4, "a-1.x2", "A"));
+        assert!(!spent_since_taken(&records, "p", "a-1.x2"));
     }
 
     #[test]

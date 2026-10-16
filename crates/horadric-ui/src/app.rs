@@ -121,6 +121,7 @@ use crate::menu::{self, Item};
 use crate::portal_key;
 use crate::questlog::{self, QuestLog};
 use crate::render::{Gpu, StashLook};
+use crate::sanctuary;
 use crate::screens::{self, Screen};
 use crate::settings::{self, Field, SettingsWindow};
 use crate::sound;
@@ -134,7 +135,7 @@ use crate::usage::{self, UsageWindow};
 use crate::window::{self, folder_key, project_key, project_name, Cluster, Shared};
 use crate::{
     ask, autostart, browsers, explorer, history, inbox, paths, picker, recent, shell, snapping,
-    store, theme, update, viewport, watch, web, worktree,
+    store, theme, town, update, viewport, watch, web, worktree,
 };
 
 #[path = "runner.rs"]
@@ -330,6 +331,8 @@ const SWEEP_GAP: Duration = Duration::from_secs(10);
 const VIEW: &str = "view:";
 /// The start of a browser pane's id, before its project key.
 const WEB: &str = "web:";
+/// The start of an Arcane Sanctuary's id, before its project key.
+const SKY: &str = "sky:";
 pub(crate) const MARGIN_DIP: i32 = 12;
 pub(crate) const GAP_DIP: i32 = 12;
 /// The narrowest the stage gets when it gives way to a new column.
@@ -388,6 +391,11 @@ pub(crate) enum Input {
     /// Ctrl+Shift+B in a pane: the browser pane of the project on the
     /// stage, opened or given the keyboard.
     Browse,
+    /// Ctrl+Shift+G in a pane: the Arcane Sanctuary of the project on the
+    /// stage, opened or given the keyboard.
+    Sanctuary,
+    /// A sanctuary's cross: close the one of the project with this key.
+    CloseSky(String),
     /// A web address Ctrl+clicked in a pane: to the browser pane of the
     /// project on the stage when it has one, otherwise to the user's own
     /// browser.
@@ -529,6 +537,32 @@ pub(crate) fn push(input: Input) {
 
 /// Tells the UI the registry changed, unless it has yet to hear of the
 /// last change, when it will see this one with it.
+/// Hands a session's transcript to the memory when a hook says it is a
+/// good moment: the turn ended, the context is about to be compacted, or
+/// the session is over. A subagent's hooks are its own, not the session's.
+fn keep_transcript(t: &Tagged) {
+    use horadric_memory::transcripts::Format;
+    let e = &t.event;
+    if !matches!(
+        e.hook_event_name.as_str(),
+        "Stop" | "PreCompact" | "SessionEnd"
+    ) || e.transcript_path.is_empty()
+        || e.agent_id.is_some()
+    {
+        return;
+    }
+    let format = match t.agent {
+        Agent::Claude => Format::Claude,
+        Agent::Codex => Format::Codex,
+        Agent::Grok => return,
+    };
+    crate::memory::keep(crate::memory::Keep {
+        path: e.transcript_path.clone().into(),
+        cwd: e.cwd.clone(),
+        format,
+    });
+}
+
 fn post_event(window: isize, phase: bool) {
     let flags = EVENTS_DUE | if phase { EVENTS_PHASE } else { 0 };
     if EVENTS.fetch_or(flags, Ordering::AcqRel) & EVENTS_DUE == 0 {
@@ -623,7 +657,8 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
     });
 
     // Feeder thread: apply to the registry, wake the UI. The limits in a
-    // status line are the account's, so the latest from any session wins.
+    // status line are the account's, so any session's reading counts, though
+    // an idle one's stale numbers never pull the bars back.
     let feed_registry = Arc::clone(&registry);
     let feed_usage = Arc::clone(&usage);
     let feed_agent_usage = Arc::clone(&agent_usage);
@@ -635,17 +670,28 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
         }
         let mut asked = Asked::default();
         for t in rx {
+            // What a lore tool showed a session lights the sanctuary and
+            // is no news of the session itself.
+            if t.event.hook_event_name == HookEvent::GLOW {
+                if crate::glows::hear(&feed_registry, &t.horadric_id, &t.event) {
+                    post_event(notify_id, false);
+                }
+                continue;
+            }
+            keep_transcript(&t);
             if let Some(limits) = t.limits.filter(|l| !l.is_empty()) {
-                let heard = Usage {
-                    limits,
-                    at: unix_now(),
+                let now = unix_now();
+                let heard = |held: Option<&Usage>| Usage {
+                    limits: held.map_or(limits.clone(), |h| h.limits.merge(&limits, now)),
+                    at: now,
                 };
                 if t.agent == Agent::Claude {
                     if let Ok(mut u) = feed_usage.lock() {
-                        *u = Some(heard);
+                        *u = Some(heard(u.as_ref()));
                     }
                 } else if let Ok(mut u) = feed_agent_usage.lock() {
-                    u.insert(t.agent, heard);
+                    let merged = heard(u.get(&t.agent));
+                    u.insert(t.agent, merged);
                 }
             }
             let route = feed_registry
@@ -684,6 +730,8 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
                 .lock()
                 .map(|mut r| r.apply(&target, &t.event, SystemTime::now()))
                 .unwrap_or(false);
+            // Woken by the post below whether or not it lit anything.
+            crate::glows::hear(&feed_registry, &target, &t.event);
             post_event(notify_id, changed);
         }
     });
@@ -704,6 +752,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
     // the installed copy decides: a dev instance or a build run from target
     // would point it at a build about to be replaced, and a fake install
     // with its own APPDATA has a first run of its own but shares the value.
+    crate::memory::set_across(saved.recall_across);
     let mut autostart_offered = saved.autostart_offered;
     if !autostart_offered && !horadric_hooks::dev() && autostart::running_installed() {
         autostart_offered = autostart::enable();
@@ -767,6 +816,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
     // running the status line from wherever it pointed.
     let status_settings = store::write_status_settings(&console::host_program());
     let mcp_config = store::write_mcp_config(&console::host_program());
+    town::make();
     let usage_window = match UsageWindow::create(
         Rc::clone(&shared),
         saved.usage_window.as_ref().is_some_and(|p| p.collapsed),
@@ -813,6 +863,8 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             portal_checked: Default::default(),
             views: HashMap::new(),
             webs: HashMap::new(),
+            skies: HashMap::new(),
+            glow_stamp: 0,
             web_ask: None,
             pane_ask: None,
             stage: None,
@@ -824,6 +876,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             key_listening: None,
             keys_note: None,
             drives: saved.drives.clone(),
+            tasks: runner::State::after(&saved.warriv_heard),
             stopped: saved.stopped.iter().cloned().collect(),
             away: Away::default(),
             spectating: Default::default(),
@@ -857,11 +910,14 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             closed: saved.closed.iter().cloned().collect(),
             columns: Columns::from_keys(&saved.columns),
             recent: saved.recent.clone(),
+            town_listed: None,
             autostart_offered,
             explorer_offered,
             quiet: saved.quiet,
             sounds: saved.sounds,
+            town_hidden: saved.town_hidden,
             discord: saved.discord,
+            recall_across: saved.recall_across,
             rich: None,
             run: presence::Run::from_saved(saved.run),
             tome: runner::runeword::Tome::new(&saved, reload),
@@ -886,7 +942,6 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             browsers: HashMap::new(),
             waiting: HashSet::new(),
             alert_for: None,
-            tasks: runner::State::default(),
             new_trees: HashMap::new(),
             recounts: HashMap::new(),
             counted: Arc::new(Mutex::new(Vec::new())),
@@ -1526,6 +1581,7 @@ fn tile_menu(id: &str) {
     const STASH: usize = 4;
     const PICK: usize = 5;
     const STOP_RUNEWORD: usize = 6;
+    const FOUND: usize = 7;
     let Some((kind, shell)) = with_app(|app| app.tile_kind(id)).flatten() else {
         return;
     };
@@ -1535,6 +1591,7 @@ fn tile_menu(id: &str) {
         Some(false) => Item::action(STASH, "Stash"),
         _ => Item::Disabled("Stash is full".into()),
     };
+    let live = matches!(kind, TileKind::Live);
     let items = match (kind, shell) {
         (TileKind::Live, false) => vec![
             Item::action(OPEN, "Show terminal"),
@@ -1586,6 +1643,11 @@ fn tile_menu(id: &str) {
         items.insert(0, changes_menu(w, diff.as_ref()));
         items.insert(1, Item::Separator);
     }
+    let in_town = with_app(|app| app.project_of(id).is_some_and(|k| town::is(&k)));
+    if in_town == Some(true) && live && !shell {
+        items.insert(0, Item::action(FOUND, "Found a project\u{2026}"));
+        items.insert(1, Item::Separator);
+    }
     if with_app(|app| app.can_pick(id)) == Some(true) {
         items.insert(0, Item::action(PICK, "Pick this tomb\u{2026}"));
         items.insert(1, Item::Separator);
@@ -1620,6 +1682,7 @@ fn tile_menu(id: &str) {
         }
         Some(RENAME) => rename_session(id),
         Some(PICK) => runner::tomb::ask_pick(id),
+        Some(FOUND) => found_project(id),
         Some(STOP_RUNEWORD) => {
             with_app(|app| app.stop_runeword(id));
         }
@@ -1628,6 +1691,52 @@ fn tile_menu(id: &str) {
         }
         _ => {}
     }
+}
+
+/// Asks for the new project's name, then asks the town session to found it:
+/// only the session has the conversation to summarise, so it runs
+/// `horadric found` with what it settled.
+fn found_project(id: &str) {
+    let Some(key) = with_app(|app| app.project_of(id)).flatten() else {
+        return;
+    };
+    let prompt = match town::default_parent() {
+        Some(p) => format!("It is made in {}, beside your latest project.", p.display()),
+        None => "What is it called?".to_string(),
+    };
+    let question = ask::Ask {
+        title: "Found a project",
+        prompt: &prompt,
+        initial: "",
+        placeholder: "Project name",
+        verb: "found",
+        notes: false,
+        pick: None,
+    };
+    let Some(a) = ask_beside(Some(&key), &question) else {
+        return;
+    };
+    let name = a.text.trim().to_string();
+    if let Some(why) = town::check_name(&name) {
+        ask(&Dialog {
+            tone: Tone::Warning,
+            title: "Found a project",
+            text: &why,
+            buttons: &["OK"],
+            default: 0,
+            check: None,
+        });
+        return;
+    }
+    let text = format!(
+        "Found the project \"{name}\": run `horadric found \"{name}\" --summary \"<what we \
+         settled, in a short paragraph>\"`, then tell me it is made.\r"
+    );
+    with_app(|app| {
+        if let Some(c) = app.consoles.get(id) {
+            c.write(text.into_bytes());
+        }
+    });
 }
 
 /// Asks before stashing a session mid turn, which stops the turn. One
@@ -2087,6 +2196,7 @@ fn project_menu(key: &str) {
     const END_ALL: usize = 4;
     const SHELL: usize = 5;
     const BROWSE: usize = 14;
+    const SANCTUARY: usize = 16;
     const QUESTS: usize = 15;
     const CODE: usize = 7;
     const EXPLORE: usize = 8;
@@ -2094,6 +2204,7 @@ fn project_menu(key: &str) {
     const ADD_TREE: usize = 6;
     const SSH_FIND: usize = 11;
     const CLOSE: usize = 12;
+    const HIDE_TOWN: usize = 13;
     const SSH: usize = 20;
     const SSH_END: usize = 200;
     const MERGE: usize = 300;
@@ -2156,6 +2267,7 @@ fn project_menu(key: &str) {
         Item::Separator,
         Item::action(SHELL, "New terminal\tCtrl+Shift+T"),
         Item::action(BROWSE, "Browser\tCtrl+Shift+B"),
+        Item::action(SANCTUARY, "Arcane Sanctuary\tCtrl+Shift+G"),
     ]);
     for (i, host) in listed.iter().enumerate() {
         items.push(Item::action(SSH + i, format!("SSH to {host}")));
@@ -2187,8 +2299,18 @@ fn project_menu(key: &str) {
         Item::action(SETTINGS, "Project settings\u{2026}"),
         Item::Separator,
         Item::action(END_ALL, "End all sessions"),
-        Item::action(CLOSE, "Close project"),
     ]);
+    // The town is not closed but hidden, and only once no session runs
+    // there, or the hide would not show.
+    if !town::is(key) {
+        items.push(Item::action(CLOSE, "Close project"));
+    } else if with_app(|app| app.sessions_in(key)) == Some(0) {
+        items.push(Item::action(HIDE_TOWN, "Hide Tristram"));
+    } else {
+        items.push(Item::Disabled(
+            "Hide Tristram (end its sessions first)".into(),
+        ));
+    }
     let picked = menu::popup(&items);
     match (picked, &dir) {
         (Some(SSH_FIND), Some(_)) => return ssh_to(key, &hosts, &devices),
@@ -2220,8 +2342,10 @@ fn project_menu(key: &str) {
         Some(START_OVER) => app.start_over(key, BATCH),
         Some(END_ALL) => app.end_all(Some(key)),
         Some(CLOSE) => app.close_project(key),
+        Some(HIDE_TOWN) => app.hide_town(true),
         Some(SHELL) => app.open_shell(key),
         Some(BROWSE) => app.open_web(key, None),
+        Some(SANCTUARY) => app.open_sky(key),
         Some(i) if (SSH..SSH_END).contains(&i) => app.open_ssh(key, &listed[i - SSH], None),
         Some(i) if (MERGE..MERGE_END).contains(&i) => {
             app.merge(&merges[i - MERGE]);
@@ -2784,6 +2908,11 @@ struct App {
     /// Browser panes, at most one per project, by project key. The page
     /// itself is `web`'s and outlives its pane.
     webs: HashMap<String, Arc<Console>>,
+    /// Arcane Sanctuaries, at most one per project, by project key. What
+    /// they show is `sanctuary`'s and outlives the pane.
+    skies: HashMap<String, Arc<Console>>,
+    /// The glows' stamp the sanctuaries were last drawn at.
+    glow_stamp: u64,
     /// What to ask for which project's browser pane, once out of the borrow.
     web_ask: Option<(String, WebAsk)>,
     /// Which session pane's header button to act on, once out of the
@@ -2871,6 +3000,8 @@ struct App {
     columns: Columns,
     /// Projects sessions were started in, newest first, for the tray menu.
     recent: Vec<String>,
+    /// The projects the town's `CLAUDE.md` was last written for.
+    town_listed: Option<Vec<town::Project>>,
     autostart_offered: bool,
     explorer_offered: bool,
     last_saved: Option<SavedState>,
@@ -2919,9 +3050,13 @@ struct App {
     quiet: bool,
     /// Loot sounds, from the Settings window.
     sounds: bool,
+    /// Tristram's tile is hidden while no session runs in the town.
+    town_hidden: bool,
     /// What the Discord profile may show, from the Settings window.
     /// Changed only through [`App::set_discord`].
     discord: Discord,
+    /// Recall may look in other projects, told to the memory thread.
+    recall_across: bool,
     /// The Rich Presence client, kept while [`App::discord`] is on.
     rich: Option<crate::discord::Discord>,
     /// When the current run of work began, which the profile counts from.
@@ -3043,6 +3178,7 @@ impl App {
     fn on_message(&mut self, msg: u32, wparam: usize) {
         match msg {
             WM_HORADRIC_EVENT => {
+                self.light_skies();
                 let events = EVENTS.swap(0, Ordering::AcqRel);
                 if events & EVENTS_DUE == 0 {
                     return;
@@ -3100,6 +3236,7 @@ impl App {
                         Command::Overlap(o) => self.overlapped(&o),
                         Command::Browser(call) => self.browser_call(call),
                         Command::Know(call) => self.know_call(call),
+                        Command::Recall(call) => crate::memory::ask(call),
                     }
                 }
             }
@@ -3185,6 +3322,7 @@ impl App {
             .get(id)
             .or_else(|| self.views.values().find(|v| v.id == id))
             .or_else(|| self.webs.values().find(|v| v.id == id))
+            .or_else(|| self.skies.values().find(|v| v.id == id))
     }
 
     /// The stage, when it shows this console.
@@ -4263,6 +4401,9 @@ impl App {
         let config = self.mcp_config.as_ref().map(|p| p.to_string_lossy());
         extra.extend(Agent::Claude.mcp_args("", config.as_deref()));
         extra.extend(self.task_args(id, program, cwd));
+        if town::is(&folder_key(&cwd.to_string_lossy())) {
+            extra.extend(town::add_dir_args(&self.town_projects()));
+        }
         extra
     }
 
@@ -4753,6 +4894,7 @@ impl App {
             screen: shown.and_then(|n| screens.iter().position(|s| s.name == n)),
             notify: !self.quiet,
             sounds: self.sounds,
+            town: !self.town_hidden,
             agent: self.settings_agent,
             defaults: self.shared.defaults_of(self.settings_agent),
             offered: (self.settings_agent != Agent::Claude).then(|| {
@@ -4762,6 +4904,8 @@ impl App {
             autostart: (!horadric_hooks::dev()).then(autostart::is_enabled),
             explorer: (!horadric_hooks::dev()).then(explorer::is_installed),
             discord: self.discord,
+            recall_across: self.recall_across,
+            scroll: self.scroll_values(),
             update: self.update.as_ref().map(|m| m.version.clone()),
             checking: self.checking,
             version: env!("CARGO_PKG_VERSION").to_string(),
@@ -4776,6 +4920,42 @@ impl App {
             projects: projects.into_iter().map(|(_, name)| name).collect(),
             project,
         }
+    }
+
+    /// What the Scroll section shows: the tongue's switch and the Lexicon
+    /// of the project the Projects section has picked.
+    fn scroll_values(&self) -> settings::Scroll {
+        let Some(dir) = horadric_hooks::state_dir().map(|d| d.join("memory")) else {
+            return settings::Scroll::default();
+        };
+        let mut scroll = settings::Scroll {
+            off: horadric_memory::horadrim::is_off(&dir),
+            ..Default::default()
+        };
+        let Some(key) = self.settings_key() else {
+            return scroll;
+        };
+        scroll.project = project_name(&key);
+        let lexicon = self
+            .project_dir(&key)
+            .and_then(|d| horadric_hooks::lore::Place::of(Path::new(&d)).ok())
+            .and_then(|place| {
+                horadric_memory::horadrim::Tongue::load(&dir)
+                    .ok()?
+                    .projects
+                    .remove(place.key())
+            });
+        if let Some(lex) = lexicon {
+            let mut live: Vec<_> = lex.sigils.iter().filter(|s| !s.retired).collect();
+            scroll.sigils = live.len();
+            live.sort_by_key(|s| std::cmp::Reverse(s.uses));
+            scroll.top = live
+                .iter()
+                .map(|s| (s.sigil.clone(), s.name.clone(), s.uses))
+                .collect();
+            scroll.saved = lex.saved_this_week(horadric_hooks::lore::now());
+        }
+        scroll
     }
 
     /// Every project the Projects section offers, by key and name: the
@@ -5037,6 +5217,7 @@ impl App {
                 self.quiet = !self.quiet;
                 self.save();
             }
+            Field::Town => self.hide_town(!self.town_hidden),
             Field::Sounds => {
                 self.sounds = !self.sounds;
                 self.save();
@@ -5080,6 +5261,17 @@ impl App {
             Field::Ask => {
                 self.tome.ask = !self.tome.ask;
                 self.save();
+            }
+            Field::Recall => {
+                self.recall_across = !self.recall_across;
+                crate::memory::set_across(self.recall_across);
+                self.save();
+            }
+            Field::Horadrim => {
+                if let Some(dir) = horadric_hooks::state_dir().map(|d| d.join("memory")) {
+                    let off = horadric_memory::horadrim::is_off(&dir);
+                    let _ = horadric_memory::horadrim::set_off(&dir, !off);
+                }
             }
             Field::Hidden => self.hide_stone(None),
             Field::Key(action) => self.listen_for_key(action),
@@ -5338,9 +5530,28 @@ impl App {
         self.reconcile(false);
     }
 
+    /// How many sessions the registry has in the project.
+    fn sessions_in(&self, key: &str) -> usize {
+        self.shared
+            .registry
+            .lock()
+            .map_or(0, |r| r.all().filter(|s| project_key(s) == key).count())
+    }
+
+    /// Hides Tristram's tile, or shows it again. A session running in the
+    /// town keeps it on screen until it ends.
+    fn hide_town(&mut self, hidden: bool) {
+        self.town_hidden = hidden;
+        self.save();
+        self.reconcile(false);
+    }
+
     /// Ends the project's sessions and takes its cluster down, unfinished
     /// tasks or not.
     fn close_project(&mut self, key: &str) {
+        if town::is(key) {
+            return self.end_all(Some(key));
+        }
         self.open.remove(key);
         self.closed.insert(key.to_string());
         self.end_all(Some(key));
@@ -5563,6 +5774,9 @@ impl App {
         }
         if let Some(page) = self.webs.get(key) {
             ids.push(page.id.clone());
+        }
+        if let Some(sky) = self.skies.get(key) {
+            ids.push(sky.id.clone());
         }
         ids
     }
@@ -5993,6 +6207,7 @@ impl App {
                 Some(path.file_name()?.to_string_lossy().into_owned())
             })
             .or_else(|| id.starts_with(WEB).then(|| "Browser".to_string()))
+            .or_else(|| id.starts_with(SKY).then(|| "Arcane Sanctuary".to_string()))
             .unwrap_or_else(|| id.to_string())
     }
 
@@ -6073,6 +6288,49 @@ impl App {
         self.webs.remove(key);
         self.sync_stage();
         web::close(key);
+    }
+
+    /// Shows the project's Arcane Sanctuary on the stage beside its
+    /// sessions, with the keyboard, opening it when it is not yet.
+    fn open_sky(&mut self, key: &str) {
+        let Some(dir) = self.project_dir(key) else {
+            return;
+        };
+        let id = format!("{SKY}{key}");
+        if !self.skies.contains_key(key) {
+            let serial = self.next_serial;
+            self.next_serial += 1;
+            self.skies.insert(
+                key.to_string(),
+                Console::sky(id.clone(), serial, key.to_string()),
+            );
+            sanctuary::open(key, &dir);
+        }
+        if self.fill_stage(key) {
+            if let Some(stage) = &self.stage {
+                stage.focus_session(&id);
+            }
+        }
+    }
+
+    /// An agent touched something: every sanctuary on the stage draws it
+    /// lit and runs its clock while the light fades.
+    fn light_skies(&mut self) {
+        let stamp = crate::glows::stamp();
+        if std::mem::replace(&mut self.glow_stamp, stamp) == stamp {
+            return;
+        }
+        if let Some(stage) = &self.stage {
+            for sky in self.skies.values() {
+                stage.refresh(sky.serial);
+            }
+        }
+    }
+
+    fn close_sky(&mut self, key: &str) {
+        self.skies.remove(key);
+        self.sync_stage();
+        sanctuary::close(key);
     }
 
     /// A project's files changed: its view reads its file again, if that
@@ -6392,7 +6650,7 @@ impl App {
                 .stage
                 .as_ref()
                 .and_then(|s| s.active())
-                .filter(|id| !id.starts_with(VIEW) && !id.starts_with(WEB)),
+                .filter(|id| !id.starts_with(VIEW) && !id.starts_with(WEB) && !id.starts_with(SKY)),
             grids: self
                 .shared
                 .orders
@@ -6439,7 +6697,9 @@ impl App {
             font_size: Some(self.shared.font.size()).filter(|&s| s != keys::FONT_DEFAULT),
             quiet: self.quiet,
             sounds: self.sounds,
+            town_hidden: self.town_hidden,
             discord: self.discord,
+            recall_across: self.recall_across,
             run: self.run.saved(),
             cube: self.cube_on,
             font_family: self.font_family.clone(),
@@ -6459,6 +6719,7 @@ impl App {
             errands: self.tome.errands.clone(),
             update_told: self.update_told.clone(),
             drives: self.drives.clone(),
+            warriv_heard: self.tasks.warriv.heard(),
             stopped: {
                 let mut stopped: Vec<String> = self.stopped.iter().cloned().collect();
                 stopped.sort();
@@ -6515,9 +6776,69 @@ impl App {
         }
     }
 
+    /// Every project the town agent is told about: the recent folders that
+    /// still exist, with when a session last ran in each.
+    fn town_projects(&self) -> Vec<town::Project> {
+        let now = SystemTime::now();
+        let last: HashMap<String, u64> = self
+            .shared
+            .registry
+            .lock()
+            .map(|r| {
+                let mut m: HashMap<String, u64> = HashMap::new();
+                for s in r.all().filter(|s| !s.cwd.is_empty()) {
+                    let secs = now.duration_since(s.since).map_or(0, |d| d.as_secs());
+                    let e = m.entry(project_key(s)).or_insert(secs);
+                    *e = (*e).min(secs);
+                }
+                m
+            })
+            .unwrap_or_default();
+        let mut seen = HashSet::new();
+        self.recent
+            .iter()
+            .filter(|p| Path::new(p).is_dir())
+            .filter_map(|p| {
+                let key = folder_key(p);
+                if town::is(&key) || !seen.insert(key.clone()) {
+                    return None;
+                }
+                let intro = ["README.md", "CLAUDE.md"]
+                    .iter()
+                    .find_map(|f| std::fs::read_to_string(Path::new(p).join(f)).ok())
+                    .map(|t| town::intro_of(&t, 3))
+                    .unwrap_or_default();
+                Some(town::Project {
+                    name: project_name(&key),
+                    dir: p.clone(),
+                    intro,
+                    last_ran: last.get(&key).copied(),
+                })
+            })
+            .collect()
+    }
+
+    /// Rewrites the town's `CLAUDE.md` when the set of projects changed.
+    /// Only the folders count: how long ago a session ran would rewrite it
+    /// on every pass.
+    fn refresh_town(&mut self) {
+        let Some(dir) = town::dir().filter(|d| d.is_dir()) else {
+            return;
+        };
+        let projects = self.town_projects();
+        let same = self.town_listed.as_ref().is_some_and(|old| {
+            old.len() == projects.len() && old.iter().zip(&projects).all(|(a, b)| a.dir == b.dir)
+        });
+        if !same {
+            town::write(&dir, &projects);
+            self.town_listed = Some(projects);
+        }
+    }
+
     /// Makes the windows match the projects in the registry.
     fn reconcile(&mut self, phase_changed: bool) {
         self.read_boards(false);
+        self.refresh_town();
         let mut projects: HashSet<String> = self
             .shared
             .registry
@@ -6527,8 +6848,16 @@ impl App {
         self.closed.retain(|k| !projects.contains(k));
         self.open
             .extend(projects.iter().filter(|k| !k.is_empty()).cloned());
+        // A hidden town shows only while a session runs there.
+        if self.town_hidden {
+            self.open.retain(|k| !town::is(k));
+        }
         projects.extend(self.open.iter().cloned());
         projects.extend(self.listed());
+        // The town stays when it has no sessions, unless it is hidden.
+        if !self.town_hidden {
+            projects.extend(town::key().map(String::from));
+        }
 
         // Remove clusters whose project is gone.
         let mut i = 0;
@@ -6963,7 +7292,25 @@ impl App {
         for input in inputs {
             match input {
                 Input::Toggle(hwnd) => {
-                    if let Some(c) = self.clusters.iter_mut().find(|c| c.hwnd.0 as isize == hwnd) {
+                    // A town without sessions has no tiles to fold or click,
+                    // so its header opens the stage with its browser pane,
+                    // also when that pane is already open behind another
+                    // project.
+                    let town = self
+                        .clusters
+                        .iter()
+                        .find(|c| c.hwnd.0 as isize == hwnd && town::is(&c.key))
+                        .map(|c| c.key.clone());
+                    let sessionless = |grid: Vec<String>| {
+                        grid.iter().all(|id| {
+                            id.starts_with(WEB) || id.starts_with(VIEW) || id.starts_with(SKY)
+                        })
+                    };
+                    if let Some(key) = town.filter(|k| sessionless(self.grid_of(k))) {
+                        self.open_web(&key, None);
+                    } else if let Some(c) =
+                        self.clusters.iter_mut().find(|c| c.hwnd.0 as isize == hwnd)
+                    {
                         c.collapsed = !c.collapsed;
                         c.fit();
                         relayout = true;
@@ -7063,6 +7410,12 @@ impl App {
                     _ => watch::open_link(&crate::links::Target::Web(url), None),
                 },
                 Input::CloseWeb(key) => self.close_web(&key),
+                Input::Sanctuary => {
+                    if let Some(key) = self.stage.as_ref().map(|s| s.project()) {
+                        self.open_sky(&key);
+                    }
+                }
+                Input::CloseSky(key) => self.close_sky(&key),
                 Input::WebTab(key, step) => web::tab(&key, step),
                 Input::WebAsk(key, what) => {
                     self.web_ask = Some((key, what));
@@ -7192,8 +7545,9 @@ impl App {
     }
 
     /// Shows the start window while no project is open, and only then.
+    /// The town is always open, so it does not count.
     fn sync_start(&mut self) {
-        if !self.clusters.is_empty() {
+        if self.clusters.iter().any(|c| !town::is(&c.key)) {
             if let Some(s) = self.start_window.take() {
                 s.destroy();
             }
@@ -7219,6 +7573,9 @@ impl App {
     /// session, as the recent list spells it, for a project up for its
     /// task list alone.
     fn project_dir(&self, key: &str) -> Option<PathBuf> {
+        if town::is(key) {
+            return town::dir();
+        }
         let from_session = self.shared.registry.lock().ok().and_then(|r| {
             let mut dirs = r
                 .all()
@@ -7317,7 +7674,7 @@ impl App {
 
     /// The windows standing in a column with these keys, top to bottom.
     /// The start window stands in for the first project, so it goes below
-    /// the usage window in the first column.
+    /// the town and the usage window in the first column.
     fn column_windows(&self, keys: &[String], first: bool) -> Vec<Tile<'_>> {
         let mut out: Vec<Tile> = keys
             .iter()
@@ -7340,7 +7697,11 @@ impl App {
         if let Some(s) = self.start_window.as_deref().filter(|_| first) {
             let at = out
                 .iter()
-                .position(|t| matches!(t, Tile::Usage(_)))
+                .rposition(|t| match t {
+                    Tile::Usage(_) => true,
+                    Tile::Cluster(c) => town::is(&c.key),
+                    _ => false,
+                })
                 .map_or(0, |i| i + 1);
             out.insert(at, Tile::Start(s));
         }
@@ -7365,6 +7726,9 @@ impl App {
         self.columns.prune(is_present);
         if self.usage_window.is_some() && !self.columns.contains(columns::USAGE) {
             self.columns.add_first(columns::USAGE);
+        }
+        if let Some(k) = town::key().filter(|k| is_present(k) && !self.columns.contains(k)) {
+            self.columns.add_first(k);
         }
         let mut fresh: Vec<(String, String, i32)> = self
             .clusters

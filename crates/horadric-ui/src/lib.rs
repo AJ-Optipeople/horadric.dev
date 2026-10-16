@@ -30,7 +30,7 @@
 //!
 //! [`anim`], [`art`], [`board`], [`columns`], [`field`], [`files`], [`find`], [`layout`], [`theme`], [`palette`], [`paste`],
 //! [`keys`], [`frame`], [`icon`], [`inbox`], [`loot`], [`motion`], [`paths`], [`viewer`],
-//! [`highlight`], [`history`], [`hotkey`], [`screens`] and [`shell`] are pure and tested, and so is
+//! [`highlight`], [`history`], [`hotkey`], [`screens`], [`shell`] and [`sky`] are pure and tested, and so is
 //! the list logic in `recent`.
 //! `update` is the updater's crypto through CNG, tested with keys made in
 //! the tests.
@@ -66,6 +66,7 @@ pub mod portal_key;
 pub mod rain;
 pub mod screens;
 pub mod shell;
+pub mod sky;
 pub mod spectator;
 pub mod symbols;
 pub mod theme;
@@ -119,11 +120,18 @@ pub use dialog::error_alone;
 pub use store::exe_command;
 /// For `horadric quest`, which writes the chronicle from a session's shell
 /// under the same project key the app uses.
-pub use {project::folder_key, store::chronicle};
+pub use {
+    project::{folder_key, project_name},
+    store::{chronicle, chronicle_all, spent},
+};
 #[cfg(windows)]
 mod dropdown;
 #[cfg(windows)]
+mod glows;
+#[cfg(windows)]
 mod glyphs;
+#[cfg(windows)]
+pub mod memory;
 #[cfg(windows)]
 mod menu;
 #[cfg(windows)]
@@ -148,6 +156,8 @@ mod recent;
 #[cfg(windows)]
 mod render;
 #[cfg(windows)]
+pub mod sanctuary;
+#[cfg(windows)]
 mod settings;
 #[cfg(windows)]
 mod snapping;
@@ -157,6 +167,7 @@ mod sound;
 mod start;
 #[cfg(windows)]
 mod stash;
+pub mod town;
 // The journal, the chronicle and the MCP config wait for the Mac's quest log
 // and browser pane.
 #[cfg(windows)]

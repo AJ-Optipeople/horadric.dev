@@ -176,6 +176,9 @@ pub struct Console {
     /// The project whose browser page this pane shows, for a browser pane,
     /// which has no program and draws no grid: the page covers it.
     pub web: Option<String>,
+    /// The project whose Arcane Sanctuary this pane shows, which also has
+    /// no program and draws no grid: the graph covers it.
+    pub sky: Option<String>,
     pub screen: Mutex<Screen>,
     size: Mutex<GridSize>,
     /// Set by the reader when output arrived and no wake message is queued
@@ -630,6 +633,7 @@ impl Console {
             remote: Some(remote),
             view: None,
             web: None,
+            sky: None,
             screen: Mutex::new(Screen {
                 term: Term::new(config, &size, events),
                 parser: Processor::new(),
@@ -753,6 +757,7 @@ impl Console {
             serial,
             remote: None,
             web: None,
+            sky: None,
             view: Some(Mutex::new(View {
                 path,
                 stamp: None,
@@ -792,6 +797,16 @@ impl Console {
     /// A console with no program for the browser pane of project `key`.
     /// Its grid is never drawn, but a pane is made of a console.
     pub fn web(id: String, serial: usize, key: String) -> Arc<Console> {
+        Console::blank(id, serial, Some(key), None)
+    }
+
+    /// A console with no program for the Arcane Sanctuary of project
+    /// `key`, drawn by [`crate::sanctuary`] where a grid would be.
+    pub fn sky(id: String, serial: usize, key: String) -> Arc<Console> {
+        Console::blank(id, serial, None, Some(key))
+    }
+
+    fn blank(id: String, serial: usize, web: Option<String>, sky: Option<String>) -> Arc<Console> {
         let size = GridSize {
             cols: DEFAULT_COLS,
             rows: DEFAULT_ROWS,
@@ -807,7 +822,8 @@ impl Console {
             serial,
             remote: None,
             view: None,
-            web: Some(key),
+            web,
+            sky,
             screen: Mutex::new(Screen {
                 term: Term::new(Config::default(), &size, events),
                 parser: Processor::new(),

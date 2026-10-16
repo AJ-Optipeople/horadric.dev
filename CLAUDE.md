@@ -3,7 +3,9 @@
 Horadric shows every coding agent session you have running as a tile on your
 Windows desktop, grouped by project. Read [README.md](README.md) for what it
 does and [docs/PLAN.md](docs/PLAN.md) for where the work is up to and what
-comes next. Read the plan before starting anything.
+comes next. Read the plan's index before starting anything, then only the
+parts in `docs/plan/` that your work touches. The whole plan is far too
+long to read every time.
 
 The original concept lives outside this repo at
 `../ideas.repo/glance/glance-concept.md`. It holds the problem statement and
@@ -18,7 +20,7 @@ Do not reopen these without asking. They were argued through and chosen.
   Performance is the reason and so is control: the window manager fight
   is the whole project, and a layer in between makes it unwinnable. The
   one web view is the browser pane, which shows web pages, not Horadric
-  (decided 2026-09-29, see the plan's Browser pane).
+  (decided 2026-09-29, see docs/plan/browser-pane.md).
 - **One window per project cluster, not per tile.** Tiles are drawn inside
   the cluster window. Forty tiles must not mean forty windows.
 - **One terminal window for all sessions, the stage.** It shows one
@@ -27,16 +29,25 @@ Do not reopen these without asking. They were argued through and chosen.
   sessions must not mean ten terminals piled up.
 - **State comes from hook events, never from parsing terminal output.**
   The one exception is OSC 7501, a status the program sends on purpose
-  (decided 2026-10-11, see the plan's Claude Code 2.1.287 to 2.1.296).
+  (decided 2026-10-11, see docs/plan/claude-code-2-1-287-to-2-1-296.md).
   Hooks win where both speak.
 - **Dependencies are justified one at a time.** Today: `serde`, `serde_json`,
   `windows`, `windows-numerics`, `alacritty_terminal` for the terminal
   grid (writing a VT parser is not the project), `syntect` for the
-  file viewer's colours (writing grammars is not either), and
+  file viewer's colours (writing grammars is not either),
   `webview2-com` for the browser pane (the WebView2 COM bindings, on the
-  same `windows` version). Not a crate but vendored: `conpty.dll` and
-  `OpenConsole.exe` from Microsoft's ConPTY package, the pseudo console
-  that passes `CSI c` through so OSC 7501 works (see
+  same `windows` version), and `tree-sitter` with one grammar crate per
+  language (Rust, TypeScript and JavaScript, Python) for the lore's code
+  index (parsing languages is not the project either, and it finds the
+  calls a regex outline misses), and in `horadric-memory` `candle-core`,
+  `candle-nn` and `candle-transformers` with `tokenizers` (its `onig`
+  feature only) to run the embedding model that finds memory by meaning:
+  Hugging Face's pure Rust ML crates, no DLL to ship and no service that
+  must be running, and the tokenizer is the one the models were trained
+  with (writing either is not the project; see docs/plan/memory.md).
+  Not a crate but vendored: `conpty.dll` and `OpenConsole.exe` from
+  Microsoft's ConPTY package, the pseudo console that passes `CSI c`
+  through so OSC 7501 works (see
   `crates/horadric-pty/conpty/README.md`). Adding one is a decision, not a reflex.
 
 ## Conventions

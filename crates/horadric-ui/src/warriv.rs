@@ -8,17 +8,20 @@
 //! session gets the text only while it is live and between turns, as
 //! `go_on` types.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime};
 
 use horadric_core::chronicle::{self, Happened, Woken};
 use horadric_core::tasks::{self, Mark, Mode, Task};
 use horadric_core::warriv::{
-    self, Brief, Desk, Dried, Drive, Event, Kind, Looked, Picture, Review, Reviews, Wake, Why,
+    self, Brief, Desk, Dried, Drive, Event, Heard, Kind, Looked, Picture, Review, Reviews, Said,
+    Wake, Why,
 };
-use horadric_core::{lookback, runeword, ship, tombs, Agent, Phase};
+use horadric_core::{lookback, lore, runeword, ship, tombs, Agent, Phase};
 use horadric_hooks::tasks as file;
+use horadric_memory::distill;
+use horadric_memory::store::ChunkId;
 
 use super::{horadric_command, Board};
 use crate::app::{unix_now, App, Run};
@@ -131,17 +134,78 @@ impl Camp {
 }
 
 /// What the day's look back is given: the chronicle since the last one,
-/// read for what happened more than once.
-fn looked(key: &str) -> Looked {
+/// read for what happened more than once, and the dialogue stored since,
+/// to distill into notes. `live` are the conversations of the project's
+/// Warriv and errand sessions running now, whose talk is left out too
+/// though the chronicle may not name them yet.
+fn looked(key: &str, live: Vec<String>) -> Looked {
     let records = store::chronicle_all();
-    let since = lookback::since(&records, key, unix_now());
+    let now = unix_now();
+    let since = lookback::since(&records, key, now);
+    let mut skip = lookback::warriv_talk(&records, key);
+    skip.extend(live);
     Looked {
         day: lookback::day(&records, key, since),
         patterns: lookback::patterns(&records, key, since)
             .iter()
             .map(lookback::Pattern::line)
             .collect(),
+        said: said(key, since, &skip, now),
     }
+}
+
+/// Where the day's dialogue is written for the look back, and beside it
+/// how far the store was read: `.next` for the look back being told,
+/// `.mark` once it was.
+fn day_file(key: &str, ext: &str) -> Option<PathBuf> {
+    let dir = horadric_hooks::state_dir()?.join("memory").join("day");
+    Some(dir.join(lore::file_name(key)).with_extension(ext))
+}
+
+/// The look back was told, so the next one starts reading the store where
+/// this one stopped.
+fn day_read(key: &str) {
+    let (Some(next), Some(mark)) = (day_file(key, "next"), day_file(key, "mark")) else {
+        return;
+    };
+    if next.exists() {
+        if let Err(e) = std::fs::rename(&next, &mark) {
+            eprintln!("horadric: {} could not be kept: {e}", mark.display());
+        }
+    }
+}
+
+/// The project's dialogue the look back has not read, written to a file
+/// in the memory's folder for it to read: a day of it is too long for the
+/// prompt. None when there is none, or it could not be written.
+fn said(key: &str, since: u64, skip: &[String], now: u64) -> Option<Said> {
+    let memory = horadric_hooks::state_dir()?.join("memory");
+    let after = day_file(key, "mark")
+        .and_then(|m| std::fs::read_to_string(m).ok())
+        .and_then(|t| ChunkId::parse(t.trim()));
+    let day = distill::day(&memory, key, after, since, skip, now)
+        .map_err(|e| eprintln!("horadric: the day's dialogue could not be read: {e}"))
+        .ok()?;
+    let path = day_file(key, "md")?;
+    let next = day_file(key, "next")?;
+    if let Some(end) = day.end.filter(|e| Some(*e) != after) {
+        let kept = std::fs::create_dir_all(memory.join("day"))
+            .and_then(|()| std::fs::write(&next, end.to_string()));
+        if let Err(e) = kept {
+            eprintln!("horadric: {} could not be written: {e}", next.display());
+        }
+    }
+    if day.passages == 0 {
+        return None;
+    }
+    std::fs::write(&path, &day.text)
+        .map_err(|e| eprintln!("horadric: {} could not be written: {e}", path.display()))
+        .ok()?;
+    Some(Said {
+        path: path.display().to_string(),
+        passages: day.passages,
+        left_out: day.left_out,
+    })
 }
 
 /// The line for a wake given `events`.
@@ -192,6 +256,35 @@ pub(in crate::app) struct State {
     camps: HashMap<String, Camp>,
     tells: Vec<Tell>,
     reviewing: HashMap<String, Reviewing>,
+}
+
+impl State {
+    /// Camps that remember what the run before this one heard, so a reload
+    /// does not wake Warriv for every event that still stands.
+    pub(in crate::app) fn after(heard: &BTreeMap<String, Heard>) -> State {
+        State {
+            camps: heard
+                .iter()
+                .map(|(key, h)| {
+                    let camp = Camp {
+                        desk: Desk::after(h.clone()),
+                        ..Camp::default()
+                    };
+                    (key.clone(), camp)
+                })
+                .collect(),
+            ..State::default()
+        }
+    }
+
+    /// What each project's Warriv has heard, for `state.json`.
+    pub(in crate::app) fn heard(&self) -> BTreeMap<String, Heard> {
+        self.camps
+            .iter()
+            .map(|(key, c)| (key.clone(), c.desk.heard()))
+            .filter(|(_, h)| !h.is_empty())
+            .collect()
+    }
 }
 
 impl App {
@@ -360,8 +453,13 @@ impl App {
             return;
         };
         std::thread::spawn(move || {
+            let before = crate::worktree::committed(&dir, warriv::MEMORY);
             if let Err(e) = crate::worktree::commit_file(&dir, warriv::MEMORY, MEMORY_COMMIT) {
                 eprintln!("horadric: cannot commit Warriv's memory: {e}");
+            }
+            let after = std::fs::read_to_string(dir.join(warriv::MEMORY)).unwrap_or_default();
+            if let Err(e) = note_learned(&dir, &before.unwrap_or_default(), &after) {
+                eprintln!("horadric: cannot keep what Warriv learned as lore: {e}");
             }
         });
     }
@@ -456,6 +554,11 @@ impl App {
     /// A line of the wake's story, with its conversation once the session
     /// has one.
     fn record_wake(&self, key: &str, id: &str, mut what: Happened) {
+        if let Happened::WarrivWoke { events, .. } = &what {
+            if events.iter().any(|e| e.kind == Kind::LookBack) {
+                day_read(key);
+            }
+        }
         let known = self
             .shared
             .registry
@@ -476,6 +579,19 @@ impl App {
             title: String::new(),
             what,
         });
+    }
+
+    /// The conversations of the project's Warriv, reviewer and errand
+    /// sessions running now.
+    fn live_talk(&self, key: &str) -> Vec<String> {
+        let Ok(r) = self.shared.registry.lock() else {
+            return Vec::new();
+        };
+        r.all()
+            .filter(|s| warriv::is_warriv(&s.id) || runeword::is_errand(&s.id))
+            .filter(|s| folder_key(&s.cwd) == key)
+            .filter_map(|s| s.claude_session_id.clone())
+            .collect()
     }
 
     /// Each event with its quest's notes and its session's last turn.
@@ -499,7 +615,7 @@ impl App {
                         _ => Vec::new(),
                     },
                     picture: (e.kind == Kind::Round).then(|| self.picture(key, b)),
-                    looked: (e.kind == Kind::LookBack).then(|| looked(key)),
+                    looked: (e.kind == Kind::LookBack).then(|| looked(key, self.live_talk(key))),
                 }
             })
             .collect()
@@ -521,7 +637,8 @@ impl App {
             let ship = drive
                 .filter(|_| stones.iter().any(|s| s.label == ship::STONE))
                 .and_then(|d| {
-                    let due = ship::due(landed, checked, held.is_some());
+                    let busy = ship::under_way(key, &log, &records, unix_now());
+                    let due = ship::due(landed, checked, held.is_some(), busy);
                     ship::brief(due, d.ships_public, held)
                 });
             (warriv::main_line(&head, checked, landed), ship)
@@ -702,13 +819,22 @@ impl App {
         }
     }
 
-    /// The flags a Warriv session starts with: the one command it may run
+    /// The flags a Warriv session starts with: the folder of the day's
+    /// dialogue, which lies outside the project and is read without
+    /// asking only as a folder of its own, and the one command it may run
     /// without asking, before its system prompt, which ends that list.
     pub(super) fn warriv_args(&self, cwd: &Path) -> (Vec<String>, String) {
         let horadric = horadric_command();
         let key = folder_key(&cwd.to_string_lossy());
         let mut prompt = warriv::system_prompt(&horadric, file::rel(Path::new(&key)));
-        let mut tools = memory_tools(&horadric);
+        let mut tools = Vec::new();
+        if let Some(day) = day_file(&key, "md").and_then(|f| Some(f.parent()?.to_path_buf())) {
+            if std::fs::create_dir_all(&day).is_ok() {
+                tools.push("--add-dir".to_string());
+                tools.push(day.display().to_string());
+            }
+        }
+        tools.extend(memory_tools(&horadric));
         if self.drives.contains_key(&key) {
             prompt.push_str("\n\n");
             prompt.push_str(&warriv::driven_prompt(&horadric));
@@ -1276,4 +1402,37 @@ fn reload_log() -> String {
     store::dir()
         .and_then(|d| std::fs::read_to_string(d.join("reload.log")).ok())
         .unwrap_or_default()
+}
+
+/// Each rule Warriv added to its memory on a wake, as a lore note naming
+/// the project's files it mentions, so every session finds what Warriv
+/// learned and not only the next Warriv. A rule kept already is not kept
+/// twice.
+fn note_learned(dir: &std::path::Path, before: &str, after: &str) -> Result<(), String> {
+    let rules = horadric_core::lore::learned(before, after);
+    if rules.is_empty() {
+        return Ok(());
+    }
+    let place = horadric_hooks::lore::Place::of(dir)?;
+    let commit = place.commit();
+    let notes: Vec<_> = rules
+        .into_iter()
+        .map(|rule| {
+            let files = horadric_core::lore::named_files(&rule)
+                .into_iter()
+                .filter(|f| place.exists(f))
+                .take(horadric_core::lore::MOST_FILES)
+                .collect();
+            (rule, place.marks(files))
+        })
+        .collect();
+    let at = horadric_hooks::lore::now();
+    place.change(|l| {
+        for (rule, marks) in notes {
+            if !l.has(&rule) {
+                l.add(&rule, marks, &commit, at, &[])?;
+            }
+        }
+        Ok(())
+    })
 }

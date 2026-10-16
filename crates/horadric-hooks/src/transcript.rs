@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::SystemTime;
 
+use horadric_core::pack;
+use horadric_core::spend::{self, Spend};
 use horadric_core::{title, Agent, Limits, Title};
 
 /// Claude Code repeats the title every few turns, so the end of the file
@@ -146,6 +148,31 @@ fn list_in(root: &Path, cwd: &str, skip: &[String], limit: usize) -> Vec<Past> {
         .collect()
 }
 
+/// Every conversation Claude Code has on disk, newest first: the
+/// `<id>.jsonl` files in each folder of its projects folder. Subagents'
+/// own transcripts, in folders named after their parent, are not among
+/// them.
+pub fn files() -> Vec<PathBuf> {
+    let Some(root) = projects_root(
+        std::env::var("CLAUDE_CONFIG_DIR").ok().as_deref(),
+        crate::home().as_deref(),
+    ) else {
+        return Vec::new();
+    };
+    let mut found: Vec<(SystemTime, PathBuf)> = std::fs::read_dir(root)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|d| std::fs::read_dir(d.path()).ok())
+        .flatten()
+        .flatten()
+        .filter(|e| e.path().extension().is_some_and(|x| x == "jsonl"))
+        .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
+        .collect();
+    found.sort_by_key(|(m, _)| std::cmp::Reverse(*m));
+    found.into_iter().map(|(_, p)| p).collect()
+}
+
 /// Where Claude Code keeps its transcripts, one folder per working
 /// directory.
 fn projects_root(config_dir: Option<&str>, home: Option<&str>) -> Option<PathBuf> {
@@ -218,6 +245,40 @@ pub fn codex_limits(path: &Path) -> Option<Limits> {
     let len = file.metadata().ok()?.len();
     let tail = read_from(&mut file, len.saturating_sub(TAIL))?;
     Limits::from_codex(&String::from_utf8_lossy(&tail))
+}
+
+/// What the conversation `id`, held in `cwd`, spent in tokens, with the
+/// subagents it ran, whose transcripts Claude Code keeps in a folder named
+/// after it. None when it has no transcript on disk.
+pub fn spend(cwd: &str, id: &str) -> Option<Spend> {
+    let path = path(cwd, id)?;
+    let mut out = spend::read(&std::fs::read_to_string(&path).ok()?, spend::PROMPT);
+    let subagents = path.with_extension("").join("subagents");
+    for e in std::fs::read_dir(subagents).into_iter().flatten().flatten() {
+        let p = e.path();
+        if p.extension().is_some_and(|x| x == "jsonl") {
+            let text = std::fs::read_to_string(&p).unwrap_or_default();
+            out.add(&spend::read(&text, spend::AGENT));
+        }
+    }
+    Some(out)
+}
+
+/// What the conversation `id` in `cwd` read and changed under `cwd`, its
+/// subagents' reads and changes included. None when its transcript is not
+/// there.
+pub fn touched(cwd: &str, id: &str) -> Option<pack::Touched> {
+    let path = path(cwd, id)?;
+    let mut out = pack::touched(&std::fs::read_to_string(&path).ok()?, cwd);
+    let subagents = path.with_extension("").join("subagents");
+    for e in std::fs::read_dir(subagents).into_iter().flatten().flatten() {
+        let p = e.path();
+        if p.extension().is_some_and(|x| x == "jsonl") {
+            let text = std::fs::read_to_string(&p).unwrap_or_default();
+            out.add(&pack::touched(&text, cwd));
+        }
+    }
+    Some(out)
 }
 
 fn read_from(file: &mut File, at: u64) -> Option<Vec<u8>> {

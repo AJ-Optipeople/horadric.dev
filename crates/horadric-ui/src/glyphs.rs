@@ -39,8 +39,10 @@ use windows_numerics::{Matrix3x2, Vector2};
 use crate::favicon::{self, Favicon};
 use crate::frame::{Decoration, Frame, BOLD, ITALIC};
 use crate::render::{self, hwnd_target, Gpu};
+use crate::sky::SkyFrame;
 use crate::theme::{self, Color};
 use crate::{rain, viewport};
+use horadric_core::sanctuary::Kind;
 use horadric_core::saved::Side;
 
 /// Cascadia ships with Windows 11. Consolas is on every Windows since Vista.
@@ -852,6 +854,7 @@ impl GridTarget {
         veil: f32,
         plate: (f32, f32),
         rain: Option<(u64, f32)>,
+        sky: Option<&SkyFrame>,
     ) -> Result<()> {
         let (ox, oy) = grid_origin();
         let x = |col: usize| ox + col as f32 * cell.w;
@@ -1005,6 +1008,13 @@ impl GridTarget {
             self.rt.PopAxisAlignedClip();
             self.rt.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
 
+            // The graph keeps no margin: it reaches the glass's edges.
+            if let Some(sky) = sky {
+                self.rt
+                    .PushAxisAlignedClip(&screen, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+                self.sky(gpu, sky, frame.background, header.accent, &screen);
+                self.rt.PopAxisAlignedClip();
+            }
             self.glass(&screen, header);
             if let Some(bar) = &header.bar {
                 self.tab_strip(gpu, bar, size.width, header.accent);
@@ -1029,6 +1039,140 @@ impl GridTarget {
                     .FillRoundedRectangle(&rounded(&screen, SCREEN_RADIUS), &self.brush);
             }
             self.rt.EndDraw(None, None)
+        }
+    }
+
+    /// The Arcane Sanctuary's graph on the glass: links as faint threads,
+    /// files as dots in the ink of the text, notes and quests each in a
+    /// colour of their own, the node under the mouse and its links lit in
+    /// the project's colour, and the names under the dots.
+    unsafe fn sky(&self, gpu: &Gpu, sky: &SkyFrame, bg: Rgb, accent: Color, room: &D2D_RECT_F) {
+        let bg = Color::rgb(((bg.r as u32) << 16) | ((bg.g as u32) << 8) | bg.b as u32);
+        let light = 0.2126 * bg.r + 0.7152 * bg.g + 0.0722 * bg.b > 0.5;
+        let ink = Color::rgb(if light { 0x000000 } else { 0xFFFFFF });
+        let kind_color = |k: Kind| match k {
+            Kind::File => bg.mix(ink, 0.6),
+            Kind::Note => theme::ACCENTS[4].0,
+            Kind::Quest => theme::quest(),
+        };
+        let thread = bg.mix(ink, 0.3);
+        // The lit links last, so they lie over the rest.
+        let (lit, unlit): (Vec<_>, Vec<_>) = sky.lines.iter().partition(|l| l.lit);
+        for l in unlit.into_iter().chain(lit) {
+            let (c, width) = if l.lit {
+                (accent.with_alpha(0.85), 1.4)
+            } else {
+                (thread.with_alpha(0.2 + 0.4 * l.strength), 0.8)
+            };
+            self.brush.SetColor(&render::color(c));
+            self.rt.DrawLine(
+                Vector2 { X: l.a.0, Y: l.a.1 },
+                Vector2 { X: l.b.0, Y: l.b.1 },
+                &self.brush,
+                width,
+                None,
+            );
+        }
+        let disc = |at: (f32, f32), r: f32, c: Color| {
+            self.brush.SetColor(&render::color(c));
+            self.rt.FillEllipse(
+                &D2D1_ELLIPSE {
+                    point: Vector2 { X: at.0, Y: at.1 },
+                    radiusX: r,
+                    radiusY: r,
+                },
+                &self.brush,
+            );
+        };
+        // What an agent touched glows under every dot, a few rings of its
+        // session's colour thinning outward, so a lit cluster reads as one
+        // light rather than as single dots.
+        for d in &sky.dots {
+            if let Some((rgb, strength)) = d.glow {
+                let c = Color::rgb(rgb);
+                let reach = 4.0 + 10.0 * strength;
+                for (grow, alpha) in [(1.0, 0.10), (0.6, 0.16), (0.3, 0.26)] {
+                    disc(
+                        d.at,
+                        d.r + reach * grow,
+                        c.with_alpha(alpha * strength * d.fade),
+                    );
+                }
+            }
+        }
+        for d in &sky.dots {
+            let mut c = match (d.hovered, d.lit) {
+                (true, _) => accent,
+                (false, true) => kind_color(d.kind).mix(accent, 0.6),
+                _ => kind_color(d.kind),
+            };
+            if let Some((rgb, strength)) = d.glow {
+                if !d.hovered {
+                    c = c.mix(Color::rgb(rgb).mix(ink, 0.25), strength.min(1.0));
+                }
+            }
+            if d.fade < 1.0 {
+                c = c.with_alpha(d.fade.max(0.0));
+            }
+            disc(d.at, d.r, c);
+        }
+        for s in &sky.sparks {
+            let c = Color::rgb(s.rgb);
+            self.brush.SetColor(&render::color(c.with_alpha(0.7)));
+            self.rt.DrawLine(
+                Vector2 {
+                    X: s.tail.0,
+                    Y: s.tail.1,
+                },
+                Vector2 {
+                    X: s.at.0,
+                    Y: s.at.1,
+                },
+                &self.brush,
+                1.6,
+                None,
+            );
+            disc(s.at, 5.0, c.with_alpha(0.25));
+            disc(s.at, 2.2, c.mix(ink, 0.4));
+        }
+        // A name is drawn over a halo of the background, so it reads over
+        // the dots and threads behind it.
+        let label = |text: &str, x: f32, y: f32, c: Color| {
+            let wide: Vec<u16> = text.encode_utf16().collect();
+            let at = |dx: f32, dy: f32, c: Color| {
+                self.brush.SetColor(&render::color(c));
+                self.rt.DrawText(
+                    &wide,
+                    &gpu.small_centre,
+                    &D2D_RECT_F {
+                        left: x - 300.0 + dx,
+                        top: y + dy,
+                        right: x + 300.0 + dx,
+                        bottom: y + 20.0 + dy,
+                    },
+                    &self.brush,
+                    D2D1_DRAW_TEXT_OPTIONS_NONE,
+                    DWRITE_MEASURING_MODE_NATURAL,
+                );
+            };
+            let halo = bg.with_alpha(0.8);
+            for (dx, dy) in [(-1.0, 0.0), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0)] {
+                at(dx, dy, halo);
+            }
+            at(0.0, 0.0, c);
+        };
+        for l in &sky.labels {
+            let c = if l.hovered {
+                ink.mix(bg, 0.05)
+            } else {
+                bg.mix(ink, 0.75)
+            };
+            label(&l.text, l.at.0, l.at.1, c);
+        }
+        if let Some(m) = &sky.message {
+            let mid = (room.left + room.right) / 2.0;
+            let y = (room.top + room.bottom) / 2.0 - 10.0;
+            label(m, mid, y, bg.mix(ink, 0.55));
         }
     }
 

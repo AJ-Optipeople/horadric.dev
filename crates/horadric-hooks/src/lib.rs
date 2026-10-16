@@ -15,6 +15,8 @@ pub mod codex;
 pub mod grok;
 pub mod install;
 pub mod listener;
+pub mod lock;
+pub mod lore;
 pub mod tasks;
 pub mod transcript;
 
@@ -82,6 +84,15 @@ pub const BROWSER_PATH: &str = "/horadric/browser";
 /// knows about its session, for the band above the prompt. The reply
 /// carries it.
 pub const KNOW_PATH: &str = "/horadric/know";
+
+/// Path `horadric mcp` posts to after a lore tool answered: the notes and
+/// files it showed the session, for the Arcane Sanctuary to light.
+pub const GLOW_PATH: &str = "/horadric/glow";
+
+/// Path `horadric mcp` posts `lore_recall` to: the app holds the model
+/// that finds notes by meaning, one for every session. The reply carries
+/// the answer, or an error that sends the server back to words.
+pub const RECALL_PATH: &str = "/horadric/recall";
 
 /// Header a command request must carry. A browser can not send a custom
 /// header to another origin without a preflight we never answer, so this is

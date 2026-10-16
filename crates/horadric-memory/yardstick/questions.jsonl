@@ -1,0 +1,65 @@
+{"q": "Why didn't we build Horadric's interface on a GUI framework or an embedded browser engine?", "answers": ["doc:CLAUDE.md#3", "doc:docs/plan/browser-pane.md#1", "doc:docs/plan/macos.md#1"], "from": "doc"}
+{"q": "If a project has forty tiles, how many operating system windows does that cost?", "answers": ["doc:CLAUDE.md#3"], "from": "doc"}
+{"q": "Which port does a dev instance listen on?", "answers": ["doc:CLAUDE.md#8", "doc:docs/plan/dev-instances.md#1"], "from": "doc"}
+{"q": "I launched my debug build in the background with PowerShell and the terminal pane never showed up. What did I do wrong?", "answers": ["doc:CLAUDE.md#8"], "from": "doc"}
+{"q": "Has resuming paused sessions ever gone out of control and launched far too many agents?", "answers": ["doc:CLAUDE.md#9", "doc:docs/plan/persistence.md#4", "dialogue:bbaf5c96#4"], "from": "doc"}
+{"q": "Why do we bundle Microsoft's OpenConsole and conpty.dll instead of relying on the one Windows ships?", "answers": ["doc:crates/horadric-pty/conpty/README.md#1", "doc:CLAUDE.md#4", "doc:docs/plan/claude-code-2-1-287-to-2-1-296.md#6", "doc:docs/plan/claude-code-2-1-287-to-2-1-296.md#7"], "from": "doc"}
+{"q": "Which machine learning library was picked to run embeddings inside the app, and what else was considered?", "answers": ["doc:docs/plan/memory.md#3"], "from": "doc"}
+{"q": "Will past chats with the coding assistant still exist a year from now unless we save them ourselves?", "answers": ["doc:docs/plan/memory.md#5", "dialogue:78f905f4#5"], "from": "doc"}
+{"q": "If an upgrade won't boot, how many seconds pass before we fall back automatically?", "answers": ["doc:docs/plan/reload.md#3", "doc:RELEASING.md#9", "doc:docs/plan/the-updater.md#3", "dialogue:8f7873b5#2"], "from": "doc"}
+{"q": "Where are project secrets kept on disk, and why not in Windows Credential Manager?", "answers": ["doc:docs/plan/secrets.md#2"], "from": "doc"}
+{"q": "How is an agent supposed to call a CLI that needs a token without the token value ever showing up in its context?", "answers": ["doc:docs/plan/secrets.md#3", "doc:docs/plan/secrets.md#1"], "from": "doc"}
+{"q": "Wouldn't it be simpler to export every stored credential as an environment variable when a session launches?", "answers": ["doc:docs/plan/secrets.md#4"], "from": "doc"}
+{"q": "How does the lore work out that a note may be out of date, and does an uncommitted edit count?", "answers": ["doc:docs/plan/lore.md#8", "doc:docs/plan/lore.md#6"], "from": "doc"}
+{"q": "Is there a cap on how many lore notes a project keeps, and how many come back from one recall?", "answers": ["doc:docs/plan/lore.md#8"], "from": "doc"}
+{"q": "Why parse source with tree-sitter rather than asking a language server or using a ctags style regex outline?", "answers": ["doc:docs/plan/lore.md#10", "doc:docs/plan/lore.md#11", "doc:CLAUDE.md#4"], "from": "doc"}
+{"q": "How large had the single plan file grown before it was broken up into parts?", "answers": ["doc:docs/plan/lore.md#1"], "from": "doc"}
+{"q": "Typing in a pane showed each character a frame late whenever a few tiles were animating. What was holding it back?", "answers": ["doc:docs/plan/performance.md#2"], "from": "doc"}
+{"q": "Why did every hook event cost around 90 milliseconds when a few saved folders no longer existed?", "answers": ["doc:docs/plan/performance.md#3"], "from": "doc"}
+{"q": "After how long does a finished quest get archived out of the live quest list?", "answers": ["doc:docs/plan/lore.md#15"], "from": "doc"}
+{"q": "On startup, how does the app tell that the previous run died instead of being quit from the tray?", "answers": ["doc:docs/plan/reload.md#3"], "from": "doc"}
+{"q": "What stops a crash loop from resuming the same sessions again and again?", "answers": ["doc:docs/plan/reload.md#4"], "from": "doc"}
+{"q": "Which window bugs did checking on screen catch that unit tests would have missed?", "answers": ["doc:CLAUDE.md#10"], "from": "doc"}
+{"q": "Why won't recall squeeze what it keeps into an abbreviated code language?", "answers": ["doc:docs/plan/memory.md#2", "dialogue:78f905f4#5", "dialogue:78f905f4#7"], "from": "doc"}
+{"q": "Why do the usage bars sometimes show limit percentages that are behind what I have really used?", "answers": ["note:horadric.dev#12"], "from": "note"}
+{"q": "When two status line readings disagree about the same rate limit window, which one wins?", "answers": ["note:horadric.dev#12"], "from": "note"}
+{"q": "Where do the links between files in the sanctuary graph come from, and why can't horadric-ui build them alone?", "answers": ["note:horadric.dev#13", "doc:docs/plan/the-arcane-sanctuary.md#6"], "from": "note"}
+{"q": "If I come back tomorrow, will the graph picture look the same, and where is that remembered?", "answers": ["note:horadric.dev#13", "doc:docs/plan/the-arcane-sanctuary.md#6"], "from": "note"}
+{"q": "What is the keyboard shortcut for the Arcane Sanctuary?", "answers": ["note:horadric.dev#15", "note:horadric.dev#16", "doc:docs/plan/the-arcane-sanctuary.md#7", "dialogue:fab60fe7#13"], "from": "note"}
+{"q": "How quickly does the graph of this repository settle from scratch, and how big is it?", "answers": ["note:horadric.dev#14", "doc:docs/plan/the-arcane-sanctuary.md#6"], "from": "note"}
+{"q": "What message does the background graph reader send to the pane when it has finished loading?", "answers": ["note:horadric.dev#15"], "from": "note"}
+{"q": "Which approximation keeps the repulsion step of the graph layout fast with many nodes?", "answers": ["note:horadric.dev#14", "doc:docs/plan/the-arcane-sanctuary.md#5", "doc:docs/plan/the-arcane-sanctuary.md#6"], "from": "note"}
+{"q": "What was the typical token cost of a quest before quests began with a list of likely files?", "answers": ["note:horadric.dev#2", "doc:docs/plan/lore.md#6", "dialogue:35e9c211#1", "dialogue:35e9c211#4"], "from": "note"}
+{"q": "Is the spend of quests run by Codex counted, and from what data?", "answers": ["note:horadric.dev#1", "note:horadric.dev#6", "doc:docs/plan/lore.md#3"], "from": "note"}
+{"q": "Where did the old completed quests go when tasks.md got shorter?", "answers": ["note:horadric.dev#5", "doc:docs/plan/lore.md#14", "dialogue:0de3055b#1"], "from": "note"}
+{"q": "How does the symbol index notice changed files when nothing watches the folder?", "answers": ["note:horadric.dev#8", "doc:docs/plan/lore.md#13"], "from": "note"}
+{"q": "Which programming languages can lore_find and lore_calls look into?", "answers": ["note:horadric.dev#8", "doc:docs/plan/lore.md#10", "doc:CLAUDE.md#4"], "from": "note"}
+{"q": "An idea in the town turned into something real. How do I spin it off into its own repository with a first session?", "answers": ["note:horadric.dev#11", "doc:docs/plan/tristram.md#5", "doc:docs/plan/tristram.md#7", "dialogue:3e2dcb44#3", "dialogue:3e2dcb44#5", "dialogue:735e048b#1"], "from": "note"}
+{"q": "Can the town agent file quests into some other project's log from the command line?", "answers": ["note:horadric.dev#9", "doc:docs/plan/tristram.md#4", "doc:docs/plan/tristram.md#7", "dialogue:3e2dcb44#5", "dialogue:3e2dcb44#3"], "from": "note"}
+{"q": "How does the town session get to read every project's files without permission prompts, and where do my own notes for it go?", "answers": ["note:horadric.dev#7", "doc:docs/plan/tristram.md#3", "doc:docs/plan/tristram.md#4", "doc:docs/plan/tristram.md#6", "dialogue:fd798dcd#1"], "from": "note"}
+{"q": "What became of the first step of the town feature when its quest session found the work was already on main?", "answers": ["note:horadric.dev#4"], "from": "note"}
+{"q": "Which file draws the plus and its caption on the empty town's add button?", "answers": ["note:horadric.dev#10"], "from": "note"}
+{"q": "The branch that counted spend for quests marked done by hand would not rebase onto main. How did that work land in the end?", "answers": ["note:horadric.dev#3", "note:horadric.dev#6", "dialogue:e437fd7c#3"], "from": "note"}
+{"q": "Where does the sanctuary keep its per project view state so it is still there after the pane closes?", "answers": ["note:horadric.dev#15"], "from": "note"}
+{"q": "A tile window that appears while the app is running stays fully see-through and leaves a hole between tiles. Why?", "answers": ["dialogue:fcae534c#1", "dialogue:fcae534c#4"], "from": "dialogue"}
+{"q": "Adding one more worker reshapes the big console back into a box and loses my dimensions. Why?", "answers": ["dialogue:8a8cb053#1", "dialogue:8a8cb053#2", "doc:docs/plan/the-stage.md#2"], "from": "dialogue"}
+{"q": "How can I check how a site looks at phone width inside the browser pane without the page reflowing every time the grid changes?", "answers": ["dialogue:8a8cb053#4", "dialogue:8a8cb053#9", "doc:docs/plan/browser-pane.md#12"], "from": "dialogue"}
+{"q": "A new user picks a folder in the start window and nothing happens, it just asks for a folder again. What is going wrong?", "answers": ["dialogue:820177e6#2", "dialogue:820177e6#5"], "from": "dialogue"}
+{"q": "Which folders are searched for the claude executable when it is not on the PATH Horadric started with?", "answers": ["dialogue:820177e6#5"], "from": "dialogue"}
+{"q": "A tester updated through the app, then double clicked the exe in their downloads again and got the old version. Why?", "answers": ["dialogue:b8691996#2"], "from": "dialogue"}
+{"q": "Why might one job get picked up twice by different workers?", "answers": ["dialogue:188f3a91#2"], "from": "dialogue"}
+{"q": "While I fill in a form on a web page, the keyboard suddenly jumps over to one of the agents. What is stealing it?", "answers": ["dialogue:5f0bd476#1", "dialogue:5f0bd476#2"], "from": "dialogue"}
+{"q": "Browser MCP calls keep failing with a connection reset even though the action happened in the page. What is the root cause?", "answers": ["dialogue:b3acd5c5#3", "doc:docs/plan/browser-pane.md#7", "dialogue:5eabf119#1"], "from": "dialogue"}
+{"q": "Sometimes an agent's tile hops to a brand new cluster for a while and then comes back. What makes it move?", "answers": ["dialogue:1bc0c7e5#2", "dialogue:1bc0c7e5#3"], "from": "dialogue"}
+{"q": "Movement on screen felt stuttery, as if running at half speed. Why, and what was done about it?", "answers": ["dialogue:c6365ba0#1", "dialogue:c6365ba0#3", "dialogue:c6365ba0#4"], "from": "dialogue"}
+{"q": "In trunk mode, what happens when one session edits a file that another session changed and has not committed?", "answers": ["dialogue:dae26194#4", "doc:docs/plan/step-4-worktrees-and-the-git-glance.md#5"], "from": "dialogue"}
+{"q": "On a laptop the little project windows stay buried under everything and the taskbar button only brings up the terminal. Was that ever fixed?", "answers": ["dialogue:45541664#3", "dialogue:45541664#1", "doc:docs/plan/step-2-cluster-windows.md#2", "doc:docs/plan/step-2-cluster-windows.md#3"], "from": "dialogue"}
+{"q": "I chose Close project on the Horadric project and its cluster came straight back. Why?", "answers": ["dialogue:242331d6#2", "dialogue:242331d6#3"], "from": "dialogue"}
+{"q": "An agent in a freshly made repository had no idea how our work queue works. Why, and what did we change?", "answers": ["dialogue:c27f6937#2", "dialogue:c27f6937#4"], "from": "dialogue"}
+{"q": "Every time the app restarts for an update, the orchestrator spins up a session again. How was that stopped?", "answers": ["dialogue:fd4d2d90#2", "dialogue:fd4d2d90#4", "dialogue:fd4d2d90#1"], "from": "dialogue"}
+{"q": "Why did several open projects end up painted in the same colour, and how are colours picked now?", "answers": ["dialogue:61b057e3#3", "dialogue:61b057e3#4"], "from": "dialogue"}
+{"q": "The iPhone home screen app never picks up the pairing when I scan the code with the camera. What is the workaround?", "answers": ["dialogue:3f8ed3a4#3", "dialogue:3f8ed3a4#4"], "from": "dialogue"}
+{"q": "If somebody got a photo of the phone pairing code, could they control my machine?", "answers": ["dialogue:5cb5ca58#7", "doc:docs/PORTAL.md#3", "doc:docs/IDEAS.md#11", "dialogue:5cb5ca58#6"], "from": "dialogue"}
+{"q": "Should the long term memory sit on a vector database?", "answers": ["dialogue:78f905f4#8", "doc:docs/plan/memory.md#5", "dialogue:78f905f4#5"], "from": "dialogue"}
+{"q": "Does anything in the notification area or on the taskbar show that an agent is busy?", "answers": ["dialogue:74de4cab#3", "dialogue:74de4cab#2", "dialogue:74de4cab#5", "dialogue:74de4cab#6"], "from": "dialogue"}
+{"q": "How can a Windows app animate its tray icon at all?", "answers": ["dialogue:74de4cab#1"], "from": "dialogue"}

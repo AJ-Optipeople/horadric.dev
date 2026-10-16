@@ -9,8 +9,10 @@ use std::path::{Path, PathBuf};
 
 use horadric_core::fleet::{self, Device};
 use horadric_core::runeword::{self, Stone};
-use horadric_core::tasks::{self, Mode, CONFIG_FILE, OLD_FILE, QUESTS_FILE};
+use horadric_core::tasks::{self, Mode, Task, CONFIG_FILE, OLD_FILE, QUESTS_FILE};
 use horadric_core::{merge, ssh, warriv, worktree};
+
+use crate::lock::Lock;
 
 /// The list's path in a project.
 pub fn file(project: &Path) -> PathBuf {
@@ -134,15 +136,52 @@ pub fn set_parallel(project: &Path, n: usize) -> io::Result<()> {
 
 /// Reads the list, lets `change` rewrite it and writes the result back.
 /// Read and written in one go, so an edit made in an editor a moment
-/// before is not lost. False when `change` found nothing to change.
+/// before is not lost, and under the list's lock, so the app and every
+/// session's `horadric quest` take turns. False when `change` found
+/// nothing to change.
 pub fn update(project: &Path, change: impl FnOnce(&str) -> Option<String>) -> io::Result<bool> {
     let path = file(project);
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    let _lock = Lock::take(&path.with_extension("lock"))?;
     let old = read_text(&path);
     match change(&old) {
         Some(new) if new != old => write(&path, &new).map(|_| true),
         Some(_) => Ok(true),
         None => Ok(false),
     }
+}
+
+/// The done file's path in a project: where the list's old done quests
+/// went.
+pub fn done_file(project: &Path) -> PathBuf {
+    project.join(tasks::done_file(rel(project)))
+}
+
+/// The quests the done file holds, oldest first, none when there is none.
+pub fn read_done(project: &Path) -> Vec<Task> {
+    tasks::parse(&read_text(&done_file(project)))
+}
+
+/// Moves the list's done quests that `old` says ended long enough ago to
+/// the done file, under the list's lock. The done file is written first,
+/// so a failure loses no quest; at worst one shows twice. How many moved.
+pub fn sweep_done(project: &Path, old: impl Fn(&Task) -> bool) -> io::Result<usize> {
+    let done = done_file(project);
+    let mut moved = 0;
+    let mut failed = None;
+    update(project, |text| {
+        let (rest, gone) = tasks::sweep(text, old)?;
+        let grown = tasks::append_done(&read_text(&done), &gone, rel(project));
+        if let Err(e) = write(&done, &grown) {
+            failed = Some(e);
+            return None;
+        }
+        moved = tasks::parse(&gone).len();
+        Some(rest)
+    })?;
+    failed.map_or(Ok(moved), Err)
 }
 
 /// Writes through a file beside it and a rename, so a reader never sees
@@ -206,6 +245,34 @@ mod tests {
         assert!(!update(&dir, |_| None).unwrap());
         assert!(!dir.join(".horadric/quests.horadric-tmp").exists());
         assert!(dir.join(QUESTS_FILE).is_file());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn old_done_quests_move_to_the_done_file() {
+        let dir = scratch("sweep");
+        write(
+            &dir.join(OLD_FILE),
+            "- [x] Old @a
+- [x] New @b
+- [ ] Open
+",
+        )
+        .unwrap();
+        let old = |t: &Task| t.holder.as_deref() == Some("a");
+        assert_eq!(sweep_done(&dir, old).unwrap(), 1);
+        assert_eq!(
+            read(&dir),
+            "- [x] New @b
+- [ ] Open
+"
+        );
+        assert_eq!(done_file(&dir), dir.join(".horadric/tasks-done.md"));
+        let done = read_done(&dir);
+        assert_eq!(done.len(), 1);
+        assert_eq!(done[0].title, "Old");
+        assert_eq!(sweep_done(&dir, old).unwrap(), 0);
+        assert!(!dir.join(".horadric/tasks.lock").exists());
         fs::remove_dir_all(&dir).unwrap();
     }
 

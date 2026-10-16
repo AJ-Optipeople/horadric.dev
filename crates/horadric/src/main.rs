@@ -11,6 +11,8 @@
 //! Horadric up on this machine. `host` is not for people: the app starts
 //! one per session to hold its console.
 
+#[cfg(windows)]
+mod code;
 mod console;
 mod heavy;
 mod hook;
@@ -19,6 +21,8 @@ mod install;
 #[cfg(target_os = "macos")]
 #[path = "install_mac.rs"]
 mod install;
+#[cfg(windows)]
+mod lore;
 #[cfg(windows)]
 mod mcp;
 #[cfg(windows)]
@@ -63,8 +67,15 @@ Usage:
                                Report on the quest this session works, or add to
                                the project's quest log (.horadric/quests.md).
                                `horadric task` is the same, from before the rename
+                               `quest add|list --project NAME` works on another project
+  horadric found <name>          Make a project from the town: folder, git, README, first session
+  horadric projects              Every known project: folder, sessions, open quests, last commit
   horadric heavy -- COMMAND...    Run a test suite or build once no other session on this
                                machine runs one; alone, say who runs one now
+  horadric sanctuary             Lay out this project's Arcane Sanctuary graph from where
+                               it was left, keep it, and say how large it is
+  horadric sky                   Chart every known project into Tristram's sky, each a
+                               galaxy, and say how large and how quick it is
   horadric runeword list         Every stone of this project's Runetome: its runeword name,
                                label and steps, and why any does not parse
   horadric runeword cast NAME    Cast that stone of this project's Runetome, in a session
@@ -133,6 +144,8 @@ fn main() -> ExitCode {
         Some("heavy") => heavy::run(&args[1..]),
         // `task` is how sessions started before the rename report back.
         Some("quest" | "task") => task::run(&args[1..]),
+        Some("projects") => task::projects(),
+        Some("found") => run::found(&args[1..]),
         #[cfg(windows)]
         Some("runeword") => runeword::run(&args[1..]),
         #[cfg(windows)]
@@ -153,10 +166,15 @@ fn main() -> ExitCode {
             .map_err(|e| e.to_string())
             .and_then(|exe| launch(&exe)),
         #[cfg(windows)]
-        Some("app") => horadric_ui::app::run(
-            horadric_hooks::port(),
-            args.get(1).is_some_and(|a| a == "--reload"),
-        ),
+        Some("app") => {
+            horadric_ui::sanctuary::set_source(lore::graph_at);
+            horadric_ui::memory::set_code_source(lore::code_files);
+            horadric_ui::sanctuary::set_town_source(lore::town_graph);
+            horadric_ui::app::run(
+                horadric_hooks::port(),
+                args.get(1).is_some_and(|a| a == "--reload"),
+            )
+        }
         #[cfg(target_os = "macos")]
         Some("app") => horadric_ui::mac::run(
             horadric_hooks::port(),
@@ -173,6 +191,10 @@ fn main() -> ExitCode {
         Some("mcp") => mcp::run(),
         #[cfg(windows)]
         Some("portal") => portal::run(&args[1..]),
+        #[cfg(windows)]
+        Some("sanctuary") => lore::sanctuary(),
+        #[cfg(windows)]
+        Some("sky") => lore::sky(),
         Some("swap") => reload::swap(&args[1..]),
         Some("install") => install_command(),
         Some("uninstall") => uninstall_command(),

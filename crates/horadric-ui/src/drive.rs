@@ -145,7 +145,10 @@ impl App {
             self.webs.insert(key.to_string(), page);
         }
         let live = self.live_sessions();
-        let id = web::agent_tab(key, session, |s| live.contains(s), true);
+        // Without an address it only wants to look, which the user's page
+        // allows: a tab of its own only when there is nothing to look at.
+        let id = web::agent_tab(key, session, |s| live.contains(s), url.is_some())
+            .or_else(|| web::agent_tab(key, session, |s| live.contains(s), true));
         if let (Some(id), Some(u)) = (id, url) {
             web::navigate(key, id, u);
         }

@@ -34,7 +34,7 @@ use horadric_core::journal::{self, Commit, Entry, What};
 use horadric_core::tasks::{self, Holder, Mark, Mode, Next, Task, Wait};
 use horadric_core::usage::{self, format_until};
 use horadric_core::worktree::{self, Worktree};
-use horadric_core::{fleet, merge, ship, ssh, tombs, Agent, Phase, Setting, WaitReason};
+use horadric_core::{fleet, merge, pack, ship, ssh, tombs, Agent, Phase, Setting, WaitReason};
 use horadric_hooks::tasks as file;
 
 use super::{post, push, unix_now, with_app, App, Input, WM_HORADRIC_KEPT, WM_HORADRIC_TASK_MENU};
@@ -127,6 +127,18 @@ pub(super) struct State {
     busy: bool,
     /// Each project's Warriv, and what it told quests' sessions.
     pub(super) warriv: warriv::State,
+}
+
+impl State {
+    /// The runner of a run that follows one which heard `heard`.
+    pub(super) fn after(
+        heard: &std::collections::BTreeMap<String, horadric_core::warriv::Heard>,
+    ) -> State {
+        State {
+            warriv: warriv::State::after(heard),
+            ..State::default()
+        }
+    }
 }
 
 /// The last look at a wait that git or a command answers.
@@ -374,6 +386,7 @@ impl App {
                                 },
                             });
                         }
+                        self.keep_spend(key, &e.session, title, at);
                     }
                     store::journal(e);
                 }
@@ -412,6 +425,35 @@ impl App {
             .filter(|p| !p.as_os_str().is_empty())
             .unwrap_or_else(|| dir.to_path_buf());
         crate::worktree::commits_since(&tree, since)
+    }
+
+    /// Keeps what the item `title` that just finished spent, when `horadric
+    /// quest done` did not: the human or the runner marked it. Its
+    /// sessions still running are counted too, since a turn the human cut
+    /// short is in no turn record yet.
+    fn keep_spend(&self, key: &str, session: &str, title: &str, at: u64) {
+        if session.is_empty() {
+            return;
+        }
+        let records = store::chronicle_all();
+        if chronicle::spent_since_taken(&records, key, session) {
+            return;
+        }
+        let quest = chronicle::quest_of(session);
+        let live: Vec<(String, String)> = self
+            .shared
+            .registry
+            .lock()
+            .map(|r| {
+                r.all()
+                    .filter(|s| chronicle::quest_of(&s.id) == quest)
+                    .filter_map(|s| Some((s.claude_session_id.clone()?, s.cwd.clone())))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if let Some(r) = store::spent(&records, key, session, title, live, at) {
+            store::chronicle(&r);
+        }
     }
 
     /// The phase of a session, none when it is gone.
@@ -602,9 +644,11 @@ impl App {
         if !taken {
             return Err("the list changed, so that item is not there to take".into());
         }
+        let (pack, packed) = context_pack(key, &dir, &task);
+        record_pack(key, &id, title, packed);
         self.tasks.prompts.insert(
             id.clone(),
-            tasks::prompt(&task, &horadric_command(), file::rel(&dir)),
+            tasks::prompt(&task, &pack, &horadric_command(), file::rel(&dir)),
         );
         self.refresh_boards(true);
         let parallel = self
@@ -2240,6 +2284,36 @@ pub(super) fn merges(dir: &Path) -> Vec<Merge> {
             title,
         })
         .collect()
+}
+
+/// The context pack for `task` from the project's finished quests (Lore
+/// part 2), files no longer there left out: the text for its prompt, and
+/// its files.
+pub(super) fn context_pack(key: &str, dir: &Path, task: &Task) -> (String, Vec<String>) {
+    let list = tasks::parse(&file::read(dir));
+    let quests = chronicle::quests(&store::chronicle_all(), &[], key, &list);
+    let mut hints = pack::pack(task, &quests);
+    hints.retain(|h| dir.join(&h.file).exists());
+    let text = pack::render(&hints);
+    (text, hints.into_iter().map(|h| h.file).collect())
+}
+
+/// Keeps which files the quest `id` was started with, so its spend can be
+/// set beside that of quests started without.
+pub(super) fn record_pack(key: &str, id: &str, title: &str, files: Vec<String>) {
+    if files.is_empty() {
+        return;
+    }
+    let pack = horadric_core::glow::Touch::Pack;
+    let lit: Vec<_> = files.iter().map(|f| (f.clone(), pack)).collect();
+    crate::glows::light(key, id, &lit);
+    store::chronicle(&chronicle::Record {
+        at: unix_now(),
+        project: key.to_string(),
+        quest: id.to_string(),
+        title: title.to_string(),
+        what: Happened::Packed { files },
+    });
 }
 
 #[cfg(test)]

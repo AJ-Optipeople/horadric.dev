@@ -1715,6 +1715,10 @@ fn detail_of(q: &Quest, quests: &[Quest], now: u64, offset: i64) -> QuestDetail 
     if let Some(b) = &q.merged {
         facts.push(("Merged", b.clone()));
     }
+    if let Some(s) = q.spend.as_ref().filter(|s| !s.is_empty()) {
+        facts.push(("Spent", s.line()));
+        facts.push(("Went on", s.by_tool(3)));
+    }
     QuestDetail {
         title: one_line(&q.title),
         word: q.outcome.word(),
@@ -1827,6 +1831,9 @@ mod tests {
             last: String::new(),
             conversation: None,
             commits: vec![],
+            spend: None,
+            touched: None,
+            packed: None,
             merged: None,
             parent: None,
             added_by: None,
@@ -1986,6 +1993,35 @@ mod tests {
             session_doc(t, "## You\n\nHi\n"),
             "# T\n\n# The conversation\n\n## You\n\nHi\n"
         );
+    }
+
+    #[test]
+    fn a_done_quests_detail_says_what_it_spent_and_on_what() {
+        use horadric_core::spend::{Spend, Tokens};
+        let mut q = quest("a", 100, Some(200), Outcome::Done);
+        let d = detail_of(&q, &[], 300, 0);
+        assert!(d.facts.iter().all(|(k, _)| *k != "Spent"));
+        let read = Tokens {
+            cache_read: 900_000,
+            ..Tokens::default()
+        };
+        q.spend = Some(Spend {
+            calls: 12,
+            tokens: read,
+            tools: [("Read".to_string(), read)].into_iter().collect(),
+        });
+        let d = detail_of(&q, &[], 300, 0);
+        let fact = |k: &str| {
+            d.facts
+                .iter()
+                .find(|(f, _)| *f == k)
+                .map(|(_, v)| v.clone())
+        };
+        assert_eq!(
+            fact("Spent").as_deref(),
+            Some("900k tokens, 900k of them cached, 12 calls")
+        );
+        assert_eq!(fact("Went on").as_deref(), Some("Read 100%"));
     }
 
     #[test]

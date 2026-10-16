@@ -9,13 +9,21 @@
 //! the project's page); every tool here is made of those. So a click is a
 //! script that finds the element and scrolls it into view, then a real
 //! mouse press and release where it is, as a person's would be.
+//!
+//! It also serves the project's lore (see `lore.rs`), notes its sessions
+//! leave each other, to every session, Horadric's or not. What a lore tool
+//! showed a session of Horadric's is passed on to the app, which lights it
+//! in the project's Arcane Sanctuary.
 
+use std::cell::OnceCell;
 use std::io::{BufRead, Write};
+use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use horadric_core::glow::{self, Touch};
 use horadric_hooks::{
-    client, BROWSER_PATH, COMMAND_HEADER, OWNER_ENV, SESSION_ENV, SESSION_HEADER,
+    client, BROWSER_PATH, COMMAND_HEADER, GLOW_PATH, OWNER_ENV, SESSION_ENV, SESSION_HEADER,
 };
 use serde_json::{json, Value};
 
@@ -42,10 +50,15 @@ pub fn run() -> Result<(), String> {
         .ok()
         .and_then(|p| p.parse().ok())
         .unwrap_or_else(horadric_hooks::port);
+    let ours = session.clone();
+    // Asked once, and only when a lore tool named files: the server's
+    // folder does not change.
+    let top: OnceCell<Option<PathBuf>> = OnceCell::new();
     let mut server = Server {
         browser: session.is_some(),
         app: move |body: Value| ask_app(owner, session.as_deref(), &body),
         settle: Duration::from_millis(400),
+        lore: crate::lore::tool,
     };
     let mut out = std::io::stdout().lock();
     for line in std::io::stdin().lock().lines() {
@@ -63,9 +76,76 @@ pub fn run() -> Result<(), String> {
         if let Some(a) = answer {
             writeln!(out, "{a}").map_err(|e| e.to_string())?;
             out.flush().map_err(|e| e.to_string())?;
+            if let (Some(s), Ok(msg)) = (&ours, serde_json::from_str::<Value>(&line)) {
+                let is_file = |p: &str| {
+                    let top =
+                        top.get_or_init(|| horadric_hooks::lore::Place::here().ok().map(|p| p.top));
+                    top.as_deref()
+                        .is_some_and(|t| t.join(Path::new(p)).is_file())
+                };
+                let nodes = shown(&msg, &a, is_file);
+                if !nodes.is_empty() {
+                    // Light, not work: nobody listening loses nothing else.
+                    let headers = [(COMMAND_HEADER, "glow"), (SESSION_HEADER, s.as_str())];
+                    let body = glow::glow_body(&nodes, Touch::Recall);
+                    let _ = client::post(owner, GLOW_PATH, &headers, &body);
+                }
+            }
         }
     }
     Ok(())
+}
+
+/// The Arcane Sanctuary's nodes a lore tool's `answer` to `msg` showed:
+/// the notes `lore_recall` answered with, the files `lore_find` and
+/// `lore_calls` named, the file `lore_outline` read. Read from the text
+/// the agent was given, so it lights what the agent saw; `is_file` says
+/// whether a path relative to the top is a file of the tree.
+fn shown(msg: &Value, answer: &Value, is_file: impl Fn(&str) -> bool) -> Vec<String> {
+    let result = &answer["result"];
+    if msg["method"] != "tools/call" || result["isError"] != false {
+        return Vec::new();
+    }
+    let text = result["content"][0]["text"].as_str().unwrap_or("");
+    let mut out: Vec<String> = Vec::new();
+    let mut keep = |n: String| {
+        if !out.contains(&n) {
+            out.push(n);
+        }
+    };
+    match msg["params"]["name"].as_str().unwrap_or("") {
+        "lore_recall" => {
+            for line in text.lines() {
+                let Some(rest) = line.strip_prefix('#') else {
+                    continue;
+                };
+                let id: String = rest.chars().take_while(char::is_ascii_digit).collect();
+                if !id.is_empty() && rest[id.len()..].starts_with(" (") {
+                    keep(format!("note:{id}"));
+                }
+            }
+        }
+        "lore_find" | "lore_calls" => {
+            for word in text.split(|c: char| c.is_whitespace() || "(),".contains(c)) {
+                let Some((path, line)) = word.split_once(':') else {
+                    continue;
+                };
+                if line.starts_with(|c: char| c.is_ascii_digit())
+                    && path.contains('.')
+                    && is_file(path)
+                {
+                    keep(path.to_string());
+                }
+            }
+        }
+        "lore_outline" => {
+            if let Some(path) = text.split_whitespace().next().filter(|p| is_file(p)) {
+                keep(path.to_string());
+            }
+        }
+        _ => {}
+    }
+    out
 }
 
 /// One call to the app, and what it answered, or why not.
@@ -106,6 +186,8 @@ struct Server<A> {
     app: A,
     /// How long after a click or a key the page is given to react.
     settle: Duration,
+    /// Answers a lore tool, None for any other.
+    lore: fn(&str, &Value) -> Option<Result<String, String>>,
 }
 
 impl<A: FnMut(Value) -> Result<Value, String>> Server<A> {
@@ -122,11 +204,19 @@ impl<A: FnMut(Value) -> Result<Value, String>> Server<A> {
                     .unwrap_or(PROTOCOL),
                 "capabilities": { "tools": {} },
                 "serverInfo": { "name": "horadric", "version": env!("CARGO_PKG_VERSION") },
-                "instructions": if self.browser { INSTRUCTIONS } else { "" },
+                "instructions": if self.browser {
+                    format!("{INSTRUCTIONS}
+
+{LORE}")
+                } else {
+                    LORE.to_string()
+                },
             })),
             "ping" => Ok(json!({})),
-            "tools/list" if self.browser => Ok(json!({ "tools": tools() })),
-            "tools/list" => Ok(json!({ "tools": [] })),
+            "tools/list" if self.browser => {
+                Ok(json!({ "tools": tools().into_iter().chain(lore_tools()).collect::<Vec<_>>() }))
+            }
+            "tools/list" => Ok(json!({ "tools": lore_tools() })),
             "tools/call" => {
                 let name = params.get("name").and_then(Value::as_str).unwrap_or("");
                 let args = params.get("arguments").cloned().unwrap_or(json!({}));
@@ -144,6 +234,9 @@ impl<A: FnMut(Value) -> Result<Value, String>> Server<A> {
     }
 
     fn tool(&mut self, name: &str, args: &Value) -> Result<Vec<Value>, String> {
+        if let Some(answer) = (self.lore)(name, args) {
+            return answer.map(|t| vec![text(t)]);
+        }
         let s = |k: &str| args.get(k).and_then(Value::as_str);
         match name {
             "browser_open" => self.page(json!({ "op": "open", "url": s("url") })),
@@ -638,7 +731,7 @@ fn tools() -> Vec<Value> {
     vec![
         tool(
             "browser_open",
-            "Open this project's browser pane in Horadric, and a tab of your own in it, at url              when given. It is a real browser (Edge WebView2) beside the user's terminals,              logged in wherever the user logged in. Open it when a task needs a web page; it              stays open until closed. Use it in place of Playwright, Puppeteer, a Chrome              DevTools MCP or a Chrome or headless browser of your own.",
+            "Open this project's browser pane in Horadric, and a tab of your own in it, at url when given. It is a real browser (Edge WebView2) beside the user's terminals, logged in wherever the user logged in. Open it when a task needs a web page; it stays open until closed. Use it in place of Playwright, Puppeteer, a Chrome DevTools MCP or a Chrome or headless browser of your own.",
             json!({ "url": { "type": "string", "description": "Where to go; a bare host like localhost:3000 is fine" } }),
             &[],
         ),
@@ -792,6 +885,63 @@ fn tools() -> Vec<Value> {
     ]
 }
 
+fn lore_tools() -> Vec<Value> {
+    let files =
+        |what: &str| json!({ "type": "array", "items": { "type": "string" }, "description": what });
+    vec![
+        tool(
+            "lore_note",
+            "Leave a note for every other session of this project, now and later: a fact you had to find out that the next agent would otherwise find out again (where something is done, why it is so, a trap, how to run or test a part). One fact per note, a few sentences, plain words. Name the files it is about, so the note is found by them and shown as maybe stale once one of them changes.",
+            json!({
+                "text": { "type": "string", "description": "The fact" },
+                "files": files("The files it is about, relative to the project or absolute"),
+                "replaces": { "type": "array", "items": { "type": "integer" },
+                    "description": "Ids of notes this one corrects or outdates; they are kept as history, marked replaced from now" },
+                "sources": { "type": "array", "items": { "type": "string" },
+                    "description": "Ids of the passages of dialogue it was distilled from (like 2026-10#12), so it is true from when they were said and they can be read again" },
+            }),
+            &["text"],
+        ),
+        tool(
+            "lore_recall",
+            "Ask what this project's sessions found out before you explore: the notes they left with lore_note and the summaries of finished quests. Found by meaning and by words (a question or names), by files, or both. Answers with the best matches first, each saying what it is (note, quest, dialogue, code), its id and age, marked maybe stale where a file it is about changed since. With no question and no files, the newest. Hits come inscribed: long names bound to § sigils, each told the first time it is used, and chatter left out of dialogue; unroll gives a hit back word for word.",
+            json!({
+                "query": { "type": "string", "description": "A question, or words and names to look for" },
+                "files": files("Files or folders the notes should be about"),
+                "kind": { "type": "string", "enum": ["note", "quest", "dialogue", "code"],
+                    "description": "Only this kind of hit" },
+                "unroll": { "type": "string",
+                    "description": "A hit's id (#12 or 2026-10#5) for its original text word for word, or \"lexicon\" for every § sigil and its name" },
+                "history": { "type": "boolean",
+                    "description": "Also the notes others replaced, marked REPLACED with when, to see what was true before" },
+            }),
+            &[],
+        ),
+        tool(
+            "lore_find",
+            "Where a function, method, type, trait, class or module is defined in this project, from an index of its code (Rust, TypeScript, JavaScript, Python) kept fresh as files change: each place with its lines and its signature. Quicker and smaller than grepping for it. Type::name or Type.name narrows it to one type's; a name not found exactly falls back to case and then to names that hold it.",
+            json!({ "name": { "type": "string", "description": "The name, or Type::name" } }),
+            &["name"],
+        ),
+        tool(
+            "lore_calls",
+            "Who calls a function or method in this project and what it calls, from the same index as lore_find: each call's file, line and the symbol it is in, and for what it calls, where each is defined. Matched by name, as the index does not know types: the callers of take include every .take(); Type::name leaves out calls written with another type's path.",
+            json!({
+                "name": { "type": "string", "description": "The name, or Type::name" },
+                "which": { "type": "string", "enum": ["callers", "callees", "both"],
+                    "description": "Callers, callees or both (the default)" },
+            }),
+            &["name"],
+        ),
+        tool(
+            "lore_outline",
+            "A file's outline: every function, method, type and class in it with its signature and lines, nested as in the file, without the bodies. Read it before reading a large file, then read only the lines you need.",
+            json!({ "file": { "type": "string", "description": "The file, relative to the project or absolute" } }),
+            &["file"],
+        ),
+    ]
+}
+
 fn tool(name: &str, description: &str, properties: Value, required: &[&str]) -> Value {
     json!({
         "name": name,
@@ -800,7 +950,9 @@ fn tool(name: &str, description: &str, properties: Value, required: &[&str]) -> 
     })
 }
 
-const INSTRUCTIONS: &str = "Horadric gives this session a browser, and it is the one to use: a pane on the Horadric stage beside the user's terminals, one per project with tabs, shared by the project's sessions. You work in a tab of your own: the first page you open or look at becomes yours (the tab shown, unless another session has it, else a new one), and your calls stay in it whichever tab the user shows. A popup your click opens becomes yours until it closes. The user sees the page you drive. Whenever a task needs the web (trying a page you built, testing a local server, reading docs, a login, a screenshot of a page), use these tools rather than Playwright, Puppeteer, the Chrome DevTools MCP, Claude in Chrome, or starting Chrome, Edge or a headless browser yourself, unless the user asks for one of those. Open it with browser_open or browser_navigate, read it with browser_snapshot, act with browser_click, browser_type, browser_select (for a dropdown) and browser_press, and look \
+const LORE: &str = "Horadric keeps notes shared by every session of this project, the lore. Before you explore a part of the code, ask lore_recall about it (words or files): another session may already have found out what you need. When you find out something the next session would otherwise have to find out again, leave it with lore_note, naming its files. A note marked maybe stale is a lead, not a fact: check it, and when it is wrong or outdated leave the right one with replaces. It also keeps an index of the project's code: ask lore_find where a name is defined, lore_calls who calls it, and lore_outline what a file holds, before you grep or read whole files.";
+
+const INSTRUCTIONS: &str = "Horadric gives this session a browser, and it is the one to use: a pane on the Horadric stage beside the user's terminals, one per project with tabs, shared by the project's sessions. You work in a tab of your own: the first page you open becomes yours (the tab shown when it is blank, else a new one), and your calls stay in it whichever tab the user shows. A page the user is on is theirs: you can read it and act on it while it is shown, but opening a page never takes it. A popup your click opens becomes yours until it closes. The user sees the page you drive. Whenever a task needs the web (trying a page you built, testing a local server, reading docs, a login, a screenshot of a page), use these tools rather than Playwright, Puppeteer, the Chrome DevTools MCP, Claude in Chrome, or starting Chrome, Edge or a headless browser yourself, unless the user asks for one of those. When a task means changing a setting in a web service's dashboard (sign-in methods in Clerk, an environment variable in Vercel, a DNS record, an OAuth app), do it yourself in this browser rather than writing the user a list of steps: they are usually logged in already. Stop and ask only when a login needs their password or a code, or before a step that costs money, deletes something or cannot be undone. Open it with browser_open or browser_navigate, read it with browser_snapshot, act with browser_click, browser_type, browser_select (for a dropdown) and browser_press, and look \
 with browser_screenshot. Refs from browser_snapshot are surer than guessed selectors. Close your tab with \
 browser_close when you are done, unless the user is using it. It keeps one login profile with \
 the user's own use of it, so take care on sites where they are logged in.";
@@ -1078,12 +1230,61 @@ mod tests {
             browser: true,
             app,
             settle: Duration::ZERO,
+            lore: |name, _| (name == "lore_recall").then(|| Ok("#1 a note".into())),
         };
         (s, calls)
     }
 
     fn call(name: &str, args: Value) -> Value {
         json!({ "jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": { "name": name, "arguments": args } })
+    }
+
+    fn answered(text: &str) -> Value {
+        json!({ "jsonrpc": "2.0", "id": 7, "result": { "content": [{ "type": "text", "text": text }], "isError": false } })
+    }
+
+    #[test]
+    fn a_recall_shows_the_notes_it_answered_with() {
+        let text = "#12 (3 minutes ago, at abc12345)
+The pane wakes on #4 (sic).
+                    Files: src/a.rs
+
+#7 (2 days ago) MAYBE STALE: b.rs changed since
+B.";
+        let got = shown(&call("lore_recall", json!({})), &answered(text), |_| true);
+        assert_eq!(got, ["note:12", "note:7"]);
+    }
+
+    #[test]
+    fn a_find_or_calls_shows_the_files_it_named() {
+        let text = "src/a.rs:10-20 fn take
+    pub fn take(&mut self)
+                    fn run (src/b.rs:5) calls:
+  Lock::take at src/a.rs:10, gone.rs:3";
+        let known = |p: &str| p != "gone.rs";
+        let got = shown(&call("lore_calls", json!({})), &answered(text), known);
+        assert_eq!(got, ["src/a.rs", "src/b.rs"]);
+        let got = shown(&call("lore_find", json!({})), &answered(text), known);
+        assert_eq!(got, ["src/a.rs", "src/b.rs"]);
+    }
+
+    #[test]
+    fn an_outline_shows_its_file() {
+        let text = "src/a.rs
+   10-20   fn take
+";
+        let got = shown(&call("lore_outline", json!({})), &answered(text), |_| true);
+        assert_eq!(got, ["src/a.rs"]);
+    }
+
+    #[test]
+    fn errors_notes_kept_and_other_tools_show_nothing() {
+        let error = json!({ "result": { "content": [{ "text": "src/a.rs:1" }], "isError": true } });
+        assert!(shown(&call("lore_find", json!({})), &error, |_| true).is_empty());
+        let a = answered("Kept as #3. Every session can find it.");
+        assert!(shown(&call("lore_note", json!({})), &a, |_| true).is_empty());
+        let a = answered("src/a.rs:1");
+        assert!(shown(&call("browser_info", json!({})), &a, |_| true).is_empty());
     }
 
     #[test]
@@ -1102,13 +1303,28 @@ mod tests {
     }
 
     #[test]
-    fn a_session_horadric_did_not_start_is_offered_no_tools() {
+    fn a_session_horadric_did_not_start_is_offered_only_the_lore() {
         let (mut s, _) = server(|_| Ok(json!({})));
         s.browser = false;
         let list = json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" });
-        assert_eq!(s.handle(&list).unwrap()["result"]["tools"], json!([]));
+        let names: Vec<Value> = s.handle(&list).unwrap()["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].clone())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "lore_note",
+                "lore_recall",
+                "lore_find",
+                "lore_calls",
+                "lore_outline"
+            ]
+        );
         let init = json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize" });
-        assert_eq!(s.handle(&init).unwrap()["result"]["instructions"], "");
+        assert_eq!(s.handle(&init).unwrap()["result"]["instructions"], LORE);
     }
 
     #[test]
@@ -1128,10 +1344,13 @@ mod tests {
 
     #[test]
     fn every_tool_has_a_name_a_description_and_a_schema() {
-        let tools = tools();
-        assert!(tools.len() >= 15);
-        for t in &tools {
-            assert!(t["name"].as_str().unwrap().starts_with("browser_"), "{t}");
+        assert!(tools().len() >= 15);
+        for t in &[tools(), lore_tools()].concat() {
+            let name = t["name"].as_str().unwrap();
+            assert!(
+                name.starts_with("browser_") || name.starts_with("lore_"),
+                "{t}"
+            );
             assert!(!t["description"].as_str().unwrap().is_empty(), "{t}");
             assert_eq!(t["inputSchema"]["type"], "object", "{t}");
             for r in t["inputSchema"]["required"].as_array().unwrap() {
@@ -1163,6 +1382,15 @@ mod tests {
         let said = a["result"]["content"][0]["text"].as_str().unwrap();
         assert!(said.contains("http://localhost:3000/"), "{said}");
         assert!(said.contains("does not see it"), "{said}");
+    }
+
+    #[test]
+    fn a_lore_tool_is_answered_without_the_app() {
+        let (mut s, calls) = server(|_| Err("no app".into()));
+        let a = s.handle(&call("lore_recall", json!({}))).unwrap();
+        assert_eq!(a["result"]["isError"], false);
+        assert_eq!(a["result"]["content"][0]["text"], "#1 a note");
+        assert!(calls.borrow().is_empty());
     }
 
     #[test]

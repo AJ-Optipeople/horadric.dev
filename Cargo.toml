@@ -1,9 +1,9 @@
 [workspace]
 resolver = "2"
-members = ["crates/horadric-core", "crates/horadric-hooks", "crates/horadric-pty", "crates/horadric-ui", "crates/horadric"]
+members = ["crates/horadric-core", "crates/horadric-memory", "crates/horadric-hooks", "crates/horadric-pty", "crates/horadric-ui", "crates/horadric"]
 
 [workspace.package]
-version = "0.25.0"
+version = "0.28.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/Mopra/horadric.dev"
