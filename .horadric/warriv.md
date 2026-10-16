@@ -7,6 +7,7 @@
 - A quest session silent for hours with an empty worktree after two nudges is dead and I can not restart it: hand it to the human with "restart it", who does so (settled on "OSC 7501: plain terminals", which then landed).
 
 ## Lately
+- 2026-10-16 Round (13:20, main at aa829d1): "Recall on every prompt" landed. The 13:06 Ship Local has not built yet (release exe 13:04) and builds from the shared tree, so it carries aa829d1. No second cast. Only "Backup: the Settings section" left, running its tests; then public per Open.
 - 2026-10-16 Round (13:15, main at fbc3e9f): "Recall off the window thread" landed. The 13:06 Ship Local has not reloaded yet (last reload 13:04) and a session started 13:08 is busy, its checks queued behind the quest pack's clippy, so it carries fbc3e9f. No second cast. Three quests under way.
 - 2026-10-16 Round (main at 1227150): "Backup: encrypted snapshots to a folder, and restore" landed, tree clean apart from Horadric's own files, so cast "Ship Local". "Recall off the window thread" committed 39f180f on its branch, tests running: not stuck, noted, no tell. Three Backup and recall quests still under way.
 - 2026-10-16 "Backup: encrypted snapshots to a folder, and restore" stopped a sixth time, checks queued behind another clippy before its fast-forward. Not stuck (lore #31), noted, no tell.
