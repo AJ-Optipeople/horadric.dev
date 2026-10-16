@@ -108,6 +108,8 @@ mod clipboard;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod console;
 #[cfg(windows)]
+pub mod credential;
+#[cfg(windows)]
 mod cube;
 #[cfg(windows)]
 mod dialog;
@@ -128,6 +130,10 @@ mod dropdown;
 mod glows;
 #[cfg(windows)]
 mod glyphs;
+#[cfg(windows)]
+pub mod google;
+#[cfg(windows)]
+pub mod google_drive;
 #[cfg(windows)]
 pub mod memory;
 #[cfg(windows)]
