@@ -77,8 +77,11 @@ pub struct Keep {
 enum To {
     /// A session's `lore_recall`, by `horadric mcp`.
     Mcp(Reply),
-    /// Horadric itself, for a prompt the agent did not ask it for.
-    Unasked(Sender<Result<Answer, String>>),
+    /// Horadric itself, for a prompt the agent did not ask it for, by the
+    /// time it stops waiting. One found later is not worked out: quests
+    /// started in a burst would queue recalls nobody reads, ahead of the
+    /// sessions' own.
+    Unasked(Sender<Result<Answer, String>>, Instant),
 }
 
 enum Msg {
@@ -114,7 +117,10 @@ pub fn ask(call: RecallCall) {
 pub fn unasked(dir: &Path, query: &str) -> Option<String> {
     let (tx, rx) = mpsc::channel();
     let body = json!({ "dir": dir.to_string_lossy(), "query": query, "strong": true });
-    sender().send(Msg::Recall(body, To::Unasked(tx))).ok()?;
+    let until = Instant::now() + UNASKED_WAIT;
+    sender()
+        .send(Msg::Recall(body, To::Unasked(tx, until)))
+        .ok()?;
     match rx.recv_timeout(UNASKED_WAIT) {
         Ok(Ok(a)) if a.text != recall::NOTHING => Some(a.text),
         Ok(Ok(_)) => None,
@@ -225,9 +231,10 @@ fn run(state: &Path, rx: Receiver<Msg>, loaded: Sender<Msg>) {
                         });
                     }
                     To::Mcp(_) => {}
-                    To::Unasked(reply) => {
+                    To::Unasked(reply, until) if Instant::now() < until => {
                         let _ = reply.send(answer(&mut keeper, &body, UNASKED_BUDGET));
                     }
+                    To::Unasked(..) => {}
                 }
                 if let Some(dir) = body["dir"].as_str() {
                     if CODE.get().is_some()
