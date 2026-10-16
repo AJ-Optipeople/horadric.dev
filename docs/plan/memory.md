@@ -319,6 +319,36 @@ that makes the memory intelligent rather than a pile, and it is done by
 an agent in the open, with its notes readable, never by a hidden
 rewrite of the kept text.
 
+**Built 2026-10-16.** A note keeps `since`, when what it says became
+true, and `sources`, the ids of the passages it came from
+(`horadric_core::lore`). `lore_note` takes `sources`: the passages are
+looked up in the store before the note is kept, an id that names none
+is refused, and the note is true from the earliest of them. A note that
+`replaces` others no longer drops them: they move to the lore's `past`,
+each with `until` (when the new note was written) and `by` (its id), at
+most 1,000 kept, and ids are never given again. `lore_recall` answers
+with current notes only; `history: true` adds the replaced ones,
+weighed at 0.7 so what is true now comes first, each saying `REPLACED
+by #12 a day ago`. A current hit says `true since ...` when that is
+before it was written, and `From: 2026-10#3, ...` for its sources.
+
+The look back (`horadric_core::lookback`, Warriv's first round after
+04:00) is now handed the day's dialogue too: the app reads the months
+of the store since the last look back (`Store::text_since`, text only,
+no vectors), keeps the project's dialogue said since, leaves out the
+conversations of Warriv's own wakes and errands (they talk about the
+quest log, not the project), and writes it to
+`memory\day\<project>.md`, each passage headed by its id, the newest
+160,000 characters (about 40k tokens) when the day said more. The
+prompt names the file and asks Warriv to keep what was decided and
+learned with `lore_note`, one fact a note, recalling first, with its
+sources, replacing what it contradicts. The pure parts are
+`horadric_memory::distill`.
+
+Not yet: the older passages of a day too long to fit are left out for
+good, since the next look back starts where this one did; the
+yardstick has no questions about validity yet.
+
 ### 8. Horadrim, the written tongue
 
 Asked for on 2026-10-16: a compressed language of Horadric's own, aiming

@@ -15,11 +15,12 @@ use std::time::{Instant, SystemTime};
 use horadric_core::chronicle::{self, Happened, Woken};
 use horadric_core::tasks::{self, Mark, Mode, Task};
 use horadric_core::warriv::{
-    self, Brief, Desk, Dried, Drive, Event, Heard, Kind, Looked, Picture, Review, Reviews, Wake,
-    Why,
+    self, Brief, Desk, Dried, Drive, Event, Heard, Kind, Looked, Picture, Review, Reviews, Said,
+    Wake, Why,
 };
-use horadric_core::{lookback, runeword, ship, tombs, Agent, Phase};
+use horadric_core::{lookback, lore, runeword, ship, tombs, Agent, Phase};
 use horadric_hooks::tasks as file;
+use horadric_memory::distill;
 
 use super::{horadric_command, Board};
 use crate::app::{unix_now, App, Run};
@@ -132,17 +133,45 @@ impl Camp {
 }
 
 /// What the day's look back is given: the chronicle since the last one,
-/// read for what happened more than once.
+/// read for what happened more than once, and the dialogue said since, to
+/// distill into notes.
 fn looked(key: &str) -> Looked {
     let records = store::chronicle_all();
-    let since = lookback::since(&records, key, unix_now());
+    let now = unix_now();
+    let since = lookback::since(&records, key, now);
+    let skip = lookback::warriv_talk(&records, key, since);
     Looked {
         day: lookback::day(&records, key, since),
         patterns: lookback::patterns(&records, key, since)
             .iter()
             .map(lookback::Pattern::line)
             .collect(),
+        said: said(key, since, &skip, now),
     }
+}
+
+/// The project's dialogue since `since`, written to a file in the memory's
+/// folder for the look back to read: a day of it is too long for the
+/// prompt. None when there is none, or it could not be written.
+fn said(key: &str, since: u64, skip: &[String], now: u64) -> Option<Said> {
+    let memory = horadric_hooks::state_dir()?.join("memory");
+    let day = distill::day(&memory, key, since, skip, now)
+        .map_err(|e| eprintln!("horadric: the day's dialogue could not be read: {e}"))
+        .ok()?;
+    if day.passages == 0 {
+        return None;
+    }
+    let dir = memory.join("day");
+    let path = dir.join(lore::file_name(key)).with_extension("md");
+    std::fs::create_dir_all(&dir)
+        .and_then(|()| std::fs::write(&path, &day.text))
+        .map_err(|e| eprintln!("horadric: {} could not be written: {e}", path.display()))
+        .ok()?;
+    Some(Said {
+        path: path.display().to_string(),
+        passages: day.passages,
+        left_out: day.left_out,
+    })
 }
 
 /// The line for a wake given `events`.

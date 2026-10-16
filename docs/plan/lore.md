@@ -93,8 +93,9 @@ folder, so a dev instance keeps its own. Choices made along the way:
 - Staleness is a hash of each file's bytes when the note was taken, not
   a git diff from its commit, so a change not yet committed counts too,
   and a session in a worktree checks its own copy of the file.
-- `lore_note` takes `replaces`, ids of notes it corrects, which are
-  dropped. There is no forget tool: one tool fewer in every session's
+- `lore_note` takes `replaces`, ids of notes it corrects, which leave
+  the notes for the history, marked with when they stopped being true
+  (memory part 7). There is no forget tool: one tool fewer in every session's
   list, and a wrong note is best answered with the right one.
 - A project keeps at most 500 notes, the oldest dropped first. A recall
   answers with at most 10.

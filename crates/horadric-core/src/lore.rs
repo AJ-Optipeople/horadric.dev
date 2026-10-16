@@ -18,6 +18,13 @@ pub const MOST_FOUND: usize = 10;
 /// The longest note, in characters. A note is a fact, not a document.
 pub const LONGEST: usize = 2_000;
 
+/// The most replaced notes a project keeps as history; the oldest go
+/// first. What a note said before matters less the further back it goes.
+pub const MOST_PAST: usize = 1_000;
+
+/// The most passages one note names as where it came from.
+pub const MOST_SOURCES: usize = 20;
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Lore {
     /// The id the next note gets. Ids are never used twice, so a note
@@ -26,6 +33,10 @@ pub struct Lore {
     pub next: u64,
     #[serde(default)]
     pub notes: Vec<Note>,
+    /// Notes another replaced, oldest first, each with when it stopped
+    /// being true and which note took its place.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub past: Vec<Past>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -39,6 +50,39 @@ pub struct Note {
     pub commit: String,
     /// Unix seconds.
     pub at: u64,
+    /// When what it says became true, if before it was written: the
+    /// earliest passage it came from. Unix seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<u64>,
+    /// The passages of the memory it was distilled from, by id
+    /// (`2026-10#12`), so what was said can be read again.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sources: Vec<String>,
+}
+
+impl Note {
+    /// When what it says became true.
+    pub fn since(&self) -> u64 {
+        self.since.map_or(self.at, |s| s.min(self.at))
+    }
+}
+
+/// A note that is no longer true: another replaced it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Past {
+    pub note: Note,
+    /// When it stopped being true: when the note replacing it was written.
+    pub until: u64,
+    /// The note that replaced it.
+    pub by: u64,
+}
+
+/// Where a note came from, beside its text: when it became true and the
+/// passages it was distilled from.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Origin {
+    pub since: Option<u64>,
+    pub sources: Vec<String>,
 }
 
 /// A file a note is about, as it was when the note was taken.
@@ -51,8 +95,9 @@ pub struct Mark {
 }
 
 impl Lore {
-    /// Keeps a note and gives its id. A note that `replaces` others drops
-    /// them, which is how a wrong or outdated note is corrected.
+    /// Keeps a note and gives its id. A note that `replaces` others moves
+    /// them to the history, which is how a wrong or outdated note is
+    /// corrected.
     pub fn add(
         &mut self,
         text: &str,
@@ -60,6 +105,19 @@ impl Lore {
         commit: &str,
         at: u64,
         replaces: &[u64],
+    ) -> Result<u64, String> {
+        self.add_from(text, files, commit, at, replaces, Origin::default())
+    }
+
+    /// [`Lore::add`], saying where the note came from.
+    pub fn add_from(
+        &mut self,
+        text: &str,
+        files: Vec<Mark>,
+        commit: &str,
+        at: u64,
+        replaces: &[u64],
+        origin: Origin,
     ) -> Result<u64, String> {
         let text = text.trim();
         if text.is_empty() {
@@ -76,18 +134,40 @@ impl Lore {
         {
             return Err(format!("there is no note {gone} to replace"));
         }
-        self.notes.retain(|n| !replaces.contains(&n.id));
+        if origin.sources.len() > MOST_SOURCES {
+            return Err(format!(
+                "a note names at most {MOST_SOURCES} sources; name the ones that say it"
+            ));
+        }
         self.next = self
             .next
             .max(self.notes.iter().map(|n| n.id).max().unwrap_or(0))
+            .max(self.past.iter().map(|p| p.note.id).max().unwrap_or(0))
             + 1;
         let id = self.next;
+        let (gone, kept): (Vec<Note>, Vec<Note>) = std::mem::take(&mut self.notes)
+            .into_iter()
+            .partition(|n| replaces.contains(&n.id));
+        self.notes = kept;
+        self.past.extend(gone.into_iter().map(|note| Past {
+            note,
+            until: at,
+            by: id,
+        }));
+        if self.past.len() > MOST_PAST {
+            let over = self.past.len() - MOST_PAST;
+            self.past.drain(..over);
+        }
+        let mut sources = origin.sources;
+        sources.dedup();
         self.notes.push(Note {
             id,
             text: text.to_string(),
             files,
             commit: commit.to_string(),
             at,
+            since: origin.since.filter(|s| *s < at),
+            sources,
         });
         if self.notes.len() > MOST_NOTES {
             let over = self.notes.len() - MOST_NOTES;
@@ -410,6 +490,71 @@ mod tests {
         assert!(l.add("x y z", vec![], "", 300, &[2]).is_err());
         assert_eq!(l.add("again", vec![], "", 400, &[3]).unwrap(), 4);
         assert_eq!(l.notes.len(), 2);
+    }
+
+    #[test]
+    fn a_replaced_note_is_kept_with_when_it_stopped() {
+        let mut l = lore();
+        let origin = Origin {
+            since: Some(150),
+            sources: vec!["2026-10#3".into(), "2026-10#4".into()],
+        };
+        let id = l
+            .add_from("Titles match exactly.", vec![], "", 300, &[2], origin)
+            .unwrap();
+        assert_eq!(l.past.len(), 1);
+        assert_eq!(
+            (l.past[0].note.id, l.past[0].until, l.past[0].by),
+            (2, 300, id)
+        );
+        assert_eq!(l.past[0].note.since(), 200);
+        let new = l.notes.last().unwrap();
+        assert_eq!(new.since(), 150);
+        assert_eq!(new.sources, ["2026-10#3", "2026-10#4"]);
+        // Said to be true from after it was written, it is true from then.
+        let later = Origin {
+            since: Some(900),
+            sources: Vec::new(),
+        };
+        let id = l.add_from("x", vec![], "", 400, &[], later).unwrap();
+        assert_eq!(l.notes.iter().find(|n| n.id == id).unwrap().since, None);
+        // An id in the history is never given again.
+        let mut fresh = Lore {
+            past: l.past.clone(),
+            ..Lore::default()
+        };
+        assert_eq!(fresh.add("z", vec![], "", 500, &[]).unwrap(), 3);
+    }
+
+    #[test]
+    fn too_many_sources_are_refused_and_the_history_is_cut() {
+        let mut l = Lore::default();
+        let many = Origin {
+            since: None,
+            sources: (0..=MOST_SOURCES).map(|i| format!("2026-10#{i}")).collect(),
+        };
+        assert!(l.add_from("x", vec![], "", 0, &[], many).is_err());
+        let mut last = l.add("first", vec![], "", 0, &[]).unwrap();
+        for i in 0..MOST_PAST + 1 {
+            last = l
+                .add(&format!("v{i}"), vec![], "", i as u64, &[last])
+                .unwrap();
+        }
+        assert_eq!(l.past.len(), MOST_PAST);
+        assert_eq!(l.past[0].note.text, "v0");
+    }
+
+    #[test]
+    fn a_lore_from_before_the_history_reads() {
+        let old = r#"{"next":1,"notes":[{"id":1,"text":"t","at":5}]}"#;
+        let l: Lore = serde_json::from_str(old).unwrap();
+        assert!(l.past.is_empty());
+        assert_eq!(l.notes[0].since(), 5);
+        let again = serde_json::to_string(&l).unwrap();
+        assert!(
+            !again.contains("past") && !again.contains("since"),
+            "{again}"
+        );
     }
 
     #[test]

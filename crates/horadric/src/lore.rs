@@ -16,6 +16,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use horadric_core::chronicle;
+use horadric_core::lore::Origin;
 use horadric_core::pack::Touched;
 use horadric_core::sanctuary::{self, Graph, Kind, Positions, QuestFiles};
 use horadric_core::sky::{Project, Sky};
@@ -23,6 +24,7 @@ use horadric_hooks::lock::Lock;
 use horadric_hooks::lore::{now, Place};
 use horadric_hooks::tasks as tasks_file;
 use horadric_hooks::{client, COMMAND_HEADER, OWNER_ENV, RECALL_PATH};
+use horadric_memory::distill;
 use horadric_memory::recall::{self, Candidate};
 use serde_json::Value;
 
@@ -50,10 +52,26 @@ fn note(args: &Value) -> Result<String, String> {
         .iter()
         .filter_map(Value::as_u64)
         .collect();
+    let sources: Vec<String> = list(args, "sources")
+        .iter()
+        .filter_map(Value::as_str)
+        .map(|s| s.trim().to_string())
+        .collect();
     let place = Place::here()?;
     let marks = place.marks(files(&place, args)?);
     let commit = place.commit();
-    let id = place.change(|l| l.add(text, marks, &commit, now(), &replaces))?;
+    // The passages are looked up before the note is kept, so a note never
+    // names one the memory does not hold, and is true from the earliest.
+    let since = if sources.is_empty() {
+        None
+    } else {
+        let dir = horadric_hooks::state_dir()
+            .ok_or("no state folder to find the passages in")?
+            .join("memory");
+        distill::earliest(&dir, &sources)?
+    };
+    let origin = Origin { since, sources };
+    let id = place.change(|l| l.add_from(text, marks, &commit, now(), &replaces, origin))?;
     Ok(format!(
         "Kept as #{id}. Every session of this project can find it with lore_recall."
     ))
@@ -71,6 +89,7 @@ fn recall(args: &Value) -> Result<String, String> {
                 .ok_or_else(|| format!("kind is one of note, quest, dialogue or code, not {k}"))?,
         ),
     };
+    let history = args.get("history").and_then(Value::as_bool) == Some(true);
     let place = Place::here()?;
     let files = files(&place, args)?;
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
@@ -79,6 +98,7 @@ fn recall(args: &Value) -> Result<String, String> {
         "query": query,
         "files": files,
         "kind": kind_name,
+        "history": history,
     });
     if let Some(text) = ask_app(&body) {
         return Ok(text);
@@ -89,8 +109,12 @@ fn recall(args: &Value) -> Result<String, String> {
         files,
         kind,
         now: now(),
+        history,
     };
-    let cands: Vec<Candidate> = lore.notes.iter().map(Candidate::note).collect();
+    let mut cands: Vec<Candidate> = lore.notes.iter().map(Candidate::note).collect();
+    if history {
+        cands.extend(lore.past.iter().map(Candidate::past));
+    }
     let found = recall::rank(&ask, &cands, &[], |i| {
         !recall::changed(&cands[i], |p| place.hash(p)).is_empty()
     });

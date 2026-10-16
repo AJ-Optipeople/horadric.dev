@@ -258,6 +258,27 @@ pub fn day(records: &[Record], project: &str, since: u64) -> String {
     )
 }
 
+/// The conversations Warriv and the errands held in the project since
+/// `since`, so the day's dialogue the look back distills is the work's,
+/// not Warriv's own talk about the quest log.
+pub fn warriv_talk(records: &[Record], project: &str, since: u64) -> Vec<String> {
+    let mut out: Vec<String> = records
+        .iter()
+        .filter(|r| r.project == project && r.at >= since)
+        .filter_map(|r| match &r.what {
+            Happened::WarrivWoke { conversation, .. }
+            | Happened::WarrivRan { conversation, .. }
+            | Happened::WarrivSlept { conversation, .. }
+            | Happened::ErrandEnded { conversation, .. } => Some(conversation.clone()),
+            _ => None,
+        })
+        .filter(|c| !c.is_empty())
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
 fn plural(n: usize, word: &str) -> String {
     match n {
         1 => format!("1 {word}"),
@@ -495,6 +516,26 @@ mod tests {
         assert!(back
             .line()
             .starts_with("\"A\" came back from review 2 times"));
+    }
+
+    #[test]
+    fn warrivs_own_conversations_since() {
+        let mut a = woke(10, &[(Kind::Round, "")]);
+        if let Happened::WarrivWoke { conversation, .. } = &mut a.what {
+            *conversation = "C:/t/w1.jsonl".into();
+        }
+        let mut b = fix(20, "A");
+        if let Happened::WarrivRan { conversation, .. } = &mut b.what {
+            *conversation = "C:/t/w2.jsonl".into();
+        }
+        let mut old = a.clone();
+        old.at = 1;
+        let records = [a.clone(), a, b, old, woke(30, &[(Kind::Round, "")])];
+        assert_eq!(
+            warriv_talk(&records, "p", 5),
+            ["C:/t/w1.jsonl", "C:/t/w2.jsonl"]
+        );
+        assert!(warriv_talk(&records, "q", 0).is_empty());
     }
 
     #[test]

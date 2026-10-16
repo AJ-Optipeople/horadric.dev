@@ -228,6 +228,7 @@ fn answer(keeper: &mut Keeper<Embedder>, body: &Value) -> Result<String, String>
             .unwrap_or_default(),
         kind,
         now: now(),
+        history: body["history"].as_bool() == Some(true),
     };
     keeper.recall(place.key(), &lore, &ask, BUDGET, |p| place.hash(p))
 }

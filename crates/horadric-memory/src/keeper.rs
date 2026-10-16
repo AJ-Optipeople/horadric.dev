@@ -12,7 +12,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use horadric_core::lore::{Lore, Note};
+use horadric_core::lore::{Lore, Note, Past};
 
 use crate::recall::{self, Ask, Candidate, Source};
 use crate::store::{Chunk, ChunkId, FileMark, Store};
@@ -82,7 +82,7 @@ impl<E: Embed> Keeper<E> {
     fn copies(
         &mut self,
         project: &str,
-        notes: &[Note],
+        notes: &[&Note],
         now: u64,
     ) -> io::Result<HashMap<u64, ChunkId>> {
         self.store.refresh()?;
@@ -95,7 +95,7 @@ impl<E: Embed> Keeper<E> {
                 }
             }
         }
-        for note in notes {
+        for &note in notes {
             if let Entry::Vacant(e) = have.entry(note.id) {
                 e.insert(self.store.add(&copy(project, note), now)?);
             }
@@ -104,10 +104,11 @@ impl<E: Embed> Keeper<E> {
     }
 
     /// Answers `ask` for `project` from its `lore` and what the store
-    /// keeps of it. Notes the model has not embedded yet are embedded
-    /// first, newest first, for at most `budget`; the rest are found by
-    /// words until the background catches up. `now_hash` says what a
-    /// file's hash is now, for staleness.
+    /// keeps of it, with the notes `lore` replaced when history is asked
+    /// for. Notes the model has not embedded yet are embedded first,
+    /// newest first, for at most `budget`; the rest are found by words
+    /// until the background catches up. `now_hash` says what a file's hash
+    /// is now, for staleness.
     pub fn recall(
         &mut self,
         project: &str,
@@ -116,8 +117,10 @@ impl<E: Embed> Keeper<E> {
         budget: Duration,
         now_hash: impl Fn(&str) -> Option<u64>,
     ) -> Result<String, String> {
+        let past: &[Past] = if ask.history { &lore.past } else { &[] };
+        let notes: Vec<&Note> = past.iter().map(|p| &p.note).chain(&lore.notes).collect();
         let copies = self
-            .copies(project, &lore.notes, ask.now)
+            .copies(project, &notes, ask.now)
             .map_err(|e| e.to_string())?;
         let Keeper { store, model, .. } = self;
         let mut query = None;
@@ -125,7 +128,7 @@ impl<E: Embed> Keeper<E> {
             let tag = m.tag().to_string();
             let missing: HashSet<ChunkId> = store.missing(&tag).into_iter().collect();
             let start = Instant::now();
-            for note in lore.notes.iter().rev() {
+            for note in notes.iter().rev() {
                 let id = copies[&note.id];
                 if !missing.contains(&id) {
                     continue;
@@ -141,6 +144,7 @@ impl<E: Embed> Keeper<E> {
             }
         }
         let mut cands: Vec<Candidate> = lore.notes.iter().map(Candidate::note).collect();
+        cands.extend(past.iter().map(Candidate::past));
         // Other projects' passages wait for the switch of part 6.
         cands.extend(
             store
@@ -154,9 +158,10 @@ impl<E: Embed> Keeper<E> {
                     .iter()
                     .enumerate()
                     .filter_map(|(i, c)| {
-                        let id = match c.source {
-                            Source::Note(n) => copies[&n.id],
-                            Source::Chunk(id, _) => id,
+                        let id = match (c.note_of(), c.source) {
+                            (Some(n), _) => copies[&n.id],
+                            (None, Source::Chunk(id, _)) => id,
+                            (None, _) => return None,
                         };
                         let cos = store.cosine(tag, id, q)?;
                         (cos >= recall::LEAST_COSINE).then_some((cos, i))
@@ -363,6 +368,37 @@ mod tests {
             .unwrap();
         assert!(got.starts_with("#2 (note,"), "{got}");
         assert!(!got.contains("kitten"), "{got}");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_replaced_note_is_found_only_when_history_is_asked_for() {
+        let dir = temp("history");
+        let mut k = keeper(&dir);
+        let mut l = lore(&["The kitten sleeps in the box."]);
+        l.add(
+            "The kitten sleeps on the sofa now.",
+            Vec::new(),
+            "",
+            NOW,
+            &[1],
+        )
+        .unwrap();
+        let asked = ask("where does the cat nap");
+        let got = k
+            .recall("p", &l, &asked, Duration::from_secs(5), |_| None)
+            .unwrap();
+        assert!(got.starts_with("#2 (note,"), "{got}");
+        assert!(!got.contains("box"), "{got}");
+        let then = Ask {
+            history: true,
+            ..asked
+        };
+        let got = k
+            .recall("p", &l, &then, Duration::from_secs(5), |_| None)
+            .unwrap();
+        assert!(got.starts_with("#2 (note,"), "{got}");
+        assert!(got.contains("REPLACED by #2"), "{got}");
         fs::remove_dir_all(&dir).unwrap();
     }
 
