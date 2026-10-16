@@ -16,6 +16,8 @@ mod code;
 mod console;
 #[cfg(windows)]
 mod explorer;
+#[cfg(windows)]
+mod google;
 mod heavy;
 mod hook;
 #[cfg(windows)]
@@ -103,6 +105,10 @@ Usage:
                                a pairing QR code that works once, for 5 minutes; turn it
                                off; list the paired phones; forget one or all of them;
                                or use your own relay
+  horadric google [sign-in|sign-out|status|machines|try]
+                               Google Drive for the backup: sign in in the browser, sign
+                               out, say who is signed in, list the machines backed up,
+                               or try putting, getting and deleting a file there
   horadric reload [--now]        Swap the running Horadric for this build once no session
                                is working (a build from before session hosts waits),
                                and carry the running sessions over to it.
@@ -144,6 +150,8 @@ fn main() -> ExitCode {
         Some("new") => run::new(&args[1..]),
         Some("run") => run::run(&args[1..]),
         Some("heavy") => heavy::run(&args[1..]),
+        #[cfg(windows)]
+        Some("google") => google::run(&args[1..]),
         // `task` is how sessions started before the rename report back.
         Some("quest" | "task") => task::run(&args[1..]),
         Some("projects") => task::projects(),
