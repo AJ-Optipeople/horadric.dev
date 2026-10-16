@@ -131,8 +131,15 @@ fn wait_for_code(listener: &TcpListener, state: &str) -> Result<String, String> 
 fn request_line(stream: &TcpStream) -> Option<String> {
     stream.set_nonblocking(false).ok()?;
     stream.set_read_timeout(Some(Duration::from_secs(5))).ok()?;
+    let mut reader = BufReader::new(stream);
     let mut line = String::new();
-    BufReader::new(stream).read_line(&mut line).ok()?;
+    reader.read_line(&mut line).ok()?;
+    // The headers are read to the end too: closing a socket with unread
+    // data resets it, and the browser would show that, not the page.
+    let mut header = String::new();
+    while reader.read_line(&mut header).ok()? > 2 {
+        header.clear();
+    }
     Some(line.trim_end().to_string())
 }
 
@@ -217,8 +224,15 @@ impl Session {
         )?;
         let Tokens {
             access, expires_in, ..
-        } = google::parse_tokens(&answer.body)
-            .map_err(|why| format!("Google sign in no longer works ({why}); sign in again"))?;
+        } = google::parse_tokens(&answer.body).map_err(|why| {
+            // Only a refused grant means the sign in is gone; anything
+            // else is Google having a bad moment, and the next try works.
+            if answer.status == 400 || answer.status == 401 {
+                format!("Google sign in no longer works ({why}); sign in again")
+            } else {
+                format!("Google answered {}: {why}", answer.status)
+            }
+        })?;
         self.access = access;
         self.until = Instant::now() + Duration::from_secs(expires_in.saturating_sub(60));
         Ok(())

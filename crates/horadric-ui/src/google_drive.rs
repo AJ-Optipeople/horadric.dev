@@ -98,21 +98,34 @@ impl Vault for DriveVault {
             ("X-Upload-Content-Type", "application/octet-stream"),
             ("X-Upload-Content-Length", length.as_str()),
         ];
-        let start = match self.id(name) {
-            Some(id) => call(
-                &mut session,
-                "PATCH",
-                &format!("{}/{id}?uploadType=resumable", google::UPLOAD_URL),
-                &headers,
-                b"{}",
-            )?,
-            None => call(
-                &mut session,
+        let create = |session: &mut Session| {
+            call(
+                session,
                 "POST",
                 &format!("{}?uploadType=resumable", google::UPLOAD_URL),
                 &headers,
                 google::metadata(name, &self.folder, false).as_bytes(),
-            )?,
+            )
+        };
+        let start = match self.id(name) {
+            Some(id) => {
+                let answer = call(
+                    &mut session,
+                    "PATCH",
+                    &format!("{}/{id}?uploadType=resumable", google::UPLOAD_URL),
+                    &headers,
+                    b"{}",
+                )?;
+                // Gone from Drive since the listing (the human deleted
+                // it): make it again rather than fail every time.
+                if answer.status == 404 {
+                    self.ids.lock().unwrap().remove(name);
+                    create(&mut session)?
+                } else {
+                    answer
+                }
+            }
+            None => create(&mut session)?,
         };
         ok(&start, name)?;
         let upload = start

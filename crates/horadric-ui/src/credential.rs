@@ -20,8 +20,11 @@ pub fn read(target: &str) -> Option<(String, Vec<u8>)> {
         } else {
             c.UserName.to_string().unwrap_or_default()
         };
-        let secret =
-            std::slice::from_raw_parts(c.CredentialBlob, c.CredentialBlobSize as usize).to_vec();
+        let secret = if c.CredentialBlob.is_null() {
+            Vec::new()
+        } else {
+            std::slice::from_raw_parts(c.CredentialBlob, c.CredentialBlobSize as usize).to_vec()
+        };
         CredFree(found as *const _);
         Some((user, secret))
     }
