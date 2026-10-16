@@ -225,6 +225,8 @@ const WM_HORADRIC_SETTINGS_LIST: u32 = WM_APP + 31;
 /// Ask what a row of the Settings window needs asked first, the row the
 /// app's `settings_ask` names.
 const WM_HORADRIC_SETTINGS_ASK: u32 = WM_APP + 36;
+/// A backup job on its thread has finished.
+const WM_HORADRIC_BACKUP: u32 = WM_APP + 42;
 /// Town Portal's link heard something from the relay.
 const WM_HORADRIC_PORTAL: u32 = WM_APP + 40;
 /// Town Portal's key on the stage clicked: open it, or offer what can be
@@ -849,6 +851,14 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             settings_agent: Agent::Claude,
             agents_off: saved.agents_off.clone(),
             settings_ask: None,
+            backup_cfg: horadric_hooks::state_dir()
+                .map(|d| crate::backup::Config::load(&d))
+                .unwrap_or_default(),
+            backup_busy: None,
+            backup_done: Arc::new(Mutex::new(Vec::new())),
+            backup_checked: None,
+            backup_step: None,
+            backup_note: backup_started(),
             settings_project: None,
             switches: HashMap::new(),
             settings_before: None,
@@ -1319,6 +1329,7 @@ unsafe extern "system" fn app_proc(
             | WM_HORADRIC_WINDOW_GONE
             | WM_HORADRIC_COUNTED
             | WM_HORADRIC_UPDATE
+            | WM_HORADRIC_BACKUP
             | WM_HORADRIC_DOWNLOADED
             | WM_HORADRIC_KEPT
             | WM_HORADRIC_PORTAL
@@ -1707,6 +1718,7 @@ fn found_project(id: &str) {
         placeholder: "Project name",
         verb: "found",
         notes: false,
+        secret: false,
         pick: None,
     };
     let Some(a) = ask_beside(Some(&key), &question) else {
@@ -1888,6 +1900,7 @@ fn rename_session(id: &str) {
         placeholder: "Claude's own title",
         verb: "rename",
         notes: false,
+        secret: false,
         pick: None,
     };
     if let Some(a) = ask_beside(Some(&key), &question) {
@@ -2012,6 +2025,7 @@ fn ask_address(key: &str) {
         placeholder: "localhost:3000",
         verb: "go",
         notes: false,
+        secret: false,
         pick: None,
     };
     let Some(a) = ask_beside(Some(key), &question) else {
@@ -2032,6 +2046,7 @@ fn ask_find(key: &str) {
         placeholder: "",
         verb: "find",
         notes: false,
+        secret: false,
         pick: None,
     };
     if let Some(a) = ask_beside(Some(key), &question).filter(|a| !a.text.trim().is_empty()) {
@@ -2122,6 +2137,7 @@ fn ask_size(key: &str) {
         placeholder: "1024 × 768",
         verb: "resize",
         notes: false,
+        secret: false,
         pick: None,
     };
     let Some(a) = ask_beside(Some(key), &question) else {
@@ -2403,6 +2419,7 @@ fn ssh_to(key: &str, hosts: &[String], devices: &[Device]) {
         placeholder: "name, group or address",
         verb: "connect",
         notes: false,
+        secret: false,
         pick: Some(&pick),
     };
     let Some(a) = ask_beside(Some(key), &question) else {
@@ -2417,10 +2434,57 @@ fn ssh_to(key: &str, hosts: &[String], devices: &[Device]) {
     });
 }
 
+/// A restore's next question, once the backups at the target are known.
+enum RestoreStep {
+    /// Which machine's backup, of these.
+    Machines(Vec<String>),
+    /// The passphrase of this machine's backup, the one kept not opening it.
+    Passphrase(String),
+}
+
+/// Swaps in a restore staged before the last quit, now, while nothing has
+/// opened the memory. What to tell of it, once there is a screen to tell
+/// it on.
+fn backup_started() -> Option<(bool, String)> {
+    let state = horadric_hooks::state_dir()?;
+    match crate::backup::run::apply_pending(&state)? {
+        Ok(kept) => {
+            let beside = kept
+                .first()
+                .and_then(|p| p.parent())
+                .map_or(String::new(), |p| {
+                    format!(" The old ones are kept in {}.", p.display())
+                });
+            Some((
+                false,
+                format!("The memory and the lore are back from the backup.{beside}"),
+            ))
+        }
+        Err(e) => Some((
+            true,
+            format!("The restored memory could not be put in place: {e}"),
+        )),
+    }
+}
+
+/// A size in the Backup section's words.
+fn backup_size(bytes: u64) -> String {
+    match bytes {
+        b if b >= 1 << 20 => format!("{:.1} MB", b as f64 / (1 << 20) as f64),
+        b if b >= 1 << 10 => format!("{} KB", b >> 10),
+        b => format!("{b} bytes"),
+    }
+}
+
 /// What a row of the Settings window asks before it changes anything:
 /// a host to add, or whether Warriv may ship public. Outside the app's
 /// borrow, since a question waits for its answer.
 fn settings_ask() {
+    if let Some(field) = with_app(|app| app.settings_ask.take_if(|f| f.asks_backup())).flatten() {
+        backup_ask(field);
+        with_app(|app| app.refresh_settings());
+        return;
+    }
     let Some((field, key, dir, on)) = with_app(|app| {
         let field = app.settings_ask.take()?;
         let key = app.settings_key()?;
@@ -2447,6 +2511,128 @@ fn settings_ask() {
         _ => {}
     }
     with_app(|app| app.refresh_settings());
+}
+
+/// A secret asked of the human, kept out of the app's borrow while it
+/// waits.
+fn ask_secret(title: &str, prompt: &str, verb: &str) -> Option<String> {
+    let question = ask::Ask {
+        title,
+        prompt,
+        initial: "",
+        placeholder: "",
+        verb,
+        notes: false,
+        secret: true,
+        pick: None,
+    };
+    ask_beside(None, &question).map(|a| a.text)
+}
+
+/// The questions of the Backup section: the folder, the passphrase, and
+/// the restore's machine and passphrase.
+fn backup_ask(field: Field) {
+    match field {
+        Field::BackupFolder => {
+            let Some((owner, start)) = with_app(|app| {
+                let owner = app.settings_window.as_ref().map(|w| w.hwnd);
+                (owner.unwrap_or_default(), app.backup_cfg.folder.clone())
+            }) else {
+                return;
+            };
+            if let Some(dir) = picker::pick_folder(owner, start.as_deref()) {
+                with_app(|app| app.backup_folder(dir));
+            }
+        }
+        Field::BackupPassphrase => {
+            let Some(first) = ask_secret(
+                "Backup passphrase",
+                "Eight characters or more. It is kept in Windows Credential Manager so backups run by themselves. Without it the backup cannot be read, by you or anyone.",
+                "keep it",
+            ) else {
+                return;
+            };
+            let Some(again) = ask_secret("Backup passphrase", "Once more, to be sure.", "keep it")
+            else {
+                return;
+            };
+            if first != again {
+                with_app(|app| {
+                    app.toasts
+                        .show(Kind::Failed, "Backup", "The two passphrases differ.");
+                });
+                return;
+            }
+            with_app(|app| app.backup_passphrase(first));
+        }
+        Field::BackupRestore => {
+            let Some(step) = with_app(|app| app.backup_step.take()).flatten() else {
+                return;
+            };
+            match step {
+                RestoreStep::Machines(list) => {
+                    let Some(machine) = pick_machine(list) else {
+                        return;
+                    };
+                    with_app(|app| app.backup_restore(machine, None));
+                }
+                RestoreStep::Passphrase(machine) => {
+                    let prompt = format!("The passphrase {machine}'s backup was made with.");
+                    if let Some(p) = ask_secret("Restore", &prompt, "restore") {
+                        with_app(|app| app.backup_restore(machine, Some(p)));
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Which machine's backup to restore: this one's when it has one and it
+/// is the only one, otherwise the human picks.
+fn pick_machine(list: Vec<String>) -> Option<String> {
+    if let [only] = list.as_slice() {
+        return Some(only.clone());
+    }
+    let here = crate::backup::config::machine();
+    let initial = if list.contains(&here) {
+        here
+    } else {
+        String::new()
+    };
+    let suggest = |text: &str| {
+        let text = text.trim().to_lowercase();
+        list.iter()
+            .filter(|m| m.to_lowercase().contains(&text))
+            .map(|m| ask::Suggestion {
+                label: m.clone(),
+                detail: String::new(),
+                value: m.clone(),
+            })
+            .collect()
+    };
+    let check = |text: &str| {
+        (!list.iter().any(|m| m == text.trim())).then(|| "Pick one of the machines".to_string())
+    };
+    let pick = ask::Pick {
+        suggest: &suggest,
+        check: &check,
+        browse: false,
+        glyph: '\u{E7F8}',
+        paths: false,
+    };
+    let question = ask::Ask {
+        title: "Restore",
+        prompt:
+            "Whose backup? It replaces the memory and the lore here; the ones it replaces are kept.",
+        initial: &initial,
+        placeholder: "A computer's name",
+        verb: "restore",
+        notes: false,
+        secret: false,
+        pick: Some(&pick),
+    };
+    ask_beside(None, &question).map(|a| a.text.trim().to_string())
 }
 
 /// Asks for a host to add to the project, anything `ssh` takes, the
@@ -2478,6 +2664,7 @@ fn ask_host(key: &str, dir: &Path, offer: &[String]) {
         placeholder: "user@address",
         verb: "add it",
         notes: false,
+        secret: false,
         pick: (!offer.is_empty()).then_some(&pick),
     };
     if let Some(a) = ask_beside(Some(key), &question) {
@@ -2794,6 +2981,7 @@ fn pick_folder(hwnd: HWND, start: Option<PathBuf>) -> Option<PathBuf> {
         placeholder: "C:\\path\\to\\project",
         verb: "start",
         notes: false,
+        secret: false,
         pick: Some(&pick),
     };
     let a = ask::ask(shared, None, &question)?;
@@ -2871,6 +3059,18 @@ struct App {
     /// The row of the Settings window that asks before it changes
     /// anything, for its question to open outside the app's borrow.
     settings_ask: Option<Field>,
+    /// The memory's backup: its settings as the file has them, the job on
+    /// its thread (named for the Settings section), what the jobs have
+    /// finished, and when the schedule last looked.
+    backup_cfg: crate::backup::Config,
+    backup_busy: Option<String>,
+    backup_done: Arc<Mutex<Vec<crate::backup::run::Done>>>,
+    backup_checked: Option<Instant>,
+    /// Where a restore is, between its questions.
+    backup_step: Option<RestoreStep>,
+    /// What start found of a restore staged last time: whether it failed,
+    /// and what to tell.
+    backup_note: Option<(bool, String)>,
     /// The project the Settings window's Projects section shows, by key.
     settings_project: Option<String>,
     /// Slash commands waiting to be typed into running sessions, by session
@@ -3190,6 +3390,7 @@ impl App {
                 self.take_update();
                 self.refresh_settings();
             }
+            WM_HORADRIC_BACKUP => self.take_backup(),
             WM_HORADRIC_DOWNLOADED => self.take_download(),
             WM_HORADRIC_KEPT => self.offer_merges(),
             WM_HORADRIC_INPUT => self.apply_input(),
@@ -3276,6 +3477,7 @@ impl App {
                 self.reload_when_ready();
                 self.portal_check();
                 self.portal_show();
+                self.backup_tick();
                 if self
                     .last_check
                     .is_none_or(|t| t.elapsed() >= release::CHECK_EVERY)
@@ -4899,6 +5101,7 @@ impl App {
             autostart: (!horadric_hooks::dev()).then(autostart::is_enabled),
             discord: self.discord,
             recall_across: self.recall_across,
+            backup: self.backup_values(),
             scroll: self.scroll_values(),
             update: self.update.as_ref().map(|m| m.version.clone()),
             checking: self.checking,
@@ -5083,6 +5286,252 @@ impl App {
         self.refresh_settings();
     }
 
+    /// The Backup section's view of the backup.
+    fn backup_values(&self) -> settings::Backup {
+        let cfg = &self.backup_cfg;
+        let (last, failed) = match &cfg.last {
+            None => (String::new(), false),
+            Some(l) => match &l.error {
+                None => (
+                    format!(
+                        "{}, {} files, {}",
+                        horadric_core::tasks::utc(l.at),
+                        l.files,
+                        backup_size(l.bytes)
+                    ),
+                    false,
+                ),
+                Some(e) => {
+                    let short: String = e.chars().take(48).collect();
+                    let more = if short.len() < e.len() {
+                        "\u{2026}"
+                    } else {
+                        ""
+                    };
+                    (format!("Failed: {short}{more}"), true)
+                }
+            },
+        };
+        settings::Backup {
+            to: cfg.to,
+            account: crate::google::account(),
+            folder: cfg.folder.as_ref().map(|f| f.display().to_string()),
+            passphrase: crate::backup::credential::read(crate::backup::credential::PASSPHRASE)
+                .is_some(),
+            last,
+            failed,
+            busy: self.backup_busy.clone(),
+        }
+    }
+
+    /// Starts `job` on a thread of its own, its result waiting for the
+    /// app in [`Self::take_backup`]. One at a time.
+    fn backup_start(
+        &mut self,
+        busy: &str,
+        job: impl FnOnce(&Path, crate::backup::Config) -> crate::backup::run::Done + Send + 'static,
+    ) {
+        let Some(state) = horadric_hooks::state_dir() else {
+            return;
+        };
+        if self.backup_busy.is_some() {
+            return;
+        }
+        self.backup_busy = Some(busy.to_string());
+        let cfg = self.backup_cfg.clone();
+        let inbox = Arc::clone(&self.backup_done);
+        let notify = self.notify.0 as isize;
+        thread::spawn(move || {
+            let done = job(&state, cfg);
+            if let Ok(mut q) = inbox.lock() {
+                q.push(done);
+            }
+            post(notify, WM_HORADRIC_BACKUP, 0);
+        });
+    }
+
+    fn backup_failed(&self, what: &str) {
+        self.toasts.show(Kind::Failed, "Backup", what);
+    }
+
+    /// What is missing before a backup can run, said plainly.
+    fn backup_missing(&self) -> Option<&'static str> {
+        use crate::backup::config::To;
+        if crate::backup::credential::read(crate::backup::credential::PASSPHRASE).is_none() {
+            return Some("Choose a passphrase first.");
+        }
+        match self.backup_cfg.to {
+            To::Off => Some("Backup is off."),
+            To::Drive if crate::google::account().is_none() => Some("Sign in with Google first."),
+            To::Folder if self.backup_cfg.folder.is_none() => Some("Pick a folder first."),
+            _ => None,
+        }
+    }
+
+    fn backup_set_to(&mut self, to: crate::backup::config::To) {
+        self.backup_cfg.to = to;
+        self.backup_save();
+    }
+
+    fn backup_folder(&mut self, dir: PathBuf) {
+        self.backup_cfg.folder = Some(dir);
+        self.backup_save();
+    }
+
+    /// Keeps the settings and has the schedule look again at once, so a
+    /// change that makes a backup due starts it without waiting a minute.
+    fn backup_save(&mut self) {
+        if let Some(state) = horadric_hooks::state_dir() {
+            if let Err(e) = self.backup_cfg.save(&state) {
+                self.backup_failed(&e);
+            }
+        }
+        self.backup_checked = None;
+    }
+
+    fn backup_passphrase(&mut self, new: String) {
+        self.backup_start("Sealing the backup\u{2026}", move |state, cfg| {
+            crate::backup::run::Done::Passphrase(crate::backup::run::set_passphrase(
+                state, &cfg, &new,
+            ))
+        });
+    }
+
+    fn backup_restore(&mut self, machine: String, passphrase: Option<String>) {
+        self.backup_start("Restoring\u{2026}", move |state, cfg| {
+            let result =
+                crate::backup::run::stage_restore(state, &cfg, &machine, passphrase.as_deref());
+            crate::backup::run::Done::Restored(machine, result)
+        });
+    }
+
+    fn backup_now(&mut self) {
+        self.backup_start("Backing up\u{2026}", |state, _| {
+            crate::backup::run::Done::BackedUp(crate::backup::run::run_once(state).1)
+        });
+    }
+
+    /// A button of the Backup section.
+    fn backup_click(&mut self, field: Field) {
+        use crate::backup::run::Done;
+        if self.backup_busy.is_some() {
+            return;
+        }
+        match field {
+            Field::BackupAccount if crate::google::account().is_some() => {
+                self.backup_start("Signing out\u{2026}", |_, _| {
+                    crate::google::sign_out();
+                    Done::SignedOut
+                });
+            }
+            Field::BackupAccount => {
+                self.backup_start("Waiting for Google, in your browser\u{2026}", |_, _| {
+                    Done::SignedIn(crate::google::sign_in())
+                });
+            }
+            Field::BackupNow => match self.backup_missing() {
+                Some(why) => self.backup_failed(why),
+                None => self.backup_now(),
+            },
+            Field::BackupRestore => {
+                use crate::backup::config::To;
+                match self.backup_cfg.to {
+                    To::Drive if crate::google::account().is_none() => {
+                        self.backup_failed("Sign in with Google first.");
+                    }
+                    To::Folder if self.backup_cfg.folder.is_none() => {
+                        self.backup_failed("Pick a folder first.");
+                    }
+                    _ => {
+                        self.backup_start("Looking for backups\u{2026}", |_, cfg| {
+                            Done::Machines(crate::backup::run::machines(&cfg))
+                        });
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// What the backup's jobs have finished.
+    fn take_backup(&mut self) {
+        use crate::backup::run::Done;
+        let done: Vec<Done> = self
+            .backup_done
+            .lock()
+            .map(|mut q| std::mem::take(&mut *q))
+            .unwrap_or_default();
+        if done.is_empty() {
+            return;
+        }
+        self.backup_busy = None;
+        if let Some(state) = horadric_hooks::state_dir() {
+            self.backup_cfg = crate::backup::Config::load(&state);
+        }
+        for d in done {
+            match d {
+                Done::SignedIn(Ok(_)) | Done::Passphrase(Ok(())) => self.backup_checked = None,
+                Done::SignedIn(Err(e)) => self.backup_failed(&format!("Google sign in failed: {e}")),
+                Done::SignedOut | Done::BackedUp(_) => {}
+                Done::Passphrase(Err(e)) => self.backup_failed(&e),
+                Done::Machines(Err(e)) => self.backup_failed(&e),
+                Done::Machines(Ok(list)) if list.is_empty() => {
+                    self.backup_failed("There is no backup there to restore.");
+                }
+                Done::Machines(Ok(list)) => {
+                    self.backup_step = Some(RestoreStep::Machines(list));
+                    self.settings_ask = Some(Field::BackupRestore);
+                    post(self.notify.0 as isize, WM_HORADRIC_SETTINGS_ASK, 0);
+                }
+                Done::Restored(machine, Err(e)) if e == crate::backup::WRONG_PASSPHRASE => {
+                    self.backup_step = Some(RestoreStep::Passphrase(machine));
+                    self.settings_ask = Some(Field::BackupRestore);
+                    post(self.notify.0 as isize, WM_HORADRIC_SETTINGS_ASK, 0);
+                }
+                Done::Restored(_, Err(e)) => self.backup_failed(&e),
+                Done::Restored(machine, Ok((report, at))) => self.toasts.show(
+                    Kind::Info,
+                    "Restore is ready",
+                    &format!(
+                        "{} files from {machine}'s backup of {}. Quit Horadric from the tray and start it again to swap them in; the ones they replace are kept.",
+                        report.files,
+                        horadric_core::tasks::utc(at)
+                    ),
+                ),
+            }
+        }
+        self.refresh_settings();
+    }
+
+    /// The schedule: once a minute, back up when it is switched on, can
+    /// reach its target and the last try was an hour ago. The segments of
+    /// months that are over hash the same and are never sent again.
+    fn backup_tick(&mut self) {
+        if let Some((failed, text)) = self.backup_note.take() {
+            let kind = if failed { Kind::Failed } else { Kind::Info };
+            self.toasts.show(kind, "Restore", &text);
+        }
+        let waited = self
+            .backup_checked
+            .is_some_and(|t| t.elapsed() < Duration::from_secs(60));
+        if self.backup_busy.is_some() || waited {
+            return;
+        }
+        self.backup_checked = Some(Instant::now());
+        if let Some(state) = horadric_hooks::state_dir() {
+            self.backup_cfg = crate::backup::Config::load(&state);
+        }
+        let cfg = &self.backup_cfg;
+        if crate::backup::run::due(
+            cfg,
+            crate::backup::run::ready(cfg),
+            crate::backup::run::unix_now(),
+        ) {
+            self.backup_now();
+            self.refresh_settings();
+        }
+    }
+
     /// Hands the Settings window the settings again, after a change.
     fn refresh_settings(&self) {
         if let Some(w) = &self.settings_window {
@@ -5133,6 +5582,16 @@ impl App {
                 "What your Discord profile may show",
                 Discord::ALL.iter().map(|d| d.label().to_string()).collect(),
                 at(Discord::ALL.iter().position(|d| *d == self.discord)),
+            ),
+            Field::BackupTo => list(
+                "Off keeps the memory on this PC only",
+                crate::backup::config::To::ALL
+                    .iter()
+                    .map(|t| t.label().to_string())
+                    .collect(),
+                at(crate::backup::config::To::ALL
+                    .iter()
+                    .position(|t| *t == self.backup_cfg.to)),
             ),
             Field::Agent => list(
                 "Whose defaults the rows show",
@@ -5192,6 +5651,7 @@ impl App {
             | Field::Default(_)
             | Field::Project
             | Field::Colour
+            | Field::BackupTo
             | Field::WorkMode => {
                 self.settings_list_for = Some((field, row));
                 post(self.notify.0 as isize, WM_HORADRIC_SETTINGS_LIST, 0);
@@ -5206,6 +5666,17 @@ impl App {
                     self.set_drive(&key, on);
                 }
             }
+            Field::BackupFolder | Field::BackupPassphrase if self.backup_busy.is_none() => {
+                self.settings_ask = Some(field);
+                post(self.notify.0 as isize, WM_HORADRIC_SETTINGS_ASK, 0);
+            }
+            Field::BackupAccount | Field::BackupNow | Field::BackupRestore => {
+                self.backup_click(field);
+            }
+            Field::BackupFolder
+            | Field::BackupPassphrase
+            | Field::BackupNote
+            | Field::BackupLast => {}
             Field::Hosts => {}
             Field::Notify => {
                 self.quiet = !self.quiet;
@@ -5299,6 +5770,11 @@ impl App {
             Field::Discord => {
                 if let Some(d) = Discord::ALL.get(i) {
                     self.set_discord(*d);
+                }
+            }
+            Field::BackupTo => {
+                if let Some(to) = crate::backup::config::To::ALL.get(i) {
+                    self.backup_set_to(*to);
                 }
             }
             Field::Agent => {

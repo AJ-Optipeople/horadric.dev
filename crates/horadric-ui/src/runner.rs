@@ -1854,6 +1854,7 @@ pub(super) fn show_menu(menu: Menu) {
                 placeholder: "A title for the quest",
                 verb: "add it",
                 notes: true,
+                secret: false,
                 pick: None,
             };
             if let Some(a) = ask_quest(&key, &draft_for(&key, None), &question, "") {
@@ -2084,6 +2085,7 @@ fn rewrite(key: &str, t: &Task) {
         placeholder: "A title for the quest",
         verb: "save it",
         notes: true,
+        secret: false,
         pick: None,
     };
     let notes = t.notes.join(

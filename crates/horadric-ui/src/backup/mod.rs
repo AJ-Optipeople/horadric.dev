@@ -10,6 +10,7 @@ pub mod config;
 pub mod credential;
 pub mod crypto;
 pub mod folder;
+pub mod run;
 pub mod vault;
 
 pub use config::Config;

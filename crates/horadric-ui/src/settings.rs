@@ -12,6 +12,7 @@ use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::rc::Rc;
 
+use crate::backup::config::To;
 use horadric_core::saved::Discord;
 use horadric_core::{Agent, Defaults, Setting};
 use windows::core::{w, Result, PCWSTR};
@@ -64,19 +65,21 @@ pub enum Section {
     Keys,
     Startup,
     Privacy,
+    Backup,
     Scroll,
     Runetome,
     Projects,
 }
 
 impl Section {
-    pub const ALL: [Section; 9] = [
+    pub const ALL: [Section; 10] = [
         Section::Appearance,
         Section::Notifications,
         Section::Sessions,
         Section::Keys,
         Section::Startup,
         Section::Privacy,
+        Section::Backup,
         Section::Scroll,
         Section::Runetome,
         Section::Projects,
@@ -90,6 +93,7 @@ impl Section {
             Section::Keys => "Keys",
             Section::Startup => "Startup and updates",
             Section::Privacy => "Privacy",
+            Section::Backup => "Backup",
             Section::Scroll => "The Scroll",
             Section::Runetome => "Runetome",
             Section::Projects => "Projects",
@@ -122,6 +126,18 @@ pub enum Field {
     Discord,
     /// Whether recall looks in other projects' memory too.
     Recall,
+    /// Where the memory is backed up to, from Off to a folder.
+    BackupTo,
+    /// Signs in or out of the Google account the backup uses.
+    BackupAccount,
+    /// The folder a backup to a folder goes in.
+    BackupFolder,
+    BackupPassphrase,
+    /// What the Backup section has to say, as a line across the row.
+    BackupNote,
+    BackupLast,
+    BackupNow,
+    BackupRestore,
     /// Whether recall's answers are written in the Horadrim's tongue.
     Horadrim,
     /// Whether a click on a stone asks before it casts.
@@ -141,6 +157,16 @@ pub enum Field {
     /// What the Keys section has to say: how to set one, or why the last
     /// try did not take.
     KeysNote,
+}
+
+impl Field {
+    /// A row of the Backup section that asks something before it acts.
+    pub fn asks_backup(self) -> bool {
+        matches!(
+            self,
+            Field::BackupFolder | Field::BackupPassphrase | Field::BackupRestore
+        )
+    }
 }
 
 /// What a row does when clicked.
@@ -190,6 +216,7 @@ pub struct Values {
     pub autostart: Option<bool>,
     pub discord: Discord,
     pub recall_across: bool,
+    pub backup: Backup,
     pub scroll: Scroll,
     /// A newer release a check found.
     pub update: Option<String>,
@@ -208,6 +235,23 @@ pub struct Values {
     pub projects: Vec<String>,
     /// The one picked, None when there are none.
     pub project: Option<Project>,
+}
+
+/// What the Backup section shows of the memory's backup: see
+/// docs/plan/backup.md.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Backup {
+    pub to: To,
+    /// The signed in Google account's email.
+    pub account: Option<String>,
+    pub folder: Option<String>,
+    /// A passphrase is kept in Credential Manager.
+    pub passphrase: bool,
+    /// How the last backup went, worded: when, how much, or what failed.
+    pub last: String,
+    pub failed: bool,
+    /// What is being done now, which holds the buttons back.
+    pub busy: Option<String>,
 }
 
 /// What the Scroll section reads of the tongue: see docs/plan/memory.md,
@@ -434,6 +478,7 @@ pub fn lines(section: Section, v: &Values) -> Vec<Line> {
                 line(Field::Recall, "Recall across projects", across, a),
             ]
         }
+        Section::Backup => backup_lines(&v.backup),
         Section::Scroll => {
             let sc = &v.scroll;
             let (word, c) = switch(!sc.off);
@@ -560,6 +605,79 @@ pub fn lines(section: Section, v: &Values) -> Vec<Line> {
             ]
         }
     }
+}
+
+/// The Backup section's rows. The ones about a target show only when
+/// there is one, and the buttons rest while a job runs.
+fn backup_lines(b: &Backup) -> Vec<Line> {
+    let line = |field, label, value: &str, control| Line {
+        field,
+        label,
+        value: value.to_string(),
+        control,
+    };
+    let mut rows = vec![line(
+        Field::BackupTo,
+        "Back up to",
+        b.to.label(),
+        Control::List,
+    )];
+    if b.to == To::Off {
+        rows.push(line(
+            Field::BackupNote,
+            "",
+            "Encrypted copies of the memory and the lore notes, kept off this PC.",
+            Control::Note,
+        ));
+        return rows;
+    }
+    let idle = if b.busy.is_some() {
+        Control::Fixed
+    } else {
+        Control::Button
+    };
+    match b.to {
+        To::Drive => {
+            let account = match (&b.busy, &b.account) {
+                (Some(what), _) => what.clone(),
+                (None, Some(email)) => format!("{email}, sign out"),
+                (None, None) => "Sign in with Google".to_string(),
+            };
+            rows.push(line(Field::BackupAccount, "Google account", &account, idle));
+        }
+        _ => {
+            let folder = b.folder.as_deref().unwrap_or("Pick a folder\u{2026}");
+            rows.push(line(Field::BackupFolder, "Folder", folder, idle));
+        }
+    }
+    let passphrase = if b.passphrase {
+        "Kept in Windows, change"
+    } else {
+        "Not set, choose one"
+    };
+    rows.push(line(
+        Field::BackupPassphrase,
+        "Passphrase",
+        passphrase,
+        idle,
+    ));
+    rows.push(line(
+        Field::BackupNote,
+        "",
+        "Without the passphrase the backup cannot be read.",
+        Control::Note,
+    ));
+    let last = if b.last.is_empty() { "Never" } else { &b.last };
+    rows.push(line(Field::BackupLast, "Last backup", last, Control::Fixed));
+    let now = b.busy.as_deref().unwrap_or("Start");
+    rows.push(line(Field::BackupNow, "Back up now", now, idle));
+    rows.push(line(
+        Field::BackupRestore,
+        "Restore",
+        "Restore\u{2026}",
+        idle,
+    ));
+    rows
 }
 
 /// The most rows any section has, which sets the window's height. The
@@ -1160,6 +1278,7 @@ mod tests {
             autostart: Some(true),
             discord: Discord::Unnamed,
             recall_across: false,
+            backup: Backup::default(),
             scroll: Scroll::default(),
             update: None,
             checking: false,
@@ -1187,6 +1306,48 @@ mod tests {
 
     fn fields(section: Section, v: &Values) -> Vec<Field> {
         lines(section, v).iter().map(|l| l.field).collect()
+    }
+
+    #[test]
+    fn the_backup_section_shows_only_what_its_target_needs() {
+        let mut v = values();
+        assert_eq!(
+            fields(Section::Backup, &v),
+            [Field::BackupTo, Field::BackupNote]
+        );
+        v.backup.to = To::Drive;
+        assert_eq!(
+            fields(Section::Backup, &v),
+            [
+                Field::BackupTo,
+                Field::BackupAccount,
+                Field::BackupPassphrase,
+                Field::BackupNote,
+                Field::BackupLast,
+                Field::BackupNow,
+                Field::BackupRestore,
+            ]
+        );
+        assert_eq!(lines(Section::Backup, &v)[1].value, "Sign in with Google");
+        v.backup.account = Some("me@example.com".into());
+        assert_eq!(
+            lines(Section::Backup, &v)[1].value,
+            "me@example.com, sign out"
+        );
+        v.backup.to = To::Folder;
+        assert_eq!(fields(Section::Backup, &v)[1], Field::BackupFolder);
+    }
+
+    #[test]
+    fn a_running_job_holds_the_backup_buttons() {
+        let mut v = values();
+        v.backup.to = To::Folder;
+        v.backup.busy = Some("Backing up".into());
+        let rows = lines(Section::Backup, &v);
+        let button = |f| rows.iter().find(|l| l.field == f).unwrap().control;
+        assert_eq!(button(Field::BackupNow), Control::Fixed);
+        assert_eq!(button(Field::BackupRestore), Control::Fixed);
+        assert_eq!(button(Field::BackupTo), Control::List);
     }
 
     #[test]

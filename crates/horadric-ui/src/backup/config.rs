@@ -17,8 +17,45 @@ pub struct Last {
     pub error: Option<String>,
 }
 
+/// Where the app backs up to by itself. Off until the human picks.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum To {
+    #[default]
+    Off,
+    Drive,
+    Folder,
+}
+
+impl To {
+    pub const ALL: [To; 3] = [To::Off, To::Drive, To::Folder];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            To::Off => "Off",
+            To::Drive => "Google Drive",
+            To::Folder => "A folder",
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            To::Off => "off",
+            To::Drive => "drive",
+            To::Folder => "folder",
+        }
+    }
+
+    fn from_name(name: &str) -> To {
+        To::ALL
+            .into_iter()
+            .find(|t| t.name() == name)
+            .unwrap_or_default()
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Config {
+    pub to: To,
     /// The folder picked; the backup is in `Horadric backup\<machine>` in it.
     pub folder: Option<PathBuf>,
     pub last: Option<Last>,
@@ -32,6 +69,10 @@ impl Config {
         let Ok(Value::Object(mut map)) = serde_json::from_str(text) else {
             return Config::default();
         };
+        let to = map
+            .remove("to")
+            .and_then(|v| v.as_str().map(To::from_name))
+            .unwrap_or_default();
         let folder = map
             .remove("folder")
             .and_then(|v| v.as_str().map(PathBuf::from));
@@ -44,6 +85,7 @@ impl Config {
             })
         });
         Config {
+            to,
             folder,
             last,
             rest: map,
@@ -52,6 +94,7 @@ impl Config {
 
     pub fn to_json(&self) -> Value {
         let mut map = self.rest.clone();
+        map.insert("to".into(), json!(self.to.name()));
         if let Some(folder) = &self.folder {
             map.insert("folder".into(), json!(folder.to_string_lossy()));
         }
@@ -96,7 +139,8 @@ mod tests {
         let c = Config::parse(text);
         assert_eq!(c.folder.as_deref(), Some(Path::new(r"D:\Backups")));
         assert_eq!(c.last.as_ref().unwrap().files, 2);
-        assert_eq!(c.rest["to"], "drive");
+        assert_eq!(c.to, To::Drive);
+        assert!(c.rest.is_empty());
         assert_eq!(Config::parse(&c.to_json().to_string()), c);
         assert_eq!(Config::parse("junk"), Config::default());
     }

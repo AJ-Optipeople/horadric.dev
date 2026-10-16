@@ -75,6 +75,8 @@ pub struct Ask<'a> {
     pub verb: &'a str,
     /// Ask for notes under it too, as a new task takes.
     pub notes: bool,
+    /// The text is a secret, drawn as dots, as a passphrase is.
+    pub secret: bool,
     /// Offer what the answer could be as it is typed, as a folder does.
     pub pick: Option<&'a Pick<'a>>,
 }
@@ -233,6 +235,7 @@ struct Popup<'a> {
     title: String,
     prompt: IDWriteTextLayout,
     placeholder: String,
+    secret: bool,
     hint: String,
     fields: RefCell<Vec<Field>>,
     /// How far each field's text is scrolled, across and down.
@@ -349,6 +352,7 @@ impl<'a> Popup<'a> {
             title: a.title.to_string(),
             prompt,
             placeholder: a.placeholder.to_string(),
+            secret: a.secret,
             hint,
             fields: RefCell::new(fields),
             scroll: RefCell::new(vec![(0.0, 0.0); n]),
@@ -424,7 +428,19 @@ impl<'a> Popup<'a> {
     /// Field `i`'s text laid out as it is drawn.
     fn text_layout(&self, i: usize, f: &Field) -> Option<IDWriteTextLayout> {
         let inner = layout::ask_inner(&self.field_rect(i));
-        render::field_layout(&self.shared.gpu, &f.text, &inner, f.multiline).ok()
+        // One dot per UTF-16 unit, so the caret offsets still line up.
+        let dots: String;
+        let text = if self.secret {
+            dots = f
+                .text
+                .chars()
+                .flat_map(|c| (0..c.len_utf16()).map(|_| '\u{2022}'))
+                .collect();
+            &dots
+        } else {
+            &f.text
+        };
+        render::field_layout(&self.shared.gpu, text, &inner, f.multiline).ok()
     }
 
     fn paint(&self) {

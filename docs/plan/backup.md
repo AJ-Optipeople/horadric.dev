@@ -133,3 +133,17 @@ now, and Restore. Off by default.
    the memory thread is for the Settings button.
 2. Google Drive: sign in, WinHTTP's other verbs, the Drive vault.
 3. The Settings section and the schedule in the app.
+   Done 2026-10-16, in `backup/run.rs` and the app. The section sits
+   after Privacy and shows only the rows its target needs. The schedule
+   looks once a minute and backs up when on, signed in or a folder
+   picked, a passphrase kept, and the last try (failed ones too) an hour
+   old. Closed months are not special cased: their hash is unchanged, so
+   they are never sent again. Changing the passphrase seals the whole
+   backup again under the new one (read out under the old into a
+   scratch folder, the vault emptied, backed up from there), and a
+   passphrase typed when none is kept must open the backup already
+   there. Restore from Settings does not stop the memory thread. It
+   stages the decrypted files in `restore-pending` and the next start
+   swaps them in (`swap_in`) before anything opens the memory, the old
+   folders kept beside; a toast says so each way. The question dialog
+   got a `secret` flag that draws the text as dots.
