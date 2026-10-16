@@ -24,6 +24,23 @@ pub fn now() -> u64 {
         .map_or(0, |d| d.as_secs())
 }
 
+/// The notes of the project `key`, as [`Place::key`] names it, read from
+/// outside it: what recall across projects checks another project's
+/// notes against.
+pub fn of_key(key: &str) -> Result<Lore, String> {
+    let dir = crate::state_dir().ok_or("there is no folder notes are kept in")?;
+    read_lore(&dir.join("lore").join(lore::file_name(key)))
+}
+
+fn read_lore(store: &Path) -> Result<Lore, String> {
+    match fs::read_to_string(store) {
+        Ok(s) => serde_json::from_str(&s)
+            .map_err(|e| format!("{} could not be read: {e}", store.display())),
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(Lore::default()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 /// A project, as a folder in it sees it, and where its notes are.
 pub struct Place {
     /// The top of the working tree the folder is in, which files are read
@@ -193,12 +210,7 @@ impl Place {
     }
 
     pub fn read(&self) -> Result<Lore, String> {
-        match fs::read_to_string(&self.store) {
-            Ok(s) => serde_json::from_str(&s)
-                .map_err(|e| format!("{} could not be read: {e}", self.store.display())),
-            Err(e) if e.kind() == ErrorKind::NotFound => Ok(Lore::default()),
-            Err(e) => Err(e.to_string()),
-        }
+        read_lore(&self.store)
     }
 
     /// Reads the notes, changes them and writes them back, with no other

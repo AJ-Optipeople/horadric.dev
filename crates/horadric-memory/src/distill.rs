@@ -15,6 +15,12 @@ use horadric_core::lore;
 
 use crate::store::{Chunk, ChunkId, Kind, Month, Store};
 
+/// How long before the last look back a passage stored since may have
+/// been said and still be read: a turn that ran past it, or a backlog
+/// still being read, is read late, but a backfill of old transcripts is
+/// no day's news.
+pub const LATE: u64 = 24 * 60 * 60;
+
 /// The most characters of dialogue one look back is handed, about 40k
 /// tokens: a busy day says more, and the newest is what is kept.
 pub const MOST_CHARS: usize = 160_000;
@@ -28,19 +34,31 @@ pub struct Day {
     pub passages: usize,
     /// How many older ones did not fit.
     pub left_out: usize,
+    /// How far the store was read: where the next look back starts.
+    pub end: Option<ChunkId>,
 }
 
-/// The dialogue of `project` said at `since` or later, oldest first,
+/// The dialogue of `project` the look back has not read, oldest first,
 /// without the sessions in `skip` (Warriv's own, whose talk is about the
-/// quest log, not the project).
+/// quest log, not the project). That is what was stored after `after`,
+/// where the last look back stopped reading, said no more than [`LATE`]
+/// before `since`; with no `after`, what was said at `since` or later.
+/// Picked by where it was stored rather than when it was said, so a
+/// passage stored after a look back that it was said before is not
+/// missed by both.
 pub fn said_since<'a>(
     chunks: impl Iterator<Item = (ChunkId, &'a Chunk)>,
     project: &str,
+    after: Option<ChunkId>,
     since: u64,
     skip: &[String],
 ) -> Vec<(ChunkId, &'a Chunk)> {
+    let new = |id: ChunkId, c: &Chunk| match after {
+        Some(a) => id > a && c.time >= since.saturating_sub(LATE),
+        None => c.time >= since,
+    };
     let mut said: Vec<(ChunkId, &Chunk)> = chunks
-        .filter(|(_, c)| c.kind == Kind::Dialogue && c.project == project && c.time >= since)
+        .filter(|(id, c)| c.kind == Kind::Dialogue && c.project == project && new(*id, c))
         .filter(|(_, c)| {
             c.session
                 .as_deref()
@@ -77,16 +95,31 @@ pub fn write(passages: &[(ChunkId, &Chunk)], now: u64, most: usize) -> Day {
         text: kept.join("\n"),
         passages: kept.len(),
         left_out: passages.len() - kept.len(),
+        end: None,
     }
 }
 
-/// The day's dialogue of `project` from the store in `dir`: what was said
-/// at `since` or later, outside the sessions in `skip`.
-pub fn day(dir: &Path, project: &str, since: u64, skip: &[String], now: u64) -> io::Result<Day> {
-    // A passage is written after it is said, so no earlier month holds one.
-    let store = Store::text_since(dir, Month::of(since))?;
-    let said = said_since(store.chunks(), project, since, skip);
-    Ok(write(&said, now, MOST_CHARS))
+/// The day's dialogue of `project` from the store in `dir`: what the
+/// look back has not read, as [`said_since`] picks it, with where the
+/// store ends for the next one. `after` is where the last one stopped.
+pub fn day(
+    dir: &Path,
+    project: &str,
+    after: Option<ChunkId>,
+    since: u64,
+    skip: &[String],
+    now: u64,
+) -> io::Result<Day> {
+    // A chunk is kept in the month it is stored, so no earlier month holds
+    // one stored after `after`, and none said since `since`.
+    let from = after.map_or(Month::of(since), |a| a.month);
+    let store = Store::text_since(dir, from)?;
+    let said = said_since(store.chunks(), project, after, since, skip);
+    let end = store.chunks().map(|(id, _)| id).max().max(after);
+    Ok(Day {
+        end,
+        ..write(&said, now, MOST_CHARS)
+    })
 }
 
 /// When the earliest of the passages `ids` was said, from the store in
@@ -157,9 +190,32 @@ mod tests {
         ];
         let all = chunks.iter().enumerate().map(|(i, c)| (id(i as u32), c));
         let skip = ["C:\\x\\warriv-1.jsonl".to_string()];
-        let got = said_since(all, "p", NOW - 86_400, &skip);
+        let got = said_since(all, "p", None, NOW - 86_400, &skip);
         let texts: Vec<&str> = got.iter().map(|(_, c)| c.text.as_str()).collect();
         assert_eq!(texts, ["first", "second"]);
+    }
+
+    #[test]
+    fn after_a_look_back_what_was_stored_since_is_read_whenever_it_was_said() {
+        let looked = NOW - 3600;
+        let chunks = [
+            said("p", "s1", "read last time", looked - 600),
+            said("p", "s1", "a turn that ran past it", looked - 300),
+            said("p", "s1", "a backlog read at last", looked - 20 * 3600),
+            said("p", "s1", "a backfill of last year", looked - 300 * 86_400),
+            said("p", "s1", "said since", NOW - 60),
+        ];
+        let all = chunks.iter().enumerate().map(|(i, c)| (id(i as u32), c));
+        let got = said_since(all, "p", Some(id(0)), looked, &[]);
+        let texts: Vec<&str> = got.iter().map(|(_, c)| c.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            [
+                "a backlog read at last",
+                "a turn that ran past it",
+                "said since"
+            ]
+        );
     }
 
     #[test]
@@ -190,7 +246,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("horadric-distill-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         assert_eq!(
-            day(&dir, "p", NOW - 86_400, &[], NOW).unwrap(),
+            day(&dir, "p", None, NOW - 86_400, &[], NOW).unwrap(),
             Day::default()
         );
         let mut store = Store::open(&dir).unwrap();
@@ -203,8 +259,18 @@ mod tests {
                 NOW,
             )
             .unwrap();
-        let got = day(&dir, "p", NOW - 86_400, &[], NOW).unwrap();
+        let got = day(&dir, "p", None, NOW - 86_400, &[], NOW).unwrap();
         assert_eq!(got.passages, 2);
+        assert_eq!(got.end, Some(ids[1]));
+        // Stored after that look back, though said before it.
+        let late = store
+            .add(&said("p", "s1", "Agent: and int4?", NOW - 400), NOW)
+            .unwrap();
+        let next = day(&dir, "p", got.end, NOW - 60, &[], NOW).unwrap();
+        assert_eq!((next.passages, next.end), (1, Some(late)));
+        assert!(next.text.contains("int4"), "{}", next.text);
+        let none = day(&dir, "p", next.end, NOW, &[], NOW).unwrap();
+        assert_eq!((none.passages, none.end), (0, Some(late)));
         let names: Vec<String> = ids.iter().map(ChunkId::to_string).collect();
         assert_eq!(earliest(&dir, &names), Ok(Some(NOW - 600)));
         assert_eq!(earliest(&dir, &[]), Ok(None));

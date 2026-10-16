@@ -258,13 +258,15 @@ pub fn day(records: &[Record], project: &str, since: u64) -> String {
     )
 }
 
-/// The conversations Warriv and the errands held in the project since
-/// `since`, so the day's dialogue the look back distills is the work's,
-/// not Warriv's own talk about the quest log.
-pub fn warriv_talk(records: &[Record], project: &str, since: u64) -> Vec<String> {
+/// The conversations Warriv and the errands ever held in the project, so
+/// the day's dialogue the look back distills is the work's, not Warriv's
+/// own talk about the quest log. Ever, not since the last look back: a
+/// wake's conversation may be named only on a line before it, and its
+/// talk still be stored since.
+pub fn warriv_talk(records: &[Record], project: &str) -> Vec<String> {
     let mut out: Vec<String> = records
         .iter()
-        .filter(|r| r.project == project && r.at >= since)
+        .filter(|r| r.project == project)
         .filter_map(|r| match &r.what {
             Happened::WarrivWoke { conversation, .. }
             | Happened::WarrivRan { conversation, .. }
@@ -519,7 +521,7 @@ mod tests {
     }
 
     #[test]
-    fn warrivs_own_conversations_since() {
+    fn warrivs_own_conversations_ever() {
         let mut a = woke(10, &[(Kind::Round, "")]);
         if let Happened::WarrivWoke { conversation, .. } = &mut a.what {
             *conversation = "C:/t/w1.jsonl".into();
@@ -530,12 +532,15 @@ mod tests {
         }
         let mut old = a.clone();
         old.at = 1;
+        if let Happened::WarrivWoke { conversation, .. } = &mut old.what {
+            *conversation = "C:/t/w0.jsonl".into();
+        }
         let records = [a.clone(), a, b, old, woke(30, &[(Kind::Round, "")])];
         assert_eq!(
-            warriv_talk(&records, "p", 5),
-            ["C:/t/w1.jsonl", "C:/t/w2.jsonl"]
+            warriv_talk(&records, "p"),
+            ["C:/t/w0.jsonl", "C:/t/w1.jsonl", "C:/t/w2.jsonl"]
         );
-        assert!(warriv_talk(&records, "q", 0).is_empty());
+        assert!(warriv_talk(&records, "q").is_empty());
     }
 
     #[test]

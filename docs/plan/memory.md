@@ -356,6 +356,22 @@ learned with `lore_note`, one fact a note, recalling first, with its
 sources, replacing what it contradicts. The pure parts are
 `horadric_memory::distill`.
 
+Fixed after review the same day. The look back picks passages by where
+they were stored, not when they were said: a passage said before 04:00
+but stored after (a backlog still reading, a turn still running) was
+missed by both look backs. `memory\day\<project>.mark` keeps the last
+chunk id read, written from `.next` once the look back is told; the
+next one reads what was stored after it, said no more than a day before
+the last look back, so a backfill of old transcripts is no day's news.
+Warriv's talk is left out by every conversation the chronicle ever
+named for its wakes and errands, and by those of its sessions running
+now, so a running errand and a wake named only on an older line are
+skipped too. A Warriv session starts with `--add-dir` on the day's
+folder, which lies outside the project: without it Claude asks before
+reading the file. With the across switch, another project's note copy
+comes in only while that project's lore holds the note, same text, as
+current: a replaced one is not what that project knows now.
+
 Not yet: the older passages of a day too long to fit are left out for
 good, since the next look back starts where this one did; the
 yardstick has no questions about validity yet.
