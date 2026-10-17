@@ -16,24 +16,42 @@ on:
 permissions:
   contents: write
 jobs:
+  # One runner per kind of Mac, side by side, so the release waits for one
+  # build instead of two in a row.
   build:
     runs-on: macos-latest
-    env:
-      TAG: ${{ github.event.inputs.tag || github.ref_name }}
+    strategy:
+      matrix:
+        target: [aarch64-apple-darwin, x86_64-apple-darwin]
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
       - run: rustup toolchain install
-      - run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
-      - run: cargo build --release --target aarch64-apple-darwin
-      - run: cargo build --release --target x86_64-apple-darwin
+      - run: rustup target add ${{ matrix.target }}
+      - run: cargo build --release --target ${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: horadric-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/horadric
+  pack:
+    needs: build
+    runs-on: macos-latest
+    env:
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
+      # No checkout here, so gh cannot read the repository from git.
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: horadric-*
       - name: One binary for both
         run: |
           mkdir -p dist
           lipo -create -output dist/horadric \
-            target/aarch64-apple-darwin/release/horadric \
-            target/x86_64-apple-darwin/release/horadric
+            horadric-aarch64-apple-darwin/horadric \
+            horadric-x86_64-apple-darwin/horadric
+          chmod +x dist/horadric
           lipo -info dist/horadric
       - name: Bundle, check and pack
         run: |

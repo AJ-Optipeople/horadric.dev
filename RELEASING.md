@@ -39,7 +39,10 @@ and only reloads this machine.
 1. Bump `version` under `[workspace.package]` in `Cargo.toml`. That is the
    release's version, and every install compares its own against it, so
    it must go up each time or no one is offered the release.
-2. Run the three checks, as before any commit:
+2. Run the three checks, as before any commit. Run them once: if they
+   already passed on the commit just before the bump (a merge you checked
+   a moment ago), skip them, since the bump changes nothing but the
+   version and the release build in step 3 proves it still compiles.
 
    ```sh
    cargo fmt --all

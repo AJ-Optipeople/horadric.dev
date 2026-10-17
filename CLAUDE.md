@@ -160,11 +160,13 @@ stone whose steps or mode change is disarmed until the human arms it
 again, so that go ahead covers only what they read.
 
 Shipping local is merging into `main` as above. Then the three checks run on
-that merged code, each through `horadric heavy`: `horadric heavy -- cargo fmt
+that merged code, once, each through `horadric heavy`: `horadric heavy -- cargo fmt
 --all --check`, `horadric heavy -- cargo clippy --workspace --all-targets --
 -D warnings`, and `horadric heavy -- cargo test --workspace`. A red check stops
 the ship. Do not build or reload. Report the failing output (in the quest's
-blocked line or the final message) so the human sees why. Only when all three
+blocked line or the final message) so the human sees why. Checks that
+already passed on this exact commit (a ship public that just ran them,
+or a merge you just checked) are not run again. Only when all three
 are green, run `cargo build --release` from the merged code, then
 `target\release\horadric.exe reload`. Before `reload`, deploy the Town Portal page if it is behind
 (RELEASING.md, "The Town Portal page"), for ship local and ship public
