@@ -55,7 +55,9 @@ usage: horadric quest done [\"summary\"]  The quest this session works is comple
        horadric quest spend             What done quests spent, those started with a
                                         context pack beside those without
        horadric quest pack \"title\"      The context pack and recall that quest
-                                        gets when it starts";
+                                        gets when it starts
+       horadric quest start             What a session's first call carries, piece
+                                        by piece, before it has done anything";
 
 /// What the errors call the list, which may still be the old file.
 const NO_LOG: &str = "no quest log (.horadric/quests.md or .horadric/tasks.md) above here";
@@ -121,6 +123,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
         },
         Some("list") => list(&cwd, elsewhere),
         Some("spend") => spend(&cwd),
+        Some("start") => start(&cwd),
         Some("pack") => show_pack(&cwd, &args[1..].join(" ")),
         _ => Err(USAGE.into()),
     }
@@ -672,7 +675,10 @@ fn spend(cwd: &Path) -> Result<(), String> {
         }
         // A record from before the window was kept is read again, so the
         // window has a baseline as the pack had.
-        let no_window = q.spend.as_ref().is_none_or(|s| s.first_window == 0);
+        let no_window = q
+            .spend
+            .as_ref()
+            .is_none_or(|s| s.first_window == 0 || s.results.is_empty());
         if no_window && q.outcome == chronicle::Outcome::Done {
             if let Some(spend) = transcript::spend(cwd, conversation).filter(|s| !s.is_empty()) {
                 let conversation = conversation.clone();
@@ -692,6 +698,159 @@ fn spend(cwd: &Path) -> Result<(), String> {
     let quests = chronicle::quests(&horadric_ui::chronicle_all(), &[], &key, &list);
     println!("{}", pack::compare(&quests));
     Ok(())
+}
+
+/// What a session's first window is made of: Horadric's own prompts and
+/// MCP tools, the instruction files, and the skills every enabled plugin
+/// lists in every session, against the median first window of this
+/// project's done quests. The pieces Horadric cannot read back (Claude
+/// Code's own prompt and built-in tools, the quest's prompt and pack) are
+/// the rest.
+fn start(cwd: &Path) -> Result<(), String> {
+    let project = main_list().or_else(|| file::find_list(cwd)).ok_or(NO_LOG)?;
+    let main = main_tree().unwrap_or_else(|| cwd.to_path_buf());
+    let key = horadric_ui::folder_key(&project.to_string_lossy());
+    let list = tasks::parse(&file::read(&project));
+    let quests = chronicle::quests(&horadric_ui::chronicle_all(), &[], &key, &list);
+    let mut starts: Vec<u64> = quests
+        .iter()
+        .filter(|q| q.outcome == chronicle::Outcome::Done)
+        .filter_map(|q| q.spend.as_ref())
+        .map(|s| s.first_window)
+        .filter(|w| *w > 0)
+        .collect();
+    starts.sort_unstable();
+    let median = starts.get(starts.len() / 2).copied().unwrap_or(0);
+    let chars = |s: &str| s.len() as u64;
+    let horadric = "horadric";
+    let rel = file::rel(&main);
+    let mut pieces: Vec<(String, u64)> = vec![
+        (
+            "Horadric's quest prompt (the log, how to end a quest, waits)".into(),
+            chars(&tasks::system_prompt(horadric, rel, None)),
+        ),
+        (
+            "Horadric's trunk prompt (commit small, stage by name)".into(),
+            chars(&horadric_core::worktree::trunk_prompt(
+                &main.to_string_lossy(),
+                Some("main"),
+            )),
+        ),
+        (
+            "Horadric's heavy prompt".into(),
+            chars(&horadric_core::heavy::system_prompt(horadric)),
+        ),
+        (
+            "Horadric's browser pane prompt".into(),
+            chars(horadric_ui::AGENT_PROMPT),
+        ),
+        (
+            "Horadric's MCP server instructions (browser, lore)".into(),
+            chars(crate::mcp::INSTRUCTIONS) + chars(crate::mcp::LORE),
+        ),
+        (
+            "Horadric's MCP tool list, when not deferred".into(),
+            chars(&crate::mcp::tool_list().to_string()),
+        ),
+    ];
+    let home = std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(PathBuf::from)
+        .unwrap_or_default();
+    let read = |p: &Path| {
+        std::fs::read_to_string(p)
+            .map(|s| s.len() as u64)
+            .unwrap_or(0)
+    };
+    pieces.push(("CLAUDE.md (project)".into(), read(&main.join("CLAUDE.md"))));
+    pieces.push((
+        "CLAUDE.md (global)".into(),
+        read(&home.join(".claude").join("CLAUDE.md")),
+    ));
+    let memory_key: String = main
+        .to_string_lossy()
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    pieces.push((
+        "Memory index (MEMORY.md)".into(),
+        read(
+            &home
+                .join(".claude")
+                .join("projects")
+                .join(memory_key)
+                .join("memory")
+                .join("MEMORY.md"),
+        ),
+    ));
+    pieces.extend(plugin_skills(&home.join(".claude")));
+    pieces.retain(|(_, n)| *n > 0);
+    print!("{}", horadric_core::spend::start_table(&pieces, median));
+    if median == 0 {
+        println!(
+            "No quest of this project has a window recorded yet; run `horadric quest spend` first."
+        );
+    }
+    Ok(())
+}
+
+/// The skills each enabled plugin lists in every session's prompt, as
+/// their names and descriptions, which is what the listing costs: one
+/// piece per plugin.
+fn plugin_skills(claude: &Path) -> Vec<(String, u64)> {
+    let json = |p: PathBuf| -> serde_json::Value {
+        std::fs::read_to_string(p)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or(serde_json::Value::Null)
+    };
+    let settings = json(claude.join("settings.json"));
+    let installed = json(claude.join("plugins").join("installed_plugins.json"));
+    let Some(enabled) = settings.get("enabledPlugins").and_then(|v| v.as_object()) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for (name, on) in enabled {
+        if on.as_bool() != Some(true) {
+            continue;
+        }
+        let Some(path) = installed
+            .get("plugins")
+            .and_then(|p| p.get(name))
+            .and_then(|v| v.as_array())
+            .and_then(|v| v.first())
+            .and_then(|v| v.get("installPath"))
+            .and_then(|v| v.as_str())
+        else {
+            continue;
+        };
+        let mut chars = 0;
+        let mut skills = 0;
+        for folder in ["skills", "agents"] {
+            let Ok(entries) = std::fs::read_dir(Path::new(path).join(folder)) else {
+                continue;
+            };
+            for e in entries.flatten() {
+                let p = e.path();
+                let md = if p.is_dir() { p.join("SKILL.md") } else { p };
+                let Ok(text) = std::fs::read_to_string(&md) else {
+                    continue;
+                };
+                let n = horadric_core::spend::listed_chars(&text);
+                if n > 0 {
+                    chars += n;
+                    skills += 1;
+                }
+            }
+        }
+        let short = name.split('@').next().unwrap_or(name);
+        out.push((
+            format!("Plugin {short}: {skills} skills and agents listed"),
+            chars,
+        ));
+    }
+    out
 }
 
 /// The done quests of the project `cwd` is in and the files each touched,

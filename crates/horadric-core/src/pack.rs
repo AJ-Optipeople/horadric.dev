@@ -344,8 +344,9 @@ pub fn render(hints: &[Hint]) -> String {
 
 /// Done quests with a known spend, those started with a pack beside those
 /// without, for `horadric quest spend`: how many, the median tokens, calls
-/// and tokens a call, Read's share, and the median window at the start
-/// among the quests whose record has one.
+/// and tokens a call, Read's share, the median share spent in subagents,
+/// and the median window at the start among the quests whose record has
+/// one.
 pub fn compare(quests: &[Quest]) -> String {
     let group = |packed: bool| -> Vec<&Spend> {
         quests
@@ -383,10 +384,12 @@ pub fn compare(quests: &[Quest]) -> String {
             .map(|t| t.total())
             .sum();
         let share = (read * 100 + all / 2).checked_div(all).unwrap_or(0);
+        let agent = median(spends.iter().map(|s| s.agent_share()).collect());
         let n = spends.len();
         let quests = if n == 1 { "quest" } else { "quests" };
         format!(
-            "{label}: {n} {quests}, median {} tokens and {calls} calls of {}{start}, Read {share}%",
+            "{label}: {n} {quests}, median {} tokens and {calls} calls of {}{start}, \
+             Read {share}%, Agent {agent}%",
             spend::count(tokens),
             spend::count(per_call)
         )
@@ -566,8 +569,8 @@ mod tests {
         assert_eq!(
             compare(&[a, b]),
             "With a pack: 1 quest, median 1M tokens and 10 calls of 100k, 40k at the start, \
-             Read 10%\n\
-             Without: 1 quest, median 2M tokens and 10 calls of 200k, Read 50%"
+             Read 10%, Agent 0%\n\
+             Without: 1 quest, median 2M tokens and 10 calls of 200k, Read 50%, Agent 0%"
         );
         assert_eq!(
             compare(&[]),

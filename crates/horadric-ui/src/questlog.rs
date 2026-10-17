@@ -1721,6 +1721,15 @@ fn detail_of(q: &Quest, quests: &[Quest], now: u64, offset: i64) -> QuestDetail 
         if s.first_window > 0 {
             facts.push(("Window", s.window_line()));
         }
+        if !s.results.is_empty() {
+            facts.push(("Results", s.results_line(3)));
+        }
+        if s.tools.contains_key(horadric_core::spend::AGENT) {
+            facts.push((
+                "In subagents",
+                format!("{}% of the tokens", s.agent_share()),
+            ));
+        }
     }
     QuestDetail {
         title: one_line(&q.title),
@@ -2014,6 +2023,7 @@ mod tests {
             tools: [("Read".to_string(), read)].into_iter().collect(),
             first_window: 30_000,
             last_window: 120_000,
+            results: [("Read".to_string(), 200_000)].into_iter().collect(),
         });
         let d = detail_of(&q, &[], 300, 0);
         let fact = |k: &str| {
@@ -2031,6 +2041,11 @@ mod tests {
             fact("Window").as_deref(),
             Some("30k at the start, 120k at the end")
         );
+        assert_eq!(
+            fact("Results").as_deref(),
+            Some("about 50k tokens of results: Read 50k")
+        );
+        assert_eq!(fact("In subagents"), None);
     }
 
     #[test]

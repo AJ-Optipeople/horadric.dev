@@ -203,6 +203,8 @@ mod watch;
 #[cfg(windows)]
 mod web;
 #[cfg(windows)]
+pub use web::AGENT_PROMPT;
+#[cfg(windows)]
 mod window;
 #[cfg(windows)]
 mod worktree;

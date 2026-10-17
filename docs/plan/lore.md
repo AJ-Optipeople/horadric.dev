@@ -244,14 +244,8 @@ Built 2026-10-17, the measures and the first lever:
   medians, and filled the window in for the 102 quests recorded before
   it was kept. The baseline on 2026-10-17, 103 quests: median 108k to
   113k tokens a call, and **52k to 57k at the start**. Half of an average
-  call's window is there before the agent has read a line. What fills it
-  is Claude Code's own prompt and tools, the skills every installed
-  plugin lists (a Vercel, Figma and Cloudflare plugin each add a page of
-  skill descriptions to every session, Horadric's or not), CLAUDE.md,
-  the memory, Horadric's appended prompts (the quest, trunk, heavy, lore
-  and browser instructions, about 2k) and the quest's prompt. Next: an
-  itemised count of that start, so each line Horadric adds is weighed
-  against what it saves.
+  call's window is there before the agent has read a line. What fills
+  it, itemised below the same day.
 - **`horadric heavy` prints a digest.** A `cargo test` or a build prints
   thousands of lines, and every line the agent sees stays in its window
   for every call after. The command's output now goes whole to a file in
@@ -269,16 +263,41 @@ Built 2026-10-17, the measures and the first lever:
   tokens in the window of every session or Warriv wake that opened the
   file instead of asking `quest list`.
 
-Not yet, in the order worth doing:
+Built 2026-10-17, later the same day, the two measures that were still
+missing and what they showed:
 
-- Fewer calls. The median quest makes 46 to 55 calls, each replaying
-  the window. Exploration in subagents costs a window that dies with
-  them: the quest above spent under 1% in Agent. The spend record can
-  say a quest's Agent share, so a low one on a long quest is something
-  Warriv can point at.
-- Tool output that is still too long for its own good: `quest list` and
-  `quest show`, the browser snapshot, `lore_recall`. Each should be
-  measured the same way, the share of the window its results take.
+- **The start is itemised.** `horadric quest start` weighs each piece of
+  a session's first window Horadric can read back (its own prompts, its
+  MCP instructions and tool list, the two CLAUDE.md files, the memory
+  index, and the skills and agents each enabled plugin lists in every
+  session, from their front matter), against the median first window,
+  and calls what is left Claude Code's own. On this machine: Horadric's
+  prompts and MCP server together about 2k, the project's CLAUDE.md 3k,
+  the enabled plugins 6k (Vercel and Figma most of it), and **39k of 53k
+  is Claude Code's own prompt and built-in tools**. So the start is not
+  where Horadric can save much, and neither are the plugins: the guess
+  that they were a large part was wrong, and the itemised count is what
+  says so.
+- **Results are measured.** A spend record now counts the characters
+  each tool's results put into the window, the quest log's detail shows
+  "Results: about 110k tokens of results: Read 78k, Bash 22k", and
+  "In subagents" gives the share spent in Agent. Over the 102 quests
+  with records: **Read is 71% of all result text, Bash 22%, Horadric's
+  MCP tools 3%**, and the median share spent in subagents is 0%, no
+  quest above 5%. Whole files read are what fills the window; the
+  browser snapshot, `lore_recall` and `quest list` together are the 3%,
+  so trimming them was not worth a line of code. What was: the lore
+  instructions every session gets now say that a Read stays in the
+  window for the session, to outline a file first and Read a range, and
+  to send a many file search to a subagent. Whether words move the
+  number, `quest spend` will say in thirty quests: Read's share of
+  results and the Agent share are the two to watch.
+
+Not yet:
+
+- If the words do not move it, a harder lever: a PreToolUse hook that
+  rewrites a Read of a whole file over a few hundred lines into an
+  outline, or refuses it with the outline in the reason.
 - Compaction. Claude Code compacts when the window nears its limit; a
   quest that would end at 180k can go on from a 40k summary after its
   exploration. Whether Horadric can ask for one at the right moment

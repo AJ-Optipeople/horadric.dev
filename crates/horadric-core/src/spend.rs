@@ -120,6 +120,16 @@ pub struct Spend {
     /// them.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub last_window: u64,
+    /// Characters of tool results by tool: what each tool put into the
+    /// window, which stays there for every call after. A character is
+    /// about a quarter of a token.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub results: BTreeMap<String, u64>,
+}
+
+/// Tokens a count of characters comes to, near enough.
+pub fn tokens_of(chars: u64) -> u64 {
+    chars / 4
 }
 
 fn is_zero(n: &u64) -> bool {
@@ -141,6 +151,43 @@ impl Spend {
             self.first_window = o.first_window;
             self.last_window = o.last_window;
         }
+        for (tool, n) in &o.results {
+            *self.results.entry(tool.clone()).or_default() += n;
+        }
+    }
+
+    /// The share of all tokens spent in subagents, in percent: a window
+    /// that dies with the subagent instead of growing the quest's own.
+    pub fn agent_share(&self) -> u64 {
+        let all = self.tokens.total();
+        let agent = self.tools.get(AGENT).map(Tokens::total).unwrap_or(0);
+        (agent * 100 + all / 2).checked_div(all).unwrap_or(0)
+    }
+
+    /// What the tools put into the window, as tokens: "about 110k tokens of
+    /// results: Bash 78k, Read 22k, other 10k", or nothing when the record
+    /// is from before results were kept.
+    pub fn results_line(&self, top: usize) -> String {
+        let all: u64 = self.results.values().sum();
+        if all == 0 {
+            return String::new();
+        }
+        let mut tools: Vec<(&String, u64)> = self.results.iter().map(|(k, n)| (k, *n)).collect();
+        tools.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+        let mut parts: Vec<String> = tools
+            .iter()
+            .take(top)
+            .map(|(k, n)| format!("{k} {}", count(tokens_of(*n))))
+            .collect();
+        let rest: u64 = tools.iter().skip(top).map(|(_, n)| n).sum();
+        if rest > 0 {
+            parts.push(format!("other {}", count(tokens_of(rest))));
+        }
+        format!(
+            "about {} tokens of results: {}",
+            count(tokens_of(all)),
+            parts.join(", ")
+        )
     }
 
     /// Tokens per call: how large a window the quest carried on average.
@@ -230,6 +277,63 @@ pub fn total(sittings: &[Sitting]) -> Spend {
     out
 }
 
+/// What a session's first window is made of, for `horadric quest start`:
+/// each piece Horadric can see, as a label and its characters, under the
+/// median first window of the project's quests. What the pieces do not
+/// account for is Claude Code's own prompt and built-in tools, the quest's
+/// prompt and its pack, which Horadric cannot read back.
+pub fn start_table(pieces: &[(String, u64)], median_first: u64) -> String {
+    let mut rows: Vec<(u64, &str)> = pieces
+        .iter()
+        .map(|(label, chars)| (tokens_of(*chars), label.as_str()))
+        .collect();
+    rows.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(b.1)));
+    let known: u64 = rows.iter().map(|(t, _)| t).sum();
+    let mut out = format!(
+        "A session's first call carries about {} tokens (the median over this project's \
+         quests). Of them, at a quarter of a token a character:\n",
+        count(median_first)
+    );
+    for (t, label) in &rows {
+        out.push_str(&format!("{:>7}  {label}\n", count(*t)));
+    }
+    if median_first > known {
+        out.push_str(&format!(
+            "{:>7}  the rest: Claude Code's own prompt and built-in tools, the quest's prompt and pack\n",
+            count(median_first - known)
+        ));
+    }
+    out
+}
+
+/// What a skill or agent file costs in a session's prompt: its name and
+/// description from the front matter, which is what Claude Code lists,
+/// with the name said twice as the listing does. Zero for a file without
+/// front matter.
+pub fn listed_chars(markdown: &str) -> u64 {
+    let Some(rest) = markdown.strip_prefix("---") else {
+        return 0;
+    };
+    let Some(end) = rest.find("\n---") else {
+        return 0;
+    };
+    let front = &rest[..end];
+    let field = |key: &str| -> u64 {
+        front
+            .lines()
+            .find_map(|l| l.strip_prefix(key).and_then(|v| v.strip_prefix(':')))
+            .map(|v| v.trim().trim_matches('"').len() as u64)
+            .unwrap_or(0)
+    };
+    let name = field("name");
+    let description = field("description");
+    if name + description == 0 {
+        0
+    } else {
+        2 * name + description + 4
+    }
+}
+
 /// "3.4M", "812k", "950".
 pub fn count(n: u64) -> String {
     match n {
@@ -269,6 +373,7 @@ pub fn read(jsonl: &str, opened: &str) -> Spend {
     let mut calls: HashMap<String, (Tokens, Vec<String>)> = HashMap::new();
     let mut names: HashMap<String, String> = HashMap::new();
     let mut cause: Vec<String> = vec![opened.to_string()];
+    let mut results: BTreeMap<String, u64> = BTreeMap::new();
     // Whether a user line came since the last assistant one, so the next
     // only adds to what starts the coming call.
     let mut answered = false;
@@ -318,11 +423,15 @@ pub fn read(jsonl: &str, opened: &str) -> Spend {
                     .flatten()
                     .filter(|c| c.get("type").and_then(Value::as_str) == Some("tool_result"))
                     .map(|c| {
-                        c.get("tool_use_id")
+                        let tool = c
+                            .get("tool_use_id")
                             .and_then(Value::as_str)
                             .and_then(|id| names.get(id))
                             .cloned()
-                            .unwrap_or_else(|| "unknown".to_string())
+                            .unwrap_or_else(|| "unknown".to_string());
+                        *results.entry(tool.clone()).or_default() +=
+                            c.get("content").map(result_chars).unwrap_or(0);
+                        tool
                     })
                     .collect();
                 // The results of one call come back as a line each, and all
@@ -349,7 +458,27 @@ pub fn read(jsonl: &str, opened: &str) -> Spend {
         let (tokens, by) = &calls[&id];
         out.charge(tokens, by);
     }
+    out.results = results;
     out
+}
+
+/// The characters of a tool result: a string, or blocks of text (an image
+/// block counts its data, which is what the window carries).
+fn result_chars(content: &Value) -> u64 {
+    match content {
+        Value::String(s) => s.len() as u64,
+        Value::Array(blocks) => blocks
+            .iter()
+            .map(|b| {
+                b.get("text")
+                    .or_else(|| b.get("source").and_then(|s| s.get("data")))
+                    .and_then(Value::as_str)
+                    .map(|s| s.len() as u64)
+                    .unwrap_or(0)
+            })
+            .sum(),
+        _ => 0,
+    }
 }
 
 /// What a Codex rollout spent. Each call's usage is a `token_count` event,
@@ -375,12 +504,13 @@ pub fn read_codex(jsonl: &str) -> Spend {
                 }
             }
             Some("function_call_output" | "custom_tool_call_output") => {
-                cause.push(
-                    names
-                        .get(call_id)
-                        .cloned()
-                        .unwrap_or_else(|| "unknown".to_string()),
-                );
+                let tool = names
+                    .get(call_id)
+                    .cloned()
+                    .unwrap_or_else(|| "unknown".to_string());
+                *out.results.entry(tool.clone()).or_default() +=
+                    p.get("output").map(result_chars).unwrap_or(0);
+                cause.push(tool);
             }
             Some("token_count") => {
                 let Some(info) = p.get("info").filter(|i| !i.is_null()) else {
@@ -468,8 +598,71 @@ mod tests {
         assert_eq!(s.tools["Bash"], t(1, 150, 10, 20));
         assert_eq!((s.first_window, s.last_window), (110, 161));
         assert_eq!(s.per_call(), 151);
+        assert_eq!(s.results["Read"], 1);
+        assert_eq!(s.results["Bash"], 1);
+        assert_eq!(
+            s.results_line(1),
+            "about 0 tokens of results: Bash 0, other 0"
+        );
         assert_eq!(s.line(), "455 tokens, 250 of them cached, 3 calls of 151");
         assert_eq!(s.window_line(), "110 at the start, 161 at the end");
+    }
+
+    #[test]
+    fn results_are_counted_in_characters_whatever_their_shape() {
+        let blocks = r#"[{"type":"text","text":"abcd"},{"type":"image","source":{"data":"xyz"}}]"#;
+        assert_eq!(result_chars(&serde_json::from_str(blocks).unwrap()), 7);
+        assert_eq!(result_chars(&Value::String("ab".into())), 2);
+        assert_eq!(result_chars(&Value::Null), 0);
+        let mut s = Spend::default();
+        s.results.insert("Bash".into(), 400_000);
+        s.results.insert("Read".into(), 80_000);
+        s.results.insert("Grep".into(), 8_000);
+        assert_eq!(
+            s.results_line(2),
+            "about 122k tokens of results: Bash 100k, Read 20k, other 2k"
+        );
+        let mut t = Spend::default();
+        t.add(&s);
+        assert_eq!(t.results["Bash"], 400_000);
+        assert_eq!(Spend::default().results_line(2), "");
+    }
+
+    #[test]
+    fn the_agent_share_is_the_tokens_spent_in_subagents() {
+        let mut s = Spend {
+            tokens: t(0, 1_000, 0, 0),
+            ..Spend::default()
+        };
+        s.tools.insert(AGENT.into(), t(0, 120, 0, 0));
+        assert_eq!(s.agent_share(), 12);
+        assert_eq!(Spend::default().agent_share(), 0);
+    }
+
+    #[test]
+    fn a_skill_costs_its_name_and_description() {
+        let md = "---\nname: deploy\ndescription: \"Ship it. Use when asked.\"\n---\n# Body\nlong";
+        assert_eq!(listed_chars(md), 2 * 6 + 24 + 4);
+        assert_eq!(listed_chars("# No front matter\n"), 0);
+        assert_eq!(listed_chars("---\nmodel: x\n---\n"), 0);
+    }
+
+    #[test]
+    fn the_start_table_puts_the_biggest_piece_first_and_the_rest_last() {
+        let pieces = [
+            ("CLAUDE.md (project)".to_string(), 11_000),
+            ("Plugin vercel: 30 skills".to_string(), 40_000),
+        ];
+        let expected = concat!(
+            "A session's first call carries about 57k tokens (the median over this project's ",
+            "quests). Of them, at a quarter of a token a character:\n",
+            "    10k  Plugin vercel: 30 skills\n",
+            "     3k  CLAUDE.md (project)\n",
+            "    44k  the rest: Claude Code's own prompt and built-in tools, the quest's prompt ",
+            "and pack\n",
+        );
+        assert_eq!(start_table(&pieces, 57_000), expected);
+        assert!(!start_table(&pieces, 1_000).contains("the rest"));
     }
 
     #[test]
