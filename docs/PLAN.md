@@ -99,6 +99,7 @@ one. The registry is an `Arc<Mutex<Registry>>`, each console's grid an
 - [Fleets](plan/fleets.md): Hundreds of SSH devices per project.
 - [Waypoints](plan/waypoints.md): Several machines with Horadric, each seeing the others' sessions.
 - [Secrets](plan/secrets.md): Tokens for quests that push, call APIs or deploy.
+- [Identities](plan/identities.md): Each project's gh, git, npm and Vercel logins, so no session switches another's account.
 - [Sessions that outlive Horadric](plan/sessions-that-outlive-horadric.md): Session host processes that survive the UI.
 - [Step 5: inbox, installer, updater](plan/step-5-inbox-installer-updater.md): What became of the inbox, installer and updater.
 - [The updater](plan/the-updater.md): Signed manifest, update check and install.
