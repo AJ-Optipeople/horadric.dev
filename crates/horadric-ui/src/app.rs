@@ -2564,6 +2564,29 @@ fn ask_secret(title: &str, prompt: &str, verb: &str) -> Option<String> {
     ask_beside(None, &question).map(|a| a.text)
 }
 
+/// A new backup passphrase, typed twice. A slip is asked about again
+/// rather than told in a toast, which is easy to miss and keeps nothing.
+fn ask_new_passphrase() -> Option<String> {
+    const FIRST: &str = "Eight characters or more. It is kept in Windows Credential Manager so backups run by themselves. Without it the backup cannot be read, by you or anyone.";
+    let mut prompt = FIRST;
+    loop {
+        let first = ask_secret("Backup passphrase", prompt, "go on")?;
+        if first.chars().count() < 8 {
+            prompt = "That was shorter than eight characters. Choose one of eight or more.";
+            continue;
+        }
+        let again = ask_secret(
+            "Backup passphrase",
+            "Type the same passphrase again, to be sure it is the one you meant.",
+            "keep it",
+        )?;
+        if first == again {
+            return Some(first);
+        }
+        prompt = "The two did not match, so nothing was kept. Choose the passphrase again.";
+    }
+}
+
 /// The questions of the Backup section: the folder, the passphrase, and
 /// the restore's machine and passphrase.
 fn backup_ask(field: Field) {
@@ -2580,25 +2603,9 @@ fn backup_ask(field: Field) {
             }
         }
         Field::BackupPassphrase => {
-            let Some(first) = ask_secret(
-                "Backup passphrase",
-                "Eight characters or more. It is kept in Windows Credential Manager so backups run by themselves. Without it the backup cannot be read, by you or anyone.",
-                "keep it",
-            ) else {
-                return;
-            };
-            let Some(again) = ask_secret("Backup passphrase", "Once more, to be sure.", "keep it")
-            else {
-                return;
-            };
-            if first != again {
-                with_app(|app| {
-                    app.toasts
-                        .show(Kind::Failed, "Backup", "The two passphrases differ.");
-                });
-                return;
+            if let Some(chosen) = ask_new_passphrase() {
+                with_app(|app| app.backup_passphrase(chosen));
             }
-            with_app(|app| app.backup_passphrase(first));
         }
         Field::BackupRestore => {
             let Some(step) = with_app(|app| app.backup_step.take()).flatten() else {
