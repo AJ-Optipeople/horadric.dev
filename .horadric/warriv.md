@@ -9,6 +9,7 @@
 - A [/] quest whose session a dev instance started (state in %APPDATA%\Horadric-dev) died with it: no tell reaches it, hand it to the human with "restart it" at once (lore #51).
 
 ## Lately
+- 2026-10-17 Round (11:39, main at 118ba38): the d8d8102 Ship Local reloaded fine at 11:34, but Accounts (06bf101) merged at 11:35 after it, so cast "Ship Local" again. Task notification quest still with the human.
 - 2026-10-17 Round (main at d8d8102): "Tristram: browser tabs as tiles" and "A dev instance never takes quests" landed, tree clean apart from Horadric's own files, so cast "Ship Local". Task notification quest still with the human, Accounts under way.
 - 2026-10-17 Round (11:24, human left, main at 8c20a12): the 11:09 Ship Local reloaded fine at 11:23 with 0d9153f. Task notification quest still with the human, three quests under way. Nothing to do.
 - 2026-10-17 Round (11:09, main at 0d9153f): "waiting on an earlier turn's background work" landed, tree clean apart from Horadric's own files (tasks.rs and warriv.rs show as modified but have no diff), so cast "Ship Local". Task notification quest still with the human; Tristram, Accounts and the dev instance quest under way in worktrees.
@@ -62,4 +63,4 @@
 - Once quests run with a pack, the pack comparison resumes by itself.
 - "Memory: no recall on a task notification" handed to the human to restart (2026-10-17); when it lands, cast Ship Local.
 - "Earlier turn's background work" and "A dev instance never takes quests" shipped 2026-10-17: next look back should show fewer unreported stops, and no dev instance holding a real quest.
-- Check the 2026-10-17 d8d8102 Ship Local reloaded fine.
+- Check the 2026-10-17 11:39 Ship Local (Accounts) reloaded fine.
