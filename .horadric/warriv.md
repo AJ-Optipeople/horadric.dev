@@ -9,6 +9,7 @@
 - A [/] quest whose session a dev instance started (state in %APPDATA%\Horadric-dev) died with it: no tell reaches it, hand it to the human with "restart it" at once (lore #51).
 
 ## Lately
+- 2026-10-17 Round (hourly, main at 77cd610, only my memory since the last ship): nothing landed, task notification quest still with the human. Nothing to do.
 - 2026-10-17 Round (hourly, main at 3961aa2, only my memory since the last ship): nothing landed, task notification quest still with the human. Nothing to do.
 - 2026-10-17 Round (13:22, human left, main at a699f08): the 13:16 Ship Local reloaded fine, carrying Lore part 6. Task notification quest still with the human. Nothing to do.
 - 2026-10-17 Round (13:16, human left, main at 38aefd3): last reload 11:42, since then 6760222 (backup passphrase) and Lore part 6 (b0a08b3, 38aefd3) landed. heavy.rs, tasks.rs and warriv.rs show as modified with no diff, no cargo running, so cast "Ship Local". Task notification quest still with the human.
