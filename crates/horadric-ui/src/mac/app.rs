@@ -834,7 +834,7 @@ impl App {
             let collapsed = self.collapsed.contains(&c.key);
             c.collapsed = collapsed;
             let shown = if collapsed { 0 } else { mine.len() };
-            let layout = layout::cluster(&m, shown, collapsed, None, None, None);
+            let layout = layout::cluster(&m, shown, 0, collapsed, None, None, None);
             let (hot, pressed) = c.hover();
             let on_stage = stage_key.as_deref() == Some(c.key.as_str());
             let selected = focused

@@ -152,6 +152,9 @@ pub struct ClusterLayout {
     /// The button on each tile whose session has a worktree of its own,
     /// which opens it in VS Code. Left of the browser button when both.
     pub codes: Vec<Option<Rect>>,
+    /// One rect per browser tab shown as a tile, below the sessions' tiles.
+    /// Only Tristram has them. Empty when collapsed.
+    pub pages: Vec<Rect>,
     /// The wide button below the last tile that starts another session in
     /// this project at once. None when collapsed.
     pub add: Option<Rect>,
@@ -237,7 +240,8 @@ impl FilesLayout {
     }
 }
 
-/// Lays out a cluster with `n` tiles. `tasks` is one entry per task row
+/// Lays out a cluster with `n` tiles, then `pages` tiles for browser tabs.
+/// `tasks` is one entry per task row
 /// shown, true where the row has an approve button, and whether Warriv's
 /// line shows, none for no tasks tile; no rows and no line is its header
 /// alone. `tome` is how many stones the
@@ -249,6 +253,7 @@ impl FilesLayout {
 pub fn cluster(
     m: &Metrics,
     n: usize,
+    pages: usize,
     collapsed: bool,
     tasks: Option<(&[bool], bool)>,
     tome: Option<usize>,
@@ -263,6 +268,7 @@ pub fn cluster(
     );
     let full = m.width - 2.0 * m.pad;
     let mut tiles = Vec::new();
+    let mut page_rects = Vec::new();
     let mut add = None;
     let mut shell = None;
     let mut tasks_layout = None;
@@ -272,6 +278,10 @@ pub fn cluster(
     if !collapsed {
         for _ in 0..n {
             tiles.push(Rect::new(m.pad, y, full, m.tile_h));
+            y += m.tile_h + m.gap;
+        }
+        for _ in 0..pages {
+            page_rects.push(Rect::new(m.pad, y, full, m.tile_h));
             y += m.tile_h + m.gap;
         }
         let wide = full - m.shell_w - m.gap;
@@ -326,6 +336,7 @@ pub fn cluster(
         marks: vec![None; tiles.len()],
         codes: vec![None; tiles.len()],
         tiles,
+        pages: page_rects,
         add,
         shell,
         tasks: tasks_layout,
@@ -501,6 +512,8 @@ pub enum Hit {
     Browser(usize),
     /// The VS Code button on a tile.
     Code(usize),
+    /// A browser tab's tile.
+    Page(usize),
     Add,
     /// The terminal button beside the bottom plus.
     Shell,
@@ -535,6 +548,7 @@ impl Hit {
                 | Hit::Tile(_)
                 | Hit::Browser(_)
                 | Hit::Code(_)
+                | Hit::Page(_)
                 | Hit::Add
                 | Hit::Shell
                 | Hit::TasksMode
@@ -588,6 +602,11 @@ pub fn hit(layout: &ClusterLayout, x: f32, y: f32) -> Hit {
     for (i, t) in layout.tiles.iter().enumerate() {
         if t.contains(x, y) {
             return Hit::Tile(i);
+        }
+    }
+    for (i, t) in layout.pages.iter().enumerate() {
+        if t.contains(x, y) {
+            return Hit::Page(i);
         }
     }
     if layout.add.is_some_and(|a| a.contains(x, y)) {
@@ -2751,7 +2770,7 @@ mod tests {
     #[test]
     fn collapsed_is_header_only() {
         let m = Metrics::default();
-        let l = cluster(&m, 5, true, None, None, Some(100.0));
+        let l = cluster(&m, 5, 0, true, None, None, Some(100.0));
         assert!(l.tiles.is_empty());
         assert!(l.add.is_none());
         assert!(l.shell.is_none());
@@ -2765,6 +2784,7 @@ mod tests {
         let l = cluster(
             &m,
             1,
+            0,
             false,
             None,
             None,
@@ -2787,6 +2807,7 @@ mod tests {
         let l = cluster(
             &m,
             1,
+            0,
             false,
             None,
             None,
@@ -2802,6 +2823,7 @@ mod tests {
         let l = cluster(
             &m,
             1,
+            0,
             false,
             None,
             None,
@@ -2813,7 +2835,7 @@ mod tests {
     #[test]
     fn collapsed_files_tile_is_its_header() {
         let m = Metrics::default();
-        let l = cluster(&m, 1, false, None, None, Some(0.0));
+        let l = cluster(&m, 1, 0, false, None, None, Some(0.0));
         let f = l.files.unwrap();
         assert!(f.rows.is_empty());
         assert_eq!(f.rect, f.header);
@@ -2826,6 +2848,7 @@ mod tests {
         let l = cluster(
             &m,
             1,
+            0,
             false,
             Some((&approve, false)),
             None,
@@ -2858,7 +2881,7 @@ mod tests {
     #[test]
     fn the_tome_sits_under_the_tasks_tile_its_stones_in_rows() {
         let m = Metrics::default();
-        let l = cluster(&m, 1, false, Some((&[], false)), Some(6), Some(0.0));
+        let l = cluster(&m, 1, 0, false, Some((&[], false)), Some(6), Some(0.0));
         let tasks = l.tasks.as_ref().unwrap();
         let t = l.tome.as_ref().unwrap();
         let f = l.files.as_ref().unwrap();
@@ -2885,10 +2908,10 @@ mod tests {
         assert_eq!(at(t.stones[5]), Some(4));
         assert_eq!(stone_slot(t, 20.0, t.rect.bottom() + 5.0), None);
         // Folded, the header alone.
-        let folded = cluster(&m, 1, false, Some((&[], false)), Some(0), None);
+        let folded = cluster(&m, 1, 0, false, Some((&[], false)), Some(0), None);
         let t = folded.tome.unwrap();
         assert_eq!(t.rect, t.header);
-        assert!(cluster(&m, 1, true, Some((&[], false)), Some(6), None)
+        assert!(cluster(&m, 1, 0, true, Some((&[], false)), Some(6), None)
             .tome
             .is_none());
     }
@@ -2896,7 +2919,7 @@ mod tests {
     #[test]
     fn warrivs_line_sits_under_the_header_above_the_rows() {
         let m = Metrics::default();
-        let l = cluster(&m, 1, false, Some((&[false, true], true)), None, None);
+        let l = cluster(&m, 1, 0, false, Some((&[false, true], true)), None, None);
         let t = l.tasks.unwrap();
         let w = t.warriv.unwrap();
         assert_eq!(w.y, t.header.bottom());
@@ -2904,22 +2927,22 @@ mod tests {
         assert_eq!(t.rows[0].y, w.bottom());
         assert_eq!(t.rect.bottom(), t.rows[1].bottom() + m.task_foot);
         // With no rows the line still shows, folded or empty.
-        let l = cluster(&m, 1, false, Some((&[], true)), None, None);
+        let l = cluster(&m, 1, 0, false, Some((&[], true)), None, None);
         let t = l.tasks.unwrap();
         assert_eq!(t.rect.bottom(), t.warriv.unwrap().bottom() + m.task_foot);
-        let l = cluster(&m, 1, false, Some((&[false], false)), None, None);
+        let l = cluster(&m, 1, 0, false, Some((&[false], false)), None, None);
         assert!(l.tasks.unwrap().warriv.is_none());
     }
 
     #[test]
     fn an_empty_or_folded_tasks_tile_is_its_header() {
         let m = Metrics::default();
-        let l = cluster(&m, 1, false, Some((&[], false)), None, None);
+        let l = cluster(&m, 1, 0, false, Some((&[], false)), None, None);
         let t = l.tasks.unwrap();
         assert!(t.rows.is_empty());
         assert_eq!(t.rect, t.header);
         assert_eq!(l.size.1, t.rect.bottom() + m.pad);
-        assert!(cluster(&m, 1, true, Some((&[true], false)), None, None)
+        assert!(cluster(&m, 1, 0, true, Some((&[true], false)), None, None)
             .tasks
             .is_none());
     }
@@ -2927,7 +2950,7 @@ mod tests {
     #[test]
     fn tiles_stack_with_gaps() {
         let m = Metrics::default();
-        let l = cluster(&m, 3, false, None, None, None);
+        let l = cluster(&m, 3, 0, false, None, None, None);
         assert_eq!(l.tiles.len(), 3);
         assert_eq!(l.tiles[1].y - l.tiles[0].bottom(), m.gap);
         let add = l.add.unwrap();
@@ -2945,6 +2968,22 @@ mod tests {
         assert_eq!(hit(&l, 20.0, m.pad + 1.0), Hit::Header);
         assert_eq!(hit(&l, m.width - m.pad - 2.0, m.pad + 1.0), Hit::New);
         assert_eq!(hit(&l, 1.0, 1.0), Hit::Nothing);
+    }
+
+    #[test]
+    fn browser_tabs_stack_under_the_sessions_and_above_the_plus() {
+        let m = Metrics::default();
+        let l = cluster(&m, 2, 2, false, None, None, None);
+        assert_eq!(l.pages.len(), 2);
+        assert_eq!(l.pages[0].y - l.tiles[1].bottom(), m.gap);
+        assert_eq!(l.pages[1].y - l.pages[0].bottom(), m.gap);
+        assert_eq!(l.add.unwrap().y - l.pages[1].bottom(), m.gap);
+        assert_eq!(hit(&l, 20.0, l.pages[1].y + 1.0), Hit::Page(1));
+        assert_eq!(hit(&l, 20.0, l.tiles[1].y + 1.0), Hit::Tile(1));
+        // Folded, no tab shows, as no session does.
+        let folded = cluster(&m, 2, 2, true, None, None, None);
+        assert!(folded.pages.is_empty());
+        assert_eq!(folded.size, cluster(&m, 2, 0, true, None, None, None).size);
     }
 
     #[test]
@@ -2975,7 +3014,7 @@ mod tests {
     #[test]
     fn a_browser_button_sits_on_the_second_line_of_marked_tiles_only() {
         let m = Metrics::default();
-        let mut l = cluster(&m, 3, false, None, None, None);
+        let mut l = cluster(&m, 3, 0, false, None, None, None);
         assert_eq!(l.marks, vec![None; 3]);
         mark(&mut l, &m, &[false, true], &[]);
         assert_eq!(l.marks.len(), 3);
@@ -2995,7 +3034,7 @@ mod tests {
     #[test]
     fn a_worktree_button_stands_left_of_the_browser_or_in_its_place() {
         let m = Metrics::default();
-        let mut l = cluster(&m, 3, false, None, None, None);
+        let mut l = cluster(&m, 3, 0, false, None, None, None);
         mark(&mut l, &m, &[true, false, false], &[true, true, false]);
         let (browser, both) = (l.marks[0].unwrap(), l.codes[0].unwrap());
         assert_eq!(both.right() + 2.0, browser.x);
@@ -3011,7 +3050,7 @@ mod tests {
     #[test]
     fn collapsing_drops_the_browser_buttons() {
         let m = Metrics::default();
-        let mut l = cluster(&m, 2, true, None, None, None);
+        let mut l = cluster(&m, 2, 0, true, None, None, None);
         mark(&mut l, &m, &[true, true], &[true, true]);
         assert!(l.marks.is_empty() && l.codes.is_empty());
     }
@@ -3095,7 +3134,7 @@ mod tests {
     #[test]
     fn empty_cluster_still_offers_another_session() {
         let m = Metrics::default();
-        let l = cluster(&m, 0, false, None, None, None);
+        let l = cluster(&m, 0, 0, false, None, None, None);
         let add = l.add.unwrap();
         assert_eq!(add.y, l.header.bottom() + m.gap);
         assert_eq!(l.size.1, add.bottom() + m.pad);
