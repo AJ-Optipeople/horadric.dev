@@ -332,7 +332,7 @@ const SWEEP_GAP: Duration = Duration::from_secs(10);
 /// Starts the id of a file view, which is no session.
 const VIEW: &str = "view:";
 /// The start of a browser pane's id, before its project key.
-const WEB: &str = "web:";
+pub(crate) const WEB: &str = "web:";
 /// The start of an Arcane Sanctuary's id, before its project key.
 const SKY: &str = "sky:";
 pub(crate) const MARGIN_DIP: i32 = 12;
@@ -404,6 +404,11 @@ pub(crate) enum Input {
     Link(String),
     /// A browser pane's cross: close the page of the project with this key.
     CloseWeb(String),
+    /// The town's browser tabs changed, and with them its tiles.
+    Pages(String),
+    /// A browser tab's tile clicked: show that tab of the project's
+    /// browser on the stage.
+    Page(String, usize),
     /// A tab key in a browser pane's page, or its page closing itself.
     WebTab(String, web::TabStep),
     /// A browser pane's header right clicked, or Ctrl+L in its page: what
@@ -7771,21 +7776,17 @@ impl App {
         for input in inputs {
             match input {
                 Input::Toggle(hwnd) => {
-                    // A town without sessions has no tiles to fold or click,
-                    // so its header opens the stage with its browser pane,
-                    // also when that pane is already open behind another
-                    // project.
-                    let town = self
+                    // A town with no sessions and no browser has no tiles to
+                    // fold, so its header opens the stage with its browser
+                    // pane. Once it has a tile, a tab's included, the header
+                    // folds it as every project's does.
+                    let bare = self
                         .clusters
                         .iter()
                         .find(|c| c.hwnd.0 as isize == hwnd && town::is(&c.key))
+                        .filter(|c| c.tileless())
                         .map(|c| c.key.clone());
-                    let sessionless = |grid: Vec<String>| {
-                        grid.iter().all(|id| {
-                            id.starts_with(WEB) || id.starts_with(VIEW) || id.starts_with(SKY)
-                        })
-                    };
-                    if let Some(key) = town.filter(|k| sessionless(self.grid_of(k))) {
+                    if let Some(key) = bare {
                         self.open_web(&key, None);
                     } else if let Some(c) =
                         self.clusters.iter_mut().find(|c| c.hwnd.0 as isize == hwnd)
@@ -7889,6 +7890,15 @@ impl App {
                     _ => watch::open_link(&crate::links::Target::Web(url), None),
                 },
                 Input::CloseWeb(key) => self.close_web(&key),
+                Input::Pages(key) => {
+                    for c in self.clusters.iter().filter(|c| c.key == key) {
+                        relayout |= c.update();
+                    }
+                }
+                Input::Page(key, i) => {
+                    web::tab(&key, web::TabStep::Select(i));
+                    self.open_web(&key, None);
+                }
                 Input::Sanctuary => {
                     if let Some(key) = self.stage.as_ref().map(|s| s.project()) {
                         self.open_sky(&key);

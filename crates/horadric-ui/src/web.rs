@@ -360,7 +360,7 @@ pub fn open(key: &str, url: Option<&str>) {
                 navigate_view(&view, u);
             }
         }
-        Some(None) => {}
+        Some(None) => retiled(key),
         None => {
             add_tab(key, Tab::new(url.map(str::to_string)), true);
         }
@@ -497,8 +497,9 @@ pub fn navigate(key: &str, id: u64, url: &str) {
         }
         tab.webview.clone()
     });
-    if let Some(v) = view {
-        navigate_view(&v, url);
+    match view {
+        Some(v) => navigate_view(&v, url),
+        None => retiled(key),
     }
 }
 
@@ -534,6 +535,15 @@ pub fn close(key: &str) {
     let gone = WEBS.with(|w| w.borrow_mut().remove(key));
     for tab in gone.map(|w| w.tabs).unwrap_or_default() {
         end(tab);
+    }
+    retiled(key);
+}
+
+/// Tells the town's cluster its tabs changed, since each is a tile there.
+/// Project clusters show no tabs, so they hear nothing.
+fn retiled(key: &str) {
+    if crate::town::is(key) {
+        app::push(Input::Pages(key.to_string()));
     }
 }
 
@@ -878,6 +888,58 @@ pub fn tabs(key: &str) -> Option<(Vec<String>, usize)> {
     })
 }
 
+/// A tab as its tile in the town's cluster shows it.
+#[derive(Clone)]
+pub struct TabTile {
+    pub name: String,
+    /// Its address without the scheme.
+    pub address: String,
+    pub icon: Option<Rc<Favicon>>,
+    /// The session whose agent works in it.
+    pub driver: Option<String>,
+    /// The one its pane shows.
+    pub shown: bool,
+}
+
+impl PartialEq for TabTile {
+    fn eq(&self, other: &Self) -> bool {
+        let same_icon = match (&self.icon, &other.icon) {
+            (Some(a), Some(b)) => Rc::ptr_eq(a, b),
+            (a, b) => a.is_none() && b.is_none(),
+        };
+        same_icon
+            && (&self.name, &self.address, &self.driver, self.shown)
+                == (&other.name, &other.address, &other.driver, other.shown)
+    }
+}
+
+/// The project's tabs as tiles, in the strip's order.
+pub fn tiles(key: &str) -> Vec<TabTile> {
+    WEBS.with(|w| {
+        let w = w.borrow();
+        let Some(web) = w.get(key) else {
+            return Vec::new();
+        };
+        web.tabs
+            .iter()
+            .enumerate()
+            .map(|(i, t)| {
+                let url = match (t.url.is_empty(), &t.pending) {
+                    (true, Some(p)) => p.as_str(),
+                    _ => t.url.as_str(),
+                };
+                TabTile {
+                    name: tab_name(&t.title, url),
+                    address: history::bare(url).trim_end_matches('/').to_string(),
+                    icon: t.icon.clone(),
+                    driver: t.driver.clone(),
+                    shown: i == web.active,
+                }
+            })
+            .collect()
+    })
+}
+
 /// The picture of each of the project's tabs' sites, where it has one.
 pub fn icons(key: &str) -> Vec<Option<Rc<Favicon>>> {
     WEBS.with(|w| {
@@ -1172,6 +1234,7 @@ fn show(key: &str) {
     if let Some(p) = pane {
         let _ = unsafe { PostMessageW(Some(p), WM_WEB_CHANGED, WPARAM(0), LPARAM(0)) };
     }
+    retiled(key);
 }
 
 /// Says the zoom to give the tab when the pane wants another than it gave
@@ -1903,6 +1966,7 @@ fn changed(key: &str, id: Option<u64>, set: impl FnOnce(&mut Tab)) {
     if let Some(p) = pane {
         let _ = unsafe { PostMessageW(Some(p), WM_WEB_CHANGED, WPARAM(0), LPARAM(0)) };
     }
+    retiled(key);
 }
 
 /// What was typed into the address prompt, as an address: as it is with a

@@ -261,6 +261,11 @@ pub struct Scene<'a> {
     pub town: bool,
     pub collapsed: bool,
     pub sessions: &'a [&'a Session],
+    /// The browser's tabs, a tile each below the sessions'. Only the
+    /// town's cluster has any.
+    pub pages: &'a [crate::web::TabTile],
+    /// The tab whose pane on the stage has the keyboard.
+    pub page_selected: Option<usize>,
     /// How each tile draws this frame, in the same order.
     pub looks: &'a [Look],
     /// Tiles whose sessions have gone: where each was, what it showed,
@@ -1131,6 +1136,9 @@ impl Painter<'_> {
                 // Blue, as a pane is while it is dragged.
                 self.stroke_rounded(&r, m.tile_radius, theme::working().with_alpha(0.7), 1.5);
             }
+        }
+        for (i, (r, p)) in scene.layout.pages.iter().zip(scene.pages).enumerate() {
+            self.page(gpu, m, scene, i, r, p);
         }
         self.beams(scene);
         self.flights(scene);
@@ -3264,6 +3272,61 @@ impl Painter<'_> {
         // Inside the corner DWM rounds the window to.
         let radius = m.window_radius - inset;
         self.stroke_rounded(&r, radius, scene.accent.with_alpha(0.55), 1.5);
+    }
+
+    /// The `i`th browser tab's tile: a key like an idle session's, with
+    /// its site's picture where a session has its icon, its title and its
+    /// address. Its lamp stays dark, since a page does no work of its own.
+    unsafe fn page(
+        &self,
+        gpu: &Gpu,
+        m: &Metrics,
+        scene: &Scene,
+        i: usize,
+        r: &Rect,
+        p: &crate::web::TabTile,
+    ) {
+        let b = scene.button(Hit::Page(i));
+        let selected = scene.page_selected == Some(i);
+        let rest = theme::key_depth(&Phase::Idle, selected);
+        let lift = match b {
+            Button::Pressed => (0.15 - rest).min(0.0),
+            Button::Hover if !selected => 0.3,
+            _ => 0.0,
+        };
+        let hover = if b == Button::Hover { 1.0 } else { 0.0 };
+        let face = theme::surface().mix(theme::text(), 0.03 * hover);
+        let face = if selected {
+            face.mix(theme::well(), 0.25)
+        } else {
+            face
+        };
+        self.key(gpu, r, m.tile_radius, face, rest + lift, 1.0);
+        if selected {
+            self.latched(gpu, r, m.tile_radius, 1.0);
+        }
+        self.lamp(&lamp_rect(r), theme::text_dim(), 0.0);
+        let (ix, iy) = icon_centre(r);
+        match &p.icon {
+            Some(icon) => {
+                let side = 20.0;
+                let at = Rect::new(ix - side / 2.0, iy - side / 2.0, side, side);
+                crate::favicon::draw(self.rt, icon, rect(&at));
+            }
+            None => self.icon(
+                &gpu.icon,
+                theme::text_dim(),
+                '\u{E774}',
+                Rect::new(ix - 14.0, iy - 14.0, 28.0, 28.0),
+            ),
+        }
+        let left = r.x + TILE_TEXT_X;
+        let width = r.right() - INNER_PAD - left;
+        let row_h = r.h / 2.0;
+        let top = Rect::new(left, r.y + 5.0, width, row_h - 3.0);
+        let bottom = Rect::new(left, r.y + row_h - 1.0, width, row_h - 5.0);
+        self.text(&gpu.name, theme::text(), &p.name, top);
+        self.text(&gpu.small, theme::text_dim(), &p.address, bottom);
     }
 
     /// The `i`th tile, at `r` this frame, showing `s`.
