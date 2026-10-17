@@ -9,6 +9,7 @@
 - A [/] quest whose session a dev instance started (state in %APPDATA%\Horadric-dev) died with it: no tell reaches it, hand it to the human with "restart it" at once (lore #51).
 
 ## Lately
+- 2026-10-17 Round (13:16, human left, main at 38aefd3): last reload 11:42, since then 6760222 (backup passphrase) and Lore part 6 (b0a08b3, 38aefd3) landed. heavy.rs, tasks.rs and warriv.rs show as modified with no diff, no cargo running, so cast "Ship Local". Task notification quest still with the human.
 - 2026-10-17 Round (12:43, main at 6760222): the 11:39 Ship Local reloaded fine at 11:42 with Accounts. 6760222 (backup passphrase fix, a human's session) is not shipped yet, but heavy.rs in both crates sits uncommitted in the shared tree, edited 12:41, so held the cast. Task notification quest still with the human.
 - 2026-10-17 Round (11:39, main at 118ba38): the d8d8102 Ship Local reloaded fine at 11:34, but Accounts (06bf101) merged at 11:35 after it, so cast "Ship Local" again. Task notification quest still with the human.
 - 2026-10-17 Round (main at d8d8102): "Tristram: browser tabs as tiles" and "A dev instance never takes quests" landed, tree clean apart from Horadric's own files, so cast "Ship Local". Task notification quest still with the human, Accounts under way.
@@ -64,4 +65,4 @@
 - Once quests run with a pack, the pack comparison resumes by itself.
 - "Memory: no recall on a task notification" handed to the human to restart (2026-10-17); when it lands, cast Ship Local.
 - "Earlier turn's background work" and "A dev instance never takes quests" shipped 2026-10-17: next look back should show fewer unreported stops, and no dev instance holding a real quest.
-- 6760222 (backup passphrase) waits for a Ship Local: cast it once the heavy.rs work in the shared tree is committed or gone.
+- Ship Local cast 13:16 for 6760222 and Lore part 6: check reload.log shows it reloaded.
