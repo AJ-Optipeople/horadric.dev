@@ -20,7 +20,7 @@ use crate::runeword::{describe, due, Armed, Every};
 use crate::session::made_from;
 use crate::tasks::{
     end_of, find, insert_note, insert_with_notes, item_line, move_item, one_line, parse, readiness,
-    replace_line, set_mark, Mark, Mode, Ready, Task, ASSUMED,
+    replace_line, set_mark, Mark, Mode, Ready, Task, ASSUMED, PLAN_WIDE,
 };
 
 /// What a blocked quest's reason starts with when Warriv handed it to the
@@ -731,9 +731,8 @@ pub fn system_prompt(horadric: &str, file: &str) -> String {
          - File the next quests toward the first open aim, at most {FILE_AT_MOST} a wake, in \
          the order they should be done: `{horadric} quest add \"<title>\" --notes \"<what to \
          build, where its reasoning lives, how to check it>\" --notes \"{FILED}<the aim>\" \
-         --after \"<title>\"`, with an `--after` for each quest it needs first. Each is one \
-         session's work, small enough to finish and check in one go. Never a title already in \
-         the log, done or not.\n\
+         --after \"<title>\"`, with an `--after` for each quest it needs first. File \
+         {PLAN_WIDE} Never a title already in the log, done or not.\n\
          - When what the aim names is all done, mark it: `{horadric} quest aim done \"<the \
          aim>\"`. Read the log, the plan and git before you decide either way.\n\n\
          Answer from what is written: the quest's notes, the plan and docs, the code, and \
@@ -871,8 +870,9 @@ fn brief(b: &Brief) -> String {
             }
             s.push_str(&format!(
                 "  Read what the first aim points at, then file the next quests toward it, at \
-                 most {FILE_AT_MOST}, each with an `--after` for every quest it needs first and \
-                 the notes line `{FILED}<the aim>`. Or, if it is all done, mark it reached.\n"
+                 most {FILE_AT_MOST}, few and wide so they run side by side, each with an \
+                 `--after` only for a quest it truly needs first and the notes line \
+                 `{FILED}<the aim>`. Or, if it is all done, mark it reached.\n"
             ));
             s
         }

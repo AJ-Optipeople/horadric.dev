@@ -1441,6 +1441,7 @@ pub fn bypasses_prompts(holds_quest: bool, own_tree: bool) -> bool {
 pub fn system_prompt(horadric: &str, file: &str, list: Option<&str>) -> String {
     let mut out = format!(
         "You are working on one quest of this project's quest log, {file}. \
+         {FAN_OUT} \
          Horadric started you on it and does not know you are finished until you \
          tell it, so your last step is always a command in your shell. Do only this \
          item. When it is finished, commit your work if you changed files, then run \
@@ -1454,23 +1455,14 @@ pub fn system_prompt(horadric: &str, file: &str, list: Option<&str>) -> String {
          \"<command>\"` for a command cmd.exe runs in the project folder exiting 0, \
          or `--until <+30m or 2026-10-01T14:05Z>` for a time. Use one whenever it \
          fits: the list goes on past a quest that waits on one, and stops at one that \
-         waits on the human. If you find other work worth doing, add it to the list \
-         with `{horadric} quest add \"<title>\"` instead of doing it now, adding \
-         `--after \"<other title>\"` when it can only start once another quest is \
-         done. Quests in {file} are lines like `- [ ] Title`, in the order they \
+         waits on the human. If you find other work worth doing outside your \
+         item, add it to the list with `{horadric} quest add \"<title>\"` instead \
+         of doing it now, adding `--after \"<other title>\"` when it can only start \
+         once another quest is done. Quests in {file} are lines like `- [ ] Title`, in the order they \
          should be done, with notes indented under them; a notes line `After: \
          <title>` holds a quest back until that one is done. When your item is to \
          plan work, write the items you decide on into the file below your own \
-         line, each with an `After:` line for every quest it needs first. \
-         Use your Agent tool's subagents by your own judgment, without being \
-         asked, whenever they make the quest faster or surer: send a search \
-         across many files to an Explore agent so you keep its answer and not \
-         the file dumps, start the independent parts of the work (separate \
-         files, research beside a build) as agents in one message so they run \
-         in parallel, and before you report the quest done, have a fresh agent \
-         review your diff against the quest. Tell each agent which files it may \
-         change and never let two change the same one. Do small or tightly \
-         linked steps yourself, since an agent starts without your context."
+         line: {PLAN_WIDE}"
     );
     if let Some(list) = list {
         out.push_str(&format!(
@@ -1495,9 +1487,52 @@ pub fn log_prompt(horadric: &str, file: &str) -> String {
          adding `--notes \"<what to do and why>\"` and `--after \"<other title>\"` \
          when it can only start once another quest is done; the first add creates \
          the log. `{horadric} quest` with no arguments shows every command. A quest \
-         you add is done by a session of its own, not by you, unless the human asks \
-         you to do it here."
+         you add is done by a session of its own, not by you. {FAN_OUT}"
     )
+}
+
+/// How every session Horadric starts is told to get work done: now, with
+/// subagents side by side, and a quest only for work that must wait.
+/// Sessions told only how to add quests queued work as chains of them,
+/// one after the other, where agents at once would have done it in one
+/// sitting.
+pub const FAN_OUT: &str = "Work that fits in one session is done now, in this \
+     session, not queued as quests: use your Agent tool's subagents by your own \
+     judgment, without being asked. Send a search across many files to an Explore \
+     agent so you keep its answer and not the file dumps, start the independent \
+     parts of the work (separate files, research beside a build) as several \
+     agents in one message so they run at once, and have a fresh agent review \
+     your diff before you call it finished. Tell each agent which files it may \
+     change and never let two change the same one. Do small or tightly linked \
+     steps yourself, since an agent starts without your context. A quest is only \
+     for work that has to wait (on the human, on something landing first, on a \
+     time) or is too big for one session even with agents. Steps of one change \
+     that each wait on the one before belong in one session with agents, never \
+     in a chain of quests.";
+
+/// How a session that plans cuts work into quests: few and wide, side by
+/// side, each as much as one session with agents finishes.
+pub const PLAN_WIDE: &str = "few, wide quests, each as much as one session \
+     finishes with its own agents, not one step each. Cut the work so the \
+     quests run side by side on separate parts of the code, and give one an \
+     `After:` line only for a quest it truly needs first. A chain of more than \
+     two quests is one quest too many: merge them.";
+
+/// What `quest add` says when the new quest would wait on a quest that
+/// itself waits on another, open one: the moment a chain grows is the
+/// moment to say so, which a system prompt read at the start is not.
+pub fn chain_warning(log: &[Task], notes: &str) -> Option<String> {
+    let open = |name: &str| find(log, name).is_ok_and(|i| log[i].mark != Mark::Done);
+    let middle = notes.lines().filter_map(after_line).find_map(|name| {
+        let t = &log[find(log, name).ok()?];
+        (t.mark != Mark::Done && t.after().into_iter().any(open)).then_some(&t.title)
+    })?;
+    Some(format!(
+        "This makes a chain: \"{middle}\" waits on another quest too, so these run \
+         one after the other. If they are steps of one change, they belong in one \
+         quest done with subagents: add no more, and write the rest into that \
+         quest's notes with `quest note` instead."
+    ))
 }
 
 /// What a quest's session is told besides, while Warriv drives: nobody
@@ -1618,7 +1653,23 @@ mod tests {
         assert!(p.contains("`--after \"<that title>\"`"));
         let p = system_prompt("hx", QUESTS_FILE, None);
         assert!(p.contains("`--after \"<other title>\"`"));
-        assert!(p.contains("an `After:` line for every quest it needs first"));
+        assert!(p.contains("an `After:` line only for a quest it truly needs first"));
+    }
+
+    #[test]
+    fn a_quest_that_waits_on_a_waiting_quest_is_called_a_chain() {
+        let log = parse(
+            "- [ ] Build\n- [ ] Wire\n  After: Build\n- [ ] Alone\n\
+             - [ ] Late\n  After: Shipped\n- [x] Shipped\n",
+        );
+        let warned = chain_warning(&log, "Why.\nAfter: Wire").unwrap();
+        assert!(warned.contains("\"Wire\" waits on another quest"));
+        assert_eq!(chain_warning(&log, "After: Build"), None);
+        assert_eq!(chain_warning(&log, "After: Alone"), None);
+        // A quest already done holds nothing back, so it makes no chain.
+        assert_eq!(chain_warning(&log, "After: Late"), None);
+        assert_eq!(chain_warning(&log, "After: Nothing like it"), None);
+        assert_eq!(chain_warning(&log, ""), None);
     }
 
     #[test]
@@ -2493,6 +2544,9 @@ mod tests {
         assert!(system_prompt("hx", QUESTS_FILE, None).contains(report));
         // Subagents are the session's own call, not something the human asks for.
         assert!(system_prompt("hx", QUESTS_FILE, None).contains("without being asked"));
+        assert!(system_prompt("hx", QUESTS_FILE, None).contains("never in a chain of quests"));
+        assert!(log_prompt("hx", QUESTS_FILE).contains("is done now, in this session"));
+        assert!(!FAN_OUT.contains("  ") && !PLAN_WIDE.contains("  "));
         // Wrapped lines join with one space, not the source's indent.
         assert!(!system_prompt("hx", QUESTS_FILE, Some("C:/p/q.md")).contains("  "));
         assert!(nudge("hx").contains(report));

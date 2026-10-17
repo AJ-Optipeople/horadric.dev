@@ -438,6 +438,7 @@ fn add(
             .unwrap_or_else(|| cwd.to_path_buf())
     };
     let done = file::read_done(&project);
+    let mut chain = None;
     write(&project, |text| {
         let log = tasks::parse(text);
         // An `After:` line naming either of two quests alike would match
@@ -448,6 +449,7 @@ fn add(
             }
         }
         let notes = &tasks::drop_done_after(notes, &log, &done);
+        chain = tasks::chain_warning(&log, notes);
         match below {
             None => Ok(tasks::append_with_notes(text, title, notes)),
             Some(b) => warriv::add_below(text, b, title, notes),
@@ -468,6 +470,9 @@ fn add(
     warriv_ran(&project, Command::Add, title, notes);
     tell_app(&project);
     println!("Added to {}", file::file(&project).display());
+    if let Some(chain) = chain {
+        println!("{chain}");
+    }
     Ok(())
 }
 
