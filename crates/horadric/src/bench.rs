@@ -182,6 +182,9 @@ fn start(spec_path: &Path) -> Result<(), String> {
     for w in workers {
         let _ = w.join();
     }
+    // The shared build folder is gigabytes and of no use once the runs
+    // are done; the results, answers and diffs stay.
+    let _ = fs::remove_dir_all(b.root.join("target"));
     println!();
     print!("{}", bench::report(&read_runs(&results), &order));
     Ok(())
@@ -219,11 +222,17 @@ fn one(b: &Bench, task: &Task, variant: &Variant, repeat: usize) -> Run {
     }
     let settings = b.root.join(format!("{name}.settings.json"));
     let filled = bench::fill(&variant.settings, &b.exe);
-    let filled = if filled.is_object() {
+    let mut filled = if filled.is_object() {
         filled
     } else {
         json!({})
     };
+    if variant.plugins {
+        // The user's settings are not read, so their plugins come in here.
+        if let Some(on) = user_plugins() {
+            filled["enabledPlugins"] = on;
+        }
+    }
     let _ = fs::write(&settings, filled.to_string());
     let system: Vec<String> = [&b.spec.system, &variant.system]
         .iter()
@@ -242,8 +251,13 @@ fn one(b: &Bench, task: &Task, variant: &Variant, repeat: usize) -> Run {
         .arg("--mcp-config")
         .arg(&b.mcp)
         .arg("--strict-mcp-config");
-    if !b.spec.model.is_empty() {
-        c.args(["--model", &b.spec.model]);
+    let model = if variant.model.is_empty() {
+        &b.spec.model
+    } else {
+        &variant.model
+    };
+    if !model.is_empty() {
+        c.args(["--model", model]);
     }
     if !system.is_empty() {
         c.arg("--append-system-prompt").arg(system.join("\n\n"));
@@ -296,6 +310,14 @@ fn one(b: &Bench, task: &Task, variant: &Variant, repeat: usize) -> Run {
     run.seconds = began.elapsed().as_secs();
     let _ = fs::remove_dir_all(&dir);
     run
+}
+
+/// The plugins enabled in the user's own Claude Code settings.
+fn user_plugins() -> Option<Value> {
+    let home = horadric_hooks::home()?;
+    let path = Path::new(&home).join(".claude").join("settings.json");
+    let v: Value = serde_json::from_str(&fs::read_to_string(path).ok()?).ok()?;
+    v.get("enabledPlugins").cloned()
 }
 
 fn clone(b: &Bench, dir: &Path) -> Result<(), String> {

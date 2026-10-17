@@ -297,10 +297,90 @@ Not yet:
 
 - If the words do not move it, a harder lever: a PreToolUse hook that
   rewrites a Read of a whole file over a few hundred lines into an
-  outline, or refuses it with the outline in the reason.
+  outline, or refuses it with the outline in the reason. Built and
+  benched on 2026-10-17, see part 7: it never fired, and is not on.
 - Compaction. Claude Code compacts when the window nears its limit; a
   quest that would end at 180k can go on from a 40k summary after its
   exploration. Whether Horadric can ask for one at the right moment
   (after the pack is read, before the edits) is an open question of
   Claude Code's interface, not of Horadric.
 
+## 7. The bench
+
+Asked for on 2026-10-17, after a search of what the internet claims:
+20x to 30x fewer tokens from code graphs, output compressors and rule
+files. Read closely, those numbers are one tool's output or one lookup,
+measured by the tool's own author. Independent end to end tests found
+20% to 43% at best, and three code graph servers that made sessions
+cost 22% to 27% more, since the agent mostly ignored their tools. The
+way to know is to measure on this project's own work, and Horadric can,
+since it already reads what a session spent.
+
+Built 2026-10-17. `horadric bench <spec>` runs each task of a spec under
+each variant, a few times each and round robin, as a headless `claude
+-p` in a clone of its own, and reports each variant's median tokens,
+calls, tokens a call, window at the end and result text, beside the
+first variant's. A variant is a line added to the system prompt,
+Claude Code settings (hooks, with `{horadric}` for this build), extra
+environment, its own model, or the user's plugins. A task is a prompt
+with a check: a shell command that must exit 0 in the clone, or words
+the answer must hold. Choices made along the way:
+
+- A clone, not a worktree. CLAUDE.md tells an agent in a worktree to
+  merge it into main, and a clone with no remote has no main to merge
+  into and nowhere to push.
+- The runs read only project settings (`--setting-sources
+  project,local`), so the user's hooks do not post them to the running
+  Horadric as sessions, and their plugins are off unless a variant asks.
+  The lore's MCP server runs from a copy of the build with the dev
+  state, so the runs' notes stay out of the project's.
+- One shared build folder, filled once by the spec's `prepare` command,
+  so no run pays for compiling the dependencies, and dropped when the
+  bench ends. Every run is appended to `results.jsonl` as it ends, with
+  its answer and diff beside it, so a bench that is stopped keeps what
+  it measured; `horadric bench report` reads it again.
+
+The first bench, `docs/bench/window.json`, Sonnet, two question tasks
+and one edit (`--json` for `quest spend`, checked by the tests and the
+diff), five variants: none, lean rules in the system prompt, the read
+guard, the shell guard (`horadric guard`, see below), and all of them.
+25 of 30 runs finished before the machine ran low on memory and the
+bench was stopped; every one passed.
+
+| Task | Baseline | Rules | Read guard | Shell guard | All |
+|---|---|---|---|---|---|
+| pack (question) | 149k | -19% | -17% | -18% | -18% |
+| stage (question) | 278k | +30% | -6% | -9% | +45% |
+| json (edit, one run each) | 328k | -26% | +33% | +34% | +52% |
+
+What it says:
+
+- **The guards never fired.** Not one run read a whole long file or ran
+  a build outside `heavy`: given the lore's wording (part 6) and the
+  heavy prompt, the agent outlines, reads ranges and digests by itself.
+  So the guard variants were the baseline under another name, and
+  their spread, from -18% to +34%, is **the noise between two runs of
+  the same thing**. Any claim of a saving under about 40% from one or
+  two runs is inside it. The guard stays built and off.
+- **Rules in the prompt are inside the noise too**: -26% to +30%.
+- **These runs cost a tenth of a real quest.** 120k to 500k tokens, 4
+  to 13 calls, a window of 30k to 45k, against a quest's median of 5M,
+  46 calls and 110k. The task is smaller, but not ten times smaller,
+  so the gap is the lever worth finding. What differs: the model (real
+  quests run on Opus), the start (plugins, the browser tools, the
+  quest's prompt and pack: 53k against 30k), and that a real quest is
+  driven by a person or Warriv over many turns.
+
+`horadric guard [read|shell]`, the hook benched here: a Read of a whole
+file over 300 lines, or a plain `cat` of one, is turned down with the
+file's outline as the reason (on `app.rs`, 23k characters in place of
+354k), and a plain build or test is rewritten to run through `heavy`.
+A turned down read costs a call, which carries the whole window, so the
+guard only pays where a session reads whole long files, which these
+did not.
+
+Next: `docs/bench/where.json`, the edit and a question under Sonnet and
+Opus, each with and without the user's plugins, one run at a time to
+spare the memory. It says how much of the tenfold gap is the model and
+how much the start. Not run yet: the machine was short of memory when
+the first bench was stopped, so it waits to be started by the human.
