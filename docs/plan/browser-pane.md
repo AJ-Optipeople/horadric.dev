@@ -8,7 +8,9 @@ again for every project; it was dropped the same day. This reverses the
 settled "no web view" for web pages only: Horadric's own UI stays Direct2D.
 
 - **A pane on the stage** (`web.rs`, `Console::web`, `App::webs`), one per
-  project, after its sessions and the file view in the grid. Ctrl+Shift+B
+  project, after its sessions and the file view in the grid. In
+  Tristram each tab is also a tile in the cluster, below the sessions'
+  (2026-10-17, see "Tabs as tiles" below and docs/plan/tristram.md). Ctrl+Shift+B
   in a pane (`CharAction::Browse`, plain Ctrl+B stays the program's) or
   "Browser" in the project menu opens it and, when new, asks for an
   address (`web::address`, pure: a scheme kept, a local server over http,
@@ -148,6 +150,24 @@ settled "no web view" for web pages only: Horadric's own UI stays Direct2D.
   closing one left the other, and a `window.open` popup took its agent
   and gave it back. The badge was not seen on screen yet: the desktop
   was locked.
+- **Tabs as tiles, in Tristram** (2026-10-17). This changes the rule
+  of 2026-09-29 that the browser is only a pane on the stage. The
+  town's header opened its stage while a browser was up, so it no
+  longer folded the cluster as every project's header does. Now each
+  tab of the town's browser is a tile of its cluster, below the
+  sessions' (`web::tiles`, `web::TabTile`, the `pages` of
+  `layout::cluster`, `Hit::Page`), drawn as a key with a dark lamp, the
+  site's picture where a session has its icon, the title and the bare
+  address. A click picks that tab and shows the pane on the stage;
+  the shown one is latched in while its pane has the keyboard. The
+  header folds, and opens the browser only when the town has no tile
+  at all. `web` tells the town's cluster when a tab comes, goes,
+  changes title, address or picture, or another is shown
+  (`Input::Pages`). Project clusters show no tabs: their browser is
+  their sessions' to test with, and stays a pane.
+- **Open: browser tiles for project clusters too?** For the human to
+  say. It would be the same tiles with `pages` filled for any key, and
+  would make a project's cluster as tall again as it has tabs.
 - Popups and links to a new window (a middle click, `target=_blank`, an
   OAuth login) open in a new tab: `NewWindowRequested` is deferred until
   the tab's WebView is made and then handed it, so the popup keeps its

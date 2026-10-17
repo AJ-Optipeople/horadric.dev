@@ -22,8 +22,17 @@ from: always there, belongs to no project, sees all of them.
 - **Always shown.** Its cluster is pinned first in the columns and
   stays when it has no sessions, drawn as the town (its own mark, not a
   project name) so it never reads as one more repository. Clicking it
-  with no sessions opens its stage with the browser pane and a "New
-  session" prompt, so the assistant is one click away.
+  with no sessions and no browser opens its stage with the browser pane
+  and a "New session" prompt, so the assistant is one click away.
+- **Its browser tabs are tiles** (2026-10-17). The human found that a
+  header which opened the stage once a browser was up no longer folded
+  the cluster, as every other project's does. So each tab of the town's
+  browser is a tile below its sessions' (`web::tiles`,
+  `layout::cluster`'s `pages`, `Hit::Page`): its site's picture, its
+  title and its address, the shown tab latched in while its pane has
+  the keyboard. A click shows that tab on the stage. The header folds
+  and unfolds as anywhere else, and opens the browser only when the
+  town has no tile at all.
 - **Its own browser pane.** The town's pane is the human's own browser
   with an agent beside it. Logins carry over, since every pane already
   shares one profile (see "Browser pane"). Project panes stay as they

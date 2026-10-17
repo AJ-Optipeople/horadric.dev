@@ -177,6 +177,7 @@ pub fn cluster(hit: Hit) -> Option<&'static str> {
         Hit::Tile(_) => "Show this session on the stage. Right click for more",
         Hit::Browser(_) => "Show this session's browser",
         Hit::Code(_) => "Open this session's worktree in VS Code",
+        Hit::Page(_) => "Show this tab on the stage",
         Hit::Add => "Start another session in this project",
         Hit::Shell => "Open a terminal in this project",
         Hit::FilesHeader => "Fold or unfold the changed files",

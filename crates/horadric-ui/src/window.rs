@@ -66,6 +66,7 @@ use crate::theme;
 use crate::tip;
 use crate::town;
 use crate::watch::{self, Slot, Watcher};
+use crate::web::{self, TabTile};
 
 pub(crate) const CLASS: PCWSTR = w!("HoradricCluster");
 const DRAG_THRESHOLD: i32 = 4;
@@ -197,9 +198,11 @@ pub struct Cluster {
 struct Still {
     layout: ClusterLayout,
     sessions: Vec<Rc<Session>>,
+    pages: Vec<TabTile>,
     items: Option<Vec<Item>>,
     stones: Option<Vec<TomeStone>>,
     board: Option<(String, String)>,
+    /// Each session on the stage or not, then the browser.
     staged: Vec<bool>,
     active: Option<String>,
     astir: bool,
@@ -373,7 +376,7 @@ impl Cluster {
             .lock()
             .map(|r| r.all().filter(|s| project_key(s) == key).count())
             .unwrap_or(0);
-        let initial = layout::cluster(&shared.metrics, n, false, None, None, None);
+        let initial = layout::cluster(&shared.metrics, n, 0, false, None, None, None);
 
         let mut cluster = Box::new(Cluster {
             hwnd: HWND::default(),
@@ -540,6 +543,20 @@ impl Cluster {
             }
         }
         v
+    }
+
+    /// The browser's tabs, each shown as a tile. Only the town shows them:
+    /// a project's browser is its sessions' to test with, and stays a pane.
+    fn pages(&self) -> Vec<TabTile> {
+        match town::is(&self.key) {
+            true => web::tiles(&self.key),
+            false => Vec::new(),
+        }
+    }
+
+    /// No session and no tab: nothing for the header to fold.
+    pub fn tileless(&self) -> bool {
+        self.sessions().is_empty() && self.pages().is_empty()
     }
 
     pub fn files_collapsed(&self) -> bool {
@@ -709,6 +726,7 @@ impl Cluster {
         let h = layout::cluster(
             &self.shared.metrics,
             n,
+            self.pages().len(),
             self.collapsed,
             tasks.as_deref().map(|a| (a, self.warriv_line().is_some())),
             tome,
@@ -743,6 +761,7 @@ impl Cluster {
         let h = layout::cluster(
             m,
             self.sessions().len(),
+            self.pages().len(),
             self.collapsed,
             tasks.as_deref().map(|a| (a, self.warriv_line().is_some())),
             tome,
@@ -815,7 +834,12 @@ impl Cluster {
     fn still_of(&self, sessions: Vec<Rc<Session>>, items: Option<Vec<Item>>) -> Still {
         let staged = {
             let staged = self.shared.staged.borrow();
-            sessions.iter().map(|s| staged.contains(&s.id)).collect()
+            let browser = format!("{}{}", app::WEB, self.key);
+            sessions
+                .iter()
+                .map(|s| staged.contains(&s.id))
+                .chain([staged.contains(&browser)])
+                .collect()
         };
         let board = self
             .shared
@@ -826,6 +850,7 @@ impl Cluster {
         Still {
             layout: self.layout.borrow().clone(),
             sessions,
+            pages: self.pages(),
             items,
             stones: self.stones(),
             board,
@@ -853,6 +878,7 @@ impl Cluster {
         let mut l = layout::cluster(
             m,
             n,
+            self.pages().len(),
             self.collapsed,
             tasks.as_deref().map(|a| (a, self.warriv_line().is_some())),
             tome,
@@ -929,15 +955,22 @@ impl Cluster {
         let sessions: Vec<Rc<Session>> = self.sessions().into_iter().map(Rc::new).collect();
         let refs: Vec<&Session> = sessions.iter().map(|s| &**s).collect();
         let layout = self.layout.borrow();
+        let pages = self.pages();
+        let browser = format!("{}{}", app::WEB, self.key);
         let on_stage = {
             let staged = self.shared.staged.borrow();
-            refs.iter().any(|s| staged.contains(&s.id))
+            refs.iter().any(|s| staged.contains(&s.id)) || staged.contains(&browser)
         };
         let selected = on_stage
             .then(|| {
                 let active = self.shared.active.borrow();
                 refs.iter().position(|s| active.as_deref() == Some(&s.id))
             })
+            .flatten();
+        // The shown tab is latched in, as a session with the keyboard is,
+        // while its pane has it.
+        let page_selected = (on_stage && self.shared.active.borrow().as_deref() == Some(&browser))
+            .then(|| pages.iter().position(|p| p.shown))
             .flatten();
         let files = self.files.borrow();
         let items = self.items();
@@ -1091,6 +1124,8 @@ impl Cluster {
             town: town::is(&self.key),
             collapsed: self.collapsed,
             sessions: &refs,
+            pages: &pages,
+            page_selected,
             looks: &looks,
             ghosts: &ghosts,
             flights: &flights,
@@ -1449,7 +1484,7 @@ impl Cluster {
                             app::push(Input::TileMenu(s.id.clone()));
                         }
                     }
-                    Hit::Header | Hit::Add | Hit::Shell => {
+                    Hit::Header | Hit::Add | Hit::Shell | Hit::Page(_) => {
                         app::push(Input::ProjectMenu(self.key.clone()))
                     }
                     Hit::Task(i) | Hit::TaskApprove(i) => {
@@ -1743,6 +1778,7 @@ impl Cluster {
                     app::push(Input::Browser(s.id.clone()));
                 }
             }
+            Hit::Page(i) => app::push(Input::Page(self.key.clone(), i)),
             Hit::Code(i) => {
                 if let Some(w) = self.sessions().get(i).and_then(|s| s.worktree.clone()) {
                     watch::open_in_code(Path::new(&w.path));
