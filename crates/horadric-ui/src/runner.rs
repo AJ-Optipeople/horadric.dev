@@ -752,8 +752,26 @@ impl App {
             _ => match self.held_session(&task) {
                 Some(h) => self.reveal(&h, false),
                 None if task.mark == Mark::Blocked => brief(self),
-                None => {}
+                None => self.carry_on_held(key, &task),
             },
+        }
+    }
+
+    /// Shows the session working an item, or, with that session gone, its
+    /// last conversation again in a new tile, as History would.
+    fn show_quest(&mut self, key: &str, task: &Task) {
+        match self.held_session(task) {
+            Some(h) => self.reveal(&h, false),
+            None => self.carry_on_held(key, task),
+        }
+    }
+
+    /// Carries on the conversation an item's gone session held, as the
+    /// quest log's Carry on does: a quest waiting on review ended in it.
+    fn carry_on_held(&self, key: &str, task: &Task) {
+        if let Some(h) = task.holder.as_deref() {
+            let quest = chronicle::quest_of(h).to_string();
+            push(Input::QuestLog(Ask::Carry(key.to_string(), quest)));
         }
     }
 
@@ -2024,11 +2042,7 @@ fn item_menu(key: &str, line: usize, title: &str) {
                 eprintln!("horadric: cannot start the tombs: {e}");
             }
         }
-        Some(SHOW) => {
-            if let Some(h) = holder.as_deref().and_then(|h| app.shown_for(h)) {
-                app.reveal(&h, false);
-            }
-        }
+        Some(SHOW) => app.show_quest(key, &t),
         Some(APPROVE | DONE) => app.set_task(key, line, title, Mark::Done),
         Some(BACK) => app.put_back(key, line, title),
         Some(EDIT) => app.edit_list(key),
