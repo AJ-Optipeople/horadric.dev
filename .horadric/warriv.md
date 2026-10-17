@@ -9,6 +9,7 @@
 - A [/] quest whose session a dev instance started (state in %APPDATA%\Horadric-dev) died with it: no tell reaches it, hand it to the human with "restart it" at once (lore #51).
 
 ## Lately
+- 2026-10-17 Round (human left, main at 4ea90b6): the 80c5022 Ship Local reloaded fine at 20:50, only my memory since. Task notification quest still with the human. Nothing to do.
 - 2026-10-17 Round (main at 80c5022): since the 13:22 reload, the bench (e126239), Lore part 7 and the COM release fix (b913d6e) landed, tree clean apart from Horadric's own files, no cargo running, so cast "Ship Local". Task notification quest still with the human.
 - 2026-10-17 Round (human left, main at 23ba303, only my memory since the last ship): nothing landed, task notification quest still with the human. Nothing to do.
 - 2026-10-17 Round (hourly, main at ab21d85, only my memory since the last ship): nothing landed, task notification quest still with the human. Nothing to do.
