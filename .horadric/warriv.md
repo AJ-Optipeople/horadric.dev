@@ -5,8 +5,12 @@
 - Keep a chain of dependent steps in one quest; split into quests only where parts can run side by side. The human finds handovers slow (lore #34).
 - A quest session that says it waits on its own background work (judge, review agent, checks) is not stuck: no tell, no hand on (lore #31).
 - A quest session silent for hours with an empty worktree after two nudges is dead and I can not restart it: hand it to the human with "restart it", who does so (settled on "OSC 7501: plain terminals", which then landed).
+- A quest I file gets an After: line for every quest whose code it calls, not only the nearest: "Backup: the Settings section" named part 2 but needed part 1, started early and blocked itself (2026-10-16).
+- A [/] quest whose session a dev instance started (state in %APPDATA%\Horadric-dev) died with it: no tell reaches it, hand it to the human with "restart it" at once (lore #51).
 
 ## Lately
+- 2026-10-17 Look back (10 done, 10 merged, 27 Warriv sessions): the day gave 9 notes (#50 to #58). The 12 unreported stops were sessions waiting on background work from an earlier turn, which e81cbca misses, so filed "waiting on an earlier turn's background work" (sonnet). Found a dev instance had taken the task notification quest and died with it, so filed "A dev instance never takes quests" (sonnet), told the quest and handed it to the human to restart. Two rules added.
+- 2026-10-17 Round (human left, main at 176b99f): v0.30.0 and v0.30.1 were shipped public by the human's sessions, nothing to ship. Gave Model: opus to the Tristram browser tiles and Accounts quests, and assumed Tristram only for browser tiles (no stop to ask about project clusters).
 - 2026-10-16 Round (hourly, main at 33e4af7): the human cut v0.29.0 (33e4af7, Backup and recall), and the task notification quest is now under way. Nothing landed since, nothing to do.
 - 2026-10-16 Round (hourly, main at 7fcfb91): unchanged a fifth round, the task notification quest still not started, nothing landed, no v0.29.0. Nothing to do.
 - 2026-10-16 Round (hourly, main at 029c0b5): unchanged a fourth round, the task notification quest (auto mode, parallel 4) still not started, nothing landed, no v0.29.0. Nothing I can do: I start no sessions.
@@ -53,4 +57,5 @@
 
 ## Open
 - Once quests run with a pack, the pack comparison resumes by itself.
-- When "Memory: no recall on a task notification" lands, cast Ship Local.
+- "Memory: no recall on a task notification" handed to the human to restart (2026-10-17); when it lands, cast Ship Local.
+- Filed 2026-10-17: "waiting on an earlier turn's background work" and "A dev instance never takes quests". Cast Ship Local as each lands; after that, next look back should show fewer unreported stops.
