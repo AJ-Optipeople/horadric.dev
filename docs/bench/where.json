@@ -1,0 +1,40 @@
+{
+  "model": "claude-sonnet-5-5",
+  "repeats": 2,
+  "parallel": 1,
+  "minutes": 25,
+  "prepare": "\"{horadric}\" heavy -- cargo test --workspace --no-run -q && \"{horadric}\" heavy -- cargo clippy --workspace --all-targets -q",
+  "system": "This folder is a throwaway clone made to measure how an agent works. It has no remote and no main checkout to merge into. Do not commit or push, and change nothing outside this folder. Other agent sessions share this machine's CPU. Run a test suite, a full build or another long, CPU heavy command through `\"{horadric}\" heavy -- <command>`: it waits while another session runs one, then runs yours and exits with its exit code. It prints a digest, not the whole output: the end of it when the command passed, the lines that say what failed when it did not, and the file the whole output is in, to grep when the digest is not enough.",
+  "tasks": [
+    {
+      "name": "stage",
+      "prompt": "When the human clicks a session's tile, how does the stage come to show that project's sessions? Trace it from the click to the panes being laid out, naming the files and functions. Answer in at most 150 words. Do not change any file.",
+      "expect": [
+        "stage"
+      ]
+    },
+    {
+      "name": "json",
+      "prompt": "Add a `--json` flag to `horadric quest spend` that prints the comparison as one JSON object instead of two lines: {\"with_pack\": {...}, \"without\": {...}}, each with quests, median_tokens, median_calls, median_per_call, read_share and agent_share as numbers, or null for a group with no quests. Keep the pure part in horadric-core with a test. Run the project's checks (cargo fmt, clippy and tests) before you finish.",
+      "check": "cargo test -p horadric-core --quiet && git diff --name-only | grep -q 'horadric-core/src' && git diff | grep -q -e '--json'"
+    }
+  ],
+  "variants": [
+    {
+      "name": "sonnet"
+    },
+    {
+      "name": "sonnet-plugins",
+      "plugins": true
+    },
+    {
+      "name": "opus",
+      "model": "claude-opus-5-5"
+    },
+    {
+      "name": "opus-plugins",
+      "model": "claude-opus-5-5",
+      "plugins": true
+    }
+  ]
+}

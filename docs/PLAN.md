@@ -106,7 +106,7 @@ one. The registry is an `Arc<Mutex<Registry>>`, each console's grid an
 - [The Settings window](plan/the-settings-window.md): Settings moved out of the tray menu into a window.
 - [Claude Code 2.1.287 to 2.1.296](plan/claude-code-2-1-287-to-2-1-296.md): Using what is new in recent Claude Code, incl. OSC 7501 and cloud tiles.
 - [Town Portal on the phone, round two](plan/town-portal-on-the-phone-round-two.md): The phone page as an inbox, not a squeezed terminal.
-- [Lore](plan/lore.md): Fewer tokens per quest: spend counts, context packs, shared notes, a code outline and index, a shorter quest log, the window measured and heavy output digested.
+- [Lore](plan/lore.md): Fewer tokens per quest: spend counts, context packs, shared notes, a code outline and index, a shorter quest log, the window measured and heavy output digested, a bench of variants.
 - [The Arcane Sanctuary](plan/the-arcane-sanctuary.md): The lore drawn as a living graph in a stage pane, lit by what agents read and change.
 - [Memory](plan/memory.md): Long term memory by meaning, in Rust with candle: notes, transcripts kept verbatim, code, across projects, and Horadrim, a compressed tongue for recall's answers.
 - [Backup](plan/backup.md): The memory backed up encrypted, to Google Drive with one click sign in, or to a folder.

@@ -84,6 +84,14 @@ pub struct Variant {
     pub settings: Value,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+    /// The model for this variant's runs, in place of the spec's.
+    #[serde(default)]
+    pub model: String,
+    /// Whether the runs get the plugins the user has enabled, which every
+    /// real session lists. Off by default, so a variant that only changes
+    /// a prompt is not measured against a moving plugin list.
+    #[serde(default)]
+    pub plugins: bool,
 }
 
 /// One task run under one variant, as the results file keeps it.
