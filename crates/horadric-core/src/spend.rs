@@ -12,6 +12,14 @@
 //! evenly when several of them answered together. Read's share is then the
 //! calls the agent made to go on from reading, which is what a map of the
 //! code would save.
+//!
+//! The window is the other half of the sum. Nearly every token a quest
+//! spends is one read from the cache: the same context window, sent again
+//! with every call. So what a quest costs is its window times its calls,
+//! and the window at the first call (the system prompt, the instructions,
+//! the tool list, the quest's prompt) and at the last (all that plus
+//! everything the agent read and was told) say where the tokens went
+//! (docs/plan/lore.md part 6).
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -66,6 +74,12 @@ impl Tokens {
         self.input + self.cache_read + self.cache_write + self.output
     }
 
+    /// The context window the call was made with: everything sent, fresh
+    /// or from the cache.
+    pub fn window(&self) -> u64 {
+        self.input + self.cache_read + self.cache_write
+    }
+
     pub fn add(&mut self, o: &Tokens) {
         self.input += o.input;
         self.cache_read += o.cache_read;
@@ -96,6 +110,20 @@ pub struct Spend {
     /// By the tool whose results each call went on from, see the module.
     #[serde(default)]
     pub tools: BTreeMap<String, Tokens>,
+    /// The window of the conversation's first call: what a session starts
+    /// with before it has done anything. Zero when not known (a record
+    /// from before it was kept).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub first_window: u64,
+    /// The window of its last call. For a quest, both are its first
+    /// conversation's, a subagent's or a later sitting's never replacing
+    /// them.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub last_window: u64,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 impl Spend {
@@ -109,12 +137,25 @@ impl Spend {
         for (tool, t) in &o.tools {
             self.tools.entry(tool.clone()).or_default().add(t);
         }
+        if self.first_window == 0 {
+            self.first_window = o.first_window;
+            self.last_window = o.last_window;
+        }
+    }
+
+    /// Tokens per call: how large a window the quest carried on average.
+    pub fn per_call(&self) -> u64 {
+        self.tokens.total().checked_div(self.calls).unwrap_or(0)
     }
 
     /// One call of `tokens`, charged to the tools `by` in even shares.
     fn charge(&mut self, tokens: &Tokens, by: &[String]) {
         self.calls += 1;
         self.tokens.add(tokens);
+        if self.first_window == 0 {
+            self.first_window = tokens.window();
+        }
+        self.last_window = tokens.window();
         let n = by.len() as u64;
         for (i, tool) in by.iter().enumerate() {
             self.tools
@@ -124,14 +165,28 @@ impl Spend {
         }
     }
 
-    /// The headline: "3.4M tokens, 2.9M of them cached, 61 calls".
+    /// The headline: "3.4M tokens, 2.9M of them cached, 61 calls of 56k".
     pub fn line(&self) -> String {
         let calls = if self.calls == 1 { "call" } else { "calls" };
         format!(
-            "{} tokens, {} of them cached, {} {calls}",
+            "{} tokens, {} of them cached, {} {calls} of {}",
             count(self.tokens.total()),
             count(self.tokens.cache_read),
-            self.calls
+            self.calls,
+            count(self.per_call())
+        )
+    }
+
+    /// The window's growth: "41k at the start, 128k at the end", or
+    /// nothing when the record is from before windows were kept.
+    pub fn window_line(&self) -> String {
+        if self.first_window == 0 {
+            return String::new();
+        }
+        format!(
+            "{} at the start, {} at the end",
+            count(self.first_window),
+            count(self.last_window)
         )
     }
 
@@ -411,6 +466,35 @@ mod tests {
         assert_eq!(s.tools[PROMPT], t(10, 0, 100, 5));
         assert_eq!(s.tools["Read"], t(2, 100, 50, 7));
         assert_eq!(s.tools["Bash"], t(1, 150, 10, 20));
+        assert_eq!((s.first_window, s.last_window), (110, 161));
+        assert_eq!(s.per_call(), 151);
+        assert_eq!(s.line(), "455 tokens, 250 of them cached, 3 calls of 151");
+        assert_eq!(s.window_line(), "110 at the start, 161 at the end");
+    }
+
+    #[test]
+    fn a_quests_window_is_its_first_conversations() {
+        let mut main = Spend {
+            calls: 2,
+            first_window: 100,
+            last_window: 300,
+            ..Spend::default()
+        };
+        let agent = Spend {
+            calls: 1,
+            first_window: 50,
+            last_window: 60,
+            ..Spend::default()
+        };
+        main.add(&agent);
+        assert_eq!((main.first_window, main.last_window), (100, 300));
+        let mut none = Spend::default();
+        assert_eq!(none.window_line(), "");
+        none.add(&main);
+        assert_eq!((none.first_window, none.last_window), (100, 300));
+        let old: Spend = serde_json::from_str(r#"{"calls":1}"#).unwrap();
+        assert_eq!(old.first_window, 0);
+        assert!(!serde_json::to_string(&old).unwrap().contains("window"));
     }
 
     #[test]
@@ -521,13 +605,17 @@ mod tests {
             calls: 61,
             tokens: t(100_000, 2_900_000, 380_000, 20_000),
             tools: BTreeMap::new(),
+            ..Spend::default()
         };
         s.tools.insert("Read".into(), t(0, 1_400_000, 0, 0));
         s.tools.insert("Bash".into(), t(0, 1_000_000, 0, 0));
         s.tools.insert("Grep".into(), t(0, 500_000, 0, 0));
         s.tools
             .insert(PROMPT.into(), t(100_000, 0, 380_000, 20_000));
-        assert_eq!(s.line(), "3.4M tokens, 2.9M of them cached, 61 calls");
+        assert_eq!(
+            s.line(),
+            "3.4M tokens, 2.9M of them cached, 61 calls of 56k"
+        );
         assert_eq!(s.by_tool(2), "Read 41%, Bash 29%, other 29%");
         assert_eq!(Spend::default().by_tool(3), "");
     }

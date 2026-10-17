@@ -95,5 +95,8 @@ could see.
   frees when its holder ends however it ends, so a killed session holds
   nobody up. The dev and installed Horadric share it. Every session is
   told to wrap its test suites and full builds, and never a dev server
-  or a watcher. `horadric heavy` alone says who holds it. Not yet: the
-  tile does not show a session waiting, and the slot is always one.
+  or a watcher. `horadric heavy` alone says who holds it. Since
+  2026-10-17 it also keeps the command's output out of the agent's
+  window: the whole of it goes to a file and a digest is printed, see
+  [lore.md](lore.md) part 6. Not yet: the tile does not show a session
+  waiting, and the slot is always one.

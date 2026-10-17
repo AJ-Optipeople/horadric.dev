@@ -13,7 +13,7 @@ The first saving needed no code. `docs/PLAN.md` was 366 KB, about 90k
 tokens, and every session was told to read it. It is now an index with
 the parts in `docs/plan/` (2026-10-15).
 
-Four parts, built in this order. Each is a quest.
+Six parts, built in this order. Each is a quest.
 
 ## 1. Measure
 
@@ -203,7 +203,7 @@ open plus the last few days.
 Built 2026-10-15. `tasks::sweep` takes the done quests out, notes and
 all, each under the heading it had; `horadric quest done` runs it after
 marking, so the log is tidied as often as quests end. A quest is old when
-the chronicle's last record of it is more than three days back
+the chronicle's last record of it is more than a day back (three until 2026-10-17)
 (`KEEP_DONE`), or when the chronicle never heard of it. The done file
 sits beside the list, `quests-done.md` beside `quests.md`. Choices made
 along the way:
@@ -221,3 +221,67 @@ along the way:
   agent's own Edit of the file takes no lock and never did.
 - The quest log window reads the done file before the list. The spent
   records were always in the chronicle, by id, so they need no move.
+
+## 6. The window
+
+Asked for on 2026-10-17: more saving than the pack gives. The spend
+records say where to look. One quest of that week: 108 calls, 14.5M
+tokens, 98% of them read from the cache, and 90% charged to Bash. Almost
+nothing a quest spends is fresh input. The cost is the context window
+sent again with every call, so a quest costs its window times its calls,
+and Bash gets the blame only because nearly every call is one. Reading
+less trims the window a little, which is why the pack gives a fifth and
+not five times. The next savings attack the two factors themselves.
+
+Built 2026-10-17, the measures and the first lever:
+
+- **The window is measured.** A spend record now keeps the window of a
+  conversation's first call (the system prompt, the instructions, the
+  tool list, the quest's prompt and pack: what a session starts with
+  before it has done anything) and of its last, and the quest log's
+  detail shows "Window: 57k at the start, 180k at the end" and the
+  tokens a call beside the total. `horadric quest spend` gives the
+  medians, and filled the window in for the 102 quests recorded before
+  it was kept. The baseline on 2026-10-17, 103 quests: median 108k to
+  113k tokens a call, and **52k to 57k at the start**. Half of an average
+  call's window is there before the agent has read a line. What fills it
+  is Claude Code's own prompt and tools, the skills every installed
+  plugin lists (a Vercel, Figma and Cloudflare plugin each add a page of
+  skill descriptions to every session, Horadric's or not), CLAUDE.md,
+  the memory, Horadric's appended prompts (the quest, trunk, heavy, lore
+  and browser instructions, about 2k) and the quest's prompt. Next: an
+  itemised count of that start, so each line Horadric adds is weighed
+  against what it saves.
+- **`horadric heavy` prints a digest.** A `cargo test` or a build prints
+  thousands of lines, and every line the agent sees stays in its window
+  for every call after. The command's output now goes whole to a file in
+  the temp folder (`horadric-heavy\<time>-<pid>.log`, kept a day) and
+  the agent is shown the last 12 lines when it passed, or when it failed
+  the lines that say what went wrong (errors, failed tests, panics, up
+  to 60) and the last 40, each with its line number in the file, and the
+  file's path to grep. Output no longer than the digest is shown whole.
+  `--full` prints everything, for the human watching. The system prompt
+  tells sessions to use it for any long output, CPU or not. Standard
+  output and error go into the one file so they keep their order, which
+  the live terminal could not promise either.
+- **The quest log keeps a day of done quests, not three.** At the rate
+  quests end now, three days held a hundred of them and 83 KB, about 21k
+  tokens in the window of every session or Warriv wake that opened the
+  file instead of asking `quest list`.
+
+Not yet, in the order worth doing:
+
+- Fewer calls. The median quest makes 46 to 55 calls, each replaying
+  the window. Exploration in subagents costs a window that dies with
+  them: the quest above spent under 1% in Agent. The spend record can
+  say a quest's Agent share, so a low one on a long quest is something
+  Warriv can point at.
+- Tool output that is still too long for its own good: `quest list` and
+  `quest show`, the browser snapshot, `lore_recall`. Each should be
+  measured the same way, the share of the window its results take.
+- Compaction. Claude Code compacts when the window nears its limit; a
+  quest that would end at 180k can go on from a 40k summary after its
+  exploration. Whether Horadric can ask for one at the right moment
+  (after the pack is read, before the edits) is an open question of
+  Claude Code's interface, not of Horadric.
+

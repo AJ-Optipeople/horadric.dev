@@ -646,10 +646,10 @@ fn list(cwd: &Path, elsewhere: bool) -> Result<(), String> {
 }
 
 /// Lore's yardstick: whether quests started with a context pack spend
-/// fewer tokens than those without. Quests done before their spend and
-/// files were kept get them now from their last conversation, so there is
-/// a baseline to compare with and the packs have something to draw on from
-/// the start.
+/// fewer tokens than those without, and how large a window they carried.
+/// Quests done before their spend, files or window were kept get them now
+/// from their last conversation, so there is a baseline to compare with
+/// and the packs have something to draw on from the start.
 fn spend(cwd: &Path) -> Result<(), String> {
     let project = main_list().or_else(|| file::find_list(cwd)).ok_or(NO_LOG)?;
     let key = horadric_ui::folder_key(&project.to_string_lossy());
@@ -670,7 +670,10 @@ fn spend(cwd: &Path) -> Result<(), String> {
                 filled += 1;
             }
         }
-        if q.spend.is_none() && q.outcome == chronicle::Outcome::Done {
+        // A record from before the window was kept is read again, so the
+        // window has a baseline as the pack had.
+        let no_window = q.spend.as_ref().is_none_or(|s| s.first_window == 0);
+        if no_window && q.outcome == chronicle::Outcome::Done {
             if let Some(spend) = transcript::spend(cwd, conversation).filter(|s| !s.is_empty()) {
                 let conversation = conversation.clone();
                 keep(Happened::Spent {

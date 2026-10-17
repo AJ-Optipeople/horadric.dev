@@ -1718,6 +1718,9 @@ fn detail_of(q: &Quest, quests: &[Quest], now: u64, offset: i64) -> QuestDetail 
     if let Some(s) = q.spend.as_ref().filter(|s| !s.is_empty()) {
         facts.push(("Spent", s.line()));
         facts.push(("Went on", s.by_tool(3)));
+        if s.first_window > 0 {
+            facts.push(("Window", s.window_line()));
+        }
     }
     QuestDetail {
         title: one_line(&q.title),
@@ -2009,6 +2012,8 @@ mod tests {
             calls: 12,
             tokens: read,
             tools: [("Read".to_string(), read)].into_iter().collect(),
+            first_window: 30_000,
+            last_window: 120_000,
         });
         let d = detail_of(&q, &[], 300, 0);
         let fact = |k: &str| {
@@ -2019,9 +2024,13 @@ mod tests {
         };
         assert_eq!(
             fact("Spent").as_deref(),
-            Some("900k tokens, 900k of them cached, 12 calls")
+            Some("900k tokens, 900k of them cached, 12 calls of 75k")
         );
         assert_eq!(fact("Went on").as_deref(), Some("Read 100%"));
+        assert_eq!(
+            fact("Window").as_deref(),
+            Some("30k at the start, 120k at the end")
+        );
     }
 
     #[test]

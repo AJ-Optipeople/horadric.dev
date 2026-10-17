@@ -946,8 +946,10 @@ pub fn move_item(text: &str, line: usize, to: usize, above: bool) -> Option<Stri
 
 /// How long a done quest stays in the log before it moves to the done
 /// file, in seconds. The log is read by every agent on every quest, so
-/// what is long finished only costs them.
-pub const KEEP_DONE: u64 = 3 * 24 * 60 * 60;
+/// what is long finished only costs them. A day: three days held a
+/// hundred done quests and 83 KB on 2026-10-17, about 21k tokens in the
+/// window of every session that opened it.
+pub const KEEP_DONE: u64 = 24 * 60 * 60;
 
 /// Where a list's done quests go: `.horadric/quests-done.md` beside
 /// `.horadric/quests.md`.

@@ -343,8 +343,9 @@ pub fn render(hints: &[Hint]) -> String {
 }
 
 /// Done quests with a known spend, those started with a pack beside those
-/// without, for `horadric quest spend`: how many, the median tokens and
-/// calls, and Read's share.
+/// without, for `horadric quest spend`: how many, the median tokens, calls
+/// and tokens a call, Read's share, and the median window at the start
+/// among the quests whose record has one.
 pub fn compare(quests: &[Quest]) -> String {
     let group = |packed: bool| -> Vec<&Spend> {
         quests
@@ -364,6 +365,17 @@ pub fn compare(quests: &[Quest]) -> String {
         };
         let tokens = median(spends.iter().map(|s| s.tokens.total()).collect());
         let calls = median(spends.iter().map(|s| s.calls).collect());
+        let per_call = median(spends.iter().map(|s| s.per_call()).collect());
+        let starts: Vec<u64> = spends
+            .iter()
+            .map(|s| s.first_window)
+            .filter(|w| *w > 0)
+            .collect();
+        let start = if starts.is_empty() {
+            String::new()
+        } else {
+            format!(", {} at the start", spend::count(median(starts)))
+        };
         let all: u64 = spends.iter().map(|s| s.tokens.total()).sum();
         let read: u64 = spends
             .iter()
@@ -374,8 +386,9 @@ pub fn compare(quests: &[Quest]) -> String {
         let n = spends.len();
         let quests = if n == 1 { "quest" } else { "quests" };
         format!(
-            "{label}: {n} {quests}, median {} tokens and {calls} calls, Read {share}%",
-            spend::count(tokens)
+            "{label}: {n} {quests}, median {} tokens and {calls} calls of {}{start}, Read {share}%",
+            spend::count(tokens),
+            spend::count(per_call)
         )
     };
     format!(
@@ -546,12 +559,15 @@ mod tests {
         let mut a = done("A", &[], &[], &[]);
         a.spend = Some(spent(2_000_000, 1_000_000));
         let mut b = done("B", &[], &[], &[]);
-        b.spend = Some(spent(1_000_000, 100_000));
+        let mut s = spent(1_000_000, 100_000);
+        s.first_window = 40_000;
+        b.spend = Some(s);
         b.packed = Some(vec!["x.rs".into()]);
         assert_eq!(
             compare(&[a, b]),
-            "With a pack: 1 quest, median 1M tokens and 10 calls, Read 10%\n\
-             Without: 1 quest, median 2M tokens and 10 calls, Read 50%"
+            "With a pack: 1 quest, median 1M tokens and 10 calls of 100k, 40k at the start, \
+             Read 10%\n\
+             Without: 1 quest, median 2M tokens and 10 calls of 200k, Read 50%"
         );
         assert_eq!(
             compare(&[]),

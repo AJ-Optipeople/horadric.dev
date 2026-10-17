@@ -2,9 +2,10 @@
 //! other session on this machine runs one. See `horadric_core::heavy`.
 
 use std::fs::{self, File, OpenOptions, TryLockError};
-use std::path::PathBuf;
-use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use horadric_core::heavy::{self, Holder};
 use horadric_hooks::SESSION_ENV;
@@ -12,12 +13,23 @@ use horadric_hooks::SESSION_ENV;
 const USAGE: &str = "\
 usage: horadric heavy -- <command> [args...]
                                         Run a test suite or a build once no other
-                                        session on this machine runs one
+                                        session on this machine runs one, and show
+                                        a digest of its output, the whole of it
+                                        kept in a file
+       horadric heavy --full -- <command> [args...]
+                                        The same, showing the whole output
        horadric heavy                   Say who runs one now";
+
+/// Kept outputs older than this are dropped when the next command runs.
+const KEEP_OUTPUT: Duration = Duration::from_secs(24 * 3600);
 
 /// Runs the command in the slot and exits with its exit code, or says who
 /// holds the slot when there is no command.
 pub fn run(args: &[String]) -> Result<(), String> {
+    let (full, args) = match args.first().map(String::as_str) {
+        Some("--full") => (true, &args[1..]),
+        _ => (false, args),
+    };
     let words = match args.first().map(String::as_str) {
         Some("--") => &args[1..],
         Some("-h" | "--help" | "help") => return Err(USAGE.into()),
@@ -49,7 +61,19 @@ pub fn run(args: &[String]) -> Result<(), String> {
     if let Ok(json) = serde_json::to_string(&me) {
         let _ = fs::write(&holder_path, json);
     }
-    let code = start(words)?;
+    let code = if full {
+        start(words, None)?
+    } else {
+        let kept = dir.join(format!("{}-{}.log", me.since, me.pid));
+        drop_old(&dir, me.since);
+        let code = start(words, Some(&kept))?;
+        let output = fs::read_to_string(&kept).unwrap_or_default();
+        let shown = heavy::digest(&output, code, &kept.to_string_lossy());
+        let mut stdout = std::io::stdout().lock();
+        let _ = stdout.write_all(shown.as_bytes());
+        let _ = stdout.flush();
+        code
+    };
     let _ = fs::remove_file(&holder_path);
     drop(lock);
     std::process::exit(code)
@@ -94,22 +118,55 @@ fn read_holder(path: &PathBuf) -> Option<Holder> {
     serde_json::from_str(&fs::read_to_string(path).ok()?).ok()
 }
 
-/// Runs the command with this terminal's input and output and gives its
-/// exit code. `npm`, `pnpm` and their like are batch files on Windows,
-/// which only `cmd.exe` starts.
-fn start(words: &[String]) -> Result<i32, String> {
-    let status = match Command::new(&words[0]).args(&words[1..]).status() {
+/// Runs the command and gives its exit code. Its output goes to `kept`
+/// when there is one, standard output and error alike into the one file
+/// so they keep their order, else to this terminal. `npm`, `pnpm` and
+/// their like are batch files on Windows, which only `cmd.exe` starts.
+fn start(words: &[String], kept: Option<&Path>) -> Result<i32, String> {
+    let run = |mut c: Command| -> std::io::Result<std::process::ExitStatus> {
+        if let Some(kept) = kept {
+            let out = File::create(kept)?;
+            let err = out.try_clone()?;
+            c.stdout(Stdio::from(out)).stderr(Stdio::from(err));
+        }
+        c.status()
+    };
+    let mut plain = Command::new(&words[0]);
+    plain.args(&words[1..]);
+    let status = match run(plain) {
         #[cfg(windows)]
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             use std::os::windows::process::CommandExt;
-            Command::new("cmd")
-                .raw_arg(format!("/d /s /c \"{}\"", heavy::command_line(words)))
-                .status()
+            let mut shell = Command::new("cmd");
+            shell.raw_arg(format!("/d /s /c \"{}\"", heavy::command_line(words)));
+            run(shell)
         }
         other => other,
     }
     .map_err(|e| format!("cannot start `{}`: {e}", words[0]))?;
     Ok(status.code().unwrap_or(1))
+}
+
+/// Drops kept outputs older than [`KEEP_OUTPUT`], so the folder holds a
+/// day of runs and not every run ever.
+fn drop_old(dir: &Path, now: u64) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let name = e.file_name();
+        let Some(stamp) = name
+            .to_str()
+            .and_then(|n| n.strip_suffix(".log"))
+            .and_then(|n| n.split('-').next())
+            .and_then(|n| n.parse::<u64>().ok())
+        else {
+            continue;
+        };
+        if now.saturating_sub(stamp) > KEEP_OUTPUT.as_secs() {
+            let _ = fs::remove_file(e.path());
+        }
+    }
 }
 
 fn unix_now() -> u64 {
