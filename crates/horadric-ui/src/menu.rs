@@ -119,6 +119,11 @@ pub fn init(shared: Rc<Shared>) {
     SHARED.with(|s| *s.borrow_mut() = Some(shared));
 }
 
+/// Lets go of what the menus draw with, as the app quits.
+pub fn release() {
+    SHARED.with(|s| s.borrow_mut().take());
+}
+
 /// Shows a menu at the cursor and returns the id picked. Runs a modal loop,
 /// so the caller must not hold anything the message handlers need.
 pub fn popup(items: &[Item]) -> Option<usize> {

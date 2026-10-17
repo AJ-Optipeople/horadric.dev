@@ -430,6 +430,12 @@ fn close() {
     }
 }
 
+/// Closes the line and lets go of what it draws with, as the app quits.
+pub fn release() {
+    close();
+    SHARED.with(|s| s.borrow_mut().take());
+}
+
 fn show(text: Line) {
     let Some(shared) = SHARED.with(|s| s.borrow().clone()) else {
         return;

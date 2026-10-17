@@ -539,6 +539,15 @@ pub fn close(key: &str) {
     retiled(key);
 }
 
+/// Ends every page and lets go of WebView2, as the app quits.
+pub fn shutdown() {
+    let webs = WEBS.with(|w| std::mem::take(&mut *w.borrow_mut()));
+    for tab in webs.into_values().flat_map(|w| w.tabs) {
+        end(tab);
+    }
+    ENV.with(|e| *e.borrow_mut() = Env::None);
+}
+
 /// Tells the town's cluster its tabs changed, since each is a tile there.
 /// Project clusters show no tabs, so they hear nothing.
 fn retiled(key: &str) {

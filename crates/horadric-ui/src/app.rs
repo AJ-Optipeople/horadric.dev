@@ -1034,6 +1034,13 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             }
         }
     });
+    // What these hold would otherwise go with the thread's locals, once
+    // the process has begun to unload its DLLs, and DXGI raises an
+    // exception for a factory released that late: every quit and every
+    // reload ended as a crash in the event log.
+    crate::web::shutdown();
+    crate::tip::release();
+    crate::menu::release();
     Ok(())
 }
 
