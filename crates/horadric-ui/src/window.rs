@@ -1521,6 +1521,9 @@ impl Cluster {
                 .stones()
                 .and_then(|s| s.into_iter().nth(i))
                 .map(|s| Cow::Owned(s.tip)),
+            Hit::Task(i) => self
+                .item_at(i)
+                .map(|item| Cow::Owned(tip::quest(&item.title))),
             _ => tip::cluster(hot).map(Cow::Borrowed),
         };
         tip::over_line(&self.shared, self.hwnd, line);

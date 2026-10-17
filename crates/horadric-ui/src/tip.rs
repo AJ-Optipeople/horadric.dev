@@ -184,13 +184,23 @@ pub fn cluster(hit: Hit) -> Option<&'static str> {
         Hit::TasksHeader => "Fold or unfold the quest log. Right click to pick how quests run",
         Hit::TasksMode => "Pick how the quests run",
         Hit::TasksAdd => "Add a quest",
-        Hit::Task(_) => "Read this quest before taking it on, or show the session doing it. Right click for more",
+        Hit::Task(_) => QUEST,
         Hit::TasksGive => "Ask an agent to suggest quests for this project. You pick which go in the log",
         Hit::TaskApprove(_) => "Mark this quest completed",
         Hit::TomeHeader => "Fold or unfold the Runetome. Right click for more",
         Hit::Stone(_) => "Cast this stone, drag it onto a session, or drag it within the tome to move it. Right click for more",
         Hit::Nothing => return None,
     })
+}
+
+/// What a click on a quest's row does.
+const QUEST: &str =
+    "Read this quest before taking it on, or show the session doing it. Right click for more";
+
+/// What hovering a quest says: its whole title first, since the row cuts
+/// a long one short, then apart from it what a click does.
+pub fn quest(title: &str) -> String {
+    format!("{}\n\n{QUEST}", title.trim())
 }
 
 /// What a part of the cube does.
@@ -620,6 +630,14 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_quest_says_its_whole_title_before_what_a_click_does() {
+        let title = "Recheck Google index status around 2026-10-15 (python tools/gsc.py inspect each sitemap URL)";
+        let tip = quest(&format!(" {title} "));
+        let lines: Vec<&str> = tip.lines().collect();
+        assert_eq!(lines, [title, "", QUEST]);
+    }
 
     #[test]
     fn a_line_waits_for_the_cursor_to_rest_then_shows() {
