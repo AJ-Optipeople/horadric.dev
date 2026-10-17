@@ -127,6 +127,10 @@ pub struct SavedState {
     /// window. It shows again while a session runs in the town.
     #[serde(default)]
     pub town_hidden: bool,
+    /// When a usage limit stops a session, switch to the account with the
+    /// most left and go on. Off until turned on in the Settings window.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub switch_accounts: bool,
     /// The Horadric Cube is shown, off until turned on from the usage
     /// window's menu.
     #[serde(default)]
@@ -786,6 +790,7 @@ mod tests {
             quiet: true,
             sounds: true,
             town_hidden: true,
+            switch_accounts: true,
             discord: Discord::Named,
             recall_across: true,
             run: Some(SavedRun {
@@ -826,6 +831,7 @@ mod tests {
         assert!(back.quiet);
         assert!(back.sounds);
         assert!(back.town_hidden);
+        assert!(back.switch_accounts);
         assert_eq!(back.discord, Discord::Named);
         assert_eq!(back.run, state.run);
         assert_eq!(back.screen, state.screen);

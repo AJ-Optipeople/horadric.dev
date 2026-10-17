@@ -117,6 +117,8 @@ pub enum Field {
     /// A default for the sessions Horadric starts, the same value the
     /// usage window's rows show.
     Default(Setting),
+    /// Whether a usage limit switches to the account with the most left.
+    SwitchAccounts,
     /// Whether a project's menu offers to start the agent.
     Offered,
     Autostart,
@@ -214,6 +216,8 @@ pub struct Values {
     /// Whether its project menu line is on. None where it can not be
     /// turned off, Claude Code, and Some(None) where it is not installed.
     pub offered: Option<Option<bool>>,
+    /// Claude Code switches account by itself when one runs out.
+    pub switch_accounts: bool,
     /// None where the switch is not offered, a dev instance.
     pub autostart: Option<bool>,
     /// The same for "Open in Horadric" in Explorer.
@@ -230,7 +234,7 @@ pub struct Values {
     /// How many built in stones are put away.
     pub hidden: usize,
     /// The global shortcuts in [`Action::ALL`]'s order.
-    pub keys: [Key; 3],
+    pub keys: [Key; hotkey::COUNT],
     /// The shortcut whose new chord the window waits for.
     pub listening: Option<Action>,
     /// Why the last chord pressed did not take, until the next try.
@@ -421,6 +425,16 @@ pub fn lines(section: Section, v: &Values) -> Vec<Line> {
                 }
             };
             rows.push(offered);
+            // The limit that stops a turn is Claude Code's to report.
+            if v.agent == Agent::Claude {
+                let (word, c) = switch(v.switch_accounts);
+                rows.push(line(
+                    Field::SwitchAccounts,
+                    "Switch account when one runs out",
+                    word,
+                    c,
+                ));
+            }
             rows
         }
         Section::Startup => {
@@ -1292,6 +1306,7 @@ mod tests {
                 ..Default::default()
             },
             offered: None,
+            switch_accounts: false,
             autostart: Some(true),
             explorer: Some(false),
             discord: Discord::Unnamed,
@@ -1397,6 +1412,7 @@ mod tests {
                 Field::Default(Setting::Permissions),
                 Field::Default(Setting::Workflow),
                 Field::Offered,
+                Field::SwitchAccounts,
             ]
         );
         assert_eq!(
@@ -1420,6 +1436,7 @@ mod tests {
                 Field::Key(Action::Next),
                 Field::Key(Action::Listen),
                 Field::Key(Action::Stop),
+                Field::Key(Action::Account),
                 Field::KeysNote
             ]
         );
@@ -1539,10 +1556,12 @@ mod tests {
                 "Extra high",
                 "Default",
                 "Default",
-                "Always"
+                "Always",
+                "Off"
             ]
         );
         assert_eq!(rows[5].control, Control::Fixed);
+        assert_eq!(rows[6].control, Control::Switch(false));
         v.agent = Agent::Codex;
         v.defaults = Defaults {
             model: Some("gpt-5.5".into()),
@@ -1618,16 +1637,16 @@ mod tests {
         assert_eq!(keys[0].value, "Ctrl+Alt+Space");
         assert_eq!(keys[2].value, "Ctrl+Alt+W");
         assert_eq!(keys[0].control, Control::Button);
-        assert_eq!(keys[3].control, Control::Note);
-        assert_eq!(keys[3].value, "Click a shortcut, then press its new keys");
+        assert_eq!(keys[4].control, Control::Note);
+        assert_eq!(keys[4].value, "Click a shortcut, then press its new keys");
         v.listening = Some(Action::Listen);
         let keys = lines(Section::Keys, &v);
         assert_eq!(keys[1].value, "Press the keys\u{2026}");
         assert_eq!(keys[0].value, "Ctrl+Alt+Space");
-        assert!(keys[3].value.starts_with("Esc keeps it"));
+        assert!(keys[4].value.starts_with("Esc keeps it"));
         v.keys_note = Some("Hold Ctrl, Alt or Win with the key".into());
         assert_eq!(
-            lines(Section::Keys, &v)[3].value,
+            lines(Section::Keys, &v)[4].value,
             "Hold Ctrl, Alt or Win with the key"
         );
     }
@@ -1657,7 +1676,7 @@ mod tests {
         v.keys[1].live = false;
         let keys = lines(Section::Keys, &v);
         assert_eq!(keys[1].value, "Ctrl+Alt+Home, taken");
-        assert_eq!(keys[3].value, "Ctrl+Alt+Home is taken by another program");
+        assert_eq!(keys[4].value, "Ctrl+Alt+Home is taken by another program");
     }
 
     #[test]

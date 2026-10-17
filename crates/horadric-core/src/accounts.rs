@@ -21,6 +21,11 @@ use crate::agent::Agent;
 use crate::release::base64_decode;
 use crate::usage::Usage;
 
+/// What a session a usage limit stopped is told once it is back on
+/// another account.
+pub const GO_ON: &str = "The usage limit stopped your last turn, so Horadric \
+    switched to another account. Go on where you left off.";
+
 /// The key in `.credentials.json` that holds the Claude login.
 const OAUTH: &str = "claudeAiOauth";
 /// The organization the login is for, beside it.
@@ -58,6 +63,11 @@ pub struct Account {
     /// Its limits as last heard, shown again when it comes back.
     #[serde(default)]
     pub usage: Option<Usage>,
+    /// Until when, in Unix seconds, a limit that refused a turn holds it,
+    /// though the numbers last heard may not show one full: a switch away
+    /// from it does not come straight back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub out_until: Option<u64>,
 }
 
 impl Account {
@@ -92,6 +102,7 @@ impl Account {
             profile: profile.clone(),
             login: Value::Null,
             usage: None,
+            out_until: None,
         })
     }
 
@@ -118,6 +129,7 @@ impl Account {
             profile: Value::Null,
             login: auth.clone(),
             usage: None,
+            out_until: None,
         })
     }
 
@@ -148,6 +160,7 @@ impl Account {
             profile: Value::Null,
             login: Value::Object(login),
             usage: None,
+            out_until: None,
         })
     }
 
@@ -231,6 +244,32 @@ impl Account {
             false => format!("{}\t{}", self.email, detail.join(", ")),
         }
     }
+
+    /// Its [`Account::label`] with what it has left at `now`, so a pick
+    /// between accounts shows which has room.
+    pub fn label_at(&self, now: u64) -> String {
+        let left = match self.out_until.filter(|&t| t > now) {
+            Some(_) => Some("used up".to_string()),
+            None => self.usage.as_ref().and_then(|u| u.limits.left_text(now)),
+        };
+        match (left, self.label()) {
+            (None, label) => label,
+            (Some(left), label) if label.contains('\t') => format!("{label}, {left}"),
+            (Some(left), label) => format!("{label}\t{left}"),
+        }
+    }
+
+    /// What it has left at `now` of its fullest limit, in percent: none
+    /// while a limit holds it, all of it when nothing was heard yet.
+    pub fn room(&self, now: u64) -> f32 {
+        if self.out_until.is_some_and(|t| t > now) {
+            return 0.0;
+        }
+        self.usage
+            .as_ref()
+            .and_then(|u| u.limits.left(now))
+            .unwrap_or(100.0)
+    }
 }
 
 /// Who is logged in, by `.claude.json`'s contents: the account and the
@@ -313,6 +352,9 @@ impl Accounts {
                 if account.usage.is_none() {
                     account.usage = kept.usage.clone();
                 }
+                if account.out_until.is_none() {
+                    account.out_until = kept.out_until;
+                }
                 let changed = *kept != account;
                 *kept = account;
                 changed
@@ -326,6 +368,31 @@ impl Accounts {
 
     pub fn forget(&mut self, id: &str) {
         self.list.retain(|a| a.id != id);
+    }
+
+    /// The account of `agent`, other than `live`, with the most room at
+    /// `now`, the first kept among equals. None when every other one is
+    /// used up.
+    pub fn roomiest(&self, agent: Agent, live: Option<&str>, now: u64) -> Option<&Account> {
+        self.of(agent)
+            .filter(|a| Some(a.id.as_str()) != live)
+            .map(|a| (a, a.room(now)))
+            .filter(|(_, room)| *room > 0.0)
+            .fold(
+                None,
+                |best: Option<(&Account, f32)>, (a, room)| match best {
+                    Some((_, r)) if r >= room => best,
+                    _ => Some((a, room)),
+                },
+            )
+            .map(|(a, _)| a)
+    }
+
+    /// Notes that a limit refused account `id` a turn, until `until`.
+    pub fn set_out(&mut self, id: &str, until: Option<u64>) {
+        if let Some(a) = self.list.iter_mut().find(|a| a.id == id) {
+            a.out_until = until;
+        }
     }
 
     /// Notes the limits last heard for account `id`.
@@ -562,5 +629,94 @@ mod tests {
         conf["oauthAccount"]["organizationName"] = json!("Optipeople");
         let a = Account::capture(&credentials("one"), &conf).unwrap();
         assert_eq!(a.label(), "a@x.dk\tMax 5x, Optipeople");
+    }
+
+    fn with_usage(token: &str, session: f32, week: f32) -> Account {
+        let mut a = Account::capture(
+            &credentials(token),
+            &config(token, &format!("{token}@x.dk")),
+        )
+        .unwrap();
+        let limit = |used, resets_at| {
+            Some(Limit {
+                used,
+                resets_at: Some(resets_at),
+                minutes: None,
+            })
+        };
+        a.usage = Some(Usage {
+            limits: Limits {
+                five_hour: limit(session, 500),
+                seven_day: limit(week, 9000),
+                spend: None,
+            },
+            at: 0,
+        });
+        a
+    }
+
+    #[test]
+    fn the_label_says_what_is_left() {
+        let a = with_usage("one", 38.0, 20.0);
+        assert_eq!(
+            a.label_at(100),
+            "one@x.dk\tMax 5x, 62% session, 80% week left"
+        );
+        let mut out = a.clone();
+        out.out_until = Some(600);
+        assert_eq!(out.label_at(100), "one@x.dk\tMax 5x, used up");
+        assert_eq!(
+            out.label_at(700),
+            "one@x.dk\tMax 5x, 100% session, 80% week left"
+        );
+    }
+
+    #[test]
+    fn the_roomiest_other_account_is_picked() {
+        let mut all = Accounts::default();
+        all.remember(with_usage("one", 100.0, 50.0));
+        all.remember(with_usage("two", 70.0, 10.0));
+        all.remember(with_usage("three", 20.0, 90.0));
+        let pick = |all: &Accounts, live: &str, now| {
+            all.roomiest(Agent::Claude, Some(live), now)
+                .map(|a| a.email.clone())
+        };
+        // Two has 30 left of its session, three 10 of its week.
+        assert_eq!(
+            pick(&all, "u-one:org-one", 100).as_deref(),
+            Some("two@x.dk")
+        );
+        // Never the one in use, and a used up one is no pick.
+        assert_eq!(
+            pick(&all, "u-two:org-two", 100).as_deref(),
+            Some("three@x.dk")
+        );
+        // Once the session windows start over, one has the most.
+        assert_eq!(
+            pick(&all, "u-two:org-two", 600).as_deref(),
+            Some("one@x.dk")
+        );
+        all.set_out("u-one:org-one", Some(1000));
+        assert_eq!(
+            pick(&all, "u-two:org-two", 600).as_deref(),
+            Some("three@x.dk")
+        );
+        assert!(all.roomiest(Agent::Codex, None, 100).is_none());
+    }
+
+    #[test]
+    fn a_refreshed_login_keeps_its_limit_hold() {
+        let mut all = Accounts::default();
+        all.remember(with_usage("one", 10.0, 10.0));
+        all.set_out("u-one:org-one", Some(1000));
+        all.remember(Account::capture(&credentials("one"), &config("one", "one@x.dk")).unwrap());
+        assert_eq!(all.get("u-one:org-one").unwrap().out_until, Some(1000));
+    }
+
+    #[test]
+    fn an_account_never_heard_from_has_all_its_room() {
+        let a = Account::capture(&credentials("one"), &config("one", "a@x.dk")).unwrap();
+        assert_eq!(a.room(100), 100.0);
+        assert_eq!(a.label_at(100), a.label());
     }
 }

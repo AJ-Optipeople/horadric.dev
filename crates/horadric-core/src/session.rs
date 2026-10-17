@@ -79,6 +79,10 @@ impl Phase {
     }
 }
 
+/// The `StopFailure` error Claude Code gives when a usage limit refuses a
+/// turn.
+pub const RATE_LIMIT: &str = "rate_limit";
+
 /// One running (or finished) agent session.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Session {
@@ -279,9 +283,15 @@ impl Session {
     /// Whether the agent can be stopped and resumed, as switching accounts
     /// does, without losing anything: it is not in the middle of a turn,
     /// and nothing was typed since its last prompt went in. A question it
-    /// waits on comes back with the resume.
+    /// waits on comes back with the resume. One a usage limit stopped is
+    /// free whatever was typed: on this account it can do nothing more.
     pub fn free_to_restart(&self, typed: Option<SystemTime>) -> bool {
-        !self.shell && !self.phase.mid_turn() && self.no_draft(typed)
+        !self.shell && (self.limited() || !self.phase.mid_turn() && self.no_draft(typed))
+    }
+
+    /// A usage limit refused its last turn, and nothing went in since.
+    pub fn limited(&self) -> bool {
+        matches!(&self.phase, Phase::Waiting(WaitReason::Error(e)) if e == RATE_LIMIT)
     }
 
     /// Nothing typed into its terminal since the last prompt went in.
@@ -877,6 +887,21 @@ pub fn subagent_line(types: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_session_a_limit_stopped_is_free_to_restart_draft_or_not() {
+        let mut s = Session::new("g1", "x", "");
+        s.apply(&ev("UserPromptSubmit"), now());
+        let mut f = ev("StopFailure");
+        f.error_type = Some(RATE_LIMIT.into());
+        s.apply(&f, now());
+        assert!(s.limited());
+        let later = now() + std::time::Duration::from_secs(60);
+        assert!(s.free_to_restart(Some(later)));
+        s.apply(&ev("Stop"), now());
+        assert!(!s.limited());
+        assert!(!s.free_to_restart(Some(later)));
+    }
 
     #[test]
     fn subagent_types_are_grouped_for_the_tile() {

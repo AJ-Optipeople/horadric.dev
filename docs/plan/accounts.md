@@ -27,6 +27,28 @@ a switch between them without logging in again, while the sessions run.
   opens `claude auth login` in a console of its own (a login, not a
   session, so no pane), and once the new login lands the old one goes back,
   so adding stops nothing. The new one is a pick away.
+- **One click away.** The tray menu has an Account list too, and
+  Ctrl+Alt+K (settable under Keys) drops the Claude list at the pointer.
+  Every list shows what each account has left, "62% session, 80% week
+  left", so the pick is plain: the one in use from the limits heard now,
+  the others from the limits they left with, a window whose reset has
+  passed counted empty again. An account a limit stopped says "used up"
+  until its reset.
+- **Switching by itself** (asked for 2026-10-17), "Switch account when
+  one runs out" under Sessions in Settings, off until the human turns it
+  on. When a `StopFailure` with `rate_limit` stops a Claude Code session,
+  the account in use is marked out until its full limit resets (an hour
+  when the limits heard show none full) and the switch goes to the kept account with the
+  most left of its fullest limit. A session a limit stopped is free to
+  restart whatever was typed, since it can do nothing more on that
+  account, so the switch never waits on it. Each one resumes with a
+  prompt telling it to go on, passed on the command line as a quest's
+  first prompt is, so it lands once the agent is ready. When every other
+  account is out too, a toast says so and the sessions wait as before.
+  Once for each stop: a session stopped again on the new account can
+  switch again, never back to one marked out. Taking an account by hand
+  clears its mark, and "every account has run out" is said once until one
+  is taken.
 - **The Version row** is the last one: this build's version, or "Update
   to <version>" once a check found a release. A click shows that
   release's notes with Update now, or checks for one and says what it

@@ -928,6 +928,9 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             quiet: saved.quiet,
             sounds: saved.sounds,
             town_hidden: saved.town_hidden,
+            switch_accounts: saved.switch_accounts,
+            out_seen: HashMap::new(),
+            all_out_told: false,
             discord: saved.discord,
             recall_across: saved.recall_across,
             rich: None,
@@ -1031,7 +1034,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
 
 /// The global shortcuts as state.json sets them, each one it does not
 /// set at its default.
-fn chords(saved: &BTreeMap<String, String>) -> [Chord; 3] {
+fn chords(saved: &BTreeMap<String, String>) -> [Chord; hotkey::COUNT] {
     Action::ALL.map(|a| {
         saved
             .get(a.key())
@@ -1376,8 +1379,17 @@ fn tray_menu(hwnd: HWND) {
         .filter(|p| Path::new(p).is_dir())
         .collect();
     let driven = with_app(|app| app.driven()).unwrap_or_default();
+    let logins = with_app(App::logins).unwrap_or_default();
     let hotkeys = hotkeys.each_ref().map(Option::as_deref);
-    let menu = tray::menu(&projects, hotkeys, &driven, terminal, update.as_deref(), xp);
+    let menu = tray::menu(
+        &projects,
+        hotkeys,
+        &driven,
+        &logins,
+        terminal,
+        update.as_deref(),
+        xp,
+    );
     match menu {
         Some(Choice::Settings) => open_settings(None),
         Some(Choice::New) => pick_and_start(hwnd, projects.first().map(PathBuf::from)),
@@ -1424,6 +1436,18 @@ fn tray_menu(hwnd: HWND) {
         }
         Some(Choice::StopWarriv) => {
             with_app(App::stop_warriv);
+        }
+        Some(Choice::Account(agent, i)) => {
+            let picked = logins
+                .iter()
+                .find(|l| l.agent == agent)
+                .and_then(|l| l.accounts.get(i));
+            if let Some(to) = picked.map(|a| a.id.clone()) {
+                with_app(|app| app.switch_account(agent, to, false));
+            }
+        }
+        Some(Choice::AddAccount(agent)) => {
+            with_app(|app| app.add_account(agent));
         }
         Some(Choice::EndAll) => {
             if confirm_end(None) {
@@ -2808,12 +2832,13 @@ fn account_menu(agent: Agent) {
         return;
     };
     let all: Vec<Account> = all.of(agent).cloned().collect();
+    let now = unix_now();
     let mut items: Vec<Item> = all
         .iter()
         .enumerate()
         .map(|(i, a)| Item::Action {
             id: PICK + i,
-            label: a.label(),
+            label: a.label_at(now),
             checked: live.as_deref() == Some(a.id.as_str()),
         })
         .collect();
@@ -3132,9 +3157,9 @@ struct App {
     /// terminal" in the tray brings back.
     stage_key: Option<String>,
     /// The global shortcuts' chords, in [`Action::ALL`]'s order.
-    keys: [Chord; 3],
+    keys: [Chord; hotkey::COUNT],
     /// Which of them are registered. Another program may hold a chord.
-    keys_live: [bool; 3],
+    keys_live: [bool; hotkey::COUNT],
     /// The shortcut the Settings window waits for a new chord for. Every
     /// shortcut is let go meanwhile, so pressing one reaches the window.
     key_listening: Option<Action>,
@@ -3254,6 +3279,14 @@ struct App {
     sounds: bool,
     /// Tristram's tile is hidden while no session runs in the town.
     town_hidden: bool,
+    /// A usage limit switches Claude Code to the account with the most
+    /// left, from the Settings window.
+    switch_accounts: bool,
+    /// The sessions a usage limit stopped that were seen to, each with
+    /// when it stopped, so one stop switches once.
+    out_seen: HashMap<String, SystemTime>,
+    /// "Every account has run out" was said, until an account is taken.
+    all_out_told: bool,
     /// What the Discord profile may show, from the Settings window.
     /// Changed only through [`App::set_discord`].
     discord: Discord,
@@ -3358,9 +3391,15 @@ struct AccountSwitch {
     running: Vec<String>,
     /// Stopped, to resume once the login is in.
     stopped: Vec<String>,
+    /// Of those, the ones a usage limit had stopped, told to go on.
+    limited: Vec<String>,
     /// Stop them now, mid turn or not.
     now: bool,
 }
+
+/// How long an account a limit stopped is passed over when the limits
+/// heard show none full, so no reset is known.
+const OUT_FOR: u64 = 60 * 60;
 
 /// How long a login just put in is watched for being written over.
 const SETTLES_IN: Duration = Duration::from_secs(15);
@@ -3387,6 +3426,7 @@ impl App {
                 }
                 self.reconcile(events & EVENTS_PHASE != 0);
                 self.switch_free();
+                self.switch_when_out();
                 self.switch_step();
                 self.run_tasks();
                 self.recount();
@@ -3447,6 +3487,7 @@ impl App {
                 Some(Action::Next) => self.next_waiting(),
                 Some(Action::Listen) => self.listen_on_demand(),
                 Some(Action::Stop) => self.stop_warriv(),
+                Some(Action::Account) => post(self.notify.0 as isize, WM_HORADRIC_ACCOUNT_MENU, 0),
                 None => {}
             },
             WM_TIMER if wparam == GLIDE_TIMER => {
@@ -3479,6 +3520,7 @@ impl App {
                 self.sweep();
                 self.switch_free();
                 self.watch_login();
+                self.switch_when_out();
                 self.switch_step();
                 self.tick_tasks();
                 self.reload_when_ready();
@@ -4826,6 +4868,9 @@ impl App {
             }
         }
         let email = self.accounts.get(&id).map(|a| a.email.clone());
+        // Taken by hand or logged in to again, it is worth trying.
+        self.accounts.set_out(&id, None);
+        self.all_out_told = false;
         self.login(agent).account = Some(id);
         self.save_accounts();
         self.show_account(agent, email);
@@ -4854,6 +4899,7 @@ impl App {
 
     /// The accounts for `agent`'s Account menu, the one in use, and the
     /// one a switch is on its way to with how many sessions it waits for.
+    /// The one in use carries the limits heard now, not those it left with.
     fn account_choices(
         &mut self,
         agent: Agent,
@@ -4864,7 +4910,40 @@ impl App {
             .as_ref()
             .map(|s| (s.to.clone(), s.running.len()));
         let live = login.account.clone();
-        (self.accounts.clone(), live, switching)
+        let mut all = self.accounts.clone();
+        if let Some(id) = &live {
+            all.set_usage(id, self.usage_of(agent));
+        }
+        (all, live, switching)
+    }
+
+    /// The limits heard for `agent`'s account in use.
+    fn usage_of(&self, agent: Agent) -> Option<Usage> {
+        match agent {
+            Agent::Claude => self.shared.usage.lock().ok()?.clone(),
+            _ => self.shared.agent_usage.lock().ok()?.get(&agent).cloned(),
+        }
+    }
+
+    /// Each agent's kept accounts for the tray's Account menu, with what
+    /// each has left. Only agents logged in to some.
+    fn logins(&mut self) -> Vec<tray::Logins> {
+        let now = unix_now();
+        Agent::ALL
+            .into_iter()
+            .filter_map(|agent| {
+                let (all, live, _) = self.account_choices(agent);
+                let accounts: Vec<tray::Pick> = all
+                    .of(agent)
+                    .map(|a| tray::Pick {
+                        id: a.id.clone(),
+                        label: a.label_at(now),
+                        live: live.as_deref() == Some(a.id.as_str()),
+                    })
+                    .collect();
+                (!accounts.is_empty()).then_some(tray::Logins { agent, accounts })
+            })
+            .collect()
     }
 
     /// Opens a login for another of `agent`'s accounts. The sessions keep
@@ -4925,6 +5004,12 @@ impl App {
     /// together, see [`AccountSwitch`]. With `now` they stop at once. The
     /// other agents' sessions run on.
     fn switch_account(&mut self, agent: Agent, to: String, now: bool) {
+        self.begin_switch(agent, to, now, true);
+    }
+
+    /// [`App::switch_account`], saying so with `say`: a switch a limit
+    /// set off has said why already.
+    fn begin_switch(&mut self, agent: Agent, to: String, now: bool, say: bool) {
         if let Some(why) = accounts::refused(agent) {
             self.toasts
                 .show(Kind::Failed, "Cannot switch accounts", &why);
@@ -4945,7 +5030,7 @@ impl App {
             .filter(|id| self.runs(id, agent))
             .cloned()
             .collect();
-        if let (false, Some(a)) = (running.is_empty(), self.accounts.get(&to)) {
+        if let (true, false, Some(a)) = (say, running.is_empty(), self.accounts.get(&to)) {
             self.toasts.show(
                 Kind::Info,
                 &format!("Switching to {}", a.email),
@@ -4956,9 +5041,72 @@ impl App {
             to,
             running,
             stopped: Vec::new(),
+            limited: Vec::new(),
             now,
         });
         self.switch_step();
+    }
+
+    /// When a usage limit stopped a Claude Code session and the switch is
+    /// on, switches to the account with the most left. The account that
+    /// ran out is noted as out until its limit resets, so the next switch
+    /// does not come straight back to it. Once for each stop.
+    fn switch_when_out(&mut self) {
+        let agent = Agent::Claude;
+        let stops: Vec<(String, SystemTime)> = match self.shared.registry.lock() {
+            Ok(r) => self
+                .consoles
+                .keys()
+                .filter_map(|id| {
+                    let s = r.get(id).filter(|s| s.limited())?;
+                    Some((id.clone(), s.since))
+                })
+                .collect(),
+            Err(_) => return,
+        };
+        self.out_seen
+            .retain(|id, since| stops.iter().any(|(i, s)| i == id && s == since));
+        let fresh: Vec<(String, SystemTime)> = stops
+            .into_iter()
+            .filter(|(id, _)| !self.out_seen.contains_key(id) && self.runs(id, agent))
+            .collect();
+        if !self.switch_accounts || fresh.is_empty() || self.login(agent).switch.is_some() {
+            return;
+        }
+        self.out_seen.extend(fresh);
+        let Some(live) = self.login(agent).account.clone() else {
+            return;
+        };
+        let now = unix_now();
+        // Not the fullest limit's reset, which can be the weekly one days
+        // off when the refusal was the session's.
+        let until = self
+            .usage_of(agent)
+            .and_then(|u| u.limits.out_until(now, false))
+            .unwrap_or(now + OUT_FOR);
+        self.accounts.set_out(&live, Some(until));
+        self.save_accounts();
+        let leaving = self.accounts.get(&live).map(|a| a.email.clone());
+        match self.accounts.roomiest(agent, Some(&live), now) {
+            Some(to) => {
+                let (id, email) = (to.id.clone(), to.email.clone());
+                self.toasts.show(
+                    Kind::Info,
+                    &format!("{} ran out", leaving.unwrap_or_default()),
+                    &format!("Switching to {email}, and the stopped turns go on there."),
+                );
+                self.begin_switch(agent, id, false, false);
+            }
+            None if self.accounts.of(agent).count() > 1 && !self.all_out_told => {
+                self.all_out_told = true;
+                self.toasts.show(
+                    Kind::Info,
+                    "Every account has run out",
+                    "The sessions wait for a limit to reset.",
+                );
+            }
+            None => {}
+        }
     }
 
     /// Moves every switch on, see [`App::switch_step_of`].
@@ -4977,16 +5125,21 @@ impl App {
         if let Ok(r) = self.shared.registry.lock() {
             let consoles = &self.consoles;
             let stopped = &mut s.stopped;
+            let limited = &mut s.limited;
             let now = s.now;
             s.running.retain(|id| {
                 let Some(c) = consoles.get(id).filter(|c| c.exit_code().is_none()) else {
                     // Gone on its own, ended or crashed: nothing to carry.
                     return false;
                 };
-                let free = now || r.get(id).is_some_and(|x| x.free_to_restart(c.typed_at()));
+                let session = r.get(id);
+                let free = now || session.is_some_and(|x| x.free_to_restart(c.typed_at()));
                 if free {
                     c.kill();
                     stopped.push(id.clone());
+                    if session.is_some_and(|x| x.limited()) {
+                        limited.push(id.clone());
+                    }
                 }
                 !free
             });
@@ -5013,8 +5166,17 @@ impl App {
         let on_stage = self.shared.active.borrow().clone();
         for id in &s.stopped {
             if self.paused.contains_key(id) {
+                // Its refused prompt is the last in the conversation, and
+                // this takes it up again on the new login.
+                let go_on = agent == Agent::Claude && s.limited.contains(id);
+                if go_on {
+                    self.tasks
+                        .prompts
+                        .insert(id.clone(), horadric_core::accounts::GO_ON.to_string());
+                }
                 if let Err(e) = self.resume(id, false) {
                     eprintln!("horadric: cannot resume {id}: {e}");
+                    self.tasks.prompts.remove(id);
                 }
             }
         }
@@ -5099,6 +5261,7 @@ impl App {
             notify: !self.quiet,
             sounds: self.sounds,
             town: !self.town_hidden,
+            switch_accounts: self.switch_accounts,
             agent: self.settings_agent,
             defaults: self.shared.defaults_of(self.settings_agent),
             offered: (self.settings_agent != Agent::Claude).then(|| {
@@ -5226,7 +5389,7 @@ impl App {
     }
 
     /// The shortcuts' names for the tray, None for one not registered.
-    fn key_names(&self) -> [Option<String>; 3] {
+    fn key_names(&self) -> [Option<String>; hotkey::COUNT] {
         Action::ALL.map(|a| self.keys_live[a.index()].then(|| self.keys[a.index()].name()))
     }
 
@@ -5691,6 +5854,11 @@ impl App {
                 self.save();
             }
             Field::Town => self.hide_town(!self.town_hidden),
+            Field::SwitchAccounts => {
+                self.switch_accounts = !self.switch_accounts;
+                self.save();
+                self.switch_when_out();
+            }
             Field::Sounds => {
                 self.sounds = !self.sounds;
                 self.save();
@@ -7176,6 +7344,7 @@ impl App {
             quiet: self.quiet,
             sounds: self.sounds,
             town_hidden: self.town_hidden,
+            switch_accounts: self.switch_accounts,
             discord: self.discord,
             recall_across: self.recall_across,
             run: self.run.saved(),

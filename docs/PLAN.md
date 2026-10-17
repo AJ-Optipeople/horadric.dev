@@ -63,7 +63,7 @@ one. The registry is an `Arc<Mutex<Registry>>`, each console's grid an
 - [Plain terminals](plan/plain-terminals.md): Non-agent terminals beside the sessions.
 - [The columns](plan/the-columns.md): How clusters are stacked into columns down the screen edge.
 - [The usage window](plan/the-usage-window.md): Usage and limits per provider.
-- [Accounts](plan/accounts.md): Several subscriptions logged in, switched while sessions run.
+- [Accounts](plan/accounts.md): Several subscriptions logged in, switched while sessions run, from the tray, a hotkey or by itself when one runs out.
 - [The look](plan/the-look.md): Visual identity: colour rules, type, motion, dark and light.
 - [No Windows chrome](plan/no-windows-chrome.md): Menus, dialogs, toasts and title bars drawn in Horadric's own look.
 - [Quality of life](plan/quality-of-life.md): Seven small daily-use fixes.

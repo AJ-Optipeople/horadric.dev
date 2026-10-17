@@ -34,7 +34,7 @@ use horadric_core::journal::{self, Commit, Entry, What};
 use horadric_core::tasks::{self, Holder, Mark, Mode, Next, Task, Wait};
 use horadric_core::usage::{self, format_until};
 use horadric_core::worktree::{self, Worktree};
-use horadric_core::{fleet, merge, pack, ship, ssh, tombs, Agent, Phase, Setting, WaitReason};
+use horadric_core::{fleet, merge, pack, ship, ssh, tombs, Agent, Phase, Setting};
 use horadric_hooks::tasks as file;
 
 use super::{post, push, unix_now, with_app, App, Input, WM_HORADRIC_KEPT, WM_HORADRIC_TASK_MENU};
@@ -64,8 +64,6 @@ const ENTER_AFTER: Duration = Duration::from_millis(400);
 /// How long past a limit's reset the runner waits before it goes on, in
 /// seconds, so a clock a little ahead of Anthropic's is not refused again.
 const AFTER_RESET: u64 = 60;
-/// The `StopFailure` error Claude Code gives when a usage limit refuses a turn.
-const RATE_LIMIT: &str = "rate_limit";
 
 /// What the app keeps for the task lists.
 #[derive(Default)]
@@ -1213,9 +1211,7 @@ impl App {
                 .iter()
                 .filter_map(|h| {
                     let s = r.get(h)?;
-                    let refused =
-                        matches!(&s.phase, Phase::Waiting(WaitReason::Error(e)) if e == RATE_LIMIT);
-                    refused.then(|| (h.clone(), s.since))
+                    s.limited().then(|| (h.clone(), s.since))
                 })
                 .collect()
         };

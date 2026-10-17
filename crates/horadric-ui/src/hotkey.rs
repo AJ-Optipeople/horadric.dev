@@ -15,10 +15,15 @@ pub enum Action {
     Listen,
     /// Stops every drive of Warriv's at once.
     Stop,
+    /// The list of Claude accounts to switch to.
+    Account,
 }
 
+/// How many global shortcuts there are.
+pub const COUNT: usize = 4;
+
 impl Action {
-    pub const ALL: [Action; 3] = [Action::Next, Action::Listen, Action::Stop];
+    pub const ALL: [Action; COUNT] = [Action::Next, Action::Listen, Action::Stop, Action::Account];
 
     /// Its place in [`Action::ALL`], which is also its hotkey id less one.
     pub fn index(self) -> usize {
@@ -40,6 +45,7 @@ impl Action {
             Action::Next => "next",
             Action::Listen => "listen",
             Action::Stop => "stop",
+            Action::Account => "account",
         }
     }
 
@@ -48,18 +54,20 @@ impl Action {
             Action::Next => "Next waiting session",
             Action::Listen => "Stay a while and listen",
             Action::Stop => "Stop Warriv",
+            Action::Account => "Switch account",
         }
     }
 
     /// The chord it has until another is set. A dev instance adds Shift,
     /// so it never fights the installed Horadric for it. AltGr is
-    /// Ctrl+Alt, and AltGr+Space types nothing on the layouts that matter
-    /// here.
+    /// Ctrl+Alt, and AltGr+Space or AltGr+K types nothing on the layouts
+    /// that matter here, where AltGr+A types a letter in Polish.
     pub fn default_chord(self, dev: bool) -> Chord {
         let key = match self {
             Action::Next => VK_SPACE,
             Action::Listen => VK_HOME,
             Action::Stop => u16::from(b'W'),
+            Action::Account => u16::from(b'K'),
         };
         Chord {
             mods: Mods {
@@ -252,7 +260,7 @@ pub fn press(key: u16, mods: Mods) -> Press {
 
 /// The other action already on `chord`, which setting it for `action`
 /// would take from it.
-pub fn clash(chords: &[Chord; 3], action: Action, chord: Chord) -> Option<Action> {
+pub fn clash(chords: &[Chord; COUNT], action: Action, chord: Chord) -> Option<Action> {
     Action::ALL
         .into_iter()
         .find(|a| *a != action && chords[a.index()] == chord)
@@ -275,7 +283,15 @@ mod tests {
             .iter()
             .map(|a| a.default_chord(false).name())
             .collect();
-        assert_eq!(names, ["Ctrl+Alt+Space", "Ctrl+Alt+Home", "Ctrl+Alt+W"]);
+        assert_eq!(
+            names,
+            [
+                "Ctrl+Alt+Space",
+                "Ctrl+Alt+Home",
+                "Ctrl+Alt+W",
+                "Ctrl+Alt+K"
+            ]
+        );
         assert_eq!(
             Action::Next.default_chord(true).name(),
             "Ctrl+Alt+Shift+Space"
@@ -377,7 +393,7 @@ mod tests {
         assert_eq!(clash(&chords, Action::Listen, home), None);
         let fresh = Chord {
             mods: CTRL_ALT,
-            key: u16::from(b'K'),
+            key: u16::from(b'J'),
         };
         assert_eq!(clash(&chords, Action::Next, fresh), None);
     }

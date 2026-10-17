@@ -188,6 +188,29 @@ impl Limits {
             .max_by(|a, b| a.0.total_cmp(&b.0))
             .map(|&(_, t)| t)
     }
+    /// How much is left at `now` of the fullest limit, in percent, which
+    /// is what an account has to work with. None when no limit is known.
+    pub fn left(&self, now: u64) -> Option<f32> {
+        self.named()
+            .into_iter()
+            .map(|(_, l)| (100.0 - l.at(now).0).max(0.0))
+            .min_by(f32::total_cmp)
+    }
+
+    /// What is left of each limit at `now`, "62% session, 80% week left",
+    /// for a menu to set accounts side by side.
+    pub fn left_text(&self, now: u64) -> Option<String> {
+        let parts: Vec<String> = self
+            .named()
+            .into_iter()
+            .map(|(name, l)| {
+                let left = (100.0 - l.at(now).0).clamp(0.0, 100.0);
+                format!("{left:.0}% {}", name.to_lowercase())
+            })
+            .collect();
+        (!parts.is_empty()).then(|| format!("{} left", parts.join(", ")))
+    }
+
     /// The fullest limit at `now`, with its name, when it is at
     /// `PACE_AT` or more: the runner starts nothing then, rather than learn
     /// at 100 % that a session it started cannot finish its turn. A limit
@@ -500,6 +523,32 @@ mod tests {
             "unknown_window": {"used_percentage": 1}
         }
     }"#;
+
+    #[test]
+    fn what_is_left_is_the_fullest_limits_rest() {
+        let l = Limits {
+            five_hour: Some(Limit {
+                used: 38.0,
+                resets_at: Some(500),
+                minutes: None,
+            }),
+            seven_day: Some(Limit {
+                used: 20.0,
+                resets_at: Some(9000),
+                minutes: None,
+            }),
+            spend: None,
+        };
+        assert_eq!(l.left(100), Some(62.0));
+        assert_eq!(
+            l.left_text(100).as_deref(),
+            Some("62% session, 80% week left")
+        );
+        // The session window has started over since.
+        assert_eq!(l.left(600), Some(80.0));
+        assert_eq!(Limits::default().left(100), None);
+        assert_eq!(Limits::default().left_text(100), None);
+    }
 
     #[test]
     fn reads_the_status_line_input() {
