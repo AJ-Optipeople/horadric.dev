@@ -50,22 +50,32 @@ pub struct Loot {
     /// open until the human picks one of the tombs.
     #[serde(default)]
     pub finished: bool,
-    /// Work the session started in the background and has not heard end.
+    /// Background Bash, PowerShell and Agent calls started whose
+    /// `<task-notification>` has not come back in a prompt yet. Counted
+    /// across turns: the work outlives the turn that started it.
     #[serde(default)]
-    pub background: Background,
+    pub outstanding: u32,
+    /// A Monitor or ScheduleWakeup call is waiting, until the next prompt.
+    #[serde(default)]
+    pub waiting: bool,
 }
 
-/// Whether a session has work of its own running in the background. Hooks
-/// say when it starts but not when it ends, so the end is a later turn that
-/// stops having started none: the finished work is what woke it.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Background {
-    #[default]
-    Nothing,
-    /// Started in the turn that is running.
-    Started,
-    /// A turn stopped with it running: the stop is a wait, not a report.
-    Running,
+/// How many `<task-notification>` blocks in a prompt say their work ended.
+/// Hooks say when background work starts but not when it ends; the
+/// notification that wakes the session is the only word of it.
+pub fn ended_tasks(prompt: &str) -> u32 {
+    prompt
+        .split("<task-notification>")
+        .skip(1)
+        .filter(|chunk| {
+            let chunk = chunk.split("</task-notification>").next().unwrap_or(chunk);
+            chunk
+                .split("<status>")
+                .nth(1)
+                .and_then(|rest| rest.split("</status>").next())
+                .is_some_and(|status| matches!(status.trim(), "completed" | "failed" | "killed"))
+        })
+        .count() as u32
 }
 
 /// The tools that write files. A shell command may too, which the
@@ -76,12 +86,21 @@ impl Loot {
     /// Takes in a tool that finished, well or not. Subagents count: what
     /// they change is the session's work.
     pub fn hear(&mut self, event: &HookEvent) {
-        if event.hook_event_name == "Stop" && !event.is_subagent() {
-            self.background = match self.background {
-                Background::Started => Background::Running,
-                _ => Background::Nothing,
-            };
-            return;
+        match event.hook_event_name.as_str() {
+            "UserPromptSubmit" if !event.is_subagent() => {
+                self.waiting = false;
+                if let Some(prompt) = event.user_prompt.as_deref() {
+                    self.outstanding = self.outstanding.saturating_sub(ended_tasks(prompt));
+                }
+                return;
+            }
+            // A new process knows of none of the old one's work.
+            "SessionStart" if !event.is_subagent() => {
+                self.waiting = false;
+                self.outstanding = 0;
+                return;
+            }
+            _ => {}
         }
         let ok = match event.hook_event_name.as_str() {
             "PostToolUse" => true,
@@ -91,6 +110,12 @@ impl Loot {
         let Some(tool) = event.tool_name.as_deref() else {
             return;
         };
+        if matches!(tool, "Monitor" | "ScheduleWakeup") {
+            if ok {
+                self.waiting = true;
+            }
+            return;
+        }
         if WRITERS.contains(&tool) {
             if ok {
                 self.changed = true;
@@ -104,7 +129,7 @@ impl Loot {
         // One sent to the background reports back at once, before it ran.
         if input.get("run_in_background").and_then(Value::as_bool) == Some(true) {
             if ok {
-                self.background = Background::Started;
+                self.outstanding += 1;
             }
             return;
         }
@@ -119,10 +144,11 @@ impl Loot {
         }
     }
 
-    /// Whether the last turn stopped with work of its own still running,
-    /// which a nudge would only interrupt.
+    /// Whether the session has work of its own still running, from this
+    /// turn or an earlier one, or sleeps on a Monitor or wakeup: a stop is
+    /// then a wait, which a nudge would only interrupt.
     pub fn waiting_on_own_work(&self) -> bool {
-        self.background == Background::Running
+        self.outstanding > 0 || self.waiting
     }
 
     /// Whether git should be asked if its work landed.
@@ -275,19 +301,93 @@ mod tests {
         assert_eq!(rarity(&l, false), Rarity::Normal);
     }
 
-    #[test]
-    fn a_stop_with_background_work_running_is_a_wait() {
-        let mut l = Loot::default();
-        l.hear(&tool(
+    fn background_bash() -> HookEvent {
+        tool(
             "PostToolUse",
             "Bash",
             json!({ "command": "sleep 60", "run_in_background": true }),
-        ));
+        )
+    }
+
+    fn prompt(text: &str) -> HookEvent {
+        HookEvent {
+            user_prompt: Some(text.into()),
+            ..HookEvent::synthetic("UserPromptSubmit")
+        }
+    }
+
+    fn done(n: usize) -> String {
+        "<task-notification><status>completed</status></task-notification>
+"
+        .repeat(n)
+    }
+
+    #[test]
+    fn a_stop_with_background_work_running_is_a_wait() {
+        let mut l = Loot::default();
+        l.hear(&background_bash());
         l.hear(&tool("Stop", "", json!({})));
         assert!(l.waiting_on_own_work());
-        // Woken by the work ending, the next stop starts nothing more.
-        l.hear(&tool("PostToolUse", "Read", json!({})));
+    }
+
+    #[test]
+    fn work_from_an_earlier_turn_still_counts() {
+        let mut l = Loot::default();
+        l.hear(&background_bash());
+        l.hear(&tool(
+            "PostToolUse",
+            "Agent",
+            json!({ "prompt": "review", "run_in_background": true }),
+        ));
         l.hear(&tool("Stop", "", json!({})));
+        // The checks end and wake it; the review agent still runs.
+        l.hear(&prompt(&done(1)));
+        l.hear(&tool("Stop", "", json!({})));
+        assert!(l.waiting_on_own_work());
+        l.hear(&prompt(&done(1)));
+        l.hear(&tool("Stop", "", json!({})));
+        assert!(!l.waiting_on_own_work());
+    }
+
+    #[test]
+    fn a_human_prompt_ends_nothing() {
+        let mut l = Loot::default();
+        l.hear(&background_bash());
+        l.hear(&prompt("carry on"));
+        assert!(l.waiting_on_own_work());
+    }
+
+    #[test]
+    fn a_monitor_or_wakeup_waits_until_the_next_prompt() {
+        for name in ["Monitor", "ScheduleWakeup"] {
+            let mut l = Loot::default();
+            l.hear(&tool("PostToolUse", name, json!({ "delaySeconds": 60 })));
+            l.hear(&tool("Stop", "", json!({})));
+            assert!(l.waiting_on_own_work(), "{name}");
+            l.hear(&prompt("woke"));
+            assert!(!l.waiting_on_own_work(), "{name}");
+        }
+    }
+
+    #[test]
+    fn more_ended_than_started_stays_at_nothing() {
+        let mut l = Loot::default();
+        l.hear(&prompt(&done(3)));
+        assert_eq!(l.outstanding, 0);
+    }
+
+    #[test]
+    fn only_completed_or_failed_notifications_end_work() {
+        let text = "<task-notification><status>running</status></task-notification>            <task-notification><status>failed</status></task-notification>            <task-notification><status>completed</status></task-notification>";
+        assert_eq!(ended_tasks(text), 2);
+        assert_eq!(ended_tasks("no notice here"), 0);
+    }
+
+    #[test]
+    fn a_new_process_forgets_old_work() {
+        let mut l = Loot::default();
+        l.hear(&background_bash());
+        l.hear(&HookEvent::synthetic("SessionStart"));
         assert!(!l.waiting_on_own_work());
     }
 
