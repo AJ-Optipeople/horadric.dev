@@ -134,8 +134,8 @@ use crate::tray::{self, Choice, Tray};
 use crate::usage::{self, UsageWindow};
 use crate::window::{self, folder_key, project_key, project_name, Cluster, Shared};
 use crate::{
-    ask, autostart, browsers, history, inbox, paths, picker, recent, shell, snapping, store, theme,
-    town, update, viewport, watch, web, worktree,
+    ask, autostart, browsers, explorer, history, inbox, paths, picker, recent, shell, snapping,
+    store, theme, town, update, viewport, watch, web, worktree,
 };
 
 #[path = "runner.rs"]
@@ -761,6 +761,10 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
     if !autostart_offered && !horadric_hooks::dev() && autostart::running_installed() {
         autostart_offered = autostart::enable();
     }
+    let mut explorer_offered = saved.explorer_offered;
+    if !explorer_offered && !horadric_hooks::dev() && autostart::running_installed() {
+        explorer_offered = explorer::enable();
+    }
 
     // A start after Quit leaves every saved session paused until clicked.
     let how = saved.carry(reload);
@@ -920,6 +924,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             recent: saved.recent.clone(),
             town_listed: None,
             autostart_offered,
+            explorer_offered,
             quiet: saved.quiet,
             sounds: saved.sounds,
             town_hidden: saved.town_hidden,
@@ -3200,6 +3205,7 @@ struct App {
     /// The projects the town's `CLAUDE.md` was last written for.
     town_listed: Option<Vec<town::Project>>,
     autostart_offered: bool,
+    explorer_offered: bool,
     last_saved: Option<SavedState>,
     /// Set once Horadric is quitting or Windows is shutting down. The state
     /// on disk is final then: sessions dying on the way out must not be
@@ -5100,6 +5106,7 @@ impl App {
                     .map(|_| !self.agents_off.contains(&self.settings_agent))
             }),
             autostart: (!horadric_hooks::dev()).then(autostart::is_enabled),
+            explorer: (!horadric_hooks::dev()).then(explorer::is_installed),
             discord: self.discord,
             recall_across: self.recall_across,
             backup: self.backup_values(),
@@ -5705,6 +5712,16 @@ impl App {
                     autostart::disable();
                 } else {
                     autostart::enable();
+                }
+            }
+            Field::Explorer => {
+                if horadric_hooks::dev() {
+                    return;
+                }
+                if explorer::is_installed() {
+                    let _ = explorer::uninstall();
+                } else {
+                    explorer::enable();
                 }
             }
             // A release found is offered with its notes, outside the app's
@@ -7101,6 +7118,7 @@ impl App {
                 closed
             },
             autostart_offered: self.autostart_offered,
+            explorer_offered: self.explorer_offered,
             stage: self
                 .stage
                 .as_ref()

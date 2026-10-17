@@ -1,4 +1,6 @@
-//! `horadric explorer install`: "Open in Horadric" on folders in Explorer.
+//! "Open in Horadric" on folders in Explorer. The installed copy adds it the
+//! first time it runs, the settings switch it, and `horadric explorer`
+//! does the same from a terminal.
 //!
 //! Two verbs under `HKEY_CURRENT_USER\Software\Classes`, so no admin rights:
 //! one for right clicking a folder, one for right clicking the empty space
@@ -31,7 +33,18 @@ pub fn entries(horadricw: &Path) -> Vec<(String, String)> {
     ]
 }
 
+/// Points the verbs at the `horadricw.exe` beside this binary. True when
+/// it worked.
+pub fn enable() -> bool {
+    std::env::current_exe().is_ok_and(|exe| install(&exe.with_file_name("horadricw.exe")).is_ok())
+}
+
 pub fn install(horadricw: &Path) -> Result<(), String> {
+    // The verbs are shared with the installed Horadric, and a dev build
+    // would take them over until its target folder is cleaned.
+    if horadric_hooks::dev() {
+        return Err("a dev instance leaves Explorer alone".into());
+    }
     if !horadricw.is_file() {
         return Err(format!(
             "{} not found (build it with `cargo build`)",

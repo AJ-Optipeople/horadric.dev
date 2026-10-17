@@ -120,6 +120,8 @@ pub enum Field {
     /// Whether a project's menu offers to start the agent.
     Offered,
     Autostart,
+    /// "Open in Horadric" on folders in Explorer.
+    Explorer,
     /// Look for a newer release now, or install the one found.
     Updates,
     Version,
@@ -214,6 +216,8 @@ pub struct Values {
     pub offered: Option<Option<bool>>,
     /// None where the switch is not offered, a dev instance.
     pub autostart: Option<bool>,
+    /// The same for "Open in Horadric" in Explorer.
+    pub explorer: Option<bool>,
     pub discord: Discord,
     pub recall_across: bool,
     pub backup: Backup,
@@ -432,6 +436,18 @@ pub fn lines(section: Section, v: &Values) -> Vec<Line> {
                     Control::Fixed,
                 ),
             };
+            let explorer = match v.explorer {
+                Some(on) => {
+                    let (word, c) = switch(on);
+                    line(Field::Explorer, "Open in Horadric in Explorer", word, c)
+                }
+                None => line(
+                    Field::Explorer,
+                    "Open in Horadric in Explorer",
+                    "Not in a dev instance",
+                    Control::Fixed,
+                ),
+            };
             let updates = match (&v.update, v.checking) {
                 (Some(version), _) => format!("Update to {version}"),
                 (None, true) => "Checking\u{2026}".to_string(),
@@ -444,6 +460,7 @@ pub fn lines(section: Section, v: &Values) -> Vec<Line> {
             };
             vec![
                 autostart,
+                explorer,
                 line(Field::Updates, "Updates", &updates, control),
                 line(Field::Version, "Version", &v.version, Control::Fixed),
             ]
@@ -1276,6 +1293,7 @@ mod tests {
             },
             offered: None,
             autostart: Some(true),
+            explorer: Some(false),
             discord: Discord::Unnamed,
             recall_across: false,
             backup: Backup::default(),
@@ -1363,7 +1381,12 @@ mod tests {
         );
         assert_eq!(
             fields(Section::Startup, &v),
-            [Field::Autostart, Field::Updates, Field::Version]
+            [
+                Field::Autostart,
+                Field::Explorer,
+                Field::Updates,
+                Field::Version
+            ]
         );
         assert_eq!(
             fields(Section::Sessions, &v),
@@ -1563,7 +1586,12 @@ mod tests {
     #[test]
     fn the_updates_row_checks_then_offers_what_it_found() {
         let mut v = values();
-        let row = |v: &Values| lines(Section::Startup, v)[1].clone();
+        let row = |v: &Values| {
+            lines(Section::Startup, v)
+                .into_iter()
+                .find(|l| l.field == Field::Updates)
+                .unwrap()
+        };
         assert_eq!(row(&v).value, "Check now");
         assert_eq!(row(&v).control, Control::Button);
         v.checking = true;
@@ -1574,10 +1602,13 @@ mod tests {
     }
 
     #[test]
-    fn a_dev_instance_does_not_offer_start_with_windows() {
+    fn a_dev_instance_offers_neither_startup_switch() {
         let mut v = values();
         v.autostart = None;
-        assert_eq!(lines(Section::Startup, &v)[0].control, Control::Fixed);
+        v.explorer = None;
+        let startup = lines(Section::Startup, &v);
+        assert_eq!(startup[0].control, Control::Fixed);
+        assert_eq!(startup[1].control, Control::Fixed);
     }
 
     #[test]

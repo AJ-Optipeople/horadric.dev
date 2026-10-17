@@ -26,7 +26,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SendMessageTimeoutW, HWND_BROADCAST, SMTO_ABORTIFHUNG, WM_SETTINGCHANGE,
 };
 
-use crate::explorer;
+use horadric_ui::explorer;
 
 pub const BINARIES: [&str; 2] = ["horadric.exe", "horadricw.exe"];
 

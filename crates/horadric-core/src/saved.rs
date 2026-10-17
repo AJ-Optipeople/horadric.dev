@@ -51,6 +51,9 @@ pub struct SavedState {
     /// After that it is the user's call, so this remembers it was offered.
     #[serde(default)]
     pub autostart_offered: bool,
+    /// The same for "Open in Horadric" in Explorer.
+    #[serde(default)]
+    pub explorer_offered: bool,
     /// The shared terminal window as left, top, right, bottom in physical
     /// pixels, as it was last left.
     #[serde(default)]
@@ -747,6 +750,7 @@ mod tests {
             columns: vec![vec!["horadric:usage".into()], vec!["c:/app".into()]],
             recent: vec!["C:/app".into()],
             autostart_offered: true,
+            explorer_offered: true,
             stage: Some([300, 12, 1300, 712]),
             on_stage: Some("fix-1".into()),
             grids: BTreeMap::from([("c:/app".into(), vec!["fix-1".into()])]),
