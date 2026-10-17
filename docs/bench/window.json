@@ -1,0 +1,45 @@
+{
+  "model": "claude-sonnet-5-5",
+  "repeats": 2,
+  "parallel": 3,
+  "minutes": 25,
+  "prepare": "\"{horadric}\" heavy -- cargo test --workspace --no-run -q && \"{horadric}\" heavy -- cargo clippy --workspace --all-targets -q",
+  "system": "This folder is a throwaway clone made to measure how an agent works. It has no remote and no main checkout to merge into. Do not commit or push, and change nothing outside this folder. Other agent sessions share this machine's CPU. Run a test suite, a full build or another long, CPU heavy command through `\"{horadric}\" heavy -- <command>`: it waits while another session runs one, then runs yours and exits with its exit code. It prints a digest, not the whole output: the end of it when the command passed, the lines that say what failed when it did not, and the file the whole output is in, to grep when the digest is not enough.",
+  "tasks": [
+    {
+      "name": "pack",
+      "prompt": "How does Horadric choose which files go into a new quest's context pack, and how does it decide which finished quests are alike? Name the files and functions involved. Answer in at most 150 words. Do not change any file.",
+      "expect": ["pack.rs"]
+    },
+    {
+      "name": "stage",
+      "prompt": "When the human clicks a session's tile, how does the stage come to show that project's sessions? Trace it from the click to the panes being laid out, naming the files and functions. Answer in at most 150 words. Do not change any file.",
+      "expect": ["stage"]
+    },
+    {
+      "name": "json",
+      "prompt": "Add a `--json` flag to `horadric quest spend` that prints the comparison as one JSON object instead of two lines: {\"with_pack\": {...}, \"without\": {...}}, each with quests, median_tokens, median_calls, median_per_call, read_share and agent_share as numbers, or null for a group with no quests. Keep the pure part in horadric-core with a test. Run the project's checks (cargo fmt, clippy and tests) before you finish.",
+      "check": "cargo test -p horadric-core --quiet && git diff --name-only | grep -q 'horadric-core/src' && git diff | grep -q -e '--json'"
+    }
+  ],
+  "variants": [
+    { "name": "baseline" },
+    {
+      "name": "rules",
+      "system": "Work lean, since every token you read stays in your context window and is sent again with every call. Outline a file with lore_outline or grep it before reading it, then read the lines you need with offset and limit, never a whole long file. Find a definition with lore_find or grep, not by reading files. Put independent tool calls in one message. Do not read a file again after editing it unless the edit failed. Keep shell output short: pipe long output through tail or grep. Keep replies short and do not repeat code back."
+    },
+    {
+      "name": "guard-read",
+      "settings": { "hooks": { "PreToolUse": [ { "matcher": "Read|Bash", "hooks": [ { "type": "command", "command": "\"{horadric}\" guard read", "timeout": 15 } ] } ] } }
+    },
+    {
+      "name": "guard-shell",
+      "settings": { "hooks": { "PreToolUse": [ { "matcher": "Bash", "hooks": [ { "type": "command", "command": "\"{horadric}\" guard shell", "timeout": 15 } ] } ] } }
+    },
+    {
+      "name": "all",
+      "system": "Work lean, since every token you read stays in your context window and is sent again with every call. Outline a file with lore_outline or grep it before reading it, then read the lines you need with offset and limit, never a whole long file. Find a definition with lore_find or grep, not by reading files. Put independent tool calls in one message. Do not read a file again after editing it unless the edit failed. Keep shell output short: pipe long output through tail or grep. Keep replies short and do not repeat code back.",
+      "settings": { "hooks": { "PreToolUse": [ { "matcher": "Read|Bash", "hooks": [ { "type": "command", "command": "\"{horadric}\" guard", "timeout": 15 } ] } ] } }
+    }
+  ]
+}

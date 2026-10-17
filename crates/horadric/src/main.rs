@@ -14,10 +14,14 @@
 #[cfg(windows)]
 mod backup;
 #[cfg(windows)]
+mod bench;
+#[cfg(windows)]
 mod code;
 mod console;
 #[cfg(windows)]
 mod google;
+#[cfg(windows)]
+mod guard;
 mod heavy;
 mod hook;
 #[cfg(windows)]
@@ -76,6 +80,10 @@ Usage:
   horadric projects              Every known project: folder, sessions, open quests, last commit
   horadric heavy -- COMMAND...    Run a test suite or build once no other session on this
                                machine runs one; alone, say who runs one now
+  horadric guard [read|shell]    The PreToolUse hook that turns whole reads of long files
+                               into outlines and runs builds and tests through heavy
+  horadric bench SPEC.json       Run tasks under variants in throwaway clones and report
+                               what each spent beside the first
   horadric sanctuary             Lay out this project's Arcane Sanctuary graph from where
                                it was left, keep it, and say how large it is
   horadric sky                   Chart every known project into Tristram's sky, each a
@@ -157,6 +165,10 @@ fn main() -> ExitCode {
         Some("new") => run::new(&args[1..]),
         Some("run") => run::run(&args[1..]),
         Some("heavy") => heavy::run(&args[1..]),
+        #[cfg(windows)]
+        Some("guard") => guard::run(&args[1..]),
+        #[cfg(windows)]
+        Some("bench") => bench::run(&args[1..]),
         #[cfg(windows)]
         Some("google") => google::run(&args[1..]),
         // `task` is how sessions started before the rename report back.
