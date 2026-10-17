@@ -88,6 +88,11 @@ Tests cannot tell you a window looks right. The loop that works:
    `Get-Process horadric | ? Path -like '*\target\*' | Stop-Process -Force`,
    then build. The installed copy lives in `%LOCALAPPDATA%\Programs\Horadric`,
    so it never locks `target`.
+   A dev instance leaves the quest log of every project the installed
+   Horadric knows (its recent list) to the installed one: its runner and
+   Warriv skip them, so trying a build never takes a real quest and
+   strands it when the dev instance stops. Set `HORADRIC_DEV_QUESTS=1`
+   to test the runner itself, or use a folder only the dev instance knows.
 3. Start the tiles with `target\debug\horadric.exe app` in the background
    (plain `horadric` starts it hidden and returns). Use `Start-Process
    -NoNewWindow`, never `-WindowStyle Hidden`: Windows turns the first

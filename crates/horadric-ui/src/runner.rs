@@ -34,7 +34,9 @@ use horadric_core::journal::{self, Commit, Entry, What};
 use horadric_core::tasks::{self, Holder, Mark, Mode, Next, Task, Wait};
 use horadric_core::usage::{self, format_until};
 use horadric_core::worktree::{self, Worktree};
-use horadric_core::{fleet, merge, pack, ship, ssh, tombs, Agent, Phase, Setting, WaitReason};
+use horadric_core::{
+    fleet, merge, pack, ship, ssh, tombs, Agent, Phase, SavedState, Setting, WaitReason,
+};
 use horadric_hooks::tasks as file;
 
 use super::{post, push, unix_now, with_app, App, Input, WM_HORADRIC_KEPT, WM_HORADRIC_TASK_MENU};
@@ -66,6 +68,16 @@ const ENTER_AFTER: Duration = Duration::from_millis(400);
 const AFTER_RESET: u64 = 60;
 /// The `StopFailure` error Claude Code gives when a usage limit refuses a turn.
 const RATE_LIMIT: &str = "rate_limit";
+/// Set on a dev instance to let its runner work the projects the installed
+/// Horadric knows, for a test of the runner itself.
+const DEV_QUESTS_ENV: &str = "HORADRIC_DEV_QUESTS";
+/// How long an item's session must have been gone before the runner puts
+/// the item back as open. Long enough for a reload or a restart to attach
+/// the sessions again first.
+const GONE_FOR: Duration = Duration::from_secs(180);
+/// How often a dev instance reads again which projects the installed
+/// Horadric knows.
+const INSTALLED_EVERY: Duration = Duration::from_secs(30);
 
 /// What the app keeps for the task lists.
 #[derive(Default)]
@@ -127,6 +139,65 @@ pub(super) struct State {
     busy: bool,
     /// Each project's Warriv, and what it told quests' sessions.
     pub(super) warriv: warriv::State,
+    /// Since when each started item's session has been gone, by project
+    /// and title.
+    gone_since: HashMap<(String, String), Instant>,
+    /// The projects the installed Horadric knows, as last read. Only a
+    /// dev instance looks.
+    installed: Option<(Instant, HashSet<String>)>,
+}
+
+/// Whether a dev instance leaves a project's list to the installed
+/// Horadric. A dev instance started to try a build must not take quests
+/// from the real log: its session dies with it and the quest sits taken.
+fn dev_leaves(dev: bool, opted_in: bool, key: &str, installed: &HashSet<String>) -> bool {
+    dev && !opted_in && installed.contains(key)
+}
+
+/// The projects the installed Horadric lists as recent, as project keys.
+fn installed_projects() -> HashSet<String> {
+    let Some(dir) = store::dir() else {
+        return HashSet::new();
+    };
+    let Some(base) = dir.parent() else {
+        return HashSet::new();
+    };
+    std::fs::read(base.join("Horadric").join("state.json"))
+        .map(|b| SavedState::read(&b).0.recent)
+        .unwrap_or_default()
+        .iter()
+        .map(|p| folder_key(p))
+        .collect()
+}
+
+/// The titles of the started items whose session has been gone for
+/// `GONE_FOR`, given since when each has been.
+fn orphans(
+    key: &str,
+    tasks: &[Task],
+    holder: impl Fn(&str) -> Holder,
+    since: &mut HashMap<(String, String), Instant>,
+    now: Instant,
+) -> Vec<(usize, String)> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    for t in tasks.iter().filter(|t| t.mark == Mark::Working) {
+        let gone = t
+            .holder
+            .as_deref()
+            .is_none_or(|h| holder(h) == Holder::Gone);
+        let id = (key.to_string(), t.title.clone());
+        if !gone {
+            continue;
+        }
+        let first = *since.entry(id.clone()).or_insert(now);
+        seen.insert(id);
+        if now.duration_since(first) >= GONE_FOR {
+            out.push((t.line, t.title.clone()));
+        }
+    }
+    since.retain(|id, _| id.0 != key || seen.contains(id));
+    out
 }
 
 impl State {
@@ -1074,18 +1145,65 @@ impl App {
         self.refresh_tomes();
     }
 
+    /// The projects this dev instance leaves alone: those the installed
+    /// Horadric knows, unless `HORADRIC_DEV_QUESTS` is set. Empty for an
+    /// installed Horadric.
+    fn dev_leaves_to_installed(&mut self) -> HashSet<String> {
+        if !horadric_hooks::dev() || std::env::var_os(DEV_QUESTS_ENV).is_some() {
+            return HashSet::new();
+        }
+        let stale = self
+            .tasks
+            .installed
+            .as_ref()
+            .is_none_or(|(at, _)| at.elapsed() >= INSTALLED_EVERY);
+        if stale {
+            self.tasks.installed = Some((Instant::now(), installed_projects()));
+        }
+        let installed = self.tasks.installed.as_ref().map(|(_, s)| s);
+        self.shared
+            .boards
+            .borrow()
+            .keys()
+            .filter(|k| installed.is_some_and(|i| dev_leaves(true, false, k, i)))
+            .cloned()
+            .collect()
+    }
+
+    /// Puts back as open a started item whose session is gone and held by
+    /// no running Horadric, so the runner starts it again instead of the
+    /// list sitting stuck on it. Only where the list runs by itself.
+    fn release_orphans(&mut self, key: &str, b: &Board) {
+        let now = Instant::now();
+        if !b.mode.runs() {
+            self.tasks.gone_since.retain(|id, _| id.0 != key);
+            return;
+        }
+        let mut since = std::mem::take(&mut self.tasks.gone_since);
+        let gone = orphans(key, &b.tasks, |id| self.holder(id), &mut since, now);
+        self.tasks.gone_since = since;
+        for (line, title) in gone {
+            eprintln!("horadric: \"{title}\" has had no session for a while, so it is open again");
+            self.tasks
+                .gone_since
+                .remove(&(key.to_string(), title.clone()));
+            self.set_task(key, line, &title, Mark::Open);
+        }
+    }
+
     /// One look by the runner at every project's list.
     pub(super) fn run_tasks(&mut self) {
         if self.frozen || self.reload.is_some() || self.tasks.busy {
             return;
         }
         self.tasks.busy = true;
+        let leave = self.dev_leaves_to_installed();
         let boards: Vec<(String, Board)> = self
             .shared
             .boards
             .borrow()
             .iter()
-            .filter(|(k, _)| !self.closed.contains(*k))
+            .filter(|(k, _)| !self.closed.contains(*k) && !leave.contains(*k))
             .map(|(k, b)| {
                 let mut b = b.clone();
                 if let Some(l) = self.tasks.landing.get(k) {
@@ -1114,6 +1232,7 @@ impl App {
                 }
             }
             self.nudge(b);
+            self.release_orphans(key, b);
             // Warriv hears first, so what it has is not said as well.
             closed |= self.orchestrate(key, b);
             closed |= self.warriv_reviews(key, b);
@@ -2356,6 +2475,34 @@ pub(super) fn record_pack(key: &str, id: &str, title: &str, files: Vec<String>) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_dev_instance_leaves_only_the_projects_the_installed_one_knows() {
+        let installed: HashSet<String> = ["a".to_string()].into();
+        assert!(dev_leaves(true, false, "a", &installed));
+        assert!(!dev_leaves(true, false, "b", &installed));
+        assert!(!dev_leaves(true, true, "a", &installed));
+        assert!(!dev_leaves(false, false, "a", &installed));
+    }
+
+    #[test]
+    fn a_started_item_is_orphaned_once_its_session_has_been_gone_long_enough() {
+        let list = tasks::parse(
+            "- [/] One @s1
+- [ ] Two
+",
+        );
+        let mut since = HashMap::new();
+        let t0 = Instant::now();
+        let gone = |_: &str| Holder::Gone;
+        assert!(orphans("k", &list, gone, &mut since, t0).is_empty());
+        assert!(orphans("k", &list, gone, &mut since, t0 + GONE_FOR / 2).is_empty());
+        let out = orphans("k", &list, gone, &mut since, t0 + GONE_FOR);
+        assert_eq!(out, vec![(0, "One".to_string())]);
+        // A session that came back resets the clock.
+        assert!(orphans("k", &list, |_| Holder::Live, &mut since, t0 + GONE_FOR).is_empty());
+        assert!(since.is_empty());
+    }
 
     #[test]
     fn a_draft_is_kept_by_project_and_by_the_quest_edited() {
