@@ -9,6 +9,7 @@
 - A [/] quest whose session a dev instance started (state in %APPDATA%\Horadric-dev) died with it: no tell reaches it, hand it to the human with "restart it" at once (lore #51).
 
 ## Lately
+- 2026-10-17 Round (11:09, main at 0d9153f): "waiting on an earlier turn's background work" landed, tree clean apart from Horadric's own files (tasks.rs and warriv.rs show as modified but have no diff), so cast "Ship Local". Task notification quest still with the human; Tristram, Accounts and the dev instance quest under way in worktrees.
 - 2026-10-17 Look back (10 done, 10 merged, 27 Warriv sessions): the day gave 9 notes (#50 to #58). The 12 unreported stops were sessions waiting on background work from an earlier turn, which e81cbca misses, so filed "waiting on an earlier turn's background work" (sonnet). Found a dev instance had taken the task notification quest and died with it, so filed "A dev instance never takes quests" (sonnet), told the quest and handed it to the human to restart. Two rules added.
 - 2026-10-17 Round (human left, main at 176b99f): v0.30.0 and v0.30.1 were shipped public by the human's sessions, nothing to ship. Gave Model: opus to the Tristram browser tiles and Accounts quests, and assumed Tristram only for browser tiles (no stop to ask about project clusters).
 - 2026-10-16 Round (hourly, main at 33e4af7): the human cut v0.29.0 (33e4af7, Backup and recall), and the task notification quest is now under way. Nothing landed since, nothing to do.
@@ -58,4 +59,4 @@
 ## Open
 - Once quests run with a pack, the pack comparison resumes by itself.
 - "Memory: no recall on a task notification" handed to the human to restart (2026-10-17); when it lands, cast Ship Local.
-- Filed 2026-10-17: "waiting on an earlier turn's background work" and "A dev instance never takes quests". Cast Ship Local as each lands; after that, next look back should show fewer unreported stops.
+- "A dev instance never takes quests" (filed 2026-10-17): cast Ship Local when it lands. "Earlier turn's background work" shipped 2026-10-17: next look back should show fewer unreported stops.
