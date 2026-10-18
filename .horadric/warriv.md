@@ -9,6 +9,7 @@
 - A [/] quest whose session a dev instance started (state in %APPDATA%\Horadric-dev) died with it: no tell reaches it, hand it to the human with "restart it" at once (lore #51).
 
 ## Lately
+- 2026-10-18 Round (human left, main at d6bbc10, only my memory since the last ship): nothing landed, task notification quest still with the human. Nothing to do.
 - 2026-10-18 Round (hourly, main at bb9dc7f, only my memory since the last ship): nothing landed, task notification quest still with the human. Nothing to do.
 - 2026-10-18 Round (hourly, main at 6d9f595, only my memory since the last ship): nothing landed, task notification quest still with the human. Nothing to do.
 - 2026-10-18 Round (human left, main at 26daceb, only my memory since the last ship): nothing landed, task notification quest still with the human. Nothing to do.
