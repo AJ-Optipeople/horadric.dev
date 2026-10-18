@@ -9,6 +9,7 @@
 - A [/] quest whose session a dev instance started (state in %APPDATA%\Horadric-dev) died with it: no tell reaches it, hand it to the human with "restart it" at once (lore #51).
 
 ## Lately
+- 2026-10-18 Round (hourly, main at a20d9a8, only my memory since the last ship): nothing landed, task notification quest still with the human. Nothing to do.
 - 2026-10-18 Look back (5 done, 5 merged, 25 Warriv sessions): the day was clean, nothing happened twice. The day gave 3 notes (#69 Mac shares layout.rs, #70 settings only through the window, #71 explain plainly to the human). Round (main at 87e34e0, only my memory since the last ship): task notification quest still with the human. Nothing to do.
 - 2026-10-18 Round (hourly, main at f4fff5a, only my memory since the last ship): nothing landed, task notification quest still with the human. Nothing to do.
 - 2026-10-18 Round (hourly, main at f278311, only my memory since the last ship): nothing landed, task notification quest still with the human. Nothing to do.
