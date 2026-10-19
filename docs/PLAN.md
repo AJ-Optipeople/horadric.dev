@@ -57,7 +57,7 @@ one. The registry is an `Arc<Mutex<Registry>>`, each console's grid an
 - [Memory](plan/memory.md): the small gaps left in long term memory.
 - [Performance](plan/performance.md): what is left of the UI thread performance pass.
 - [The agent's cursor](plan/the-agent-s-cursor.md): agents testing without taking the human's mouse. Proposed.
-- [Waypoints](plan/waypoints.md): several machines with Horadric, each seeing the others' sessions.
+- [The Brotherhood](plan/the-brotherhood.md): every machine with Horadric as one brotherhood: each sees every session, hands sessions to another, and takes over from one that falls silent.
 - [Secrets](plan/secrets.md): tokens for quests that push, call APIs or deploy.
 - [Identities](plan/identities.md): each project's gh, git, npm and Vercel logins, so no session switches another's account.
 

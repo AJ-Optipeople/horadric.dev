@@ -50,4 +50,4 @@ really is quicker than a menu for it.
 
 The agent driving a phone it is testing an app on, through adb or a
 simulator over MCP. A tool for the agent, like the browser pane, not a
-remote tile. Split out of Waypoints.
+remote tile. Split out of the Brotherhood.
