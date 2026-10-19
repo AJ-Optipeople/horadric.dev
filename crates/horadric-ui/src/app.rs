@@ -6336,6 +6336,11 @@ impl App {
     /// a session that already has the keyboard in front collapses the
     /// stage instead, which is what a second click on its tile means.
     fn reveal(&mut self, id: &str, toggle: bool) {
+        let stashed = self.shared.registry.lock().is_ok_and(|r| r.is_stashed(id));
+        if stashed {
+            self.unstash(id, true);
+            return;
+        }
         if self.paused.contains_key(id) {
             if let Err(e) = self.resume(id, true) {
                 eprintln!("horadric: cannot resume {id}: {e}");
