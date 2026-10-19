@@ -2,10 +2,10 @@
 
 Horadric shows every coding agent session you have running as a tile on your
 Windows desktop, grouped by project. Read [README.md](README.md) for what it
-does and [docs/PLAN.md](docs/PLAN.md) for where the work is up to and what
-comes next. Read the plan's index before starting anything, then only the
-parts in `docs/plan/` that your work touches. The whole plan is far too
-long to read every time.
+does and [docs/PLAN.md](docs/PLAN.md) for what comes next. Read the
+plan's index before starting anything, then only the parts in
+`docs/plan/` that your work touches. What was decided about anything
+already built is in the lore, not the plan: ask `lore_recall`.
 
 The original concept lives outside this repo at
 `../ideas.repo/glance/glance-concept.md`. It holds the problem statement and
@@ -20,7 +20,7 @@ Do not reopen these without asking. They were argued through and chosen.
   Performance is the reason and so is control: the window manager fight
   is the whole project, and a layer in between makes it unwinnable. The
   one web view is the browser pane, which shows web pages, not Horadric
-  (decided 2026-09-29, see docs/plan/browser-pane.md).
+  (decided 2026-09-29, the lore has why).
 - **One window per project cluster, not per tile.** Tiles are drawn inside
   the cluster window. Forty tiles must not mean forty windows.
 - **One terminal window for all sessions, the stage.** It shows one
@@ -29,7 +29,7 @@ Do not reopen these without asking. They were argued through and chosen.
   sessions must not mean ten terminals piled up.
 - **State comes from hook events, never from parsing terminal output.**
   The one exception is OSC 7501, a status the program sends on purpose
-  (decided 2026-10-11, see docs/plan/claude-code-2-1-287-to-2-1-296.md).
+  (decided 2026-10-11, the lore has why).
   Hooks win where both speak.
 - **Dependencies are justified one at a time.** Today: `serde`, `serde_json`,
   `windows`, `windows-numerics`, `alacritty_terminal` for the terminal
@@ -44,7 +44,7 @@ Do not reopen these without asking. They were argued through and chosen.
   feature only) to run the embedding model that finds memory by meaning:
   Hugging Face's pure Rust ML crates, no DLL to ship and no service that
   must be running, and the tokenizer is the one the models were trained
-  with (writing either is not the project; see docs/plan/memory.md).
+  with (writing either is not the project).
   Not a crate but vendored: `conpty.dll` and `OpenConsole.exe` from
   Microsoft's ConPTY package, the pseudo console that passes `CSI c`
   through so OSC 7501 works (see

@@ -4,8 +4,8 @@
 //! at a time when nothing is asked.
 //!
 //! The model is passed in once it is loaded, so recall answers by words
-//! alone until then. See docs/plan/memory.md, parts 3 and 5. Answers
-//! are inscribed in Horadrim unless the tongue is off, see part 8.
+//! alone until then. Answers
+//! are inscribed in Horadrim unless the tongue is off.
 
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -44,8 +44,7 @@ impl Embed for Embedder {
 }
 
 /// One source file of a project's code index, as the memory takes it in:
-/// the hash of its bytes and a text for each symbol (see
-/// docs/plan/memory.md, part 5).
+/// the hash of its bytes and a text for each symbol.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodeFile {
     pub path: String,
@@ -82,7 +81,7 @@ pub struct Answer {
 }
 
 /// A recall nobody asked for: Horadric's own, on a prompt the human
-/// typed, see docs/plan/memory.md, part 9. Only hits close in meaning
+/// typed. Only hits close in meaning
 /// are shown ([`recall::offered`]), so without the model none are.
 #[derive(Debug, Clone, Copy)]
 pub struct Unasked<'a> {

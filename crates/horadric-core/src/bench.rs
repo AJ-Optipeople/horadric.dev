@@ -7,7 +7,7 @@
 //! settings such as hooks, environment variables). Every task runs under
 //! every variant a few times, round robin so a slow hour of the API does
 //! not land on one variant. The report sets each variant's medians beside
-//! the first variant's, which is the baseline (docs/plan/lore.md part 7).
+//! the first variant's, which is the baseline.
 
 use std::collections::BTreeMap;
 

@@ -1,5 +1,5 @@
 //! Horadrim, the written tongue: how recall's hits are inscribed when
-//! they are handed to an agent. See docs/plan/memory.md, part 8.
+//! they are handed to an agent.
 //!
 //! Search never reads it. The store keeps the verbatim text and recall
 //! scores that; only the answer is inscribed, after the ranking, so

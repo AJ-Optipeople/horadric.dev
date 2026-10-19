@@ -1,5 +1,5 @@
 //! The Arcane Sanctuary's graph and its layout, the pure part
-//! (docs/plan/the-arcane-sanctuary.md). Files, lore notes and done quests
+//! Files, lore notes and done quests
 //! are the nodes; calls between files, the files a note names and the
 //! files a quest touched are the links. The layout is a force simulation:
 //! links pull, every node pushes every other (Barnes Hut, so a few

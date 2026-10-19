@@ -1,5 +1,5 @@
 //! Distilling: what the daily look back reads to write the day's
-//! decisions and lessons as notes. See docs/plan/memory.md, part 7.
+//! decisions and lessons as notes.
 //!
 //! Transcripts are a record of what was said then, not of what is true
 //! now; facts are notes. So Warriv's look back is handed the day's

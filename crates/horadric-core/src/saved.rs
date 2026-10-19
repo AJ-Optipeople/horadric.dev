@@ -140,7 +140,7 @@ pub struct SavedState {
     #[serde(default, skip_serializing_if = "Discord::is_off")]
     pub discord: Discord,
     /// Recall may answer from other projects' memory, off until turned on
-    /// in Settings (docs/plan/memory.md, part 6).
+    /// in Settings.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub recall_across: bool,
     /// The run of work the Discord presence counts from, so a reload

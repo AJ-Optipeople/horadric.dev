@@ -1,5 +1,5 @@
 //! A context pack for a new quest: the files finished quests like it
-//! needed (Lore part 2, docs/plan/lore.md).
+//! needed.
 //!
 //! A quest's agent starts from nothing and explores. The quests before it
 //! explored too, and their transcripts say what they read and changed.

@@ -1,5 +1,5 @@
 //! Memory: text found by what it means, not only by the words it shares
-//! with the question. See docs/plan/memory.md.
+//! with the question.
 //!
 //! This part turns text into vectors. The model runs here, in Rust, with
 //! candle: nothing to install beside Horadric and no service that has to

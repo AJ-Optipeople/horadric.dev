@@ -1,7 +1,7 @@
 //! How the Arcane Sanctuary's graph sits in its pane: the view from layout
 //! units to DIPs, panned and zoomed toward the cursor, how large each dot
 //! is, which node is under the mouse and which few hubs are named
-//! (docs/plan/the-arcane-sanctuary.md). Pure, so the pane only draws what
+//! Pure, so the pane only draws what
 //! this says.
 
 use std::collections::HashMap;

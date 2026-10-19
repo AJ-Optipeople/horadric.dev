@@ -1,7 +1,6 @@
 //! The app's memory: one keeper and one model for every session's
 //! `lore_recall`, on a thread of its own, so embedding never holds up a
-//! window and ten sessions do not load ten models. See
-//! docs/plan/memory.md, part 3.
+//! window and ten sessions do not load ten models.
 //!
 //! Started by the first recall or the first transcript to keep. The model
 //! is fetched from Hugging Face by the first recall only, so an app
@@ -32,7 +31,7 @@ use horadric_memory::transcripts::Format;
 use horadric_memory::{models, Embedder, Kind};
 use serde_json::{json, Value};
 
-/// The model memory runs on: see docs/plan/memory.md, part 1.
+/// The model memory runs on, chosen on the yardstick.
 const MODEL: Kind = Kind::MiniLm;
 
 /// How long a recall may spend embedding notes the model has not seen,

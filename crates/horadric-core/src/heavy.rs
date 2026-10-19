@@ -10,7 +10,7 @@
 //! It also keeps the command's output out of the agent's context window.
 //! A build or a test run prints thousands of lines, and every line an
 //! agent sees stays in its window for every call after, read again from
-//! the cache each time (docs/plan/lore.md part 6). So the whole output
+//! the cache each time. So the whole output
 //! goes to a file and the agent is shown a digest: the end of it when the
 //! command passed, the lines that say what went wrong and the end of it
 //! when it failed, and where the rest is.

@@ -2,7 +2,7 @@
 //! per backed up file, named by its relative path (`lore/x.json.hbk`
 //! stays one name with a slash in it, so a machine's backup is one
 //! folder and one listing). With the `drive.file` scope Horadric sees only
-//! what it made itself. See docs/plan/backup.md, Google Drive.
+//! what it made itself.
 
 use std::collections::HashMap;
 use std::sync::Mutex;

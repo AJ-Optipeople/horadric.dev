@@ -16,7 +16,7 @@ then lacking files would be worse than saying plainly what carries over.
 
 Not part of this: the agent driving a phone it is testing an app on.
 That is a tool for the agent, like the browser pane (adb or a simulator
-over MCP), not a remote tile, and it goes in IDEAS.md on its own.
+over MCP), not a remote tile, and it is in IDEAS.md on its own.
 
 **Most of it exists already.** Town Portal (see [PORTAL.md](../PORTAL.md))
 lists sessions and projects, streams a screen, takes input, starts,

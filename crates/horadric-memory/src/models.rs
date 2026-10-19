@@ -1,6 +1,6 @@
 //! The model's weights, fetched once from Hugging Face into the state
 //! folder's `models\` and checked by hash, never shipped in the
-//! installer. See docs/plan/memory.md, part 1.
+//! installer.
 //!
 //! The download itself is passed in: WinHTTP lives in `horadric-ui` and
 //! curl on the Mac, and neither belongs in this crate.

@@ -1,5 +1,4 @@
-//! Recall: what `lore_recall` answers with. See docs/plan/memory.md,
-//! part 3.
+//! Recall: what `lore_recall` answers with.
 //!
 //! Every candidate (a note of the lore, or a passage of the store) is
 //! ranked up to three ways: by its words (BM25), by its meaning (the
@@ -40,7 +39,7 @@ pub const LEAST_COSINE: f32 = 0.2;
 /// it did not ask recall about, beside [`STRONG`]: the floor alone lets
 /// one prompt in six that memory has nothing for ("commit it") through,
 /// the two together one in thirty. Set from the yardstick (`unasked`
-/// lines): see docs/plan/memory.md, part 9.
+/// lines).
 pub const OFFER_BAR: f32 = 0.45;
 
 /// The most hits put before an agent with one prompt: a few lines it may

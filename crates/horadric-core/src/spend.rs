@@ -3,7 +3,7 @@
 //! Every assistant message in a Claude Code transcript carries the `usage`
 //! of the call that made it: fresh input, input read from the cache, input
 //! written to it, and output. Summed per conversation and then per quest,
-//! that is what the quest spent, which Lore's other parts (docs/plan/lore.md)
+//! that is what the quest spent, which the lore's other parts
 //! are judged against.
 //!
 //! The split by tool says what each call was for. A call is made because
@@ -19,7 +19,7 @@
 //! and the window at the first call (the system prompt, the instructions,
 //! the tool list, the quest's prompt) and at the last (all that plus
 //! everything the agent read and was told) say where the tokens went
-//! (docs/plan/lore.md part 6).
+//! (measured 2026-10-17).
 
 use std::collections::{BTreeMap, HashMap};
 

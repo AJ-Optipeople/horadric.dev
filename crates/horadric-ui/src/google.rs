@@ -3,7 +3,7 @@
 //! page (Google refuses sign in inside an embedded web view, so never the
 //! browser pane) and comes back to a listener on 127.0.0.1. The refresh
 //! token goes to Credential Manager, under a name with the state folder's
-//! so a dev instance has its own. See docs/plan/backup.md, Google Drive.
+//! so a dev instance has its own.
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};

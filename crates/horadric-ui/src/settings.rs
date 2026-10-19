@@ -245,8 +245,7 @@ pub struct Values {
     pub project: Option<Project>,
 }
 
-/// What the Backup section shows of the memory's backup: see
-/// docs/plan/backup.md.
+/// What the Backup section shows of the memory's backup.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Backup {
     pub to: To,
@@ -262,8 +261,7 @@ pub struct Backup {
     pub busy: Option<String>,
 }
 
-/// What the Scroll section reads of the tongue: see docs/plan/memory.md,
-/// part 8.
+/// What the Scroll section reads of the tongue.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Scroll {
     /// The tongue is turned off.
@@ -277,8 +275,7 @@ pub struct Scroll {
     pub saved: i64,
 }
 
-/// How the yardstick scored recall's answers (docs/plan/memory.md, part 8,
-/// `yardstick/judge.py`): right out of 65 questions, in the tongue and
+/// How the yardstick scored recall's answers (`yardstick/judge.py`): right out of 65 questions, in the tongue and
 /// verbatim.
 const SCORE: &str = "59 of 65, verbatim 52";
 

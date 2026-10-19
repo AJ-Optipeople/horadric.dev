@@ -1,5 +1,5 @@
 //! What the agents are doing in a project, as light on the Arcane
-//! Sanctuary (docs/plan/the-arcane-sanctuary.md, "What lights up").
+//! Sanctuary.
 //!
 //! A [`Glow`] keeps the recent touches of one project: a file read, edited,
 //! made or deleted, a note recalled, a file packed for a quest. Each lights

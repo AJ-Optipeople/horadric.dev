@@ -1,6 +1,6 @@
 //! `horadric google`: sign in to Google for the backup to Google Drive,
 //! sign out, say who is signed in, and try the Drive vault end to end.
-//! The Settings section (docs/plan/backup.md) does the same with buttons.
+//! The Settings section does the same with buttons.
 
 use horadric_ui::backup::Vault;
 use horadric_ui::google;

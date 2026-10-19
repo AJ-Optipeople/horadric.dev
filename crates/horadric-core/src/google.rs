@@ -1,8 +1,7 @@
 //! The pure half of Google sign in and Google Drive: the consent URL with
 //! PKCE, the answer the browser brings back to the loopback listener, the
 //! token and file list replies, and Drive's query language. The WinHTTP
-//! and socket half is in `horadric-ui/src/google.rs` and `drive.rs`. See
-//! docs/plan/backup.md, Google Drive.
+//! and socket half is in `horadric-ui/src/google.rs` and `drive.rs`.
 
 use crate::portal::{b64url, sha256, unb64url, uri_encode};
 

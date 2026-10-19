@@ -1,5 +1,5 @@
 //! The memory's backup: encrypted copies of the store's text files in a
-//! vault, and a restore from them. See docs/plan/backup.md.
+//! vault, and a restore from them.
 //!
 //! A backup is one machine's folder in a [`Vault`]: `manifest.json` in
 //! the clear (the key's salt and rounds, and per file its path, hash,

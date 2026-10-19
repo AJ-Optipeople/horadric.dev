@@ -6,8 +6,8 @@ finding things (words only, each embedding model, both fused) is scored
 on it by recall at 5: the share of questions with at least one answer
 chunk in the top five hits.
 
-See "1. The model" in [docs/plan/memory.md](../../../docs/plan/memory.md)
-for why it exists.
+It exists to choose the embedding model and to measure every later
+change to recall against the same questions.
 
 ## Files
 
@@ -77,13 +77,12 @@ the app is down, and with each model's meaning cut as the app cuts it.
 The models are read from `%APPDATA%\Horadric-dev\models\<folder>`.
 Vectors are cached in `target\yardstick` under a hash of the corpus, so
 a second run only scores. The first results and the model chosen from
-them are in docs/plan/memory.md, part 1.
+them are in the lore (`lore_recall` "embedding model").
 
 ## Recall without being asked
 
 The run with `minilm` also prints `unasked` lines: what recall would put
-before an agent with a prompt nobody asked it about (docs/plan/memory.md,
-part 9), at cosine bars from 0.30 to 0.70. For each bar, the share of
+before an agent with a prompt nobody asked it about, at cosine bars from 0.30 to 0.70. For each bar, the share of
 questions offered an answer, the share of offered hits that are answers
 (a floor, since a hit not on a question's list may still help), and the
 share of `chatter.jsonl` offered anything. That file holds prompts the
@@ -93,7 +92,7 @@ things, the bulk of what a human types. The bar in use is marked `<`.
 ## Horadrim
 
 The run with `minilm` also inscribes each question's answer in Horadrim
-(docs/plan/memory.md, part 8) and writes it word for word and inscribed
+and writes it word for word and inscribed
 to `target\yardstick\horadrim.jsonl`, printing the tokens a hit by the
 crate's estimate. `python -I judge.py` then has Claude answer every
 question from each form and judges the answers against the answer

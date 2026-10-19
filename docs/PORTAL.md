@@ -1,7 +1,7 @@
 # Town Portal: the protocol
 
 Horadric from a phone, through a relay. Why it is built this way is in
-[IDEAS.md](IDEAS.md), "Town Portal". This file is the contract between the
+the lore (`lore_recall` "Town Portal"). This file is the contract between the
 three parts:
 
 - **The PC side**, in this repo: `horadric portal` and the UI's connection

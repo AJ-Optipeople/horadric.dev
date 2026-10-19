@@ -64,8 +64,8 @@ reads was checked on 2026-10-17.
   token and is offered beside it. Which team a project deploys to is
   already in its `.vercel\project.json`; the identity only says who is
   logged in.
-- **Claude Code is not one of them.** Accounts (see
-  [accounts.md](accounts.md)) switches the Claude login for every
+- **Claude Code is not one of them.** Accounts
+  switches the Claude login for every
   session on purpose: a usage limit is spent per subscription, not per
   project, and `CLAUDE_CONFIG_DIR` per account was turned down there.
   An identity may later say which account it prefers, never force one.
@@ -89,15 +89,14 @@ from asking a tool every paint.
 joined into its `--append-system-prompt`: whose project this is, who it
 is logged in as for each tool, never to run a tool's login, logout or
 switch, and what to do when a tool says it is not logged in: block the
-quest with `horadric quest blocked --on-login gh`, a new kind for
-[Waits a blocked quest can name](waits-a-blocked-quest-can-name.md),
-which holds once that identity has a `gh` login. The row reads "needs gh
+quest with `horadric quest blocked --on-login gh`, a new kind of
+wait a blocked quest can name, which holds once that identity has a `gh` login. The row reads "needs gh
 login for Optipeople" and a click opens the identity's row in Settings.
 Same for Codex and Grok Build: the variables are in their environment
 like any program's.
 
 **Plain terminals and the browser pane.** A plain terminal in the stage
-(see [plain-terminals.md](plain-terminals.md)) gets its project's
+gets its project's
 identity too, so the human's own `git push` there goes as the agent's
 would. The browser pane keeps its own login profile; an identity
 does not change that in the first cut, since web logins are the sites'

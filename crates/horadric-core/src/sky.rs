@@ -1,5 +1,4 @@
-//! Tristram's sky, the pure part (docs/plan/the-arcane-sanctuary.md, step
-//! 4): every project's sanctuary, each laid out in its own coordinates,
+//! Tristram's sky, the pure part: every project's sanctuary, each laid out in its own coordinates,
 //! set apart as a galaxy in one picture so the town's pane can draw them
 //! all at once and a click can go into one.
 //!

@@ -4,7 +4,7 @@
 //! Instructions alone did not work: in the 60 sessions before 2026-10-17
 //! not one called `lore_outline` or `lore_find`, and the text tools put
 //! into the window was mostly whole files and long build output
-//! (docs/plan/lore.md part 6). So the hook does it at the tool call:
+//! (measured 2026-10-17). So the hook does it at the tool call:
 //!
 //! - A Read of a whole file over [`MOST_LINES`] lines, or a `cat` of one,
 //!   is turned down, and the reason the agent is given is the file's

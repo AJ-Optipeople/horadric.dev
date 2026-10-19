@@ -1,7 +1,7 @@
 //! Transcripts kept verbatim, dialogue only: what the human typed and
 //! what the agent said, with each tool call reduced to its name and the
 //! files it named. Claude Code's and Codex's. Tool output, which is most
-//! of a transcript, is not kept. See docs/plan/memory.md, part 4.
+//! of a transcript, is not kept.
 //!
 //! This is the pure half: reading a transcript's new lines into turns,
 //! leaving secrets out, and cutting turns into chunks. The keeper writes
@@ -350,7 +350,7 @@ fn pieces(text: &str, most: usize) -> Vec<String> {
 // credential is replaced before it is written. The patterns are the
 // well known token shapes and any value named like a secret; they cannot
 // catch a password that looks like a word, which is why the rule in
-// docs/plan/secrets.md is that an agent never sees one.
+// Secrets (docs/plan/secrets.md) is that an agent never sees one.
 
 const MASK: &str = "[secret]";
 

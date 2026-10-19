@@ -1,6 +1,6 @@
 //! The Arcane Sanctuary's pane, one per project: its graph read on a
 //! thread, its layout stepped on the vsync clock while it settles, and
-//! where the view is panned and zoomed to (docs/plan/the-arcane-sanctuary.md).
+//! where the view is panned and zoomed to.
 //! What a frame shows is worked out in [`crate::sky`]; this keeps the state
 //! the pane comes back to, so a stage that switches projects and back
 //! finds the picture as it left it.
