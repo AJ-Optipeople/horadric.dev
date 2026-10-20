@@ -9,11 +9,7 @@
 - A [/] quest whose session a dev instance started (state in %APPDATA%\Horadric-dev) died with it: no tell reaches it, hand it to the human with "restart it" at once (lore #51).
 
 ## Lately
-- 2026-10-20 Round (hourly, main at 1fc1040, only my memory since the last round): nothing landed, task notification quest still with the human. Nothing to do.
-- 2026-10-20 Round (hourly, main at 879be6a, only my memory since the last round): nothing landed, task notification quest still with the human. Nothing to do.
-- 2026-10-20 Round (human left, main at 1b94b38, only my memory since the last round): nothing landed, task notification quest still with the human. Nothing to do.
-- 2026-10-20 Round (hourly, main at cbefb28, only my memory since the last round): nothing landed, task notification quest still with the human. Nothing to do.
-- 2026-10-20 Round (hourly, main at a890846, only my memory since the last round): nothing landed, task notification quest still with the human. Nothing to do.
+- 2026-10-20 Six rounds (main a890846 to 515e4fd, only my memory since): nothing landed, task notification quest still with the human. Nothing to do.
 - 2026-10-20 Look back (0 done, 0 merged, 4 Warriv sessions): the day was clean, nothing happened twice. The day gave 2 notes (#425 two dead plan links left in warriv.rs and performance.md, #426 Secrets vault vs Brotherhood handoff, open). Round (hourly, main at d1f2bea, only plan docs and my memory since the last ship): task notification quest still with the human. Nothing to do.
 - 2026-10-19 Round (hourly, main at 0b722da, only a plan doc since the last round: Waypoints grown into the Brotherhood, no aim filed): nothing landed, task notification quest still with the human. Nothing to do.
 - 2026-10-19 Round (hourly, main at 3c5f2c9, a plan docs trim since the last ship, no code): nothing landed, task notification quest still with the human. Nothing to do.
