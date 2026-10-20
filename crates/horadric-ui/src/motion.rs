@@ -271,6 +271,21 @@ pub fn breathe(elapsed: Duration, period: Duration) -> f32 {
     (1.0 - (2.0 * PI * t).cos()) / 2.0
 }
 
+/// How often a parked session's lamp flashes for you. Its pane is off the
+/// stage, so a breath is too gentle to be noticed from the corner of an eye.
+pub const BEACON: Duration = Duration::from_millis(1100);
+
+/// The lamp of a parked session that needs you, `elapsed` into it: full on
+/// for the first third of each [`BEACON`], then dark, so it reads as a
+/// signal flashing rather than a light breathing.
+pub fn beacon(elapsed: Duration) -> f32 {
+    if cycle(elapsed, BEACON) < 1.0 / 3.0 {
+        1.0
+    } else {
+        0.0
+    }
+}
+
 /// How far round a loop something going once every `period` has got, from
 /// 0 to 1. Whole nanoseconds until the remainder, since a clock read as
 /// time since 1970 is past where an f32 counts single seconds.
@@ -527,6 +542,15 @@ mod tests {
         let epoch = Duration::from_secs(1_791_225_000);
         assert!((cycle(epoch + ms(250), ms(1000)) - 0.25).abs() < 1e-6);
         assert!((cycle(epoch + ms(500), ms(1000)) - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_beacon_is_lit_first_then_dark_and_again() {
+        assert_eq!(beacon(ms(0)), 1.0);
+        assert_eq!(beacon(ms(300)), 1.0);
+        assert_eq!(beacon(ms(600)), 0.0);
+        assert_eq!(beacon(ms(1000)), 0.0);
+        assert_eq!(beacon(BEACON + ms(100)), 1.0);
     }
 
     #[test]

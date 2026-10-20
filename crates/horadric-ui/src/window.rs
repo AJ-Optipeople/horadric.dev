@@ -95,6 +95,9 @@ pub struct Shared {
     /// both show them, by project key. Paused ones keep their place.
     pub orders: RefCell<HashMap<String, Vec<String>>>,
     pub staged: RefCell<HashSet<String>>,
+    /// Sessions whose panes are kept off the stage while they run on, so
+    /// the grid holds only the ones you are looking at.
+    pub parked: RefCell<HashSet<String>>,
     /// The session whose pane has the keyboard, or last had it.
     pub active: RefCell<Option<String>>,
     pub browsing: RefCell<HashSet<String>>,
@@ -204,6 +207,7 @@ struct Still {
     board: Option<(String, String)>,
     /// Each session on the stage or not, then the browser.
     staged: Vec<bool>,
+    parked: Vec<bool>,
     active: Option<String>,
     astir: bool,
 }
@@ -616,7 +620,7 @@ impl Cluster {
         }
         let s = self.scale();
         match layout::hit(&self.layout.borrow(), p.x as f32 / s, p.y as f32 / s) {
-            Hit::Tile(i) | Hit::Browser(i) | Hit::Code(i) => {
+            Hit::Tile(i) | Hit::Lamp(i) | Hit::Browser(i) | Hit::Code(i) => {
                 self.sessions().get(i).map(|s| s.id.clone())
             }
             _ => None,
@@ -847,6 +851,7 @@ impl Cluster {
             .borrow()
             .get(&self.key)
             .map(|b| (b.summary(), b.mode_key()));
+        let parked = self.parked(&sessions);
         Still {
             layout: self.layout.borrow().clone(),
             sessions,
@@ -855,9 +860,16 @@ impl Cluster {
             stones: self.stones(),
             board,
             staged,
+            parked,
             active: self.shared.active.borrow().clone(),
             astir: self.shared.astir.borrow().contains(&self.key),
         }
+    }
+
+    /// Which of `sessions` are parked off the stage, in the same order.
+    fn parked(&self, sessions: &[Rc<Session>]) -> Vec<bool> {
+        let parked = self.shared.parked.borrow();
+        sessions.iter().map(|s| parked.contains(&s.id)).collect()
     }
 
     fn lay_out(&self) -> bool {
@@ -1118,6 +1130,7 @@ impl Cluster {
         if rebuild {
             *self.drawn.borrow_mut() = Some(self.still_of(sessions.clone(), items.clone()));
         }
+        let parked = self.parked(&sessions);
         let scene = Scene {
             layout: &layout,
             name: &self.name,
@@ -1126,6 +1139,7 @@ impl Cluster {
             sessions: &refs,
             pages: &pages,
             page_selected,
+            parked: &parked,
             looks: &looks,
             ghosts: &ghosts,
             flights: &flights,
@@ -1161,6 +1175,9 @@ impl Cluster {
         // The quests tile's breath needs frames of its own, and only while
         // it breathes.
         let next = motion::sooner(next, breathing.then_some(motion::FRAME_BREATH));
+        let beckoning = ambient
+            && (refs.iter().zip(&parked)).any(|(s, &p)| anim::beckons(&s.phase, s.unread(), p));
+        let next = motion::sooner(next, beckoning.then_some(motion::FRAME_BREATH));
         self.schedule(if ghosts.is_empty() && !finishing {
             next
         } else {
@@ -1342,7 +1359,7 @@ impl Cluster {
                     });
                     return Some(LRESULT(0));
                 }
-                if let Hit::Tile(i) = hit {
+                if let Hit::Tile(i) | Hit::Lamp(i) = hit {
                     if self.start_lift(i, lparam) {
                         return Some(LRESULT(0));
                     }
@@ -1479,7 +1496,7 @@ impl Cluster {
                 let x = (lparam.0 & 0xffff) as i16 as f32 / s;
                 let y = ((lparam.0 >> 16) & 0xffff) as i16 as f32 / s;
                 match layout::hit(&self.layout.borrow(), x, y) {
-                    Hit::Tile(i) | Hit::Browser(i) | Hit::Code(i) => {
+                    Hit::Tile(i) | Hit::Lamp(i) | Hit::Browser(i) | Hit::Code(i) => {
                         if let Some(s) = self.sessions().get(i) {
                             app::push(Input::TileMenu(s.id.clone()));
                         }
@@ -1774,6 +1791,11 @@ impl Cluster {
                 // `sessions` returns.
                 if let Some(s) = self.sessions().get(i) {
                     app::push(Input::Expand(s.id.clone()));
+                }
+            }
+            Hit::Lamp(i) => {
+                if let Some(s) = self.sessions().get(i) {
+                    app::push(Input::Park(s.id.clone()));
                 }
             }
             Hit::Browser(i) => {

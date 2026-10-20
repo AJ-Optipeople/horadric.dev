@@ -246,6 +246,13 @@ impl Tiles {
     }
 }
 
+/// Whether a tile's lamp flashes for you: its pane is parked off the
+/// stage, so nothing else there shows that it is blocked on you or that a
+/// finished turn waits to be looked at.
+pub fn beckons(phase: &Phase, unread: bool, parked: bool) -> bool {
+    parked && (phase.is_waiting() || *phase == Phase::Done && unread)
+}
+
 /// Tiles that have gone, drawn a moment longer as they sink and fade, so a
 /// session that leaves is seen to leave. Holds what drew each tile last,
 /// by id.
@@ -404,6 +411,16 @@ impl Handoffs {
 mod tests {
     use super::*;
     use horadric_core::WaitReason;
+
+    #[test]
+    fn only_a_parked_tile_that_needs_you_beckons() {
+        let waiting = Phase::Waiting(WaitReason::Permission);
+        assert!(beckons(&waiting, false, true));
+        assert!(beckons(&Phase::Done, true, true));
+        assert!(!beckons(&Phase::Done, false, true), "already looked at");
+        assert!(!beckons(&Phase::Working, true, true));
+        assert!(!beckons(&waiting, true, false), "on the stage it breathes");
+    }
 
     fn tile<'a>(id: &'a str, phase: &'a Phase, y: f32, hot: bool) -> TileIn<'a> {
         TileIn {

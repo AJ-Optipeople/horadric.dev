@@ -266,6 +266,8 @@ pub struct Scene<'a> {
     pub pages: &'a [crate::web::TabTile],
     /// The tab whose pane on the stage has the keyboard.
     pub page_selected: Option<usize>,
+    /// Whose pane is parked off the stage, in the same order.
+    pub parked: &'a [bool],
     /// How each tile draws this frame, in the same order.
     pub looks: &'a [Look],
     /// Tiles whose sessions have gone: where each was, what it showed,
@@ -298,6 +300,12 @@ pub struct Scene<'a> {
 }
 
 impl Scene<'_> {
+    /// Whether the `i`th tile's lamp flashes this frame, showing `s`.
+    fn beckons(&self, i: usize, s: &Session) -> bool {
+        let parked = self.parked.get(i).copied().unwrap_or(false);
+        self.ambient && crate::anim::beckons(&s.phase, s.unread(), parked)
+    }
+
     fn button(&self, which: Hit) -> Button {
         layout::button(which, self.hot, self.pressed)
     }
@@ -2515,9 +2523,15 @@ impl Painter<'_> {
         let radius = m.tile_radius;
         self.busy_wash(scene);
         self.astir_breath(m, scene);
-        for (r, s, look) in tiles(scene) {
+        for (i, (r, s, look)) in tiles(scene).enumerate() {
             let phase = &s.phase;
             let c = theme::phase_color(phase);
+            if scene.beckons(i, s) {
+                let on = motion::beacon(look.phase_age) * look.enter;
+                self.halo(&r, radius, c, 0.7 * on);
+                self.lamp(&lamp_rect(&r), c, on);
+                continue;
+            }
             match phase {
                 Phase::Working => {
                     let t = motion::cycle(look.phase_age, ORBIT);
@@ -3441,16 +3455,29 @@ impl Painter<'_> {
             }
             _ => {}
         }
-        // A waiting lamp breathes, so the light draws it fresh each frame.
-        let breathing = ambient && phase.is_waiting();
+        // A waiting lamp breathes and a beckoning one flashes, so the light
+        // draws them fresh each frame.
+        let breathing = ambient && phase.is_waiting() || scene.beckons(i, s);
         let level = if breathing {
             0.0
         } else {
             (stance.lamp + 0.3 * arrival) * look.enter
         };
+        // The lamp is a switch too, so it lights under the cursor, and a
+        // parked session's sits in a ring: its pane is off the stage.
+        if let (Some(fill), _) = theme::button_look(scene.button(Hit::Lamp(i))) {
+            let slot = layout::lamp_slot(r);
+            let well = Rect::new(slot.x + 6.0, r.y + 8.0, slot.w - 8.0, r.h - 16.0);
+            self.fill_rounded(&well, 4.0, fill);
+        }
         self.lamp(&lamp_rect(r), c, level);
         if ambient && *phase == Phase::Ended && look.settle > 0.0 {
             self.power_down(&lamp_rect(r), 1.0 - look.settle);
+        }
+        if scene.parked.get(i).copied().unwrap_or(false) {
+            let l = lamp_rect(r);
+            let ring = Rect::new(l.x - 3.0, l.y - 3.0, l.w + 6.0, l.h + 6.0);
+            self.stroke_rounded(&ring, 4.0, theme::text_dim().fade(presence), 1.2);
         }
 
         // The icon: what the agent is doing, in the phase's light.

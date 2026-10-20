@@ -362,6 +362,9 @@ pub(crate) enum Input {
     Scroll(String, i32),
     /// Tile clicked: show this session's terminal, resume it, or collapse it.
     Expand(String),
+    /// A tile's lamp clicked: park this session's pane off the stage, or
+    /// bring it back.
+    Park(String),
     /// Tile right clicked: offer what can be done with this session.
     TileMenu(String),
     /// Header or bottom plus right clicked: offer what can be done with
@@ -802,6 +805,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
         registry,
         orders: RefCell::new(saved.grids.clone().into_iter().collect()),
         staged: RefCell::new(HashSet::new()),
+        parked: RefCell::new(HashSet::new()),
         active: RefCell::new(None),
         browsing: RefCell::new(HashSet::new()),
         usage,
@@ -6343,6 +6347,10 @@ impl App {
     /// a session that already has the keyboard in front collapses the
     /// stage instead, which is what a second click on its tile means.
     fn reveal(&mut self, id: &str, toggle: bool) {
+        // Asked for by name, a parked session comes back onto the stage.
+        if self.shared.parked.borrow_mut().remove(id) {
+            self.refresh_parked();
+        }
         let stashed = self.shared.registry.lock().is_ok_and(|r| r.is_stashed(id));
         if stashed {
             self.unstash(id, true);
@@ -6379,6 +6387,32 @@ impl App {
             if let Some(stage) = &self.stage {
                 stage.focus_session(id);
             }
+        }
+    }
+
+    /// Parks a session's pane off the stage while the session runs on, for
+    /// a grid of only what you are looking at, or brings a parked one back
+    /// with the keyboard. Parking the last pane closes the stage.
+    fn park(&mut self, id: &str) {
+        let parked = {
+            let mut p = self.shared.parked.borrow_mut();
+            !p.remove(id) && p.insert(id.to_string())
+        };
+        self.refresh_parked();
+        if !parked {
+            self.reveal(id, false);
+            return;
+        }
+        let key = self.project_of(id);
+        if key.is_some() && self.stage.as_ref().map(|s| s.project()) == key {
+            self.sync_stage();
+        }
+    }
+
+    /// The tiles redraw their lamps' rings.
+    fn refresh_parked(&self) {
+        for c in &self.clusters {
+            c.refresh();
         }
     }
 
@@ -6438,6 +6472,8 @@ impl App {
                 .or_default(),
             &live,
         );
+        // Filtered after the order, so a parked session keeps its place.
+        ids.retain(|id| !self.shared.parked.borrow().contains(id));
         // A file view comes last and is never saved in the order.
         if let Some(view) = self.views.get(key) {
             ids.push(view.id.clone());
@@ -8001,6 +8037,7 @@ impl App {
                     }
                 }
                 Input::Expand(id) => self.reveal(&id, true),
+                Input::Park(id) => self.park(&id),
                 Input::Unstash(id) => self.unstash(&id, true),
                 Input::ToCube(id) => {
                     self.put_in_cube(&id);
