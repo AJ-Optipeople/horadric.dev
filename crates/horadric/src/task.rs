@@ -740,6 +740,10 @@ fn start(cwd: &Path) -> Result<(), String> {
             "Horadric's heavy prompt".into(),
             chars(&horadric_core::heavy::system_prompt(horadric)),
         ),
+    ];
+    // The browser pane and the MCP server exist on Windows only.
+    #[cfg(windows)]
+    pieces.extend([
         (
             "Horadric's browser pane prompt".into(),
             chars(horadric_ui::AGENT_PROMPT),
@@ -752,7 +756,7 @@ fn start(cwd: &Path) -> Result<(), String> {
             "Horadric's MCP tool list, when not deferred".into(),
             chars(&crate::mcp::tool_list().to_string()),
         ),
-    ];
+    ]);
     let home = std::env::var_os("USERPROFILE")
         .or_else(|| std::env::var_os("HOME"))
         .map(PathBuf::from)
