@@ -50,9 +50,9 @@ use webview2_com::{
     AcceleratorKeyPressedEventHandler, AddScriptToExecuteOnDocumentCreatedCompletedHandler,
     CallDevToolsProtocolMethodCompletedHandler, CoreWebView2EnvironmentOptions,
     CreateCoreWebView2ControllerCompletedHandler, CreateCoreWebView2EnvironmentCompletedHandler,
-    DocumentTitleChangedEventHandler, HistoryChangedEventHandler, NavigationCompletedEventHandler,
-    NewWindowRequestedEventHandler, SourceChangedEventHandler, WindowCloseRequestedEventHandler,
-    ZoomFactorChangedEventHandler,
+    DevToolsProtocolEventReceivedEventHandler, DocumentTitleChangedEventHandler,
+    HistoryChangedEventHandler, NavigationCompletedEventHandler, NewWindowRequestedEventHandler,
+    SourceChangedEventHandler, WindowCloseRequestedEventHandler, ZoomFactorChangedEventHandler,
 };
 use webview2_com::{
     FaviconChangedEventHandler, FindStartCompletedHandler, GetFaviconCompletedHandler,
@@ -151,6 +151,10 @@ struct Tab {
 
 /// How soon after an agent's call a popup from its tab is the agent's.
 const POPUP_AFTER_CALL: Duration = Duration::from_secs(3);
+
+/// How soon after an agent's call a page asking "Leave site?" is asking
+/// the agent, who has no way to answer it.
+const LEAVE_AFTER_CALL: Duration = Duration::from_secs(5);
 
 /// The size a page that was never on the stage lays out at while an agent
 /// drives it, in CSS pixels: a laptop's.
@@ -495,6 +499,7 @@ pub fn navigate(key: &str, id: u64, url: &str) {
         if tab.webview.is_none() {
             tab.pending = Some(url.to_string());
         }
+        tab.called = Some(Instant::now());
         tab.webview.clone()
     });
     match view {
@@ -1378,11 +1383,18 @@ pub fn go(key: &str, step: Step) {
     go_in(key, None, step);
 }
 
-/// Back, forward or reload in the tab `id`, or the shown one.
+/// Back, forward or reload in the tab `id`, its agent's, or the shown one.
 pub fn go_in(key: &str, id: Option<u64>, step: Step) {
     let Some(view) = read_tab(key, id, |t| t.webview.clone()).flatten() else {
         return;
     };
+    if let Some(id) = id {
+        WEBS.with(|w| {
+            if let Some(t) = w.borrow_mut().get_mut(key).and_then(|web| web.by_id(id)) {
+                t.called = Some(Instant::now());
+            }
+        });
+    }
     let _ = unsafe {
         match step {
             Step::Back => view.GoBack(),
@@ -1761,6 +1773,34 @@ fn listen(key: &str, id: u64, view: &ICoreWebView2) {
         }
         Ok(())
     }));
+    // A page with unsaved changes asks before it is left, and nothing an
+    // agent can call answers that dialog: its click or navigation would
+    // hang there. The agent meant to leave, so it does. The user's own
+    // leaving still asks them.
+    let owned = key.to_string();
+    let dialog = DevToolsProtocolEventReceivedEventHandler::create(Box::new(move |view, args| {
+        let (Some(view), Some(args)) = (view, args) else {
+            return Ok(());
+        };
+        let agents = WEBS.with(|w| {
+            let mut w = w.borrow_mut();
+            let tab = w.get_mut(&owned)?.by_id(id)?;
+            tab.called.map(|at| at.elapsed() < LEAVE_AFTER_CALL)
+        });
+        let json = read(|p| unsafe { args.ParameterObjectAsJson(p) });
+        if agents == Some(true) && asks_to_leave(&json) {
+            let answered =
+                CallDevToolsProtocolMethodCompletedHandler::create(Box::new(|_, _| Ok(())));
+            unsafe {
+                view.CallDevToolsProtocolMethod(
+                    &HSTRING::from("Page.handleJavaScriptDialog"),
+                    &HSTRING::from(r#"{"accept":true}"#),
+                    &answered,
+                )?;
+            }
+        }
+        Ok(())
+    }));
     let owned = key.to_string();
     let icon = FaviconChangedEventHandler::create(Box::new(move |view, _| {
         if let Some(v) = view.and_then(|v| v.cast::<ICoreWebView2_15>().ok()) {
@@ -1779,7 +1819,23 @@ fn listen(key: &str, id: u64, view: &ICoreWebView2) {
         let _ = view.add_NavigationCompleted(&done, &mut token);
         let _ = view.add_NewWindowRequested(&popup, &mut token);
         let _ = view.add_WindowCloseRequested(&closing, &mut token);
+        let opening = HSTRING::from("Page.javascriptDialogOpening");
+        if let Ok(r) = view.GetDevToolsProtocolEventReceiver(&opening) {
+            let _ = r.add_DevToolsProtocolEventReceived(&dialog, &mut token);
+        }
+        let enabled = CallDevToolsProtocolMethodCompletedHandler::create(Box::new(|_, _| Ok(())));
+        let _ = view.CallDevToolsProtocolMethod(
+            &HSTRING::from("Page.enable"),
+            &HSTRING::from("{}"),
+            &enabled,
+        );
     }
+}
+
+/// Whether a page's dialog, as DevTools tells of it opening, is the one
+/// asking to leave a page with unsaved changes.
+fn asks_to_leave(json: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(json).is_ok_and(|v| v["type"] == "beforeunload")
 }
 
 /// A zoom the user gave a fitted page, with Ctrl and the wheel or the
@@ -2116,6 +2172,16 @@ mod tests {
         assert!(is_blank("", Some("about:blank")));
         assert!(!is_blank("", Some("https://example.com")));
         assert!(!is_blank("https://example.com/", None));
+    }
+
+    #[test]
+    fn only_the_leave_site_dialog_is_answered() {
+        assert!(asks_to_leave(
+            r#"{"url":"https://x","message":"","type":"beforeunload","hasBrowserHandler":true}"#
+        ));
+        assert!(!asks_to_leave(r#"{"message":"Sure?","type":"confirm"}"#));
+        assert!(!asks_to_leave(r#"{"type":"alert"}"#));
+        assert!(!asks_to_leave("not json"));
     }
 
     #[test]
