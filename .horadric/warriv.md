@@ -9,6 +9,7 @@
 - A [/] quest whose session a dev instance started (state in %APPDATA%\Horadric-dev) died with it: no tell reaches it, hand it to the human with "restart it" at once (lore #51).
 
 ## Lately
+- 2026-10-20 Round (hourly, main at 0be01cd): the "Leave site?" fix (0be01cd, a human's session) is code and came after the last reload (10-17 20:50), tree has no code edits, so cast "Ship Local". Task notification quest still with the human.
 - 2026-10-20 Eight rounds (main a890846 to cf2d8d4, only my memory since): nothing landed, task notification quest still with the human. Nothing to do.
 - 2026-10-20 Look back (0 done, 0 merged, 4 Warriv sessions): the day was clean, nothing happened twice. The day gave 2 notes (#425 two dead plan links left in warriv.rs and performance.md, #426 Secrets vault vs Brotherhood handoff, open). Round (hourly, main at d1f2bea, only plan docs and my memory since the last ship): task notification quest still with the human. Nothing to do.
 - 2026-10-19 Round (hourly, main at 0b722da, only a plan doc since the last round: Waypoints grown into the Brotherhood, no aim filed): nothing landed, task notification quest still with the human. Nothing to do.
@@ -111,5 +112,6 @@
 - 2026-10-06 to 2026-10-10 Mostly idle rounds (no quests, no aim). Settings window series landed 10-07 and shipped public as v0.16.0; Mac quests shipped as v0.17.0; v0.18.0 and v0.19.0 were cut by hand.
 
 ## Open
+- Check reload.log shows the 0be01cd Ship Local reloaded (cast 2026-10-20 hourly round).
 - Once quests run with a pack, the pack comparison resumes by itself.
 - "Memory: no recall on a task notification" handed to the human to restart (2026-10-17); when it lands, cast Ship Local.
