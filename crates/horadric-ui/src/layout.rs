@@ -508,6 +508,8 @@ pub enum Hit {
     New,
     Header,
     Tile(usize),
+    /// The lamp down a tile's left edge, which parks its pane.
+    Lamp(usize),
     /// The browser button on a tile.
     Browser(usize),
     /// The VS Code button on a tile.
@@ -546,6 +548,7 @@ impl Hit {
             Hit::New
                 | Hit::Header
                 | Hit::Tile(_)
+                | Hit::Lamp(_)
                 | Hit::Browser(_)
                 | Hit::Code(_)
                 | Hit::Page(_)
@@ -582,6 +585,12 @@ pub fn button<T: PartialEq>(which: T, hot: T, pressed: Option<T>) -> Button {
     }
 }
 
+/// The strip down a tile's left edge that takes a click on its lamp: the
+/// whole height, so it is easy to hit, and up to where the icon starts.
+pub fn lamp_slot(tile: &Rect) -> Rect {
+    Rect::new(tile.x, tile.y, 20.0, tile.h)
+}
+
 pub fn hit(layout: &ClusterLayout, x: f32, y: f32) -> Hit {
     if layout.new.contains(x, y) {
         return Hit::New;
@@ -600,6 +609,9 @@ pub fn hit(layout: &ClusterLayout, x: f32, y: f32) -> Hit {
         }
     }
     for (i, t) in layout.tiles.iter().enumerate() {
+        if lamp_slot(t).contains(x, y) {
+            return Hit::Lamp(i);
+        }
         if t.contains(x, y) {
             return Hit::Tile(i);
         }
@@ -2962,7 +2974,7 @@ mod tests {
         assert_eq!(shell.right(), l.tiles[2].right());
         assert_eq!(add.x, l.tiles[2].x);
         assert_eq!(l.size.1, add.bottom() + m.pad);
-        assert_eq!(hit(&l, 20.0, l.tiles[2].y + 1.0), Hit::Tile(2));
+        assert_eq!(hit(&l, 40.0, l.tiles[2].y + 1.0), Hit::Tile(2));
         assert_eq!(hit(&l, 20.0, add.y + 1.0), Hit::Add);
         assert_eq!(hit(&l, shell.x + 2.0, shell.y + 1.0), Hit::Shell);
         assert_eq!(hit(&l, 20.0, m.pad + 1.0), Hit::Header);
@@ -2979,7 +2991,7 @@ mod tests {
         assert_eq!(l.pages[1].y - l.pages[0].bottom(), m.gap);
         assert_eq!(l.add.unwrap().y - l.pages[1].bottom(), m.gap);
         assert_eq!(hit(&l, 20.0, l.pages[1].y + 1.0), Hit::Page(1));
-        assert_eq!(hit(&l, 20.0, l.tiles[1].y + 1.0), Hit::Tile(1));
+        assert_eq!(hit(&l, 40.0, l.tiles[1].y + 1.0), Hit::Tile(1));
         // Folded, no tab shows, as no session does.
         let folded = cluster(&m, 2, 2, true, None, None, None);
         assert!(folded.pages.is_empty());
@@ -3025,10 +3037,21 @@ mod tests {
         assert!(b.y > t.y + t.h / 2.0 - 4.0 && b.bottom() < t.bottom());
         // The button wins over its tile, the rest of the tile is the tile.
         assert_eq!(hit(&l, b.x + 1.0, b.y + 1.0), Hit::Browser(1));
-        assert_eq!(hit(&l, t.x + 1.0, b.y + 1.0), Hit::Tile(1));
+        assert_eq!(hit(&l, t.x + 30.0, b.y + 1.0), Hit::Tile(1));
         let unmarked = l.tiles[0];
         assert_eq!(hit(&l, b.x + 1.0, unmarked.y + 40.0), Hit::Tile(0));
         assert!(Hit::Browser(1).lights());
+    }
+
+    #[test]
+    fn the_left_edge_of_a_tile_is_its_lamp_and_the_rest_the_tile() {
+        let m = Metrics::default();
+        let l = cluster(&m, 2, 0, false, None, None, None);
+        let t = l.tiles[1];
+        assert_eq!(hit(&l, t.x + 1.0, t.y + 1.0), Hit::Lamp(1));
+        assert_eq!(hit(&l, t.x + 14.0, t.bottom() - 1.0), Hit::Lamp(1));
+        assert_eq!(hit(&l, t.x + 21.0, t.y + t.h / 2.0), Hit::Tile(1));
+        assert!(Hit::Lamp(1).lights());
     }
 
     #[test]
