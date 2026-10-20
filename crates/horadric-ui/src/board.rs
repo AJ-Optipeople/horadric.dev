@@ -159,7 +159,16 @@ pub fn state_in(task: &Task, r: &Registry) -> RowState {
                 .collect();
             tombs_row(&found)
         }
-        None => row_state(task, holder.and_then(|h| r.get(h)).map(|s| &s.phase)),
+        // A stashed holder is kept for later, not gone: starting the item
+        // again would leave it behind.
+        None => row_state(
+            task,
+            holder.and_then(|h| match r.get(h) {
+                Some(s) => Some(&s.phase),
+                None if r.is_stashed(h) => Some(&Phase::Paused),
+                None => None,
+            }),
+        ),
     }
 }
 
@@ -421,5 +430,17 @@ mod tests {
         let t = parse("- [/] A @a-1\n- [/] B @b-1.x3\n");
         assert_eq!(state_in(&t[0], &r), RowState::Gone);
         assert_eq!(state_in(&t[1], &r), RowState::Gone);
+    }
+
+    #[test]
+    fn an_item_whose_session_is_stashed_reads_paused() {
+        let mut r = Registry::default();
+        let s = horadric_core::Session::new("a-1", "a", "C:/p");
+        let saved = horadric_core::SavedSession::from_session(&s, vec![], false);
+        r.add(s);
+        assert!(r.stash(saved));
+        let t = parse("- [/] A @a-1\n- [!] B @a-1\n");
+        assert_eq!(state_in(&t[0], &r), RowState::Paused);
+        assert_eq!(state_in(&t[1], &r), RowState::Blocked);
     }
 }
