@@ -9,6 +9,7 @@
 - A [/] quest whose session a dev instance started (state in %APPDATA%\Horadric-dev) died with it: no tell reaches it, hand it to the human with "restart it" at once (lore #51).
 
 ## Lately
+- 2026-10-21 Round (hourly, main at a36eb0e, only my memory since v0.31.0): nothing landed, uncommitted code in the tree is another session's, task notification quest still with the human. Nothing to do.
 - 2026-10-21 Round (hourly, main at cad7019, only my memory since v0.31.0): nothing landed, uncommitted code in the tree is another session's, task notification quest still with the human. Nothing to do.
 - 2026-10-21 Round (hourly, main at a4c429e, only my memory since v0.31.0): nothing landed, uncommitted code in the tree is another session's, task notification quest still with the human. Nothing to do.
 - 2026-10-21 Round (hourly, main at 8b733f7, only my memory since v0.31.0): nothing landed, uncommitted code in the tree is another session's, task notification quest still with the human. Nothing to do.
