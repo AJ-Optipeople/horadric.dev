@@ -9,6 +9,7 @@
 - A [/] quest whose session a dev instance started (state in %APPDATA%\Horadric-dev) died with it: no tell reaches it, hand it to the human with "restart it" at once (lore #51).
 
 ## Lately
+- 2026-10-21 Round (hourly, main at 8e0c791, only my memory since v0.31.0): nothing landed, uncommitted edits in the tree are another session's, task notification quest still with the human. Nothing to do.
 - 2026-10-21 Round (hourly, main at a6d76fe, only my memory since v0.31.0 shipped): nothing landed, task notification quest still with the human. Nothing to do.
 - 2026-10-21 Round (human left, main at 8f566bf): the human's session shipped v0.31.0 (PRs #17 to #20) and it reloaded fine at 00:13, so nothing to ship. Task notification quest still with the human. Nothing to do.
 - 2026-10-20 Round (hourly, main at 0be01cd): the "Leave site?" fix (0be01cd, a human's session) is code and came after the last reload (10-17 20:50), tree has no code edits, so cast "Ship Local". Task notification quest still with the human.
