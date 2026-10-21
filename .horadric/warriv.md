@@ -9,6 +9,7 @@
 - A [/] quest whose session a dev instance started (state in %APPDATA%\Horadric-dev) died with it: no tell reaches it, hand it to the human with "restart it" at once (lore #51).
 
 ## Lately
+- 2026-10-21 Look back (0 done, 0 merged, 14 Warriv sessions): the day was clean, nothing happened twice. The day gave 2 notes (#428 alert and confirm left to the user on purpose, replaces #427; #429 task.rs must gate mcp and browser calls for the Mac). Round (hourly, main at ff50a82, only my memory since v0.31.0): task notification quest still with the human. Nothing to do.
 - 2026-10-21 Round (hourly, main at 3c1da71, only my memory since v0.31.0): nothing landed, task notification quest still with the human. Nothing to do.
 - 2026-10-21 Round (hourly, main at 8e0c791, only my memory since v0.31.0): nothing landed, uncommitted edits in the tree are another session's, task notification quest still with the human. Nothing to do.
 - 2026-10-21 Round (hourly, main at a6d76fe, only my memory since v0.31.0 shipped): nothing landed, task notification quest still with the human. Nothing to do.
