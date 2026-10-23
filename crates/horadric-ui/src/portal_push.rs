@@ -125,7 +125,7 @@ pub fn send_all(dir: &Path, cfg: &Config, payload: Vec<u8>) {
 }
 
 /// An ECDH P-256 private key as CNG keeps it, `x || y || d`.
-type EcdhKey = [u8; 96];
+pub(crate) type EcdhKey = [u8; 96];
 
 fn check(status: NTSTATUS, what: &str) -> Result<(), String> {
     if status.is_ok() {
@@ -168,7 +168,8 @@ fn ecdh_import(magic: u32, kind: PCWSTR, key: &[u8]) -> Result<EcKey, String> {
 }
 
 /// A fresh key pair for one message, so no two pushes share a secret.
-fn ecdh_pair() -> Result<EcdhKey, String> {
+/// Brothers keep one as who they are.
+pub(crate) fn ecdh_pair() -> Result<EcdhKey, String> {
     let mut handle = BCRYPT_KEY_HANDLE::default();
     check(
         unsafe { BCryptGenerateKeyPair(BCRYPT_ECDH_P256_ALG_HANDLE, &mut handle, 256, 0) },
@@ -201,7 +202,7 @@ fn ecdh_pair() -> Result<EcdhKey, String> {
 
 /// The ECDH shared secret, the x coordinate of the shared point, big
 /// endian. `peer` is a 65 byte uncompressed point.
-fn ecdh(private: &EcdhKey, peer: &[u8]) -> Result<[u8; 32], String> {
+pub(crate) fn ecdh(private: &EcdhKey, peer: &[u8]) -> Result<[u8; 32], String> {
     if peer.len() != 65 || peer[0] != 4 {
         return Err("a peer key is a 65 byte uncompressed point".into());
     }

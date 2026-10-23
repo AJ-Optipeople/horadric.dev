@@ -23,6 +23,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use horadric_core::warriv::Drive;
 use horadric_core::{experience, Agent};
 
+use crate::joining;
 use crate::menu::{self, Item};
 use crate::{hotkey, icon, motion, recent};
 
@@ -203,6 +204,8 @@ impl Drop for Tray {
     }
 }
 
+/// Where the Brothers menu's ids start, one per brother the relay lists.
+const BROTHER: usize = 900;
 /// Where the Quest log menu's ids start, one per recent project.
 const QUEST_LOG: usize = 1000;
 /// "Warriv drives" for the project at this place in the list given, and
@@ -357,9 +360,16 @@ pub fn menu(
     if !logins.is_empty() {
         items.push(Item::Submenu("Account".into(), account_items(logins)));
     }
+    let mut brothers = Vec::new();
     match crate::workos::user() {
         Some(user) => {
             items.push(Item::Disabled(format!("Signed in as {}", user.email)));
+            let listed = crate::brothers::listed();
+            items.push(Item::Submenu(
+                "Brothers".into(),
+                brother_items(listed.as_deref()),
+            ));
+            brothers = listed.unwrap_or_default();
             items.push(Item::action(SIGN_OUT, "Sign out"));
         }
         None => items.push(Item::action(SIGN_IN, "Sign in\u{2026}")),
@@ -400,6 +410,12 @@ pub fn menu(
                 !d.drive.as_ref().is_some_and(|d| d.ships_public),
             )
         }),
+        i if (BROTHER..QUEST_LOG).contains(&i) => {
+            if let Some(b) = brothers.get(i - BROTHER) {
+                crate::brothers::ask(&b.id);
+            }
+            None
+        }
         i if i >= DRIVE => driven
             .get(i - DRIVE)
             .map(|d| Choice::Drive(d.key.clone(), d.drive.is_none())),
@@ -411,6 +427,27 @@ pub fn menu(
             .map(|p| Choice::Recent(p.clone())),
         _ => None,
     }
+}
+
+/// The Brothers menu: the other PCs signed in as this human that the relay
+/// sees now, a joined one as a line and one not joined yet as a way to
+/// ask it in. `None` is a portal that is closed or not through yet.
+fn brother_items(listed: Option<&[joining::Listed]>) -> Vec<Item> {
+    let Some(listed) = listed else {
+        return vec![Item::Disabled("Open the Town Portal to find them".into())];
+    };
+    if listed.is_empty() {
+        return vec![Item::Disabled("No other PC is signed in".into())];
+    }
+    listed
+        .iter()
+        .take(QUEST_LOG - BROTHER)
+        .enumerate()
+        .map(|(i, b)| match b.joined || b.linked {
+            true => Item::Disabled(b.label()),
+            false => Item::action(BROTHER + i, b.label()),
+        })
+        .collect()
 }
 
 /// The Account menu: each agent's accounts with what each has left, a
