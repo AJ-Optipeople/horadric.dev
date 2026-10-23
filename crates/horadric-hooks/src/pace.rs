@@ -102,7 +102,7 @@ fn reads(tool: &str, input: &Value) -> bool {
         "Read" | "Grep" | "Glob" => true,
         "Bash" | "PowerShell" => {
             let command = input.get("command").and_then(Value::as_str).unwrap_or("");
-            let first = command.trim_start().split_whitespace().next().unwrap_or("");
+            let first = command.split_whitespace().next().unwrap_or("");
             matches!(
                 first,
                 "cat" | "grep" | "rg" | "sed" | "head" | "tail" | "find" | "Get-Content"

@@ -49,6 +49,7 @@ use std::time::{Duration, Instant, SystemTime};
 use horadric_core::accounts::{Account, Accounts};
 use horadric_core::agent::Agent;
 use horadric_core::background::Asked;
+use horadric_core::checkpoint;
 use horadric_core::chronicle;
 use horadric_core::diff::{self as changes, Diff, FileDiff, Recount};
 use horadric_core::fleet::{self, Device};
@@ -233,6 +234,9 @@ const WM_HORADRIC_PORTAL: u32 = WM_APP + 40;
 /// done with it, outside the app's borrow since a menu runs a loop of its
 /// own.
 const WM_HORADRIC_PORTAL_KEY: u32 = WM_APP + 41;
+/// Undoing a session's last turn has finished on its thread, into the
+/// app's `undone`.
+const WM_HORADRIC_UNDONE: u32 = WM_APP + 47;
 
 /// What the list of a row of the Settings window offers.
 struct SettingsList {
@@ -969,6 +973,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             new_trees: HashMap::new(),
             recounts: HashMap::new(),
             counted: Arc::new(Mutex::new(Vec::new())),
+            undone: Arc::default(),
             sweep_due: HashSet::new(),
             swept_at: HashMap::new(),
             swept_heads: Arc::new(Mutex::new(HashMap::new())),
@@ -1355,6 +1360,7 @@ unsafe extern "system" fn app_proc(
             | WM_HORADRIC_COUNTED
             | WM_HORADRIC_UPDATE
             | WM_HORADRIC_BACKUP
+            | WM_HORADRIC_UNDONE
             | WM_HORADRIC_DOWNLOADED
             | WM_HORADRIC_KEPT
             | WM_HORADRIC_PORTAL
@@ -1637,6 +1643,7 @@ fn tile_menu(id: &str) {
     const PICK: usize = 5;
     const STOP_RUNEWORD: usize = 6;
     const FOUND: usize = 7;
+    const UNDO: usize = 50;
     let Some((kind, shell)) = with_app(|app| app.tile_kind(id)).flatten() else {
         return;
     };
@@ -1693,6 +1700,11 @@ fn tile_menu(id: &str) {
         let stop = format!("Stop {} ({})", w.name, w.progress());
         items.insert(at, Item::action(STOP_RUNEWORD, stop));
     }
+    if with_app(|app| app.can_undo(id)) == Some(true) {
+        if let Some(at) = items.iter().rposition(|i| matches!(i, Item::Separator)) {
+            items.insert(at, Item::action(UNDO, "Undo last turn"));
+        }
+    }
     let tree = with_app(|app| app.diff_of(id)).flatten();
     if let Some((w, diff)) = &tree {
         items.insert(0, changes_menu(w, diff.as_ref()));
@@ -1740,6 +1752,9 @@ fn tile_menu(id: &str) {
         Some(FOUND) => found_project(id),
         Some(STOP_RUNEWORD) => {
             with_app(|app| app.stop_runeword(id));
+        }
+        Some(UNDO) => {
+            with_app(|app| app.undo_turn(id));
         }
         Some(STASH) if confirm_stash(id) => {
             with_app(|app| app.stash(id));
@@ -3340,6 +3355,9 @@ struct App {
     recounts: HashMap<String, Recount>,
     /// Counts back from their threads.
     counted: Arc<Mutex<Vec<Counted>>>,
+    /// Undone turns back from their threads: the session's name and how
+    /// it went.
+    undone: Arc<Mutex<Vec<(String, checkpoint::Outcome)>>>,
     /// Projects whose worktrees are to be swept, by project key: every
     /// project with a session at startup, and one whose session was heard
     /// from since, since that may have been a merge.
@@ -3463,6 +3481,7 @@ impl App {
                 self.refresh_settings();
             }
             WM_HORADRIC_BACKUP => self.take_backup(),
+            WM_HORADRIC_UNDONE => self.take_undone(),
             WM_HORADRIC_DOWNLOADED => self.take_download(),
             WM_HORADRIC_KEPT => self.offer_merges(),
             WM_HORADRIC_INPUT => self.apply_input(),
@@ -6180,8 +6199,77 @@ impl App {
         if let Some((short, _, _)) = self.background_of(id) {
             agents::stop(&short);
         }
+        self.drop_turns(id);
         self.forget(id);
         self.reconcile(false);
+    }
+
+    /// Deletes the checkpoints of a session that ends for good, on a thread
+    /// since it runs git.
+    fn drop_turns(&self, id: &str) {
+        let Some(cwd) = self
+            .shared
+            .registry
+            .lock()
+            .ok()
+            .and_then(|r| Some(r.get(id)?.cwd.clone()))
+        else {
+            return;
+        };
+        let id = id.to_string();
+        thread::spawn(move || horadric_hooks::checkpoint::forget(&id, &cwd));
+    }
+
+    /// Whether the tile menu offers to undo the session's last turn: an
+    /// agent's session, live or paused, between turns.
+    fn can_undo(&self, id: &str) -> bool {
+        let between = self.shared.registry.lock().is_ok_and(|r| {
+            r.get(id)
+                .is_some_and(|s| !s.shell && !s.phase.mid_turn() && !s.phase.asks())
+        });
+        between
+            && matches!(
+                self.tile_kind(id),
+                Some((TileKind::Live | TileKind::Paused, false))
+            )
+    }
+
+    /// Puts back the files the session's last turn changed, on a thread,
+    /// and toasts how it went.
+    fn undo_turn(&self, id: &str) {
+        let Some((label, cwd)) = self.shared.registry.lock().ok().and_then(|r| {
+            let s = r.get(id)?;
+            Some((s.label().to_string(), s.cwd.clone()))
+        }) else {
+            return;
+        };
+        let id = id.to_string();
+        let undone = Arc::clone(&self.undone);
+        let notify = self.notify.0 as isize;
+        thread::spawn(move || {
+            let outcome = horadric_hooks::checkpoint::undo(&id, &cwd);
+            if let Ok(mut u) = undone.lock() {
+                u.push((label, outcome));
+            }
+            post(notify, WM_HORADRIC_UNDONE, 0);
+        });
+    }
+
+    fn take_undone(&mut self) {
+        let done = self
+            .undone
+            .lock()
+            .map(|mut u| std::mem::take(&mut *u))
+            .unwrap_or_default();
+        for (label, outcome) in done {
+            let kind = match &outcome {
+                checkpoint::Outcome::Undone { .. } => Kind::Done,
+                checkpoint::Outcome::Refused(_) | checkpoint::Outcome::Failed(_) => Kind::Failed,
+                _ => Kind::Info,
+            };
+            let (title, text) = checkpoint::summary(&label, &outcome);
+            self.toasts.show(kind, &title, &text);
+        }
     }
 
     /// Ends every session of the project with this key, or of every
@@ -6196,6 +6284,7 @@ impl App {
             Err(_) => return,
         };
         for id in &ids {
+            self.drop_turns(id);
             self.forget(id);
         }
         self.reconcile(false);

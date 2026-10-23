@@ -3012,6 +3012,11 @@ impl Pane {
                 }
                 Some(LRESULT(0))
             }
+            WM_RBUTTONUP if self.in_header(lparam) && !self.console.is_view() => {
+                // A session's header offers what its tile does.
+                app::push(Input::TileMenu(self.session().to_string()));
+                Some(LRESULT(0))
+            }
             WM_RBUTTONUP => {
                 // The console convention, unless the program took the press:
                 // right click copies a selection, otherwise pastes.

@@ -154,7 +154,7 @@ impl Claims {
 
 /// One spelling for a file: absolute, forward slashes, and lower case,
 /// since Windows paths are not case sensitive.
-fn key(file: &str, cwd: &str) -> String {
+pub(crate) fn key(file: &str, cwd: &str) -> String {
     let file = file.replace('\\', "/");
     let absolute = file.starts_with('/') || file.get(1..2) == Some(":");
     let path = if absolute || cwd.is_empty() {

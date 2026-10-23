@@ -25,9 +25,9 @@ use horadric_core::{Agent, HookEvent, Limits, Status};
 use serde_json::{json, Value};
 
 use crate::{
-    client, pace, transcript, AGENT_HEADER, BROWSER_PATH, COMMAND_HEADER, GLOW_PATH, HOOK_PATH,
-    KNOW_PATH, NEW_PATH, OWNER_HEADER, RECALL_PATH, RELOAD_PATH, SESSION_HEADER, STATE_HEADER,
-    STATUS_PATH, TASKS_PATH,
+    checkpoint, client, pace, transcript, AGENT_HEADER, BROWSER_PATH, COMMAND_HEADER, GLOW_PATH,
+    HOOK_PATH, KNOW_PATH, NEW_PATH, OWNER_HEADER, RECALL_PATH, RELOAD_PATH, SESSION_HEADER,
+    STATE_HEADER, STATUS_PATH, TASKS_PATH,
 };
 
 /// A hook event together with the Horadric session id from the header.
@@ -475,6 +475,12 @@ fn handle(
     // prompt's reply waits for the memory instead, after the event is
     // handed on, so the tile turns to working at once.
     let parsed = agent.unwrap_or_default().event(&body);
+    // A turn's checkpoint is taken before the agent hears back, so its
+    // first edit cannot come before it. Only the app keeps them, and only
+    // for sessions it holds: an event passed on is the owner's to keep.
+    if let (Some(event), Some(_), false) = (&parsed, commands, owner.is_some_and(|o| o != port)) {
+        checkpoint::hear(&horadric_id, event);
+    }
     let prompt = parsed
         .as_ref()
         .filter(|_| agent.unwrap_or_default() == Agent::Claude && !horadric_id.is_empty())
