@@ -11,6 +11,7 @@ pub mod aim;
 pub mod ask;
 pub mod background;
 pub mod bench;
+pub mod brotherhood;
 pub mod chronicle;
 pub mod cube;
 pub mod diff;
