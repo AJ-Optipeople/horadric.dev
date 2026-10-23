@@ -238,10 +238,24 @@ fn said(text: &str) -> String {
         "<local-command",
         "Caveat: The messages below",
     ];
-    if own.iter().any(|p| text.starts_with(p)) || text.starts_with("[Request interrupted") {
+    if own.iter().any(|p| text.starts_with(p))
+        || text.starts_with("[Request interrupted")
+        || is_notification(text)
+    {
         return String::new();
     }
     text.to_string()
+}
+
+/// Whether `text` is a background task reporting back, which the harness
+/// sends as a prompt: nobody said it, and it names other work.
+pub fn is_notification(text: &str) -> bool {
+    text.trim_start().starts_with("<task-notification>")
+}
+
+/// Whether a stored chunk holds such a turn, kept before they were left out.
+pub fn holds_notification(chunk_text: &str) -> bool {
+    chunk_text.contains("You: <task-notification>")
 }
 
 /// `text` without its `<tag>...</tag>` blocks. An unclosed one is cut to
@@ -589,6 +603,17 @@ mod tests {
         );
         assert_eq!(s.turns[0].time, 1_792_141_200);
         assert_eq!(s.turns[2].files, vec!["src/a.rs"]);
+    }
+
+    #[test]
+    fn a_task_notification_is_no_dialogue() {
+        let bytes = lines(&[json!({"type":"user","message":{"content":
+            "<task-notification><status>completed</status></task-notification>"}})]);
+        assert!(parse(&bytes, Format::Claude).turns.is_empty());
+        assert!(is_notification("\n<task-notification>x"));
+        assert!(!is_notification("why did <task-notification> fire?"));
+        assert!(holds_notification("You: <task-notification>x\nAgent: ok"));
+        assert!(!holds_notification("You: hello"));
     }
 
     #[test]

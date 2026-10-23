@@ -322,7 +322,11 @@ pub fn rank(
     meaning: &[usize],
     stale: impl Fn(usize) -> bool,
 ) -> Vec<(usize, f64)> {
-    let wanted = |i: &usize| ask.kind.is_none_or(|k| cands[*i].kind == k);
+    let wanted = |i: &usize| {
+        let c = &cands[*i];
+        ask.kind.is_none_or(|k| c.kind == k)
+            && !(c.kind == Kind::Dialogue && crate::transcripts::holds_notification(c.text()))
+    };
     let has_words = !lore::words(&ask.query).is_empty();
     if !has_words && ask.files.is_empty() {
         // The newest are no answer to a question nobody asked.

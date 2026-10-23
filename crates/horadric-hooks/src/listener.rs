@@ -571,7 +571,8 @@ fn prompt_recall(horadric_id: &str, event: &HookEvent, body: &[u8]) -> Option<Va
     // `/compact` is a command, `/src/a.rs is broken` a path.
     let first = text.split_whitespace().next().unwrap_or("");
     let command = first.starts_with('/') && !first[1..].contains('/');
-    if text.is_empty() || command {
+    // A background task reporting back is the harness talking, not a question.
+    if text.is_empty() || command || text.starts_with("<task-notification>") {
         return None;
     }
     let query: String = text.chars().take(PROMPT_CHARS).collect();
@@ -1229,6 +1230,9 @@ X-Horadric-Port: {dev}
         let reply = post(port, "X-Horadric-Session: tile-3\r\n", &prompt("/compact"));
         assert!(reply.ends_with("\r\n\r\n{}"), "{reply}");
         let reply = post(port, "", &prompt("why?"));
+        assert!(reply.ends_with("\r\n\r\n{}"), "{reply}");
+        let note = "<task-notification><status>completed</status></task-notification>";
+        let reply = post(port, "X-Horadric-Session: tile-3\r\n", &prompt(note));
         assert!(reply.ends_with("\r\n\r\n{}"), "{reply}");
         assert!(rx.recv_timeout(Duration::from_millis(200)).is_err());
     }
