@@ -8,13 +8,19 @@
 //! Everything here runs on the UI thread, woken by the link's thread with
 //! [`WM_HORADRIC_PORTAL`] and by [`PORTAL_TIMER`] while the link is up, so
 //! a watched screen follows its output without a message per byte.
+//! While a session is streamed raw (protocol v3's `attach`), the timer runs
+//! faster, so what is typed elsewhere echoes back at once.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use horadric_core::portal::{b64url, fresh_message, unb64url, Config, Paired};
+use horadric_core::portal::{
+    answer_version, b64url, fresh_message, needs_control, size_owner, unb64url, Config, Kind,
+    Paired, Viewer,
+};
 use horadric_core::webpush;
 use horadric_core::worktree::Worktree;
 use horadric_core::Phase;
@@ -23,6 +29,7 @@ use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{KillTimer, PostMessageW, SetTimer};
 
 use super::{unix_now, App, PORTAL_TIMER, WM_HORADRIC_PORTAL};
+use crate::console::{Console, GridSize};
 use crate::portal::{self, fingerprint, Sender};
 use crate::portal_crypto;
 use crate::portal_link::{Incoming, Link};
@@ -34,6 +41,9 @@ use crate::worktree;
 const CHECK_EVERY: Duration = Duration::from_secs(2);
 /// How often a watched screen is looked at: at most 4 sends a second.
 const PUSH_MS: u32 = 250;
+/// How often raw streams are looked at, while there are any: often enough
+/// that a key typed elsewhere echoes as if typed here.
+const STREAM_MS: u32 = 20;
 /// The least time between two pushes, so a burst of waiting sessions
 /// buzzes the phone once.
 const PUSH_GAP: Duration = Duration::from_secs(60);
@@ -62,6 +72,14 @@ pub(super) struct Portal {
     pushed: Option<Instant>,
     /// Where `portal.json` and `portal-push.json` live.
     dir: PathBuf,
+    /// When the lists and screens were last looked at, so the fast timer
+    /// of raw streams does not look at them fifty times a second.
+    looked: Option<Instant>,
+    /// Whether the timer runs at [`STREAM_MS`].
+    fast: bool,
+    /// Sessions whose size a viewer elsewhere holds, to give the stage
+    /// back once that viewer goes.
+    held: HashSet<String>,
 }
 
 /// One phone, by its channel.
@@ -82,6 +100,32 @@ struct Phone {
     quests: bool,
     /// The quests message last sent to it.
     quests_sent: Option<u64>,
+    /// What its hello said it is.
+    kind: Kind,
+    /// The version its hello is answered in.
+    v: u64,
+    /// Whether it may type, start and resume, or only look.
+    control: bool,
+    /// The sessions it streams raw, by id.
+    streams: HashMap<String, Stream>,
+}
+
+/// One session streamed raw to one viewer.
+#[derive(Default)]
+struct Stream {
+    /// The console it streams, by address, so a session resumed into a
+    /// new console starts over with a replay.
+    console: usize,
+    /// The offset of the next byte to send, None until the replay went.
+    next: Option<u64>,
+    /// The size last told, so a change is told once.
+    told: Option<(u16, u16)>,
+    /// The size it would draw at, if it sets the size.
+    want: Option<(u16, u16)>,
+    /// When it last typed or clicked in the session, in microseconds.
+    active: Option<u64>,
+    /// It was told the session is not running here.
+    missing: bool,
 }
 
 impl Phone {
@@ -180,6 +224,9 @@ impl App {
             waiting: None,
             pushed: None,
             dir,
+            looked: None,
+            fast: false,
+            held: HashSet::new(),
         });
         unsafe {
             SetTimer(Some(self.notify), PORTAL_TIMER, PUSH_MS, None);
@@ -187,6 +234,13 @@ impl App {
     }
 
     fn portal_stop(&mut self) {
+        if let Some(p) = &self.portal {
+            for id in &p.held {
+                if let Some(c) = self.consoles.get(id) {
+                    c.release_size();
+                }
+            }
+        }
         if self.portal.take().is_some() {
             unsafe {
                 let _ = KillTimer(Some(self.notify), PORTAL_TIMER);
@@ -336,8 +390,10 @@ impl App {
                 ch,
                 &json!({
                     "t": "hello",
-                    "v": portal::VERSION,
+                    "v": phone.v,
                     "pc": pc,
+                    "brother": pc,
+                    "control": phone.control,
                     "vapid": p.config.vapid_pub,
                     "s": phone.s,
                 }),
@@ -349,8 +405,10 @@ impl App {
         }
         for (ch, id, data) in asked.inputs {
             match self.consoles.get(&id) {
+                // Empty is a click elsewhere, which counts for the size.
+                Some(_) if data.is_empty() => {}
                 Some(c) => {
-                    c.note_typed();
+                    c.note_typed_from_afar();
                     c.write(data.into_bytes());
                 }
                 None => p.send(
@@ -359,15 +417,101 @@ impl App {
                 ),
             }
         }
-        self.portal_push();
+        self.portal_streams();
+        self.portal_look();
+    }
+
+    /// Called by the timer: the raw streams every time, the rest at most
+    /// every [`PUSH_MS`].
+    pub(super) fn portal_push(&mut self) {
+        self.portal_streams();
+        let due = self.portal.as_ref().is_some_and(|p| {
+            p.looked
+                .is_none_or(|at| at.elapsed() >= Duration::from_millis(PUSH_MS as u64 - 10))
+        });
+        if due {
+            self.portal_look();
+        }
+    }
+
+    /// Sends what raw streams have not had yet: the size first whenever it
+    /// changed, then a replay for a new stream and what came since for the
+    /// rest. Before that, gives each streamed session's size to whoever
+    /// typed in it last.
+    fn portal_streams(&mut self) {
+        let Some(p) = self.portal.as_mut() else {
+            return;
+        };
+        let streaming = p
+            .phones
+            .values()
+            .any(|ph| ph.hello() && !ph.streams.is_empty());
+        if streaming != p.fast {
+            p.fast = streaming;
+            let ms = if streaming { STREAM_MS } else { PUSH_MS };
+            unsafe {
+                SetTimer(Some(self.notify), PORTAL_TIMER, ms, None);
+            }
+        }
+        let mut ids: HashSet<String> = p
+            .phones
+            .values()
+            .filter(|ph| ph.hello())
+            .flat_map(|ph| ph.streams.keys().cloned())
+            .collect();
+        for id in p.held.iter().filter(|id| !ids.contains(*id)) {
+            if let Some(c) = self.consoles.get(id) {
+                c.release_size();
+            }
+        }
+        p.held.retain(|id| ids.contains(id));
+        let mut out = Vec::new();
+        for id in ids.drain() {
+            let console = self.consoles.get(&id);
+            if let Some(c) = console {
+                let mut viewers = Vec::new();
+                let mut wants = Vec::new();
+                for ph in p.phones.values().filter(|ph| ph.hello()) {
+                    if let Some(st) = ph.streams.get(&id) {
+                        viewers.push(Viewer {
+                            kind: ph.kind,
+                            active: st.active,
+                        });
+                        wants.push(st.want);
+                    }
+                }
+                let stage = c.typed_here_at().map(micros);
+                match size_owner(stage, &viewers).and_then(|i| wants[i]) {
+                    Some((cols, rows)) => {
+                        c.hold_size(GridSize { cols, rows });
+                        p.held.insert(id.clone());
+                    }
+                    None => {
+                        c.release_size();
+                        p.held.remove(&id);
+                    }
+                }
+            }
+            let paused = self.paused.contains_key(&id);
+            for (&ch, ph) in p.phones.iter_mut().filter(|(_, ph)| ph.hello()) {
+                let Some(st) = ph.streams.get_mut(&id) else {
+                    continue;
+                };
+                stream(&id, console, st, paused, |m| out.push((ch, m)));
+            }
+        }
+        for (ch, msg) in out {
+            p.send(ch, &msg);
+        }
     }
 
     /// Sends the session and project lists and the watched screens where
     /// they changed, and pushes when a session has started waiting.
-    pub(super) fn portal_push(&mut self) {
-        if self.portal.is_none() {
+    fn portal_look(&mut self) {
+        let Some(p) = self.portal.as_mut() else {
             return;
-        }
+        };
+        p.looked = Some(Instant::now());
         let list = self.portal_sessions();
         let projects = self.portal_projects();
         let waiting = self.portal_waiting();
@@ -788,6 +932,64 @@ impl Portal {
     }
 }
 
+/// A time in microseconds since 1970, the unit [`size_owner`] compares.
+fn micros(t: SystemTime) -> u64 {
+    t.duration_since(UNIX_EPOCH)
+        .map(|d| d.as_micros() as u64)
+        .unwrap_or(0)
+}
+
+/// Sends one stream what it has not had: the size whenever it changed,
+/// then a replay for a new stream or a new console, else what came since.
+fn stream(
+    id: &str,
+    console: Option<&Arc<Console>>,
+    st: &mut Stream,
+    paused: bool,
+    mut send: impl FnMut(Value),
+) {
+    let Some(c) = console else {
+        if !st.missing {
+            st.missing = true;
+            st.next = None;
+            let text = if paused {
+                "paused"
+            } else {
+                "That session is not running on the PC."
+            };
+            send(json!({"t": "error", "id": id, "text": text}));
+        }
+        return;
+    };
+    st.missing = false;
+    let addr = Arc::as_ptr(c) as usize;
+    if st.console != addr {
+        st.console = addr;
+        st.next = None;
+    }
+    let size = c.size();
+    if st.told != Some((size.cols, size.rows)) {
+        st.told = Some((size.cols, size.rows));
+        send(portal::size_message(id, size.cols, size.rows));
+    }
+    let since = st.next.and_then(|at| c.raw_since(at).map(|got| (at, got)));
+    match since {
+        Some((at, (bytes, end))) => {
+            for m in portal::out_messages(id, at, &bytes, false) {
+                send(m);
+            }
+            st.next = Some(end);
+        }
+        None => {
+            let (start, bytes) = c.raw_replay();
+            for m in portal::out_messages(id, start, &bytes, true) {
+                send(m);
+            }
+            st.next = Some(start + bytes.len() as u64);
+        }
+    }
+}
+
 /// Notes that a paired phone was here now, unless it was lately.
 fn seen(dir: &Path, config: &mut Config, id: &str, now: u64) {
     let stale = |c: &Config| {
@@ -842,6 +1044,12 @@ fn heard_from(p: &mut Portal, ch: u32, sealed: &[u8], now: u64, asked: &mut Aske
         portal_crypto::random(&mut s);
         phone.s = b64url(&s);
         phone.n = 0;
+        phone.kind = Kind::of_hello(&msg);
+        phone.v = answer_version(&msg);
+        // Nothing makes a link view only yet: that switch comes with
+        // joining brothers, and a phone the human paired may always act.
+        phone.control = true;
+        phone.streams.clear();
         asked.hellos.push(ch);
         if let Some((id, _)) = phone.who.clone() {
             seen(&p.dir, &mut p.config, &id, now);
@@ -849,6 +1057,17 @@ fn heard_from(p: &mut Portal, ch: u32, sealed: &[u8], now: u64, asked: &mut Aske
         return;
     }
     if !phone.hello() || !fresh_message(&msg, &phone.s, &mut phone.n) {
+        return;
+    }
+    let t = msg["t"].as_str().unwrap_or_default();
+    if needs_control(t) && !phone.control {
+        if let Some((_, key)) = &phone.who {
+            p.link.send(
+                ch,
+                key,
+                &json!({"t": "error", "text": "view only", "for": t}),
+            );
+        }
         return;
     }
     match msg["t"].as_str() {
@@ -862,7 +1081,24 @@ fn heard_from(p: &mut Portal, ch: u32, sealed: &[u8], now: u64, asked: &mut Aske
         }
         Some("input") => {
             if let (Some(id), Some(data)) = (text("id"), text("data")) {
+                if let Some(st) = phone.streams.get_mut(&id) {
+                    st.active = Some(micros(SystemTime::now()));
+                }
                 asked.inputs.push((ch, id, data));
+            }
+        }
+        Some("detach") => {
+            if let Some(id) = text("id") {
+                phone.streams.remove(&id);
+            }
+        }
+        Some("resize") => {
+            let size = portal::asked_size(&msg);
+            if let (Some(st), Kind::Brother) = (
+                text("id").and_then(|id| phone.streams.get_mut(&id)),
+                phone.kind,
+            ) {
+                st.want = size.or(st.want);
             }
         }
         Some("start") => {
@@ -911,10 +1147,20 @@ fn heard_from(p: &mut Portal, ch: u32, sealed: &[u8], now: u64, asked: &mut Aske
                 asked.replies.push((ch, id));
             }
         }
+        // With `data` it is a photo (0.24); without, a raw stream (v3).
         Some("attach") => {
             if let (Some(id), Some(data)) = (text("id"), text("data")) {
                 let name = text("name").unwrap_or_default();
                 asked.attaches.push((ch, id, name, data));
+            } else if let Some(id) = text("id") {
+                let want = portal::asked_size(&msg).filter(|_| phone.kind == Kind::Brother);
+                phone.streams.insert(
+                    id,
+                    Stream {
+                        want,
+                        ..Stream::default()
+                    },
+                );
             }
         }
         Some("create") => {
