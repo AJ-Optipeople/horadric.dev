@@ -194,9 +194,14 @@ screen. What it lacks:
 - **The transcript is filed under the new path.** Claude Code keeps
   transcripts by the folder the session ran in, so `C:\Users\...` on the
   laptop and `/home/...` on the VPS are different keys. The receiver
-  writes the transcript under its own path, then resumes with `claude
-  --resume <id>`. Whether the `cwd` inside each line must be rewritten
-  too is the first thing the spike settles.
+  writes `<id>.jsonl` under its own path's key, then resumes with
+  `claude --resume <id>` from that folder. `--resume` looks only under
+  the current folder's key, so filing it is required; rewriting the
+  `cwd` in each line is not (step 7). The receiver rewrites `cwd` anyway,
+  so the agent's history points where it works now, and
+  brings `<id>/subagents/` and `<id>/tool-results/` along with the paths
+  to them rewritten. The project's `memory/` folder beside them is the
+  project's, not the session's, and does not move.
 - **The agent is told.** The resumed session's next prompt starts with
   one line: moved from Laptop to Desktop, the work is in this worktree,
   the last turn ended cleanly. Paths it remembers may be wrong now.
@@ -367,6 +372,64 @@ Each step is useful alone and each is verified before the next starts.
    it remembers and what breaks. Again Windows to Windows. Settles
    whether `cwd` lines need rewriting and whether subagent files and
    `ai-title` come along. Written down here before step 10.
+
+   Found on 2026-10-23, with Claude Code 2.1.309 on Windows and haiku:
+   - **Windows to Windows resumes.** A `-p` session in repo A (wrote
+     `notes.txt`, told the codeword HELIX), the repo copied to B, the
+     transcript copied under B's key alone (the project's `memory/`
+     left behind, so the answer could only come from the transcript),
+     then `claude --resume <id> -p ...` from B: it answered HELIX and
+     `notes.txt`. Same with every `cwd` rewritten to the new path.
+   - **`cwd` need not be rewritten.** Both ways resume. The resumed turn
+     gets a fresh environment attachment with the new working directory,
+     and its new lines carry the new `cwd`. The old lines keep naming A
+     in tool inputs and results (`spikeA\notes.txt`), so with A still on
+     disk the agent could reach back into it. That is why the receiver
+     rewrites anyway, and why the first line tells the agent it moved.
+   - **The key must be right.** Run from a folder whose key does not
+     hold the file and it fails at once: "No conversation found with
+     session ID". It does not search other keys. The key is the full
+     path with every character that is not a letter or digit turned into
+     `-` (`C--Users-...-spikeA`, `-home-agent-...-repo1`).
+   - **The id stays.** The resumed session keeps the same session id and
+     appends to the copied file. The original under A is untouched.
+   - **Subagents are not needed to resume.** They live in
+     `<key>/<id>/subagents/agent-<agentId>.jsonl` with a `.meta.json`
+     beside each. A session whose subagent invented a password resumed
+     under the new key without that folder and still knew the password
+     and the file: the subagent's result is in the main transcript as a
+     tool result. The folder is only the subagent's own history, so it
+     comes along for completeness, not for the resume.
+   - **`tool-results/` holds paths.** Large tool output is kept in
+     `<key>/<id>/tool-results/` and the main transcript names those files
+     by absolute path, under the old key. They move with the session and
+     the paths are rewritten, or a resumed agent that rereads one finds
+     nothing.
+   - **`ai-title` comes along.** It is a line in the main transcript
+     (`{"type":"ai-title","aiTitle":...}`), written by interactive
+     sessions (a `-p` session has none), so it moves with the file.
+   - **The project `memory/` folder is separate.** Auto memory lives in
+     `<key>/memory/` and belongs to the project, not the session. A
+     moved session does not see the old project's memory unless the
+     receiver's project already has its own.
+   - **Hooks.** The resumed run's hooks posted to the installed Horadric
+     with the same session id and the new `cwd` (Stop returned 200).
+     Horadric's memory index read each copied file as new: the copy with
+     rewritten `cwd` had its old turns indexed again under the new
+     project, the unchanged copy had its new turn half filed under the
+     old project. Step 10 tells the index a moved transcript is the same
+     session, or skips the turns it already holds.
+   - **Windows to Linux: filed, found, not answered.** On the Frankfurt
+     VPS (`exit1-eu`, Claude Code 2.1.281) the transcript filed under
+     `-home-agent-horadric-spike-repo1` (unchanged `cwd`) and `...repo2`
+     (`cwd` rewritten to the Linux path) was found by `--resume` both
+     ways: the older Claude Code read the newer transcript and appended
+     a turn with the Linux `cwd`. Both then stopped at "OAuth session
+     expired and could not be refreshed": the VPS's Claude login (agent
+     and root alike) has lapsed. Not logged in again for the spike.
+     Whether the model remembers after a Windows to Linux move is left
+     for step 11, once the VPS is logged in; nothing found here suggests
+     it would differ.
 8. **The mesh and the roster.** Joining once joins everyone, the roster
    with its number, session owners, cast out, view only per link,
    "asleep", "silent" and "out of reach" on the tiles. Pure and tested:
