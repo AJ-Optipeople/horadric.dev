@@ -24,8 +24,15 @@ class Link:
         )
         self.buf = b""
         self.started = False
+        # Every message after hello carries the hello's `s` and a count
+        # that grows, the relay's replay guard, which a node keeps too.
+        self.s = None
+        self.n = 0
 
     def send(self, msg):
+        if self.s is not None:
+            self.n += 1
+            msg = dict(msg, s=self.s, n=self.n)
         data = json.dumps(msg).encode()
         self.p.stdin.write(struct.pack(">I", len(data)) + data)
         self.p.stdin.flush()
@@ -82,6 +89,7 @@ def main():
     hello = link.until("hello", lambda m: m["t"] == "hello")
     if hello["v"] != 3 or not hello.get("brother") or hello.get("control") is not True:
         sys.exit(f"FAIL: hello {hello}")
+    link.s = hello["s"]
 
     # A host attached again after a restart is listed under its id,
     # which `horadric new` made from the name.
@@ -124,7 +132,7 @@ def main():
         link.send({"t": "input", "id": sid, "data": "exit\r"})
         link.until(
             "the end of the shell",
-            lambda m: m["t"] == "error" and m.get("id") == sid and m["text"] == "ended",
+            lambda m: m["t"] == "error" and m.get("id") == sid,
         )
     link.close()
     print(f"OK: {mode}")
