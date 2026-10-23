@@ -50,6 +50,7 @@ pub mod trust;
 pub mod usage;
 pub mod warriv;
 pub mod webpush;
+pub mod workos;
 pub mod worktree;
 
 pub use agent::Agent;
