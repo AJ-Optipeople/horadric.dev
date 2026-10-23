@@ -425,3 +425,47 @@ exactly as before.
   input never move the size. Once the viewer that held the size
   detaches, or the stage types, the session goes back to the stage's
   size.
+
+## Protocol v3: joining a brother
+
+A PC signed in with WorkOS (`/pc?secret=..&token=..&name=..`, see the
+relay's README, "Brothers") is told which of the human's other PCs are
+connected, and asks the relay for a channel to one with
+`{"join":{"to":"<pc id>"}}`. The relay answers `{"link":<ch>,"id","name"}`
+on the asker's side and `{"join":<ch>,"id","name"}` on the other's. The
+ids and names below are always the relay's, never what a message says.
+
+`<data dir>/brothers.json` holds this PC's ECDH P-256 key pair and every
+brother it joined:
+
+```json
+{ "me": { "public": "<b64url, 65 byte point>", "private": "<b64url, x || y || d>" },
+  "brothers": [{ "id": "<pc id>", "name": "Laptop", "public": "<b64url>", "key": "<b64url, 32 bytes>", "joined": 1760000000, "seen": 1760000000 }] }
+```
+
+On a brother channel, until there is a key, frames are plain UTF-8 JSON:
+
+- Asker: `{"t":"join","v":1,"name","commit":"<b64url>"}`, where `commit`
+  is SHA-256 of `"horadric join commit v1"` then the asker's public key
+  and its 16 byte nonce, each led by its length as a 4 byte big endian
+  number.
+- Giver: `{"t":"joining","name","pub","nonce"}`, its public key and nonce.
+- Asker: `{"t":"reveal","pub","nonce"}`. The giver refuses one that does
+  not hash to `commit`.
+- Both: the ECDH secret `s` (the shared x coordinate), then the link key
+  is SHA-256 of `"horadric brother key v1"` and the code SHA-256 of
+  `"horadric join code v1"`, each over `s`, the asker's key and nonce,
+  the giver's key and nonce, length led as above. The code is the first
+  4 bytes big endian, mod 1,000,000, as six digits in two groups ("587
+  941"). The asker shows it; the giver asks the human, naming it.
+- Giver, on yes: `{"t":"welcome","name"}` sealed with the link key, as
+  phone frames are. On no: plain `{"t":"refused"}`, and it closes.
+
+A brother that joined before links again with `{"t":"hello","v":3,
+"kind":"brother","name"}` sealed with the link key, answered in kind. Of
+two joined brothers the one with the lower id asks for the channel when
+it sees the other in `brothers`.
+
+A refused token closes the PC's socket with 4401: the PC drops its
+access token, refreshes it and tries again with the usual backoff. 4503
+waits 30 seconds.
