@@ -332,6 +332,29 @@ pub fn spent_since_taken(records: &[Record], project: &str, id: &str) -> bool {
     spent
 }
 
+/// What the quest `id` of `project` spent in tokens by the last report of
+/// it, which counts all its conversations again. None before any.
+pub fn tokens_spent(records: &[Record], project: &str, id: &str) -> Option<u64> {
+    let quest = quest_of(id);
+    records.iter().rev().find_map(|r| match &r.what {
+        Happened::Spent { sittings } if r.project == project && quest_of(&r.quest) == quest => {
+            Some(spend::total(sittings).tokens.total())
+        }
+        _ => None,
+    })
+}
+
+/// When the quest `id` of `project` was last taken.
+pub fn taken_at(records: &[Record], project: &str, id: &str) -> Option<u64> {
+    let quest = quest_of(id);
+    records.iter().rev().find_map(|r| match &r.what {
+        Happened::Accepted { .. } if r.project == project && quest_of(&r.quest) == quest => {
+            Some(r.at)
+        }
+        _ => None,
+    })
+}
+
 /// The records for what changed between two reads of a project's list:
 /// a quest accepted, marked, or put back. Like [`journal::marks`], items
 /// are matched by title, since lines move as the list is edited.
@@ -1661,6 +1684,34 @@ mod tests {
         assert_eq!(q[1].spend, None);
         let line = records[2].line();
         assert_eq!(parse(&line), vec![records[2].clone()]);
+    }
+
+    #[test]
+    fn a_quests_tokens_and_when_it_was_taken_are_its_last_records() {
+        let spent = |output| Happened::Spent {
+            sittings: vec![Sitting {
+                conversation: "c1".into(),
+                spend: Spend {
+                    tokens: spend::Tokens {
+                        output,
+                        ..Default::default()
+                    },
+                    ..Spend::default()
+                },
+            }],
+        };
+        let records = [
+            accepted(1, "a-1", "A"),
+            rec(2, "a-1", "", spent(10)),
+            accepted(3, "a-1", "A"),
+            rec(4, "a-1", "", spent(25)),
+            accepted(5, "b-1", "B"),
+        ];
+        assert_eq!(tokens_spent(&records, "p", "a-1"), Some(25));
+        assert_eq!(tokens_spent(&records, "p", "b-1"), None);
+        assert_eq!(tokens_spent(&records, "other", "a-1"), None);
+        assert_eq!(taken_at(&records, "p", "a-1"), Some(3));
+        assert_eq!(taken_at(&records, "p", "c-1"), None);
     }
 
     #[test]

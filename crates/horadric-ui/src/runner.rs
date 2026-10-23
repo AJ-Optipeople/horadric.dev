@@ -30,6 +30,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use horadric_core::chronicle::{self, Happened};
+use horadric_core::escalate;
 use horadric_core::journal::{self, Commit, Entry, What};
 use horadric_core::tasks::{self, Holder, Mark, Mode, Next, Task, Wait};
 use horadric_core::usage::{self, format_until};
@@ -279,6 +280,66 @@ fn stamp(dir: &Path) -> Stamp {
     [of(file::file(dir)), of(file::config_file(dir))]
 }
 
+/// A run that ended, to be written under its quest: the project folder,
+/// the title, how it ended, its minutes and its tokens.
+type Ended = (PathBuf, String, escalate::Ending, Option<u64>, Option<u64>);
+
+/// The runs that ended between two reads of the list of `key`, in `dir`,
+/// at `now`, with what the chronicle knows of their time and tokens. A
+/// landing mode's done is left to the landing, which knows the checks.
+fn runs_ended(key: &str, dir: &Path, old: &[Task], new: &[Task], now: u64) -> Vec<Ended> {
+    let endings = escalate::endings(old, new, file::mode(dir).lands());
+    if endings.is_empty() {
+        return Vec::new();
+    }
+    let records = store::chronicle_all();
+    endings
+        .into_iter()
+        .map(|(title, ending)| {
+            let holder = new
+                .iter()
+                .chain(old)
+                .find(|t| t.title == title && t.holder.is_some())
+                .and_then(|t| t.holder.clone())
+                .unwrap_or_default();
+            let (minutes, tokens) = run_facts(&records, key, &holder, now);
+            (dir.to_path_buf(), title, ending, minutes, tokens)
+        })
+        .collect()
+}
+
+/// How long the quest held by `holder` has run since it was last taken,
+/// in minutes, and what it spent by its last report.
+fn run_facts(
+    records: &[chronicle::Record],
+    key: &str,
+    holder: &str,
+    now: u64,
+) -> (Option<u64>, Option<u64>) {
+    if holder.is_empty() {
+        return (None, None);
+    }
+    let minutes = chronicle::taken_at(records, key, holder).map(|at| now.saturating_sub(at) / 60);
+    (minutes, chronicle::tokens_spent(records, key, holder))
+}
+
+/// Writes how the run of `title` ended under it, and its escalation when
+/// it struggled, which its next start reads as its model.
+fn write_run(
+    dir: &Path,
+    title: &str,
+    ending: escalate::Ending,
+    minutes: Option<u64>,
+    tokens: Option<u64>,
+) {
+    let wrote = file::update(dir, |text| {
+        escalate::record(text, title, ending, minutes, tokens)
+    });
+    if let Err(e) = wrote {
+        eprintln!("horadric: cannot write how \"{title}\" ended: {e}");
+    }
+}
+
 fn read_board(dir: &Path) -> Board {
     // Items side by side in one tree would edit the same files, so they
     // get worktrees of their own even in trunk mode, and only a repository
@@ -420,6 +481,7 @@ impl App {
             }
         }
         let mut changed = Vec::new();
+        let mut ended = Vec::new();
         for (key, dir) in &keys {
             let now = stamp(dir);
             if !force && self.tasks.stamps.get(key) == Some(&now) {
@@ -431,6 +493,10 @@ impl App {
             if boards.get(key) != Some(&fresh) {
                 let at = unix_now();
                 if let Some(old) = boards.get(key) {
+                    // Before the marks are kept: a quest sent back is taken
+                    // again, which would make its run look a moment long.
+                    let runs = runs_ended(key, dir, &old.tasks, &fresh.tasks, at);
+                    ended.extend(runs.into_iter().map(|r| (key.clone(), r)));
                     for r in chronicle::marks(key, &old.tasks, &fresh.tasks, at) {
                         store::chronicle(&r);
                     }
@@ -465,6 +531,16 @@ impl App {
             let mut boards = self.shared.boards.borrow_mut();
             boards.retain(|k, _| seen.contains(k));
             self.tasks.stamps.retain(|k, _| boards.contains_key(k));
+        }
+        // Written after the read, so the next read sees the lines and no
+        // mark changed: each run is written once, and by one Horadric.
+        if !ended.is_empty() {
+            let left = self.dev_leaves_to_installed();
+            for (key, (dir, title, ending, minutes, tokens)) in ended {
+                if !left.contains(&key) {
+                    write_run(&dir, &title, ending, minutes, tokens);
+                }
+            }
         }
         let mut resized = false;
         for c in self.clusters.iter().filter(|c| changed.contains(&c.key)) {
@@ -1867,13 +1943,26 @@ impl App {
                 store::chronicle(&chronicle::Record {
                     at: unix_now(),
                     project: l.key.clone(),
-                    quest: holder,
+                    quest: holder.clone(),
                     title: l.title.clone(),
                     what: Happened::NotMerged {
                         branch: l.w.branch.clone(),
                         failure: why.clone(),
                     },
                 });
+            }
+            let ending = match &l.landing {
+                Landing::Merged(checked) if checked.is_empty() => Some(escalate::Ending::Landed),
+                Landing::Merged(_) => Some(escalate::Ending::Green),
+                Landing::Failed(merge::Failure::Red(_), _) => Some(escalate::Ending::Red),
+                Landing::Failed(merge::Failure::Conflict, _) => Some(escalate::Ending::Conflict),
+                // Left to the human's merge, which says nothing of the work.
+                Landing::Failed(..) => None,
+            };
+            if let Some(ending) = ending {
+                let records = store::chronicle_all();
+                let (minutes, tokens) = run_facts(&records, &l.key, &holder, unix_now());
+                write_run(&l.dir, &l.title, ending, minutes, tokens);
             }
             let main = PathBuf::from(&l.w.main);
             let branch = l.w.branch.clone();
@@ -1885,7 +1974,18 @@ impl App {
                 }
                 Landing::Failed(why, out) if why.fixable() => {
                     eprintln!("horadric: cannot merge {branch}: {why:?}");
-                    let fix = merge::fix_up(&l.title, &branch, &l.into, &why, &out);
+                    let mut fix = merge::fix_up(&l.title, &branch, &l.into, &why, &out);
+                    if let merge::Failure::Red(check) = &why {
+                        let red = escalate::Struggle::Red(check.clone());
+                        let up = tasks::parse(&file::read(&l.dir))
+                            .into_iter()
+                            .find(|t| t.title == l.title)
+                            .and_then(|t| escalate::carried(&t, &red));
+                        if let Some(up) = up {
+                            fix.notes.push('\n');
+                            fix.notes.push_str(&up);
+                        }
+                    }
                     // A conflict says nothing of the checks either way.
                     if matches!(why, merge::Failure::Red(_)) {
                         self.count_red(&l.key, true, Some(&fix.title));

@@ -15,6 +15,7 @@ pub mod chronicle;
 pub mod cube;
 pub mod diff;
 pub mod discord;
+pub mod escalate;
 pub mod event;
 pub mod experience;
 pub mod fleet;
