@@ -5,6 +5,11 @@
 //! messages say is [`crate::portal`]; the connection is
 //! [`crate::portal_link`].
 //!
+//! The protocol itself is served by `horadric_core::serving`'s
+//! [`Server`], the same one a headless node runs; this file is the
+//! transport (the relay, pairing, each phone's key) and [`Here`], the
+//! Windows app as the [`Serve`] it answers through.
+//!
 //! Everything here runs on the UI thread, woken by the link's thread with
 //! [`WM_HORADRIC_PORTAL`] and by [`PORTAL_TIMER`] while the link is up, so
 //! a watched screen follows its output without a message per byte.
@@ -17,10 +22,8 @@ use std::sync::mpsc::{self, Receiver};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use horadric_core::portal::{
-    answer_version, b64url, fresh_message, needs_control, size_owner, unb64url, Config, Kind,
-    Paired, Viewer,
-};
+use horadric_core::portal::{b64url, unb64url, Config, Kind, Paired};
+use horadric_core::serving::{Job, Out, Running, Serve, Server};
 use horadric_core::webpush;
 use horadric_core::worktree::Worktree;
 use horadric_core::Phase;
@@ -29,8 +32,8 @@ use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{KillTimer, PostMessageW, SetTimer};
 
 use super::{unix_now, App, PORTAL_TIMER, WM_HORADRIC_PORTAL};
-use crate::console::{Console, GridSize};
-use crate::portal::{self, fingerprint, Sender};
+use crate::console::GridSize;
+use crate::portal::{self, Sender};
 use crate::portal_crypto;
 use crate::portal_link::{Incoming, Link};
 use crate::portal_push::{self, Subs};
@@ -44,9 +47,6 @@ const PUSH_MS: u32 = 250;
 /// How often raw streams are looked at, while there are any: often enough
 /// that a key typed elsewhere echoes as if typed here.
 const STREAM_MS: u32 = 20;
-/// The least time between two pushes, so a burst of waiting sessions
-/// buzzes the phone once.
-const PUSH_GAP: Duration = Duration::from_secs(60);
 /// How stale a phone's "last seen" may get before a hello writes it, in
 /// seconds, so reconnects do not write `portal.json` every time.
 const SEEN_EVERY: u64 = 3600;
@@ -58,80 +58,17 @@ pub(super) struct Portal {
     config: Config,
     link: Link,
     rx: Receiver<Incoming>,
-    phones: HashMap<u32, Phone>,
+    /// Which paired phone each channel is and its key, once a frame opened
+    /// with it. Until then the channel is nobody, and nothing is sent to it.
+    phones: HashMap<u32, Option<(String, [u8; 32])>>,
     /// Whether the link to the relay is up now.
     relay_up: bool,
-    /// The session list last sent, so an unchanged one is not sent again.
-    sent: Option<u64>,
-    /// The projects message last sent, the same way.
-    projects_sent: Option<u64>,
-    /// The sessions waiting at the last look, `None` before the first, so
-    /// sessions already waiting when the link started push nothing.
-    waiting: Option<HashSet<String>>,
-    /// When the last push went out.
-    pushed: Option<Instant>,
     /// Where `portal.json` and `portal-push.json` live.
     dir: PathBuf,
-    /// When the lists and screens were last looked at, so the fast timer
-    /// of raw streams does not look at them fifty times a second.
-    looked: Option<Instant>,
     /// Whether the timer runs at [`STREAM_MS`].
     fast: bool,
-    /// Sessions whose size a viewer elsewhere holds, to give the stage
-    /// back once that viewer goes.
-    held: HashSet<String>,
-}
-
-/// One phone, by its channel.
-#[derive(Default)]
-struct Phone {
-    /// Which paired phone this is and its key, once a frame opened with
-    /// it. Until then the channel is nobody, and nothing is sent to it.
-    who: Option<(String, [u8; 32])>,
-    /// This connection's `s`, made at hello; every later message must
-    /// carry it. Empty before hello.
-    s: String,
-    /// The last message count heard on this connection.
-    n: u64,
-    watch: Option<String>,
-    /// The screen last sent, so an unchanged one is not sent again.
-    screen: Option<u64>,
-    /// It asked for the quest logs, so it hears them again when they change.
-    quests: bool,
-    /// The quests message last sent to it.
-    quests_sent: Option<u64>,
-    /// What its hello said it is.
-    kind: Kind,
-    /// The version its hello is answered in.
-    v: u64,
-    /// Whether it may type, start and resume, or only look.
-    control: bool,
-    /// The sessions it streams raw, by id.
-    streams: HashMap<String, Stream>,
-}
-
-/// One session streamed raw to one viewer.
-#[derive(Default)]
-struct Stream {
-    /// The console it streams, by address, so a session resumed into a
-    /// new console starts over with a replay.
-    console: usize,
-    /// The offset of the next byte to send, None until the replay went.
-    next: Option<u64>,
-    /// The size last told, so a change is told once.
-    told: Option<(u16, u16)>,
-    /// The size it would draw at, if it sets the size.
-    want: Option<(u16, u16)>,
-    /// When it last typed or clicked in the session, in microseconds.
-    active: Option<u64>,
-    /// It was told the session is not running here.
-    missing: bool,
-}
-
-impl Phone {
-    fn hello(&self) -> bool {
-        !self.s.is_empty()
-    }
+    /// What every connection asked and was sent.
+    server: Server,
 }
 
 /// When `portal.json` was last read. Kept apart from the portal, which is
@@ -139,35 +76,9 @@ impl Phone {
 #[derive(Default)]
 pub(super) struct Checked(Option<Instant>);
 
-/// What phones asked for that needs the app, taken out of the drain first
-/// so the portal is not borrowed while the app acts.
-#[derive(Default)]
-struct Asked {
-    hellos: Vec<u32>,
-    inputs: Vec<(u32, String, String)>,
-    starts: Vec<(u32, String)>,
-    resumes: Vec<(u32, String)>,
-    /// Phones that asked for the folders projects may be started in.
-    folders: Vec<u32>,
-    /// New projects: channel, root, folder name.
-    creates: Vec<(u32, String, String)>,
-    /// What a session changed: channel, session.
-    changes: Vec<(u32, String)>,
-    /// One changed file's diff: channel, session, path.
-    diffs: Vec<(u32, String, String)>,
-    /// New quests: channel, project path, title, notes.
-    quest_adds: Vec<(u32, String, String, String)>,
-    /// Sessions named from a long press: channel, session, name.
-    renames: Vec<(u32, String, String)>,
-    /// Sessions ended from a long press, after the page's confirm.
-    stops: Vec<(u32, String)>,
-    /// Phones that asked for a session's last reply, to copy it.
-    replies: Vec<(u32, String)>,
-    /// Photos from the phone: channel, session, file name, base64url bytes.
-    attaches: Vec<(u32, String, String, String)>,
-    /// Pairing attempts: channel, the name the phone gave, the ticket key.
-    pairs: Vec<(u32, String, [u8; 32])>,
-}
+/// The Windows app as the machine a [`Server`] serves from, while the
+/// server is taken out of the portal to answer.
+struct Here<'a>(&'a mut App);
 
 impl App {
     /// Reads `portal.json` now and then, and starts or stops the link to
@@ -219,14 +130,9 @@ impl App {
             rx,
             phones: HashMap::new(),
             relay_up: false,
-            sent: None,
-            projects_sent: None,
-            waiting: None,
-            pushed: None,
             dir,
-            looked: None,
             fast: false,
-            held: HashSet::new(),
+            server: Server::default(),
         });
         unsafe {
             SetTimer(Some(self.notify), PORTAL_TIMER, PUSH_MS, None);
@@ -234,14 +140,8 @@ impl App {
     }
 
     fn portal_stop(&mut self) {
-        if let Some(p) = &self.portal {
-            for id in &p.held {
-                if let Some(c) = self.consoles.get(id) {
-                    c.release_size();
-                }
-            }
-        }
-        if self.portal.take().is_some() {
+        if let Some(mut p) = self.portal.take() {
+            p.server.release(&mut Here(self));
             unsafe {
                 let _ = KillTimer(Some(self.notify), PORTAL_TIMER);
             }
@@ -254,198 +154,54 @@ impl App {
             return;
         };
         let heard: Vec<Incoming> = p.rx.try_iter().collect();
-        let mut asked = Asked::default();
+        let mut pairs = Vec::new();
         let now = unix_now();
         for incoming in heard {
             match incoming {
                 Incoming::Open(ch) => {
-                    p.phones.insert(ch, Phone::default());
+                    p.phones.insert(ch, None);
+                    p.server.open(ch);
                 }
                 Incoming::Close(ch) => {
                     p.phones.remove(&ch);
+                    p.server.close(ch);
                 }
                 Incoming::Connected(up) => {
                     p.relay_up = up;
                     if !up {
                         p.phones.clear();
+                        p.server.clear();
                     }
                 }
-                Incoming::Sealed(ch, sealed) => heard_from(p, ch, &sealed, now, &mut asked),
+                Incoming::Sealed(ch, sealed) => heard_from(p, ch, &sealed, now, &mut pairs),
             }
         }
-        for (ch, name, key) in asked.pairs {
+        for (ch, name, key) in pairs {
             p.pair(ch, &name, key, now);
         }
-        for (ch, project) in asked.starts {
-            let reply = match self.portal_start(&project) {
-                Ok(id) => json!({"t": "started", "project": project, "id": id}),
-                Err(e) => json!({"t": "error", "text": e}),
-            };
-            if let Some(p) = &self.portal {
-                p.send(ch, &reply);
-            }
-        }
-        if !asked.folders.is_empty() {
-            let folders = portal::folders_message(&self.portal_folders());
-            if let Some(p) = &self.portal {
-                for ch in &asked.folders {
-                    p.send(*ch, &folders);
-                }
-            }
-        }
-        for (ch, root, name) in asked.creates {
-            let reply = match self.portal_create(&root, &name) {
-                Ok((project, id)) => json!({"t": "started", "project": project, "id": id}),
-                Err(e) => json!({"t": "error", "text": e}),
-            };
-            if let Some(p) = &self.portal {
-                p.send(ch, &reply);
-            }
-        }
-        for (ch, project, title, notes) in asked.quest_adds {
-            let reply = match self.portal_quest_add(&project, &title, &notes) {
-                Ok(title) => json!({"t": "quest_added", "project": project, "title": title}),
-                Err(e) => json!({"t": "error", "text": e}),
-            };
-            if let Some(p) = &self.portal {
-                p.send(ch, &reply);
-            }
-        }
-        for (ch, id) in asked.resumes {
-            let result = if self.paused.contains_key(&id) {
-                self.resume(&id, false)
-            } else if self.consoles.contains_key(&id) {
-                Ok(())
-            } else {
-                Err("That session cannot be resumed from here.".to_string())
-            };
-            let Some(p) = self.portal.as_mut() else {
-                return;
-            };
-            if let Err(e) = result {
-                p.send(ch, &json!({"t": "error", "text": e}));
-            }
-            if let Some(phone) = p.phones.get_mut(&ch) {
-                phone.screen = None;
-            }
-        }
-        for (ch, id) in asked.changes {
-            self.portal_changes(ch, &id, None);
-        }
-        for (ch, id, path) in asked.diffs {
-            self.portal_changes(ch, &id, Some(path));
-        }
-        for (ch, id, name) in asked.renames {
-            let known = self
-                .shared
-                .registry
-                .lock()
-                .is_ok_and(|r| r.get(&id).is_some());
-            if known {
-                self.rename(&id, &name);
-            } else if let Some(p) = &self.portal {
-                p.send(ch, &json!({"t": "error", "text": "That session is gone."}));
-            }
-        }
-        for (ch, id) in asked.stops {
-            let known = self.consoles.contains_key(&id)
-                || self.paused.contains_key(&id)
-                || self
-                    .shared
-                    .registry
-                    .lock()
-                    .is_ok_and(|r| r.get(&id).is_some());
-            if known {
-                self.end(&id);
-            } else if let Some(p) = &self.portal {
-                p.send(ch, &json!({"t": "error", "text": "That session is gone."}));
-            }
-        }
-        for (ch, id) in asked.replies {
-            let text = self.portal_reply(&id);
-            if let Some(p) = &self.portal {
-                p.send(ch, &json!({"t": "reply", "id": id, "text": text}));
-            }
-        }
-        for (ch, id, name, data) in asked.attaches {
-            let reply = match self.portal_attach(&id, &name, &data, now) {
-                Ok(path) => json!({"t": "attached", "id": id, "name": name, "path": path}),
-                Err(e) => json!({"t": "error", "text": e}),
-            };
-            if let Some(p) = &self.portal {
-                p.send(ch, &reply);
-            }
-        }
-        let pc = std::env::var("COMPUTERNAME").unwrap_or_else(|_| "PC".to_string());
-        let list = self.portal_sessions();
-        let projects = self.portal_projects();
-        let Some(p) = self.portal.as_mut() else {
-            return;
-        };
-        for ch in asked.hellos {
-            let Some(phone) = p.phones.get(&ch) else {
-                continue;
-            };
-            p.send(
-                ch,
-                &json!({
-                    "t": "hello",
-                    "v": phone.v,
-                    "pc": pc,
-                    "brother": pc,
-                    "control": phone.control,
-                    "vapid": p.config.vapid_pub,
-                    "s": phone.s,
-                }),
-            );
-            p.send(ch, &list);
-            p.send(ch, &projects);
-            p.sent = Some(fingerprint(&list));
-            p.projects_sent = Some(fingerprint(&projects));
-        }
-        for (ch, id, data) in asked.inputs {
-            match self.consoles.get(&id) {
-                // Empty is a click elsewhere, which counts for the size.
-                Some(_) if data.is_empty() => {}
-                Some(c) => {
-                    c.note_typed_from_afar();
-                    c.write(data.into_bytes());
-                }
-                None => p.send(
-                    ch,
-                    &json!({"t": "error", "text": "That session is not running on the PC."}),
-                ),
-            }
-        }
-        self.portal_streams();
-        self.portal_look();
+        self.portal_serve(|server, here| server.answer(here, now));
     }
 
     /// Called by the timer: the raw streams every time, the rest at most
     /// every [`PUSH_MS`].
     pub(super) fn portal_push(&mut self) {
-        self.portal_streams();
-        let due = self.portal.as_ref().is_some_and(|p| {
-            p.looked
-                .is_none_or(|at| at.elapsed() >= Duration::from_millis(PUSH_MS as u64 - 10))
-        });
-        if due {
-            self.portal_look();
-        }
+        self.portal_serve(|server, here| server.tick(here));
     }
 
-    /// Sends what raw streams have not had yet: the size first whenever it
-    /// changed, then a replay for a new stream and what came since for the
-    /// rest. Before that, gives each streamed session's size to whoever
-    /// typed in it last.
-    fn portal_streams(&mut self) {
+    /// Runs the server with the app to answer through, then sends what it
+    /// says and paces the timer to whether anything streams raw.
+    fn portal_serve(&mut self, f: impl FnOnce(&mut Server, &mut Here) -> Out) {
         let Some(p) = self.portal.as_mut() else {
             return;
         };
-        let streaming = p
-            .phones
-            .values()
-            .any(|ph| ph.hello() && !ph.streams.is_empty());
+        let mut server = std::mem::take(&mut p.server);
+        let out = f(&mut server, &mut Here(self));
+        let Some(p) = self.portal.as_mut() else {
+            return;
+        };
+        p.server = server;
+        p.deliver(out);
+        let streaming = p.server.streaming();
         if streaming != p.fast {
             p.fast = streaming;
             let ms = if streaming { STREAM_MS } else { PUSH_MS };
@@ -453,176 +209,6 @@ impl App {
                 SetTimer(Some(self.notify), PORTAL_TIMER, ms, None);
             }
         }
-        let mut ids: HashSet<String> = p
-            .phones
-            .values()
-            .filter(|ph| ph.hello())
-            .flat_map(|ph| ph.streams.keys().cloned())
-            .collect();
-        for id in p.held.iter().filter(|id| !ids.contains(*id)) {
-            if let Some(c) = self.consoles.get(id) {
-                c.release_size();
-            }
-        }
-        p.held.retain(|id| ids.contains(id));
-        let mut out = Vec::new();
-        for id in ids.drain() {
-            let console = self.consoles.get(&id);
-            if let Some(c) = console {
-                let mut viewers = Vec::new();
-                let mut wants = Vec::new();
-                for ph in p.phones.values().filter(|ph| ph.hello()) {
-                    if let Some(st) = ph.streams.get(&id) {
-                        viewers.push(Viewer {
-                            kind: ph.kind,
-                            active: st.active,
-                        });
-                        wants.push(st.want);
-                    }
-                }
-                let stage = c.typed_here_at().map(micros);
-                match size_owner(stage, &viewers).and_then(|i| wants[i]) {
-                    Some((cols, rows)) => {
-                        c.hold_size(GridSize { cols, rows });
-                        p.held.insert(id.clone());
-                    }
-                    None => {
-                        c.release_size();
-                        p.held.remove(&id);
-                    }
-                }
-            }
-            let paused = self.paused.contains_key(&id);
-            for (&ch, ph) in p.phones.iter_mut().filter(|(_, ph)| ph.hello()) {
-                let Some(st) = ph.streams.get_mut(&id) else {
-                    continue;
-                };
-                stream(&id, console, st, paused, |m| out.push((ch, m)));
-            }
-        }
-        for (ch, msg) in out {
-            p.send(ch, &msg);
-        }
-    }
-
-    /// Sends the session and project lists and the watched screens where
-    /// they changed, and pushes when a session has started waiting.
-    fn portal_look(&mut self) {
-        let Some(p) = self.portal.as_mut() else {
-            return;
-        };
-        p.looked = Some(Instant::now());
-        let list = self.portal_sessions();
-        let projects = self.portal_projects();
-        let waiting = self.portal_waiting();
-        let quests = self
-            .portal
-            .as_ref()
-            .is_some_and(|p| p.phones.values().any(|ph| ph.quests))
-            .then(|| self.portal_quests());
-        let Some(p) = self.portal.as_mut() else {
-            return;
-        };
-        if let Some(quests) = quests {
-            let print = fingerprint(&quests);
-            let to: Vec<u32> = p
-                .phones
-                .iter_mut()
-                .filter(|(_, ph)| ph.quests && ph.quests_sent != Some(print))
-                .map(|(&ch, ph)| {
-                    ph.quests_sent = Some(print);
-                    ch
-                })
-                .collect();
-            for ch in to {
-                p.send(ch, &quests);
-            }
-        }
-        let anyone = p.phones.values().any(Phone::hello);
-        let print = fingerprint(&list);
-        if p.sent != Some(print) && anyone {
-            p.send_all(&list);
-            p.sent = Some(print);
-        }
-        let print = fingerprint(&projects);
-        if p.projects_sent != Some(print) && anyone {
-            p.send_all(&projects);
-            p.projects_sent = Some(print);
-        }
-        let edge = p
-            .waiting
-            .as_ref()
-            .and_then(|before| portal::newly_waiting(before, &waiting));
-        let count = waiting.len();
-        p.waiting = Some(waiting);
-        if let Some(id) = edge.filter(|_| p.pushed.is_none_or(|at| at.elapsed() >= PUSH_GAP)) {
-            p.pushed = Some(Instant::now());
-            let payload = self.portal_push_payload(&id, count);
-            let Some(p) = self.portal.as_ref() else {
-                return;
-            };
-            portal_push::send_all(&p.dir, &p.config, payload);
-        }
-        let Some(p) = self.portal.as_mut() else {
-            return;
-        };
-        let mut out = Vec::new();
-        for (&ch, phone) in p.phones.iter_mut() {
-            let Some(id) = phone.watch.clone() else {
-                continue;
-            };
-            let Some(console) = self.consoles.get(&id) else {
-                if phone.screen != Some(0) {
-                    phone.screen = Some(0);
-                    let text = if self.paused.contains_key(&id) {
-                        "paused"
-                    } else {
-                        "Open this session once on the PC, then watch it here."
-                    };
-                    out.push((ch, json!({"t": "error", "text": text})));
-                }
-                continue;
-            };
-            let Ok(s) = console.screen.lock() else {
-                continue;
-            };
-            let screen = portal::screen_text(&s.term);
-            let size = console.size();
-            drop(s);
-            let msg = portal::screen_message(&id, size.cols as usize, size.rows as usize, &screen);
-            let print = fingerprint(&msg);
-            if phone.screen != Some(print) {
-                phone.screen = Some(print);
-                out.push((ch, msg));
-            }
-        }
-        for (ch, msg) in out {
-            p.send(ch, &msg);
-        }
-    }
-
-    /// Answers a phone's `changes`, or with `path` its `diff`, from a
-    /// thread of its own, since git can take a while in a big tree.
-    fn portal_changes(&self, ch: u32, id: &str, path: Option<String>) {
-        let Some(p) = &self.portal else {
-            return;
-        };
-        let Some((_, key)) = p.phones.get(&ch).and_then(|ph| ph.who.clone()) else {
-            return;
-        };
-        let session = self.shared.registry.lock().ok().and_then(|r| {
-            r.get(id)
-                .map(|s| (PathBuf::from(&s.cwd), s.worktree.clone()))
-        });
-        let outbox = p.link.outbox();
-        let id = id.to_string();
-        std::thread::spawn(move || {
-            let reply = match session {
-                Some((cwd, tree)) => changes_reply(&id, &cwd, tree.as_ref(), path.as_deref()),
-                None => json!({"t": "error", "text": "That session is not on the PC."}),
-            };
-            outbox.send(ch, &key, &reply);
-        });
     }
 
     /// The sessions message, from the registry. A session with no live
@@ -860,8 +446,8 @@ impl Portal {
     pub(super) fn look(&self) -> (bool, usize) {
         let phones = self
             .phones
-            .values()
-            .filter(|p| p.hello() && p.who.is_some())
+            .iter()
+            .filter(|(ch, who)| who.is_some() && self.server.greeted_on(**ch))
             .count();
         (self.relay_up, phones)
     }
@@ -869,18 +455,25 @@ impl Portal {
     /// Seals `msg` with the key of the phone on `ch` and sends it. A
     /// channel no key has opened yet gets nothing.
     fn send(&self, ch: u32, msg: &Value) {
-        if let Some((_, key)) = self.phones.get(&ch).and_then(|p| p.who.as_ref()) {
+        if let Some(Some((_, key))) = self.phones.get(&ch) {
             self.link.send(ch, key, msg);
         }
     }
 
-    /// Sends `msg` to every phone that said hello, each sealed with its
-    /// own key.
-    fn send_all(&self, msg: &Value) {
-        for (&ch, phone) in &self.phones {
-            if let (true, Some((_, key))) = (phone.hello(), &phone.who) {
-                self.link.send(ch, key, msg);
-            }
+    /// Sends what the server said: its messages now, and each job's
+    /// answer from a thread of its own, since git can take a while in a
+    /// big tree.
+    fn deliver(&self, out: Out) {
+        for (ch, msg) in &out.msgs {
+            self.send(*ch, msg);
+        }
+        for (ch, job) in out.later {
+            let Some(Some((_, key))) = self.phones.get(&ch) else {
+                continue;
+            };
+            let key = *key;
+            let outbox = self.link.outbox();
+            std::thread::spawn(move || outbox.send(ch, &key, &job()));
         }
     }
 
@@ -888,15 +481,16 @@ impl Portal {
     /// telling it why with the key it had, so a forgotten phone stops at
     /// once rather than at its next reconnect.
     fn unpair_forgotten(&mut self) {
-        for (&ch, phone) in self.phones.iter_mut() {
-            let Some((id, key)) = &phone.who else {
+        for (&ch, who) in self.phones.iter_mut() {
+            let Some((id, key)) = who else {
                 continue;
             };
             if self.config.phones.iter().any(|p| &p.id == id) {
                 continue;
             }
             self.link.send(ch, key, &json!({"t": "unpaired"}));
-            *phone = Phone::default();
+            *who = None;
+            self.server.open(ch);
         }
     }
 
@@ -916,7 +510,7 @@ impl Portal {
                         self.phones.get_mut(&ch),
                         horadric_core::portal::key32(&phone.key),
                     ) {
-                        slot.who = Some((phone.id.clone(), key));
+                        *slot = Some((phone.id.clone(), key));
                     }
                     json!({"t": "paired", "phone": phone.id, "key": phone.key})
                 }
@@ -932,62 +526,206 @@ impl Portal {
     }
 }
 
-/// A time in microseconds since 1970, the unit [`size_owner`] compares.
+impl Serve for Here<'_> {
+    fn name(&self) -> String {
+        std::env::var("COMPUTERNAME").unwrap_or_else(|_| "PC".to_string())
+    }
+
+    fn sessions(&self) -> Value {
+        self.0.portal_sessions()
+    }
+
+    fn projects(&self) -> Value {
+        self.0.portal_projects()
+    }
+
+    fn folders(&self) -> Value {
+        portal::folders_message(&self.0.portal_folders())
+    }
+
+    fn waiting(&self) -> HashSet<String> {
+        self.0.portal_waiting()
+    }
+
+    fn start(&mut self, project: &str) -> Result<String, String> {
+        self.0.portal_start(project)
+    }
+
+    fn resume(&mut self, id: &str) -> Result<(), String> {
+        self.0.resume(id, false)
+    }
+
+    fn create(&mut self, root: &str, name: &str) -> Result<(String, String), String> {
+        self.0.portal_create(root, name)
+    }
+
+    fn running(&self, id: &str) -> Running {
+        if let Some(c) = self.0.consoles.get(id) {
+            Running::Here(Arc::as_ptr(c) as usize as u64)
+        } else if self.0.paused.contains_key(id) {
+            Running::Paused
+        } else {
+            Running::Elsewhere
+        }
+    }
+
+    fn input(&mut self, id: &str, data: &str) {
+        if let Some(c) = self.0.consoles.get(id) {
+            c.note_typed_from_afar();
+            c.write(data.as_bytes().to_vec());
+        }
+    }
+
+    fn screen(&self, id: &str) -> Option<Value> {
+        let console = self.0.consoles.get(id)?;
+        let s = console.screen.lock().ok()?;
+        let screen = portal::screen_text(&s.term);
+        let size = console.size();
+        drop(s);
+        Some(portal::screen_message(
+            id,
+            size.cols as usize,
+            size.rows as usize,
+            &screen,
+        ))
+    }
+
+    fn size(&self, id: &str) -> Option<(u16, u16)> {
+        let size = self.0.consoles.get(id)?.size();
+        Some((size.cols, size.rows))
+    }
+
+    fn output_since(&self, id: &str, at: u64) -> Option<(Vec<u8>, u64)> {
+        self.0.consoles.get(id)?.raw_since(at)
+    }
+
+    fn output_replay(&self, id: &str) -> (u64, Vec<u8>) {
+        self.0
+            .consoles
+            .get(id)
+            .map_or((0, Vec::new()), |c| c.raw_replay())
+    }
+
+    fn typed_here(&self, id: &str) -> Option<u64> {
+        self.0.consoles.get(id)?.typed_here_at().map(micros)
+    }
+
+    fn hold_size(&mut self, id: &str, size: Option<(u16, u16)>) {
+        let Some(c) = self.0.consoles.get(id) else {
+            return;
+        };
+        match size {
+            Some((cols, rows)) => c.hold_size(GridSize { cols, rows }),
+            None => c.release_size(),
+        }
+    }
+
+    fn control(&self, _who: &str, _kind: Kind) -> bool {
+        // Nothing makes a link view only yet: that switch comes with
+        // joining brothers, and a phone the human paired may always act.
+        true
+    }
+
+    fn hello(&self, answer: &mut Value) {
+        if let Some(p) = &self.0.portal {
+            answer["vapid"] = json!(p.config.vapid_pub);
+        }
+    }
+
+    fn quests(&self) -> Option<Value> {
+        Some(self.0.portal_quests())
+    }
+
+    fn quest_add(&mut self, project: &str, title: &str, notes: &str) -> Result<String, String> {
+        self.0.portal_quest_add(project, title, notes)
+    }
+
+    fn rename(&mut self, id: &str, name: &str) -> Result<(), String> {
+        let known = self
+            .0
+            .shared
+            .registry
+            .lock()
+            .is_ok_and(|r| r.get(id).is_some());
+        if !known {
+            return Err("That session is gone.".to_string());
+        }
+        self.0.rename(id, name);
+        Ok(())
+    }
+
+    fn stop(&mut self, id: &str) -> Result<(), String> {
+        let app = &mut *self.0;
+        let known = app.consoles.contains_key(id)
+            || app.paused.contains_key(id)
+            || app
+                .shared
+                .registry
+                .lock()
+                .is_ok_and(|r| r.get(id).is_some());
+        if !known {
+            return Err("That session is gone.".to_string());
+        }
+        app.end(id);
+        Ok(())
+    }
+
+    fn reply(&self, id: &str) -> Option<String> {
+        self.0.portal_reply(id)
+    }
+
+    fn photo(&mut self, id: &str, name: &str, data: &str, now: u64) -> Result<String, String> {
+        self.0.portal_attach(id, name, data, now)
+    }
+
+    fn changes(&self, id: &str, path: Option<&str>) -> Job {
+        let session = self.0.shared.registry.lock().ok().and_then(|r| {
+            r.get(id)
+                .map(|s| (PathBuf::from(&s.cwd), s.worktree.clone()))
+        });
+        let id = id.to_string();
+        let path = path.map(str::to_string);
+        Box::new(move || match session {
+            Some((cwd, tree)) => changes_reply(&id, &cwd, tree.as_ref(), path.as_deref()),
+            None => json!({"t": "error", "text": "That session is not on the PC."}),
+        })
+    }
+
+    fn subscribe(&mut self, who: &str, sub: &Value) {
+        let (Some(p), Some(mut sub)) = (&self.0.portal, Subs::parse(sub)) else {
+            return;
+        };
+        if who.is_empty() {
+            return;
+        }
+        sub.phone = who.to_string();
+        let mut subs = Subs::load(&p.dir);
+        subs.add(sub);
+        let _ = subs.save(&p.dir);
+    }
+
+    fn unsubscribe(&mut self, endpoint: &str) {
+        let Some(p) = &self.0.portal else {
+            return;
+        };
+        let mut subs = Subs::load(&p.dir);
+        subs.remove(endpoint);
+        let _ = subs.save(&p.dir);
+    }
+
+    fn push(&mut self, id: &str, waiting: usize) {
+        let payload = self.0.portal_push_payload(id, waiting);
+        if let Some(p) = &self.0.portal {
+            portal_push::send_all(&p.dir, &p.config, payload);
+        }
+    }
+}
+
+/// A time in microseconds since 1970, the unit `size_owner` compares.
 fn micros(t: SystemTime) -> u64 {
     t.duration_since(UNIX_EPOCH)
         .map(|d| d.as_micros() as u64)
         .unwrap_or(0)
-}
-
-/// Sends one stream what it has not had: the size whenever it changed,
-/// then a replay for a new stream or a new console, else what came since.
-fn stream(
-    id: &str,
-    console: Option<&Arc<Console>>,
-    st: &mut Stream,
-    paused: bool,
-    mut send: impl FnMut(Value),
-) {
-    let Some(c) = console else {
-        if !st.missing {
-            st.missing = true;
-            st.next = None;
-            let text = if paused {
-                "paused"
-            } else {
-                "That session is not running on the PC."
-            };
-            send(json!({"t": "error", "id": id, "text": text}));
-        }
-        return;
-    };
-    st.missing = false;
-    let addr = Arc::as_ptr(c) as usize;
-    if st.console != addr {
-        st.console = addr;
-        st.next = None;
-    }
-    let size = c.size();
-    if st.told != Some((size.cols, size.rows)) {
-        st.told = Some((size.cols, size.rows));
-        send(portal::size_message(id, size.cols, size.rows));
-    }
-    let since = st.next.and_then(|at| c.raw_since(at).map(|got| (at, got)));
-    match since {
-        Some((at, (bytes, end))) => {
-            for m in portal::out_messages(id, at, &bytes, false) {
-                send(m);
-            }
-            st.next = Some(end);
-        }
-        None => {
-            let (start, bytes) = c.raw_replay();
-            for m in portal::out_messages(id, start, &bytes, true) {
-                send(m);
-            }
-            st.next = Some(start + bytes.len() as u64);
-        }
-    }
 }
 
 /// Notes that a paired phone was here now, unless it was lately.
@@ -1008,183 +746,53 @@ fn seen(dir: &Path, config: &mut Config, id: &str, now: u64) {
     *config = fresh;
 }
 
-/// Takes one phone's sealed message: what only the portal needs is done
-/// here, what needs the app goes into `asked`. A frame no known key opens
-/// is dropped, and so is any message after hello that does not belong to
-/// this connection.
-fn heard_from(p: &mut Portal, ch: u32, sealed: &[u8], now: u64, asked: &mut Asked) {
-    let phone = p.phones.entry(ch).or_default();
-    let msg = match &phone.who {
-        Some((_, key)) => {
+/// Takes one phone's sealed message: a pairing goes into `pairs`, the
+/// rest, opened, to the server. A frame no known key opens is dropped.
+fn heard_from(
+    p: &mut Portal,
+    ch: u32,
+    sealed: &[u8],
+    now: u64,
+    pairs: &mut Vec<(u32, String, [u8; 32])>,
+) {
+    let who = p.phones.entry(ch).or_default();
+    let (id, key, msg) = match who {
+        Some((id, key)) => {
             let Some(msg) = portal_crypto::open(key, sealed)
                 .and_then(|plain| serde_json::from_slice::<Value>(&plain).ok())
             else {
                 return;
             };
-            msg
+            (id.clone(), *key, msg)
         }
         None => match portal::identify(&p.config, sealed, now) {
             Some((Sender::Phone(id, key), msg)) => {
-                phone.who = Some((id, key));
-                msg
+                *who = Some((id.clone(), key));
+                (id, key, msg)
             }
             Some((Sender::Pairing(key), msg)) => {
                 if msg["t"] == "pair" {
                     let name = msg["name"].as_str().unwrap_or_default().to_string();
-                    asked.pairs.push((ch, name, key));
+                    pairs.push((ch, name, key));
                 }
                 return;
             }
             None => return,
         },
     };
-    let text = |k: &str| msg[k].as_str().map(str::to_string);
     if msg["t"] == "hello" {
+        seen(&p.dir, &mut p.config, &id, now);
+    }
+    let fresh = || {
         let mut s = [0u8; 16];
         portal_crypto::random(&mut s);
-        phone.s = b64url(&s);
-        phone.n = 0;
-        phone.kind = Kind::of_hello(&msg);
-        phone.v = answer_version(&msg);
-        // Nothing makes a link view only yet: that switch comes with
-        // joining brothers, and a phone the human paired may always act.
-        phone.control = true;
-        phone.streams.clear();
-        asked.hellos.push(ch);
-        if let Some((id, _)) = phone.who.clone() {
-            seen(&p.dir, &mut p.config, &id, now);
-        }
-        return;
-    }
-    if !phone.hello() || !fresh_message(&msg, &phone.s, &mut phone.n) {
-        return;
-    }
-    let t = msg["t"].as_str().unwrap_or_default();
-    if needs_control(t) && !phone.control {
-        if let Some((_, key)) = &phone.who {
-            p.link.send(
-                ch,
-                key,
-                &json!({"t": "error", "text": "view only", "for": t}),
-            );
-        }
-        return;
-    }
-    match msg["t"].as_str() {
-        Some("watch") => {
-            phone.watch = text("id");
-            phone.screen = None;
-        }
-        Some("unwatch") => {
-            phone.watch = None;
-            phone.screen = None;
-        }
-        Some("input") => {
-            if let (Some(id), Some(data)) = (text("id"), text("data")) {
-                if let Some(st) = phone.streams.get_mut(&id) {
-                    st.active = Some(micros(SystemTime::now()));
-                }
-                asked.inputs.push((ch, id, data));
-            }
-        }
-        Some("detach") => {
-            if let Some(id) = text("id") {
-                phone.streams.remove(&id);
-            }
-        }
-        Some("resize") => {
-            let size = portal::asked_size(&msg);
-            if let (Some(st), Kind::Brother) = (
-                text("id").and_then(|id| phone.streams.get_mut(&id)),
-                phone.kind,
-            ) {
-                st.want = size.or(st.want);
-            }
-        }
-        Some("start") => {
-            if let Some(project) = text("project") {
-                asked.starts.push((ch, project));
-            }
-        }
-        Some("resume") => {
-            if let Some(id) = text("id") {
-                asked.resumes.push((ch, id));
-            }
-        }
-        Some("folders") => asked.folders.push(ch),
-        Some("changes") => {
-            if let Some(id) = text("id") {
-                asked.changes.push((ch, id));
-            }
-        }
-        Some("diff") => {
-            if let (Some(id), Some(path)) = (text("id"), text("path")) {
-                asked.diffs.push((ch, id, path));
-            }
-        }
-        Some("quests") => {
-            phone.quests = true;
-            phone.quests_sent = None;
-        }
-        Some("quest_add") => {
-            if let (Some(project), Some(title)) = (text("project"), text("title")) {
-                let notes = text("notes").unwrap_or_default();
-                asked.quest_adds.push((ch, project, title, notes));
-            }
-        }
-        Some("rename") => {
-            if let (Some(id), Some(name)) = (text("id"), text("name")) {
-                asked.renames.push((ch, id, portal::session_name(&name)));
-            }
-        }
-        Some("stop") => {
-            if let Some(id) = text("id") {
-                asked.stops.push((ch, id));
-            }
-        }
-        Some("reply") => {
-            if let Some(id) = text("id") {
-                asked.replies.push((ch, id));
-            }
-        }
-        // With `data` it is a photo (0.24); without, a raw stream (v3).
-        Some("attach") => {
-            if let (Some(id), Some(data)) = (text("id"), text("data")) {
-                let name = text("name").unwrap_or_default();
-                asked.attaches.push((ch, id, name, data));
-            } else if let Some(id) = text("id") {
-                let want = portal::asked_size(&msg).filter(|_| phone.kind == Kind::Brother);
-                phone.streams.insert(
-                    id,
-                    Stream {
-                        want,
-                        ..Stream::default()
-                    },
-                );
-            }
-        }
-        Some("create") => {
-            if let (Some(root), Some(name)) = (text("root"), text("name")) {
-                asked.creates.push((ch, root, name));
-            }
-        }
-        Some("push") => {
-            let who = phone.who.as_ref().map(|(id, _)| id.clone());
-            if let (Some(mut sub), Some(who)) = (Subs::parse(&msg["sub"]), who) {
-                sub.phone = who;
-                let mut subs = Subs::load(&p.dir);
-                subs.add(sub);
-                let _ = subs.save(&p.dir);
-            }
-        }
-        Some("unpush") => {
-            if let Some(endpoint) = text("endpoint") {
-                let mut subs = Subs::load(&p.dir);
-                subs.remove(&endpoint);
-                let _ = subs.save(&p.dir);
-            }
-        }
-        _ => {}
+        b64url(&s)
+    };
+    for reply in p
+        .server
+        .heard(ch, &id, &msg, micros(SystemTime::now()), fresh)
+    {
+        p.link.send(ch, &key, &reply);
     }
 }
 
