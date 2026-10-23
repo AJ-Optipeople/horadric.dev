@@ -182,6 +182,17 @@ impl<E: Embed> Keeper<E> {
         self.model.is_some()
     }
 
+    /// The store, for the shared lore (`crate::share`): what another
+    /// brother sends lands in it and is embedded by [`Keeper::catch_up`]
+    /// with everything else still missing a vector.
+    pub fn store(&self) -> &Store {
+        &self.store
+    }
+
+    pub fn store_mut(&mut self) -> &mut Store {
+        &mut self.store
+    }
+
     /// The store's copy of each of `notes`, by note id, adding the ones it
     /// lacks. A copy whose text is not the note's (the lore was started
     /// over and an id came back) is not the note's, so it gets a new one.
