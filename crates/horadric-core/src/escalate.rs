@@ -318,7 +318,9 @@ pub fn record(text: &str, title: &str, run: &Run) -> Option<String> {
 }
 
 /// `text` with the quest `title`, put back to start over, escalated when
-/// its last run struggled. None when nothing is to be written.
+/// its last run struggled. Only [`changes`] says when: straight from the
+/// block or the send back that ended that run, so the last `Outcome:`
+/// line is that run's. None when nothing is to be written.
 pub fn starts_over(text: &str, title: &str) -> Option<String> {
     let task = tasks::parse(text).into_iter().find(|t| t.title == title)?;
     let last = task.notes.iter().rev().find_map(|n| Run::read(n))?;
@@ -349,10 +351,10 @@ pub fn changes(old: &[Task], new: &[Task], lands: bool) -> Vec<(String, Change)>
         if t.mark == before.mark || before.holder.is_none() {
             continue;
         }
-        let plain_block = t.wait.is_none() && t.after().is_empty();
+        let plain = |t: &Task| t.wait.is_none() && t.after().is_empty();
         let title = || t.title.clone();
         match (before.mark, t.mark) {
-            (Mark::Working, Mark::Blocked) if plain_block => {
+            (Mark::Working, Mark::Blocked) if plain(t) => {
                 out.push((title(), Change::Ended(Ending::Blocked)))
             }
             (Mark::Review, Mark::Working) => out.push((title(), Change::Ended(Ending::SentBack))),
@@ -360,7 +362,11 @@ pub fn changes(old: &[Task], new: &[Task], lands: bool) -> Vec<(String, Change)>
                 out.push((title(), Change::Ended(Ending::SentBack)));
                 out.push((title(), Change::StartsOver));
             }
-            (Mark::Working | Mark::Blocked, Mark::Open) => out.push((title(), Change::StartsOver)),
+            // Put back while still on the block that ended its last run.
+            // Put back from working, it worked since any struggle, so a
+            // session that died after a block answered in place does not
+            // escalate for that old block.
+            (Mark::Blocked, Mark::Open) if plain(before) => out.push((title(), Change::StartsOver)),
             (Mark::Working | Mark::Review, Mark::Done) if !lands => {
                 out.push((title(), Change::Ended(Ending::Done)))
             }
@@ -607,12 +613,16 @@ mod tests {
     fn only_a_held_run_ends_and_waits_do_not() {
         let old = parse(
             "- [/] A @a-1\n- [/] B @b-1\n- [/] C @c-1\n- [?] D @d-1\n- [/] E @e-1\n\
-             - [?] F @f-1\n- [ ] G\n- [ ] H\n- [!] I @i-1: why\n- [?] J @j-1\n- [!] K @k-1: why\n",
+             - [?] F @f-1\n- [ ] G\n- [ ] H\n- [!] I @i-1: why\n- [?] J @j-1\n- [!] K @k-1: why\n\
+             - [/] L @l-1\n- [!] M @m-1: later {on file: out.txt}\n",
         );
+        // L's session died while it worked and M only waited: neither
+        // starts over for a struggle.
         let new = parse(
             "- [!] A @a-1: which key?\n- [!] B @b-1: later {on file: out.txt}\n\
              - [!] C @c-1: needs it\n  After: A\n- [/] D @d-1\n- [x] E @e-1\n- [x] F @f-1\n\
-             - [!] G: no run\n- [x] H\n- [ ] I\n- [ ] J\n- [!] K @k-1: handed on\n",
+             - [!] G: no run\n- [x] H\n- [ ] I\n- [ ] J\n- [!] K @k-1: handed on\n\
+             - [ ] L\n- [ ] M\n",
         );
         let sb = Change::Ended(Ending::SentBack);
         let held = |lands| changes(&old, &new, lands);

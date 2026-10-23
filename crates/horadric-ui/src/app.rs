@@ -4670,6 +4670,12 @@ impl App {
     /// over settings the session brought itself.
     fn extra_args(&mut self, id: &str, program: &Path, args: &[String], cwd: &Path) -> Vec<String> {
         let bypass = self.bypasses_prompts(id);
+        match console::agent_of(program) {
+            Some(Agent::Claude) => {}
+            Some(other) => self.record_agent_launch(id, other.program()),
+            // A shell put in its place with `HORADRIC_AGENT`.
+            None => self.record_agent_launch(id, "other"),
+        }
         if console::agent_of(program) == Some(Agent::Codex) {
             let hook = store::exe_command(&console::host_program(), "hook codex");
             let mut extra = Agent::Codex.hook_args(&hook);

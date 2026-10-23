@@ -287,10 +287,31 @@ type RunChange = (PathBuf, String, Option<escalate::Run>);
 /// The changes to runs between two reads of the list of `key`, in `dir`,
 /// at `now`, each run with what the chronicle knows of it. A landing
 /// mode's done is left to the landing, which knows the checks.
-fn run_changes(key: &str, dir: &Path, old: &[Task], new: &[Task], now: u64) -> Vec<RunChange> {
+/// `keep_spend` is called for each run that ended, with its holder and
+/// title, before the chronicle is read: a run's tokens are its spend less
+/// the one kept when the run before it ended, so every run's end keeps one.
+fn run_changes(
+    key: &str,
+    dir: &Path,
+    old: &[Task],
+    new: &[Task],
+    now: u64,
+    keep_spend: impl Fn(&str, &str),
+) -> Vec<RunChange> {
     let changes = escalate::changes(old, new, file::mode(dir).lands());
     if changes.is_empty() {
         return Vec::new();
+    }
+    let holder = |title: &str| {
+        old.iter()
+            .find(|t| t.title == title)
+            .and_then(|t| t.holder.clone())
+            .unwrap_or_default()
+    };
+    for (title, change) in &changes {
+        if matches!(change, escalate::Change::Ended(_)) {
+            keep_spend(&holder(title), title);
+        }
     }
     let records = store::chronicle_all();
     changes
@@ -298,12 +319,7 @@ fn run_changes(key: &str, dir: &Path, old: &[Task], new: &[Task], now: u64) -> V
         .map(|(title, change)| {
             let run = match change {
                 escalate::Change::Ended(ending) => {
-                    let holder = old
-                        .iter()
-                        .find(|t| t.title == title)
-                        .and_then(|t| t.holder.clone())
-                        .unwrap_or_default();
-                    Some(run_of(&records, key, &holder, ending, now))
+                    Some(run_of(&records, key, &holder(&title), ending, now))
                 }
                 escalate::Change::StartsOver => None,
             };
@@ -500,7 +516,8 @@ impl App {
                 if let Some(old) = boards.get(key) {
                     // Before the marks are kept: a quest sent back is taken
                     // again, which would make its run look a moment long.
-                    let runs = run_changes(key, dir, &old.tasks, &fresh.tasks, at);
+                    let keep = |holder: &str, title: &str| self.keep_spend(key, holder, title, at);
+                    let runs = run_changes(key, dir, &old.tasks, &fresh.tasks, at, keep);
                     ended.extend(runs.into_iter().map(|r| (key.clone(), r)));
                     for r in chronicle::marks(key, &old.tasks, &fresh.tasks, at) {
                         store::chronicle(&r);
@@ -671,6 +688,25 @@ impl App {
     /// the model it ran on rather than what the notes say by then. Nothing
     /// for a session that holds no quest.
     pub(super) fn record_launch(&self, id: &str, args: &[String], extra: &[String]) {
+        let all: Vec<String> = extra.iter().chain(args).cloned().collect();
+        let model = escalate::launched_model(&all).unwrap_or(escalate::DEFAULT);
+        // Escalated only when the quest's own line chose it, not the
+        // session's arguments.
+        let chosen = Agent::Claude.chosen(Setting::Model, args);
+        self.keep_launch(id, model, |task| {
+            !chosen && task.model() == Some(model) && escalate::chosen_by_escalation(&task.notes)
+        });
+    }
+
+    /// Keeps that session `id` runs its quest on another agent than Claude
+    /// Code, `name`, which names no quest model, so the run is left out of
+    /// what Warriv is told by model rather than credited to one it never
+    /// ran on.
+    pub(super) fn record_agent_launch(&self, id: &str, name: &str) {
+        self.keep_launch(id, name, |_| false);
+    }
+
+    fn keep_launch(&self, id: &str, model: &str, escalated: impl Fn(&Task) -> bool) {
         let held = self.shared.boards.borrow().iter().find_map(|(key, b)| {
             b.tasks
                 .iter()
@@ -680,13 +716,7 @@ impl App {
         let Some((key, task)) = held else {
             return;
         };
-        let all: Vec<String> = extra.iter().chain(args).cloned().collect();
-        let model = escalate::launched_model(&all).unwrap_or(escalate::DEFAULT);
-        // Escalated only when the quest's own line chose it, not the
-        // session's arguments.
-        let escalated = !Agent::Claude.chosen(Setting::Model, args)
-            && task.model() == Some(model)
-            && escalate::chosen_by_escalation(&task.notes);
+        let escalated = escalated(&task);
         store::chronicle(&chronicle::Record {
             at: unix_now(),
             project: key,
