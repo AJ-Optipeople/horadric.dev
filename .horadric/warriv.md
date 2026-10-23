@@ -121,3 +121,4 @@
 ## Open
 - Once quests run with a pack, the pack comparison resumes by itself.
 - "Memory: no recall on a task notification" handed to the human to restart (2026-10-17); when it lands, cast Ship Local.
+- Answered: on "Memory: no recall on a task notification, and none of them kept as dialogue" you asked "Restart it: its session died with a dev instance 14 hours ago and nothing runs it now.". The human settled it without words Horadric heard: read the quest and its notes for how.
