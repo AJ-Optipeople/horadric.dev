@@ -48,7 +48,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOWNOACTIVATE, SW_SHOWNORMAL, WINDOW_EX_STYLE,
     WMSZ_BOTTOM, WMSZ_BOTTOMLEFT, WMSZ_BOTTOMRIGHT, WMSZ_LEFT, WMSZ_RIGHT, WMSZ_TOP, WMSZ_TOPLEFT,
     WMSZ_TOPRIGHT, WM_CAPTURECHANGED, WM_CLOSE, WM_DPICHANGED, WM_ENTERSIZEMOVE, WM_ERASEBKGND,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOVING, WM_NCACTIVATE, WM_NCCALCSIZE,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOVE, WM_MOVING, WM_NCACTIVATE, WM_NCCALCSIZE,
     WM_NCCREATE, WM_NCDESTROY, WM_NCHITTEST, WM_NCLBUTTONDBLCLK, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP,
     WM_NCMOUSEMOVE, WM_NCRBUTTONUP, WM_PAINT, WM_SETCURSOR, WM_SETFOCUS, WM_SETICON, WM_SIZE,
     WM_SIZING, WM_SYSCOMMAND, WM_TIMER, WNDCLASSW, WS_CLIPCHILDREN, WS_OVERLAPPEDWINDOW,
@@ -1514,6 +1514,13 @@ impl TerminalWindow {
                     );
                 }
                 Some(LRESULT(0))
+            }
+            // A child window gets no WM_MOVE when its top level moves.
+            WM_MOVE => {
+                for p in self.panes.borrow().iter() {
+                    p.moved();
+                }
+                None
             }
             WM_ENTERSIZEMOVE => {
                 *self.others.borrow_mut() = snapping::others(self.hwnd);

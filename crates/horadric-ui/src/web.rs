@@ -729,6 +729,7 @@ fn wake(key: &str, view: &ICoreWebView2) -> Option<u64> {
             };
             let _ = c.SetParentWindow(park_hwnd());
             let _ = c.SetBounds(bounds);
+            let _ = c.NotifyParentWindowPositionChanged();
             let _ = c.SetIsVisible(true);
         }
     }
@@ -1181,6 +1182,22 @@ pub fn set_bounds(key: &str, bounds: RECT, zoom: f64) {
     }
 }
 
+/// The pane moved without changing size, or the stage it is on moved:
+/// WebView2 draws where it last knew the window was until told, which
+/// left a page offset and cropped, with white around it, after a project
+/// switch moved its pane.
+pub fn moved(key: &str) {
+    let shown = WEBS.with(|w| {
+        let w = w.borrow();
+        let web = w.get(key)?;
+        web.pane?;
+        web.tabs.get(web.active)?.controller.clone()
+    });
+    if let Some(c) = shown {
+        let _ = unsafe { c.NotifyParentWindowPositionChanged() };
+    }
+}
+
 /// Puts every tab of the project's browser in its pane, only the chosen
 /// one visible and at the pane's bounds, or all of them hidden on the app
 /// window while no pane shows it. The header is drawn again, since the
@@ -1269,10 +1286,12 @@ fn place(tab: &mut Tab, zoom: f64, fitted: bool) -> Option<f64> {
 
 /// Bounds, then zoom, so the page lays out once at its size. A sized page
 /// keeps its zoom: Ctrl and the wheel would change the size it lays out
-/// at.
+/// at. Bounds the same as before are no news to WebView2, so a page moved
+/// to another parent or place is told its window moved as well.
 fn apply(c: &ICoreWebView2Controller, bounds: RECT, zoom: Option<f64>, fitted: bool) {
     unsafe {
         let _ = c.SetBounds(bounds);
+        let _ = c.NotifyParentWindowPositionChanged();
         if let Some(z) = zoom {
             let _ = c.SetZoomFactor(z);
         }

@@ -63,9 +63,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_CAPTURECHANGED, WM_CHAR, WM_DEADCHAR, WM_DESTROY, WM_DPICHANGED_AFTERPARENT, WM_DROPFILES,
     WM_ERASEBKGND, WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS, WM_LBUTTONDBLCLK,
     WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE,
-    WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR,
-    WM_SETFOCUS, WM_SIZE, WM_SYSCHAR, WM_SYSDEADCHAR, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER,
-    WM_USER, WNDCLASSW, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_VISIBLE,
+    WM_MOUSEWHEEL, WM_MOVE, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP,
+    WM_SETCURSOR, WM_SETFOCUS, WM_SIZE, WM_SYSCHAR, WM_SYSDEADCHAR, WM_SYSKEYDOWN, WM_SYSKEYUP,
+    WM_TIMER, WM_USER, WNDCLASSW, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_VISIBLE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowRect, SetParent, GWLP_HWNDPARENT, GWL_EXSTYLE, GWL_STYLE, HWND_TOP, SWP_FRAMECHANGED,
@@ -749,6 +749,14 @@ impl Pane {
     /// shell has no conversation to bring back.
     fn stashes(&self) -> bool {
         self.is_session() && !self.console.shell
+    }
+
+    /// The pane, or the stage it is on, moved: a browser pane's page is
+    /// told, so it draws where the pane is now.
+    pub fn moved(&self) {
+        if let Some(key) = &self.console.web {
+            web::moved(key);
+        }
     }
 
     pub fn invalidate(&self) {
@@ -2623,6 +2631,12 @@ impl Pane {
                     self.fit_grid();
                 }
                 self.invalidate();
+                Some(LRESULT(0))
+            }
+            // A project switch lays the panes out again, and a pane that
+            // only moves gets no WM_SIZE to place its page by.
+            WM_MOVE => {
+                self.moved();
                 Some(LRESULT(0))
             }
             WM_DPICHANGED_AFTERPARENT => {
