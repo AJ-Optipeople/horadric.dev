@@ -100,6 +100,7 @@ pub fn new(args: &[String]) -> Result<(), String> {
 
 /// `horadric found <name>`: make a project from the town and start its first
 /// session there, with what the town settled as the first prompt.
+#[cfg(not(target_os = "linux"))]
 pub fn found(args: &[String]) -> Result<(), String> {
     let mut name: Option<String> = None;
     let mut parent: Option<PathBuf> = None;

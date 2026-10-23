@@ -136,13 +136,21 @@ pub fn instance() -> String {
 
 /// Where this Horadric keeps its state: `%APPDATA%\Horadric`, or
 /// `Horadric-dev` for a dev instance, which must never touch the real one.
-/// On a Mac the same names under `~/Library/Application Support`.
+/// On a Mac the same names under `~/Library/Application Support`, on
+/// Linux under `$XDG_STATE_HOME` (`~/.local/state`).
 pub fn state_dir() -> Option<std::path::PathBuf> {
     #[cfg(windows)]
     let base = std::env::var_os("APPDATA").map(std::path::PathBuf::from);
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
     let base = std::env::var_os("HOME")
         .map(|h| std::path::PathBuf::from(h).join("Library/Application Support"));
+    #[cfg(not(any(windows, target_os = "macos")))]
+    let base = std::env::var_os("XDG_STATE_HOME")
+        .map(std::path::PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| {
+            std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".local/state"))
+        });
     base.map(|b| b.join(state_name()))
 }
 

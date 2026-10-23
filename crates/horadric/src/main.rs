@@ -33,10 +33,14 @@ mod install;
 mod lore;
 #[cfg(windows)]
 mod mcp;
+#[cfg(target_os = "linux")]
+mod node;
+mod node_wire;
 #[cfg(windows)]
 mod portal;
 #[cfg(windows)]
 mod release;
+#[cfg(not(target_os = "linux"))]
 mod reload;
 mod run;
 #[cfg(windows)]
@@ -46,18 +50,24 @@ mod runeword;
 #[cfg(windows)]
 mod setup;
 mod status;
+#[cfg(not(target_os = "linux"))]
 mod task;
 
 use std::io::Read;
+#[cfg(not(target_os = "linux"))]
 use std::net::TcpStream;
+#[cfg(not(target_os = "linux"))]
 use std::path::Path;
-use std::process::{Command, ExitCode, Stdio};
+use std::process::ExitCode;
+#[cfg(not(target_os = "linux"))]
+use std::process::{Command, Stdio};
+#[cfg(not(target_os = "linux"))]
 use std::time::{Duration, Instant};
 
 /// Where a user finds the running app, to end the lines that mention it.
 #[cfg(windows)]
 const WHERE: &str = "Its icon is in the tray, by the clock.";
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
 const WHERE: &str = "Its icon is in the menu bar.";
 
 const USAGE: &str = "\
@@ -78,6 +88,11 @@ Usage:
                                `quest add|list --project NAME` works on another project
   horadric found <name>          Make a project from the town: folder, git, README, first session
   horadric projects              Every known project: folder, sessions, open quests, last commit
+  horadric node [install|--stdio]
+                               Linux: run the hook listener and the session hosts with
+                               no tiles; install that as a systemd user service with the
+                               Claude Code hooks; or speak to the running node on stdin and
+                               stdout, as `ssh <host> horadric node --stdio` does
   horadric heavy -- COMMAND...    Run a test suite or build once no other session on this
                                machine runs one; alone, say who runs one now
   horadric guard [read|shell]    The PreToolUse hook that turns whole reads of long files
@@ -172,9 +187,14 @@ fn main() -> ExitCode {
         #[cfg(windows)]
         Some("google") => google::run(&args[1..]),
         // `task` is how sessions started before the rename report back.
+        #[cfg(not(target_os = "linux"))]
         Some("quest" | "task") => task::run(&args[1..]),
+        #[cfg(not(target_os = "linux"))]
         Some("projects") => task::projects(),
+        #[cfg(not(target_os = "linux"))]
         Some("found") => run::found(&args[1..]),
+        #[cfg(target_os = "linux")]
+        Some("node") => node::run(&args[1..]),
         #[cfg(windows)]
         Some("runeword") => runeword::run(&args[1..]),
         #[cfg(windows)]
@@ -191,6 +211,11 @@ fn main() -> ExitCode {
         None if !std::io::IsTerminal::is_terminal(&std::io::stdout()) => {
             horadric_ui::mac::run(horadric_hooks::port(), false)
         }
+        #[cfg(target_os = "linux")]
+        None => Err(format!(
+            "on Linux Horadric is a node, see `horadric node`\n\n{USAGE}"
+        )),
+        #[cfg(not(target_os = "linux"))]
         None => std::env::current_exe()
             .map_err(|e| e.to_string())
             .and_then(|exe| launch(&exe)),
@@ -212,6 +237,7 @@ fn main() -> ExitCode {
         ),
         #[cfg(target_os = "macos")]
         Some("bundle") => install::bundle_command(&args[1..]),
+        #[cfg(not(target_os = "linux"))]
         Some("reload") => reload::request(&args[1..]),
         #[cfg(windows)]
         Some("release") => release::run(&args[1..]),
@@ -227,6 +253,7 @@ fn main() -> ExitCode {
         Some("sky") => lore::sky(),
         #[cfg(windows)]
         Some("backup") => backup::run(&args[1..]),
+        #[cfg(not(target_os = "linux"))]
         Some("swap") => reload::swap(&args[1..]),
         Some("install") => install_command(),
         Some("uninstall") => uninstall_command(),
@@ -251,10 +278,13 @@ fn changes_machine(args: &[String]) -> bool {
     let words: Vec<&str> = args.iter().take(2).map(String::as_str).collect();
     matches!(
         words.as_slice(),
-        ["install" | "uninstall", ..] | ["hooks" | "explorer", "install" | "uninstall"]
+        ["install" | "uninstall", ..]
+            | ["hooks" | "explorer", "install" | "uninstall"]
+            | ["node", "install"]
     )
 }
 
+#[cfg(not(target_os = "linux"))]
 fn running() -> bool {
     let port = horadric_hooks::port();
     TcpStream::connect_timeout(&([127, 0, 0, 1], port).into(), Duration::from_millis(200)).is_ok()
@@ -275,6 +305,7 @@ fn host() -> Result<(), String> {
     horadric_pty::host::serve(spec).map_err(|e| format!("could not start the agent: {e}"))
 }
 
+#[cfg(not(target_os = "linux"))]
 /// The sessions whose hosts run with no app to show them, after a crash or
 /// a Quit that kept them.
 fn orphans() -> Vec<String> {
@@ -283,6 +314,7 @@ fn orphans() -> Vec<String> {
 }
 
 /// Starts `exe app` hidden and detached, and waits until it listens.
+#[cfg(not(target_os = "linux"))]
 fn launch(exe: &Path) -> Result<(), String> {
     if running() {
         println!("Horadric is already running. {WHERE}");
@@ -321,6 +353,7 @@ fn launch(exe: &Path) -> Result<(), String> {
 /// The app started from a terminal must outlive it. Windows gives it no
 /// console; elsewhere it gets a session of its own, so the hang up a
 /// closing terminal sends never reaches it.
+#[cfg(not(target_os = "linux"))]
 pub(crate) fn detach(cmd: &mut Command) -> &mut Command {
     #[cfg(unix)]
     {
@@ -419,6 +452,21 @@ fn uninstall_command() -> Result<(), String> {
     Ok(())
 }
 
+/// A node is installed with its own command, which knows systemd.
+#[cfg(target_os = "linux")]
+fn install_command() -> Result<(), String> {
+    Err("on Linux Horadric is a node: `horadric node install`".into())
+}
+
+#[cfg(target_os = "linux")]
+fn uninstall_command() -> Result<(), String> {
+    Err(
+        "on Linux: `systemctl --user disable --now horadric.service`, \
+         then `horadric hooks uninstall`"
+            .into(),
+    )
+}
+
 #[cfg(windows)]
 fn explorer_command(sub: Option<&str>) -> Result<(), String> {
     use horadric_ui::explorer;
@@ -457,16 +505,21 @@ fn hooks(sub: Option<&str>) -> Result<(), String> {
             install::install(&path, port).map_err(|e| format!("{}: {e}", path.display()))?;
             println!("installed Horadric hooks in {}", path.display());
             println!("posting to {}", horadric_hooks::hook_url(port));
-            let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-            if let Some(grok) = crate::install::grok_hooks(&exe)? {
-                println!("installed Grok Build hooks in {}", grok.display());
+            #[cfg(not(target_os = "linux"))]
+            {
+                let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+                if let Some(grok) = crate::install::grok_hooks(&exe)? {
+                    println!("installed Grok Build hooks in {}", grok.display());
+                }
             }
             Ok(())
         }
         Some("uninstall") => {
             install::uninstall(&path).map_err(|e| format!("{}: {e}", path.display()))?;
             println!("removed Horadric hooks from {}", path.display());
-            crate::install::remove_grok_hooks()
+            #[cfg(not(target_os = "linux"))]
+            crate::install::remove_grok_hooks()?;
+            Ok(())
         }
         Some("status") => {
             let ok =
@@ -499,6 +552,7 @@ mod tests {
             "uninstall",
             "hooks install",
             "explorer uninstall",
+            "node install",
         ] {
             assert!(changes_machine(&args(line)), "{line}");
         }
@@ -509,6 +563,8 @@ mod tests {
             "hooks status",
             "explorer",
             "serve",
+            "node",
+            "node --stdio",
         ] {
             assert!(!changes_machine(&args(line)), "{line}");
         }
