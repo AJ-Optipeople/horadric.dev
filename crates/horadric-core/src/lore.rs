@@ -3,8 +3,13 @@
 //!
 //! A note is a fact and the files it is about, each with a hash of what
 //! the file held when the note was taken, and the commit the project was
-//! at. A note whose file has changed since is shown as maybe stale, never
-//! hidden: it may still be true, and the agent can check. How a note is
+//! at. Where the note names symbols of a file (a function, a type, a
+//! const), each of those is kept with a hash of its own source too, and
+//! only a change to one of them makes the note maybe stale: a busy file
+//! changes daily, the code a note is about far less often. A note that
+//! names none of a file's symbols is judged by the whole file. A stale
+//! note is shown as maybe stale, never hidden: it may still be true, and
+//! the agent can check. How a note is
 //! found, by meaning, words and files, is in `horadric_memory::recall`.
 
 use serde::{Deserialize, Serialize};
@@ -58,6 +63,15 @@ pub struct Note {
     /// (`2026-10#12`), so what was said can be read again.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sources: Vec<String>,
+    /// The symbols of its files it names, as they were when it was taken.
+    /// A file of it with none here is judged whole.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parts: Vec<Part>,
+    /// Whether its files were looked at for symbols it names. A note from
+    /// before symbols were kept, or left where no code index runs, is
+    /// looked at later, once.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub parted: bool,
 }
 
 impl Note {
@@ -92,6 +106,145 @@ pub struct Mark {
     pub path: String,
     /// [`hash`] of its bytes, None when it did not exist.
     pub hash: Option<u64>,
+}
+
+/// A symbol of a file as the code index reads it: its kind (`fn`,
+/// `struct`, `class`), its name, and the [`hash`] of its source lines.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Piece {
+    pub kind: String,
+    pub name: String,
+    pub hash: u64,
+}
+
+/// A symbol a note names, as it was when the note was taken. Every
+/// symbol of the file with that name counts as one, so a note about
+/// `new` speaks for each `new` in the file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Part {
+    pub path: String,
+    pub kind: String,
+    pub name: String,
+    pub hash: u64,
+}
+
+/// Kinds of symbol too wide to say what a note is about: an impl block or
+/// a module holds most of a busy file.
+const WIDE: &[&str] = &["impl", "mod", "namespace"];
+
+/// The names in `text` written as code: with an underscore or a capital
+/// past the first letter (`grid_of`, `NoteId`), a capitalised word not
+/// opening a sentence (`Console`), or a plain word in backticks, after a
+/// path or a field (`Limits::merge`, `App.skies`), before a call or a
+/// path (`merge(`, `tasks::`), or after a keyword (`fn recall`). A plain
+/// English word in prose is not taken for the symbol it happens to name.
+pub fn code_names(text: &str) -> Vec<String> {
+    const KEYWORDS: &[&str] = &[
+        "fn",
+        "struct",
+        "enum",
+        "trait",
+        "const",
+        "static",
+        "type",
+        "def",
+        "class",
+        "function",
+        "interface",
+        "union",
+        "macro",
+    ];
+    let ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    let mut out: Vec<String> = Vec::new();
+    // Backticks so far: an odd count is inside a pair.
+    let mut ticks = 0;
+    let mut last: Option<(usize, &str)> = None;
+    let mut at = 0;
+    for (i, c) in text.char_indices() {
+        if i < at {
+            continue;
+        }
+        if c == '`' {
+            ticks += 1;
+        }
+        if !ident(c) {
+            continue;
+        }
+        let end = text[i..]
+            .find(|c: char| !ident(c))
+            .map_or(text.len(), |n| i + n);
+        at = end;
+        let word = &text[i..end];
+        let head = &text[..i];
+        let tail = &text[end..];
+        let prose = head.trim_end();
+        let opens = prose.is_empty() || prose.ends_with(['.', '!', '?', ':', '\n']);
+        let field = head.ends_with('.') && head[..head.len() - 1].ends_with(ident);
+        let keyword = last.is_some_and(|(e, w)| KEYWORDS.contains(&w) && &text[e..i] == " ");
+        let code = word.contains('_')
+            || word.chars().skip(1).any(|c| c.is_ascii_uppercase())
+            || (word.starts_with(|c: char| c.is_ascii_uppercase()) && !opens)
+            || ticks % 2 == 1
+            || head.ends_with("::")
+            || field
+            || tail.starts_with(['(', '!'])
+            || tail.starts_with("::")
+            || keyword;
+        let long = word.len() >= 3 && !word.starts_with(|c: char| c.is_ascii_digit());
+        if code && long && !out.iter().any(|o| o == word) {
+            out.push(word.to_string());
+        }
+        last = Some((end, word));
+    }
+    out
+}
+
+/// The symbols of `path` that `text` names, from the file's `pieces` as
+/// they are now, to keep with the note.
+pub fn parts_of(text: &str, path: &str, pieces: &[Piece]) -> Vec<Part> {
+    let names = code_names(text);
+    let mut out: Vec<Part> = Vec::new();
+    for p in pieces {
+        if WIDE.contains(&p.kind.as_str())
+            || !names.contains(&p.name)
+            || out.iter().any(|o| o.name == p.name)
+        {
+            continue;
+        }
+        if let Some((kind, hash)) = whole(pieces, &p.name) {
+            out.push(Part {
+                path: path.to_string(),
+                kind: kind.to_string(),
+                name: p.name.clone(),
+                hash,
+            });
+        }
+    }
+    out
+}
+
+/// The kind of the first symbol named `name` and one hash of all of
+/// them, in order, so a change to any one of them shows.
+fn whole<'a>(pieces: &'a [Piece], name: &str) -> Option<(&'a str, u64)> {
+    let same: Vec<&Piece> = pieces
+        .iter()
+        .filter(|p| p.name == name && !WIDE.contains(&p.kind.as_str()))
+        .collect();
+    let first = same.first()?;
+    let bytes: Vec<u8> = same.iter().flat_map(|p| p.hash.to_le_bytes()).collect();
+    Some((&first.kind, hash(&bytes)))
+}
+
+/// What a hit says of a `part` whose file's symbols are now `pieces`:
+/// None while it is as it was, else `fn recall in src/a.rs`, with
+/// `(gone)` when no symbol has its name any more.
+pub fn part_changed(part: &Part, pieces: &[Piece]) -> Option<String> {
+    let said = format!("{} {} in {}", part.kind, part.name, part.path);
+    match whole(pieces, &part.name) {
+        Some((_, h)) if h == part.hash => None,
+        Some(_) => Some(said),
+        None => Some(format!("{said} (gone)")),
+    }
 }
 
 impl Lore {
@@ -172,6 +325,8 @@ impl Lore {
             at,
             since: origin.since.filter(|s| *s < at),
             sources,
+            parts: Vec::new(),
+            parted: false,
         });
         if self.notes.len() > MOST_NOTES {
             let over = self.notes.len() - MOST_NOTES;
@@ -320,6 +475,20 @@ pub fn quest_note(title: &str, summary: &str) -> String {
 }
 
 impl Lore {
+    /// Keeps the symbols note `id` names, found by looking at its files,
+    /// so it is judged by them from now on. A note looked at before, or
+    /// gone, is left alone. True when it was kept.
+    pub fn set_parts(&mut self, id: u64, parts: Vec<Part>) -> bool {
+        match self.notes.iter_mut().find(|n| n.id == id && !n.parted) {
+            Some(n) => {
+                n.parts = parts;
+                n.parted = true;
+                true
+            }
+            None => false,
+        }
+    }
+
     /// The notes taken when the quest `title` ended before, which a new
     /// one for it replaces.
     pub fn of_quest(&self, title: &str) -> Vec<u64> {
@@ -468,6 +637,101 @@ mod tests {
         )
         .unwrap();
         l
+    }
+
+    fn piece(kind: &str, name: &str, hash: u64) -> Piece {
+        Piece {
+            kind: kind.into(),
+            name: name.into(),
+            hash,
+        }
+    }
+
+    #[test]
+    fn code_names_are_the_words_written_as_code() {
+        let text = "The feeder merges with Limits::merge, kept in App.skies by grid_of. \
+                    Then `paint` and fn recall run, show(x) too, but a new pane and the \
+                    words show and draw in prose are not code. Notes go to app.rs.";
+        let names = code_names(text);
+        for want in [
+            "Limits", "merge", "App", "skies", "grid_of", "paint", "recall", "show",
+        ] {
+            assert!(names.contains(&want.to_string()), "{want} in {names:?}");
+        }
+        for not in [
+            "The", "Then", "Notes", "new", "pane", "draw", "words", "app", "feeder",
+        ] {
+            assert!(!names.contains(&not.to_string()), "{not} in {names:?}");
+        }
+    }
+
+    #[test]
+    fn parts_are_the_named_symbols_and_not_the_wide_ones() {
+        let pieces = [
+            piece("impl", "App", 1),
+            piece("struct", "App", 2),
+            piece("fn", "new", 3),
+            piece("fn", "grid_of", 4),
+            piece("fn", "new", 5),
+            piece("fn", "paint", 6),
+        ];
+        let parts = parts_of("App::new lays out by grid_of.", "src/app.rs", &pieces);
+        let names: Vec<(&str, &str)> = parts
+            .iter()
+            .map(|p| (p.kind.as_str(), p.name.as_str()))
+            .collect();
+        assert_eq!(names, [("struct", "App"), ("fn", "new"), ("fn", "grid_of")]);
+        assert!(parts.iter().all(|p| p.path == "src/app.rs"));
+        assert!(parts_of("Nothing named here.", "src/app.rs", &pieces).is_empty());
+    }
+
+    #[test]
+    fn a_part_changed_when_any_symbol_of_its_name_did() {
+        let then = [
+            piece("fn", "new", 3),
+            piece("fn", "new", 5),
+            piece("fn", "x", 7),
+        ];
+        let part = parts_of("Both `new` do it.", "a.rs", &then).remove(0);
+        // Another symbol changing, or the file moving around it, is not it.
+        let moved = [
+            piece("fn", "x", 8),
+            piece("fn", "new", 3),
+            piece("fn", "new", 5),
+        ];
+        assert_eq!(part_changed(&part, &moved), None);
+        let edited = [piece("fn", "new", 3), piece("fn", "new", 6)];
+        assert_eq!(
+            part_changed(&part, &edited).as_deref(),
+            Some("fn new in a.rs")
+        );
+        let gone = [piece("fn", "x", 7)];
+        assert_eq!(
+            part_changed(&part, &gone).as_deref(),
+            Some("fn new in a.rs (gone)")
+        );
+    }
+
+    #[test]
+    fn parts_are_set_once_on_a_note_that_is_there() {
+        let mut l = lore();
+        let part = Part {
+            path: "crates/horadric-ui/src/render.rs".into(),
+            kind: "fn".into(),
+            name: "frame".into(),
+            hash: 9,
+        };
+        assert!(l.set_parts(1, vec![part.clone()]));
+        assert!(l.notes[0].parted);
+        assert_eq!(l.notes[0].parts, [part]);
+        assert!(!l.set_parts(1, Vec::new()), "looked at once");
+        assert_eq!(l.notes[0].parts.len(), 1);
+        assert!(!l.set_parts(99, Vec::new()));
+        let json = serde_json::to_string(&l.notes[1]).unwrap();
+        assert!(
+            !json.contains("parts") && !json.contains("parted"),
+            "{json}"
+        );
     }
 
     #[test]

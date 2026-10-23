@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use horadric_core::lore::{Lore, Note, Past};
 
 use crate::horadrim::{self, Tongue, MARK, TOLD};
-use crate::recall::{self, Ask, Candidate, Source};
+use crate::recall::{self, Ask, Candidate, Now, Source};
 use crate::store::{Chunk, ChunkId, FileMark, Kind, Store};
 use crate::transcripts::{self, Format};
 use crate::Embedder;
@@ -182,6 +182,17 @@ impl<E: Embed> Keeper<E> {
         self.model.is_some()
     }
 
+    /// The store, for the shared lore (`crate::share`): what another
+    /// brother sends lands in it and is embedded by [`Keeper::catch_up`]
+    /// with everything else still missing a vector.
+    pub fn store(&self) -> &Store {
+        &self.store
+    }
+
+    pub fn store_mut(&mut self) -> &mut Store {
+        &mut self.store
+    }
+
     /// The store's copy of each of `notes`, by note id, adding the ones it
     /// lacks. A copy whose text is not the note's (the lore was started
     /// over and an id came back) is not the note's, so it gets a new one.
@@ -214,8 +225,8 @@ impl<E: Embed> Keeper<E> {
     /// for. With `across`, which reads another project's lore, other
     /// projects' memory too. Notes the model has not embedded yet are
     /// embedded first, newest first, for at most `budget`; the rest are
-    /// found by words until the background catches up. `now_hash` says
-    /// what a file's hash is now, for staleness. `known` is the sigils the
+    /// found by words until the background catches up. `files` says
+    /// what the files are now, for staleness. `known` is the sigils the
     /// asking session was told before. With `unasked` the answer is only
     /// what clears its bar, empty when nothing does.
     // Each is a different thing the app knows of the asking session; a
@@ -228,7 +239,7 @@ impl<E: Embed> Keeper<E> {
         ask: &Ask,
         across: Option<Theirs>,
         budget: Duration,
-        now_hash: impl Fn(&str) -> Option<u64>,
+        files: &dyn Now,
         known: &[String],
         unasked: Option<Unasked>,
     ) -> Result<Answer, String> {
@@ -334,7 +345,7 @@ impl<E: Embed> Keeper<E> {
             None => Vec::new(),
         };
         let mut found = recall::rank(ask, &cands, &meaning, |i| {
-            !recall::changed(&cands[i], &now_hash).is_empty()
+            !recall::stale(&cands[i], files).is_empty()
         });
         if let Some(u) = unasked {
             found = recall::offered(
@@ -356,7 +367,7 @@ impl<E: Embed> Keeper<E> {
             .iter()
             .map(|&(i, _)| recall::id_of(&cands[i]))
             .collect();
-        let hits = recall::hits(&cands, &found, ask.now, &now_hash);
+        let hits = recall::hits(&cands, &found, ask.now, files);
         let plain = || Answer {
             text: horadrim::plain(&hits),
             given: Vec::new(),
@@ -392,7 +403,7 @@ impl<E: Embed> Keeper<E> {
                 .collect();
             lex.grow(
                 texts.iter().map(String::as_str),
-                |p| now_hash(p).is_some(),
+                |p| files.hash(p).is_some(),
                 ask.now,
             );
         }
@@ -423,7 +434,7 @@ impl<E: Embed> Keeper<E> {
         id: &str,
         across: bool,
         now: u64,
-        now_hash: impl Fn(&str) -> Option<u64>,
+        files: &dyn Now,
     ) -> Result<Answer, String> {
         if id.trim() == "lexicon" {
             let tongue = Tongue::load(&self.dir).map_err(|e| e.to_string())?;
@@ -431,7 +442,7 @@ impl<E: Embed> Keeper<E> {
         }
         self.store.refresh().map_err(|e| e.to_string())?;
         Ok(Answer {
-            text: unroll(&self.store, project, lore, id, across, now, now_hash)?,
+            text: unroll_in(&self.store, project, lore, id, across, now, files)?,
             ..Answer::default()
         })
     }
@@ -504,6 +515,20 @@ pub fn unroll(
     now: u64,
     now_hash: impl Fn(&str) -> Option<u64>,
 ) -> Result<String, String> {
+    let files = recall::hashes(now_hash);
+    unroll_in(store, project, lore, id, across, now, &files)
+}
+
+/// [`unroll`], judging staleness by `files`, which may read symbols.
+fn unroll_in(
+    store: &Store,
+    project: &str,
+    lore: &Lore,
+    id: &str,
+    across: bool,
+    now: u64,
+    files: &dyn Now,
+) -> Result<String, String> {
     let id = id.trim();
     let cand = if let Some(n) = id.strip_prefix('#') {
         let n: u64 = n.parse().map_err(|_| format!("no hit {id}"))?;
@@ -529,7 +554,7 @@ pub fn unroll(
         &[cand],
         &[(0, 0.0)],
         now,
-        now_hash,
+        files,
     )))
 }
 
@@ -673,7 +698,7 @@ mod tests {
                 &ask("where does the puppy nap"),
                 None,
                 Duration::from_secs(5),
-                |_| None,
+                &recall::hashes(|_| None),
                 &[],
                 None,
             )
@@ -699,7 +724,7 @@ mod tests {
                 &ask("monthly invoices"),
                 None,
                 Duration::ZERO,
-                |_| None,
+                &recall::hashes(|_| None),
                 &[],
                 None,
             )
@@ -731,7 +756,7 @@ mod tests {
                 &asked,
                 None,
                 Duration::from_secs(5),
-                |_| None,
+                &recall::hashes(|_| None),
                 &[],
                 None,
             )
@@ -750,7 +775,7 @@ mod tests {
                 &then,
                 None,
                 Duration::from_secs(5),
-                |_| None,
+                &recall::hashes(|_| None),
                 &[],
                 None,
             )
@@ -785,7 +810,7 @@ mod tests {
             &then,
             None,
             Duration::from_secs(5),
-            |_| None,
+            &recall::hashes(|_| None),
             &[],
             None,
         )
@@ -798,7 +823,7 @@ mod tests {
                 &ask("where does the cat nap"),
                 Some(&read),
                 Duration::from_secs(5),
-                |_| None,
+                &recall::hashes(|_| None),
                 &[],
                 None,
             )
@@ -814,7 +839,7 @@ mod tests {
                 &ask("where does the cat nap"),
                 Some(&|_| None),
                 Duration::from_secs(5),
-                |_| None,
+                &recall::hashes(|_| None),
                 &[],
                 None,
             )
@@ -836,7 +861,7 @@ mod tests {
                 &ask("storm"),
                 None,
                 Duration::from_secs(5),
-                |_| None,
+                &recall::hashes(|_| None),
                 &[],
                 None,
             )
@@ -852,7 +877,7 @@ mod tests {
             &ask("storm"),
             None,
             Duration::from_secs(5),
-            |_| None,
+            &recall::hashes(|_| None),
             &[],
             None,
         )
@@ -871,7 +896,7 @@ mod tests {
             &ask("cat"),
             None,
             Duration::from_secs(5),
-            |_| None,
+            &recall::hashes(|_| None),
             &[],
             None,
         )
@@ -883,7 +908,7 @@ mod tests {
                 &ask("storm"),
                 None,
                 Duration::from_secs(5),
-                |_| None,
+                &recall::hashes(|_| None),
                 &[],
                 None,
             )
@@ -909,7 +934,7 @@ mod tests {
             &ask("cat"),
             None,
             Duration::ZERO,
-            |_| None,
+            &recall::hashes(|_| None),
             &[],
             None,
         )
@@ -954,7 +979,7 @@ mod tests {
                 &ask("where does the puppy nap"),
                 None,
                 Duration::from_secs(5),
-                |_| None,
+                &recall::hashes(|_| None),
                 &[],
                 Some(unasked),
             )
@@ -1003,7 +1028,7 @@ mod tests {
                 &ask("rain"),
                 None,
                 Duration::ZERO,
-                |_| Some(6),
+                &recall::hashes(|_| Some(6)),
                 &[],
                 None,
             )
@@ -1023,7 +1048,7 @@ mod tests {
                 &ask("rain"),
                 Some(&|_| None),
                 Duration::ZERO,
-                |_| None,
+                &recall::hashes(|_| None),
                 &[],
                 None,
             )
@@ -1060,7 +1085,7 @@ mod tests {
                 &ask("ranking weighs"),
                 None,
                 Duration::ZERO,
-                |_| Some(1),
+                &recall::hashes(|_| Some(1)),
                 &[],
                 None,
             )
@@ -1087,7 +1112,7 @@ mod tests {
                 &ask("ranking"),
                 None,
                 Duration::ZERO,
-                |_| Some(1),
+                &recall::hashes(|_| Some(1)),
                 &a.given,
                 None,
             )
@@ -1104,12 +1129,23 @@ mod tests {
         assert!(again.given.is_empty());
 
         let back = k
-            .unroll("p", &l, "2026-10#0", false, NOW, |_| Some(1))
+            .unroll(
+                "p",
+                &l,
+                "2026-10#0",
+                false,
+                NOW,
+                &recall::hashes(|_| Some(1)),
+            )
             .unwrap();
         assert!(back.text.ends_with(&said.text), "{}", back.text);
-        let note = k.unroll("p", &l, " #1", false, NOW, |_| Some(1)).unwrap();
+        let note = k
+            .unroll("p", &l, " #1", false, NOW, &recall::hashes(|_| Some(1)))
+            .unwrap();
         assert!(note.text.ends_with(&first), "{}", note.text);
-        let lex = k.unroll("p", &l, "lexicon", false, NOW, |_| None).unwrap();
+        let lex = k
+            .unroll("p", &l, "lexicon", false, NOW, &recall::hashes(|_| None))
+            .unwrap();
         assert!(
             lex.text.ends_with(&format!("§recall = {path}")),
             "{}",
@@ -1121,12 +1157,13 @@ mod tests {
         );
         for wrong in ["2026-10#9", "#99", "nonsense"] {
             assert!(
-                k.unroll("p", &l, wrong, false, NOW, |_| None).is_err(),
+                k.unroll("p", &l, wrong, false, NOW, &recall::hashes(|_| None))
+                    .is_err(),
                 "{wrong}"
             );
         }
         assert!(k
-            .unroll("q", &l, "2026-10#0", false, NOW, |_| None)
+            .unroll("q", &l, "2026-10#0", false, NOW, &recall::hashes(|_| None))
             .is_err());
 
         let tongue = Tongue::load(&dir).unwrap();
@@ -1139,7 +1176,7 @@ mod tests {
                 &ask("weighs"),
                 None,
                 Duration::ZERO,
-                |_| Some(1),
+                &recall::hashes(|_| Some(1)),
                 &[],
                 None,
             )
@@ -1268,7 +1305,7 @@ fn feed: fn feed(cat: Cat)",
                 &ask("puppy"),
                 None,
                 Duration::ZERO,
-                |_| Some(1),
+                &recall::hashes(|_| Some(1)),
                 &[],
                 None,
             )
@@ -1290,7 +1327,7 @@ fn feed: fn feed(dog: Dog)",
                 &ask("puppy"),
                 None,
                 Duration::ZERO,
-                |_| Some(2),
+                &recall::hashes(|_| Some(2)),
                 &[],
                 None,
             )
@@ -1307,7 +1344,7 @@ fn feed: fn feed(dog: Dog)",
                 &ask("puppy"),
                 None,
                 Duration::ZERO,
-                |_| None,
+                &recall::hashes(|_| None),
                 &[],
                 None,
             )

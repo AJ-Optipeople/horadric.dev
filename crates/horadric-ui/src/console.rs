@@ -204,6 +204,27 @@ pub struct Console {
     /// When a key was last typed into it, which may have left a draft in
     /// its prompt box.
     typed: Mutex<Option<SystemTime>>,
+    /// What Town Portal streams raw and whose size wins.
+    tap: Mutex<Tap>,
+}
+
+/// Output kept raw for viewers on another machine, who build their own
+/// grid from it. Less than the host keeps: it is the screen and some
+/// scrollback a viewer needs, not a long history to send over the relay.
+const RAW: usize = 1024 * 1024;
+
+/// A console's raw output and the sizes asked of it, for Town Portal.
+#[derive(Default)]
+struct Tap {
+    /// The output as it came from the host, replay first. None for a
+    /// console with no program.
+    raw: Option<wire::Ring>,
+    /// The size the stage last asked for.
+    stage: Option<GridSize>,
+    /// A viewer elsewhere holds the size, so the stage's asks wait.
+    held: bool,
+    /// When a key was last typed into it on this machine's own stage.
+    typed_here: Option<SystemTime>,
 }
 
 /// What a hosted console is, beside its host.
@@ -649,6 +670,7 @@ impl Console {
             claude: meta.claude,
             cwd: meta.cwd,
             typed: Mutex::new(None),
+            tap: Mutex::new(Tap::default()),
         });
         let notify = waker(notify);
         let reader = Arc::clone(&console);
@@ -684,6 +706,11 @@ impl Console {
                     if let Ok(mut s) = self.screen.lock() {
                         let Screen { term, parser } = &mut *s;
                         parser.advance(term, &bytes);
+                    }
+                    if let Ok(mut t) = self.tap.lock() {
+                        t.raw
+                            .get_or_insert_with(|| wire::Ring::new(RAW))
+                            .push(&bytes);
                     }
                     if replay {
                         replaying.store(false, Ordering::Release);
@@ -785,6 +812,7 @@ impl Console {
             claude: false,
             cwd,
             typed: Mutex::new(None),
+            tap: Mutex::new(Tap::default()),
         });
         console.load(waker(notify));
         console
@@ -839,6 +867,7 @@ impl Console {
             claude: false,
             cwd: None,
             typed: Mutex::new(None),
+            tap: Mutex::new(Tap::default()),
         })
     }
 
@@ -1091,11 +1120,49 @@ impl Console {
         }
     }
 
-    /// Notes that the human typed into it.
+    /// Notes that the human typed into it here, on the stage.
     pub fn note_typed(&self) {
+        let now = SystemTime::now();
+        if let Ok(mut t) = self.typed.lock() {
+            *t = Some(now);
+        }
+        if let Ok(mut t) = self.tap.lock() {
+            t.typed_here = Some(now);
+        }
+    }
+
+    /// Notes that someone typed into it from elsewhere, a phone or another
+    /// PC: it may have left a draft, but the stage did not type.
+    pub fn note_typed_from_afar(&self) {
         if let Ok(mut t) = self.typed.lock() {
             *t = Some(SystemTime::now());
         }
+    }
+
+    /// When a key was last typed into it on the stage itself.
+    pub fn typed_here_at(&self) -> Option<SystemTime> {
+        self.tap.lock().ok().and_then(|t| t.typed_here)
+    }
+
+    /// The raw output from offset `from` on, with the offset the next byte
+    /// will have, or None when some of it is gone and the reader must
+    /// start again from [`Console::raw_replay`].
+    pub fn raw_since(&self, from: u64) -> Option<(Vec<u8>, u64)> {
+        let t = self.tap.lock().ok()?;
+        match &t.raw {
+            Some(r) => r.since(from).map(|b| (b, r.end())),
+            None => (from == 0).then(|| (Vec::new(), 0)),
+        }
+    }
+
+    /// The raw output kept, from a point a fresh terminal can start at,
+    /// with the offset of its first byte.
+    pub fn raw_replay(&self) -> (u64, Vec<u8>) {
+        self.tap
+            .lock()
+            .ok()
+            .and_then(|t| t.raw.as_ref().map(wire::Ring::replay_at))
+            .unwrap_or((0, Vec::new()))
     }
 
     /// When the human last typed into it.
@@ -1115,12 +1182,46 @@ impl Console {
         })
     }
 
-    /// Resizes grid and console together, so the program redraws for the
-    /// size the window really has.
+    /// The stage's ask: resizes grid and console together, so the program
+    /// redraws for the size the window really has, unless a viewer on
+    /// another machine holds the size, and then once it lets go.
     pub fn resize(&self, size: GridSize) {
         if size.cols == 0 || size.rows == 0 {
             return;
         }
+        let held = self.tap.lock().is_ok_and(|mut t| {
+            t.stage = Some(size);
+            t.held
+        });
+        if !held {
+            self.apply_size(size);
+        }
+    }
+
+    /// A viewer on another machine sets the size, which the stage then
+    /// draws at too, clipped or with a margin.
+    pub fn hold_size(&self, size: GridSize) {
+        if size.cols == 0 || size.rows == 0 {
+            return;
+        }
+        if let Ok(mut t) = self.tap.lock() {
+            t.held = true;
+        }
+        self.apply_size(size);
+    }
+
+    /// The stage has the size again, as it last asked for it.
+    pub fn release_size(&self) {
+        let stage = self.tap.lock().ok().and_then(|mut t| {
+            let was = std::mem::replace(&mut t.held, false);
+            t.stage.filter(|_| was)
+        });
+        if let Some(size) = stage {
+            self.apply_size(size);
+        }
+    }
+
+    fn apply_size(&self, size: GridSize) {
         if let Ok(mut current) = self.size.lock() {
             if *current == size {
                 return;

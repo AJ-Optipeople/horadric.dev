@@ -7,12 +7,15 @@
 //! vectors on disk, [`recall`] ranks what answers a question, and
 //! [`keeper::Keeper`] is all of it as the app runs it.
 
+pub mod brethren;
 pub mod distill;
 mod gemma;
 pub mod horadrim;
 pub mod keeper;
 pub mod models;
+pub mod parts;
 pub mod recall;
+pub mod share;
 pub mod store;
 pub mod transcripts;
 

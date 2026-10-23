@@ -233,6 +233,76 @@ pub fn fresh_message(msg: &serde_json::Value, s: &str, last: &mut u64) -> bool {
     }
 }
 
+/// The newest protocol this PC speaks. Version 3 adds raw streams and
+/// brothers; a client that asks for less is answered in its own version,
+/// so a v2 page never sees a number it does not know.
+pub const NEWEST: u64 = 3;
+
+/// The version to answer a hello with: the client's own, up to
+/// [`NEWEST`], and never below 2, which every page since 0.22 speaks.
+pub fn answer_version(hello: &serde_json::Value) -> u64 {
+    hello["v"].as_u64().unwrap_or(2).clamp(2, NEWEST)
+}
+
+/// What is on the other end of a connection, as its hello says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Kind {
+    /// The page, or a client that did not say: every v2 phone.
+    #[default]
+    Phone,
+    /// Another PC of the same human.
+    Brother,
+}
+
+impl Kind {
+    pub fn of_hello(hello: &serde_json::Value) -> Kind {
+        match hello["kind"].as_str() {
+            Some("brother") => Kind::Brother,
+            _ => Kind::Phone,
+        }
+    }
+}
+
+/// Whether a message needs a link that may control this PC: whatever
+/// types into a session, starts or moves one. A view only link sees
+/// tiles and screens and sends none of these.
+pub fn needs_control(t: &str) -> bool {
+    matches!(
+        t,
+        "input" | "start" | "resume" | "create" | "handoff" | "takeover"
+    )
+}
+
+/// One viewer of a session on another machine, for [`size_owner`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Viewer {
+    pub kind: Kind,
+    /// When it last typed or clicked in the session, in any unit that
+    /// only goes up, the same as the stage's. None when it never did.
+    pub active: Option<u64>,
+}
+
+/// Who sets a session's size, which its one pseudo terminal has only one
+/// of: the viewer that last typed or clicked in it, like tmux's `latest`.
+/// Some(i) is `viewers[i]`, None the stage of the PC that owns the session,
+/// which also keeps it when nobody did anything yet or on a tie. Phones
+/// never resize, so they never win.
+pub fn size_owner(stage: Option<u64>, viewers: &[Viewer]) -> Option<usize> {
+    let (i, at) = viewers
+        .iter()
+        .enumerate()
+        .filter(|(_, v)| v.kind != Kind::Phone)
+        .filter_map(|(i, v)| v.active.map(|at| (i, at)))
+        .fold(None, |best: Option<(usize, u64)>, (i, at)| match best {
+            Some((_, b)) if b >= at => best,
+            _ => Some((i, at)),
+        })?;
+    match stage {
+        Some(s) if s >= at => None,
+        _ => Some(i),
+    }
+}
+
 /// The file of phones' push subscriptions, beside `portal.json`.
 const PUSH_FILE: &str = "portal-push.json";
 
@@ -665,6 +735,77 @@ mod tests {
             &mut last
         ));
         assert_eq!(last, 5);
+    }
+
+    #[test]
+    fn a_hello_is_answered_in_the_clients_version() {
+        let v = |h: serde_json::Value| answer_version(&h);
+        assert_eq!(v(serde_json::json!({"t":"hello","v":2})), 2, "today's page");
+        assert_eq!(v(serde_json::json!({"t":"hello","v":1})), 2, "as before v3");
+        assert_eq!(v(serde_json::json!({"t":"hello"})), 2);
+        assert_eq!(v(serde_json::json!({"t":"hello","v":3})), 3);
+        assert_eq!(v(serde_json::json!({"t":"hello","v":9})), NEWEST);
+    }
+
+    #[test]
+    fn a_hello_without_a_kind_is_a_phone() {
+        let k = |h: serde_json::Value| Kind::of_hello(&h);
+        assert_eq!(k(serde_json::json!({"t":"hello","v":2})), Kind::Phone);
+        assert_eq!(k(serde_json::json!({"kind":"phone"})), Kind::Phone);
+        assert_eq!(k(serde_json::json!({"kind":"brother"})), Kind::Brother);
+        assert_eq!(k(serde_json::json!({"kind":"toaster"})), Kind::Phone);
+    }
+
+    #[test]
+    fn only_what_acts_needs_control() {
+        for t in ["input", "start", "resume", "create", "handoff", "takeover"] {
+            assert!(needs_control(t), "{t}");
+        }
+        for t in [
+            "hello", "watch", "attach", "detach", "resize", "sessions", "reply",
+        ] {
+            assert!(!needs_control(t), "{t}");
+        }
+    }
+
+    #[test]
+    fn the_viewer_that_typed_last_sets_the_size() {
+        let brother = |active| Viewer {
+            kind: Kind::Brother,
+            active,
+        };
+        let phone = |active| Viewer {
+            kind: Kind::Phone,
+            active,
+        };
+        assert_eq!(size_owner(None, &[]), None, "the stage, alone");
+        assert_eq!(size_owner(None, &[brother(None)]), None, "nobody typed");
+        assert_eq!(size_owner(None, &[brother(Some(5))]), Some(0));
+        assert_eq!(size_owner(Some(4), &[brother(Some(5))]), Some(0));
+        assert_eq!(size_owner(Some(6), &[brother(Some(5))]), None);
+        assert_eq!(
+            size_owner(Some(5), &[brother(Some(5))]),
+            None,
+            "a tie stays"
+        );
+        assert_eq!(
+            size_owner(
+                Some(1),
+                &[brother(Some(3)), brother(Some(7)), brother(None)]
+            ),
+            Some(1)
+        );
+        assert_eq!(
+            size_owner(Some(1), &[brother(Some(7)), brother(Some(7))]),
+            Some(0),
+            "the first of a tie"
+        );
+        assert_eq!(
+            size_owner(Some(1), &[phone(Some(9)), brother(Some(3))]),
+            Some(1),
+            "a phone never resizes"
+        );
+        assert_eq!(size_owner(None, &[phone(Some(9))]), None);
     }
 
     #[test]
