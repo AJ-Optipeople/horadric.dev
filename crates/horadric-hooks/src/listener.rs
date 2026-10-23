@@ -25,7 +25,7 @@ use horadric_core::{Agent, HookEvent, Limits, Status};
 use serde_json::{json, Value};
 
 use crate::{
-    client, transcript, AGENT_HEADER, BROWSER_PATH, COMMAND_HEADER, GLOW_PATH, HOOK_PATH,
+    client, pace, transcript, AGENT_HEADER, BROWSER_PATH, COMMAND_HEADER, GLOW_PATH, HOOK_PATH,
     KNOW_PATH, NEW_PATH, OWNER_HEADER, RECALL_PATH, RELOAD_PATH, SESSION_HEADER, STATE_HEADER,
     STATUS_PATH, TASKS_PATH,
 };
@@ -490,6 +490,14 @@ fn handle(
         (None, Some(event), Some(commands)) => before_search(&horadric_id, event, commands),
         _ => None,
     };
+    let wide = parsed
+        .as_ref()
+        .filter(|_| agent.unwrap_or_default() == Agent::Claude && !horadric_id.is_empty())
+        .and_then(|e| pace().lock().ok()?.hear(&horadric_id, e));
+    let known = match (known, wide) {
+        (Some(k), Some(w)) => Some(format!("{k}\n\n{w}")),
+        (k, w) => k.or(w),
+    };
     // A prompt is answered once, below; an overlap only comes of an edit,
     // and what the lore knows only before a search.
     match (&overlap, known, &prompt) {
@@ -793,6 +801,12 @@ fn know(stream: &TcpStream, session: String, commands: &Sender<Command>) -> io::
         Ok(answer) => respond_with(stream, "200 OK", &answer),
         Err(_) => respond(stream, "504 Gateway Timeout"),
     }
+}
+
+/// Every session's turn as [`pace::Pace`] counts it.
+fn pace() -> &'static Mutex<pace::Pace> {
+    static PACE: OnceLock<Mutex<pace::Pace>> = OnceLock::new();
+    PACE.get_or_init(Default::default)
 }
 
 /// Who changed which file, across every session this listener hears.

@@ -17,6 +17,7 @@ pub mod install;
 pub mod listener;
 pub mod lock;
 pub mod lore;
+pub mod pace;
 pub mod tasks;
 pub mod transcript;
 

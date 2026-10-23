@@ -190,6 +190,14 @@ pub fn model_line(note: &str) -> Option<&'static str> {
     MODELS.into_iter().find(|m| m.eq_ignore_ascii_case(name))
 }
 
+/// What a `Part: <what>, in <files>` notes line names: one piece of a
+/// quest that its session's agents build side by side.
+pub fn part_line(note: &str) -> Option<&str> {
+    let head = note.get(..5)?;
+    let part = note[5..].trim();
+    (head.eq_ignore_ascii_case("part:") && !part.is_empty()).then_some(part)
+}
+
 /// The notes line that says a quest waits for `title`.
 pub fn after_note(title: &str) -> String {
     format!("After: {}", one_line(title))
@@ -1396,11 +1404,34 @@ pub fn prompt(task: &Task, pack: &str, horadric: &str, file: &str) -> String {
         out.push_str("\n\n");
         out.push_str(pack);
     }
+    out.push_str("\n\n");
+    out.push_str(&split(task));
     out.push_str(&format!(
         "\n\n(A quest from {file}. When it is finished, run \
          `{horadric} quest done \"<one short line on what you achieved>\"`.)"
     ));
     out
+}
+
+/// How a quest's first prompt has its session split the work. Sessions
+/// told in the system prompt to use agents mostly did not, so the order
+/// comes as the first thing to do, and with the parts the planner chose
+/// when it named them.
+pub fn split(task: &Task) -> String {
+    let parts = task.notes.iter().filter_map(|n| part_line(n)).count();
+    if parts > 1 {
+        format!(
+            "Start with the {parts} parts: one agent for each `Part:` line, all \
+             in one message so they run at once, each told its part and the files \
+             it may change. Do the glue between them yourself, then have a fresh \
+             agent review the whole diff."
+        )
+    } else {
+        "Start by splitting it: name the parts that do not wait on each other \
+         and start an agent for each in one message, with the files it may \
+         change. Do it yourself only when it is one small or tightly linked step."
+            .to_string()
+    }
 }
 
 /// What memory is asked of a quest as it starts: its title and its
@@ -1518,7 +1549,9 @@ pub const PLAN_WIDE: &str = "few, wide quests, each as much as one session \
      finishes with its own agents, not one step each. Cut the work so the \
      quests run side by side on separate parts of the code, and give one an \
      `After:` line only for a quest it truly needs first. A chain of more than \
-     two quests is one quest too many: merge them.";
+     two quests is one quest too many: merge them. Give a quest whose work \
+     splits into pieces that can be built at once a notes line `Part: <what>, \
+     in <files>` for each, so its session starts an agent per part.";
 
 /// What `quest add` says when the new quest would wait on a quest that
 /// itself waits on another, open one: the moment a chain grows is the
@@ -2536,12 +2569,15 @@ mod tests {
         let t = &parse(SAMPLE)[1];
         assert_eq!(
             prompt(t, "", "hx", QUESTS_FILE),
-            "Fix the login redirect\n\nHappens only after a session expires.\nRepro in #12.\n\n\
-             (A quest from .horadric/quests.md. When it is finished, run \
-             `hx quest done \"<one short line on what you achieved>\"`.)"
+            format!(
+                "Fix the login redirect\n\nHappens only after a session expires.\nRepro in #12.\n\n\
+                 {}\n\n\
+                 (A quest from .horadric/quests.md. When it is finished, run \
+                 `hx quest done \"<one short line on what you achieved>\"`.)",
+                split(t)
+            )
         );
-        assert!(prompt(t, "Lore: x", "hx", QUESTS_FILE)
-            .contains("Repro in #12.\n\nLore: x\n\n(A quest"));
+        assert!(prompt(t, "Lore: x", "hx", QUESTS_FILE).contains("Repro in #12.\n\nLore: x\n\n"));
         let report = "`hx quest done \"<one short line on what you achieved>\"`";
         assert!(system_prompt("hx", QUESTS_FILE, None).contains(report));
         // Subagents are the session's own call, not something the human asks for.
@@ -2553,6 +2589,24 @@ mod tests {
         assert!(!system_prompt("hx", QUESTS_FILE, Some("C:/p/q.md")).contains("  "));
         assert!(nudge("hx").contains(report));
         assert!(go_on("hx").contains(report));
+    }
+
+    #[test]
+    fn a_quest_with_parts_starts_an_agent_for_each() {
+        assert_eq!(
+            part_line("Part: the hook, in listener.rs"),
+            Some("the hook, in listener.rs")
+        );
+        assert_eq!(part_line("part:x"), Some("x"));
+        assert_eq!(part_line("Part:  "), None);
+        assert_eq!(part_line("Particles"), None);
+        let mut t = parse("- [ ] Build it\n").remove(0);
+        // Without parts the session still splits it, by its own cut.
+        assert!(split(&t).starts_with("Start by splitting it"));
+        t.notes = vec!["Part: a, in a.rs".into(), "Part: b, in b.rs".into()];
+        assert!(split(&t).starts_with("Start with the 2 parts"));
+        assert!(!split(&t).contains("  ") && !PLAN_WIDE.contains("  "));
+        assert!(PLAN_WIDE.contains("`Part: <what>, in <files>`"));
     }
 
     #[test]
