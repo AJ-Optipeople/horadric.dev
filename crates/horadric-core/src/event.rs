@@ -100,6 +100,10 @@ pub struct ModAgent {
     /// The agent that spawned it; none when the main loop did.
     #[serde(default)]
     pub parent_id: Option<String>,
+    /// When it started, in milliseconds since the Unix epoch, as the mod
+    /// saw it spawn or first listed it. None from a mod too old to say.
+    #[serde(default)]
+    pub started_ms: Option<u64>,
 }
 
 impl HookEvent {

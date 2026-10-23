@@ -51,14 +51,44 @@ async function ask($: EngineInterface, to: Owner): Promise<Known | null> {
       body: '{}',
     })
     if (!r.ok) return null
-    const k = JSON.parse(r.text) as Known
-    return k.quest || k.overlaps?.length ? k : null
+    return JSON.parse(r.text) as Known
   } catch {
     return null
   }
 }
 
-export function roster(agents: AgentInfo[]) {
+/** What the band shows of Horadric's answer: nothing when there is nothing to say. */
+export function band(k: Known | null): Known | null {
+  if (!k || !(k.quest || k.overlaps?.length)) return null
+  return { quest: k.quest, overlaps: k.overlaps }
+}
+
+// TaskStop is the one supported way to stop a single subagent from outside
+// the model (Claude Code 2.1.309 has no `$.agent.stop`): it takes the id
+// `$.agent.list()` gives, a foreground subagent's too, and its parent reads
+// the Agent call as interrupted and carries on. It needs no permission.
+async function stop($: EngineInterface, ids: string[]): Promise<void> {
+  for (const task_id of ids) {
+    await $.tool.call({ tool: 'TaskStop', task_id } as never).catch(() => undefined)
+  }
+}
+
+// When each agent was first seen, by id: `$.agent.list()` gives no start
+// time, and the spawn hook knows it to the moment.
+const since = new Map<string, number>()
+
+// A spawn is stamped before the list may show it, so one not listed is let
+// go only once it is this old.
+const FORGET_MS = 60_000
+
+/** Gives an agent first seen now its start, and forgets old ones no longer listed. */
+export function stamp(since: Map<string, number>, agents: AgentInfo[], now: number): void {
+  const ids = new Set(agents.map(a => a.id))
+  for (const [id, t] of [...since]) if (!ids.has(id) && now - t > FORGET_MS) since.delete(id)
+  for (const a of agents) if (!since.has(a.id)) since.set(a.id, now)
+}
+
+export function roster(agents: AgentInfo[], since: Map<string, number> = new Map()) {
   return agents.map(a => ({
     agent_id: a.id,
     agent_type: a.type,
@@ -66,6 +96,7 @@ export function roster(agents: AgentInfo[]) {
     description: a.description,
     parent_id: a.parentId,
     teammate_id: a.teammateId,
+    started_ms: since.get(a.id),
   }))
 }
 
@@ -93,14 +124,18 @@ export const register: Register = on => {
     if (to) {
       let last = '[]'
       $.clock.every(POLL_MS, async () => {
-        const agents = JSON.stringify(roster(await $.agent.list()))
+        const listed = await $.agent.list()
+        stamp(since, listed, await $.clock.now())
+        const agents = JSON.stringify(roster(listed, since))
         if (agents === last) return
         last = agents
         post($, to, { hook_event_name: 'HoradricAgents', agents: JSON.parse(agents) })
       })
       let seen = 'null'
       const look = async () => {
-        const k = await ask($, to)
+        const answer = await ask($, to)
+        if (answer?.stop?.length) await stop($, answer.stop)
+        const k = band(answer)
         if (JSON.stringify(k) === seen) return
         seen = JSON.stringify(k)
         await update($, known, () => k)
@@ -120,9 +155,11 @@ export const register: Register = on => {
   }).catch(($, e, next) => next(e))
 
   on('agent.spawn', async ($, e, next) => {
+    const at = await $.clock.now()
     const started = await next(e)
     const to = await owner($)
     if (to && started.agentId) {
+      if (!since.has(started.agentId)) since.set(started.agentId, at)
       post($, to, {
         hook_event_name: 'HoradricSpawn',
         agent_id: started.agentId,

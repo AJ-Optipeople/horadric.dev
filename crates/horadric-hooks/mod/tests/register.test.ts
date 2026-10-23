@@ -1,5 +1,7 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 
+import { band, stamp } from '../hooks/register'
+
 // `as never` on a spawn: the engine fills in the rest of what it takes.
 const TAGGED = { HORADRIC_SESSION: 'tile-1', HORADRIC_OWNER_PORT: '43118' }
 // What the engine draws above the prompt when no mod draws there.
@@ -64,6 +66,79 @@ describe('horadric mod', () => {
         description: 'scan',
       }),
     ])
+  })
+
+  test('reports when each agent started, from its spawn or first sight', async ($, on) => {
+    mock.env(on, TAGGED)
+    on('session.id', () => ({ value: 'conv-1' }))
+    on('session.start', ($, e) => ({ cwd: e.cwd }))
+    const clock = mock.clock(on)
+    const posts: any[] = []
+    on('http.fetch', ($, e) => {
+      if (e.url.endsWith('/know')) return KNOWS_NOTHING
+      posts.push(JSON.parse(e.init?.body ?? '{}'))
+      return { value: { status: 200, ok: true, headers: {}, text: '' } }
+    })
+    let agents: any[] = []
+    on('agent.list', () => ({ value: agents }))
+    on('agent.spawn', () => ({ model: 'haiku', agentId: 's1' }))
+    await $.session.start({ cwd: '/p', surface: null, isInteractive: false })
+    const t0 = clock.now()
+    await $.agent.spawn({ prompt: 'p', description: 'scan', subagentType: 'Explore' } as never)
+    await clock.advance(4000)
+    agents = [
+      { id: 's1', type: 'Explore', status: 'running', description: 'scan' },
+      { id: 'f1', type: 'Plan', status: 'running', description: 'plan' },
+    ]
+    await clock.advance(2000)
+    const roster = posts.filter(p => p.hook_event_name === 'HoradricAgents').at(-1)
+    expect(roster.agents[0].started_ms).toBe(t0)
+    expect(roster.agents[1].started_ms).toBe(t0 + 6000)
+  })
+
+  test('stops each subagent Horadric names, by TaskStop', async ($, on) => {
+    mock.env(on, TAGGED)
+    on('session.id', () => ({ value: 'conv-1' }))
+    on('session.start', ($, e) => ({ cwd: e.cwd }))
+    const clock = mock.clock(on)
+    let answer: object = { stop: ['a1', 'a2'] }
+    on('http.fetch', () => {
+      const text = JSON.stringify(answer)
+      answer = {}
+      return { value: { status: 200, ok: true, headers: {}, text } }
+    })
+    on('agent.list', () => ({ value: [] }))
+    const stopped: unknown[] = []
+    on('tool.call', { tool: 'TaskStop' }, ($, e) => {
+      stopped.push((e as any).task_id)
+      return { result: 'stopped' }
+    })
+    on('ui.render', () => ENGINE_BAND)
+    await $.session.start({ cwd: '/p', surface: null, isInteractive: true })
+    await clock.advance(3000)
+    expect(stopped).toEqual(['a1', 'a2'])
+    await clock.advance(3000)
+    expect(stopped).toEqual(['a1', 'a2'])
+    // A stop alone is nothing to show above the prompt.
+    const band = await $.ui.mount({
+      plugin: 'horadric',
+      surface: 'terminal',
+      component: 'AbovePrompt',
+      props: { hasSurvey: false, isWorking: false, maxRows: 20, bodyColumns: 80 } as never,
+    })
+    expect(await band.drawn()).toEqual(expect.objectContaining({ type: 'Box', props: { key: 'engine' } }))
+  })
+
+  test('stamp keeps a spawn not yet listed and forgets an old one gone', async () => {
+    const since = new Map([['spawned', 30_000], ['gone', 0]])
+    stamp(since, [{ id: 'new', type: 'Plan', status: 'running', description: '' }], 61_000)
+    expect([...since]).toEqual([['spawned', 30_000], ['new', 61_000]])
+  })
+
+  test('the band shows the quest and overlaps, never a stop alone', async () => {
+    expect(band(null)).toBeNull()
+    expect(band({ stop: ['a1'] })).toBeNull()
+    expect(band({ quest: 'q', stop: ['a1'] })).toEqual({ quest: 'q', overlaps: undefined })
   })
 
   test('stays silent in a session Horadric did not start', async ($, on) => {

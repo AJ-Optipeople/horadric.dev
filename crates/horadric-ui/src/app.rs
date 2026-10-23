@@ -974,6 +974,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             swept_heads: Arc::new(Mutex::new(HashMap::new())),
             update: None,
             update_click: false,
+            stop_agents: HashMap::new(),
             last_check: None,
             checking: false,
             looked: Arc::new(Mutex::new(None)),
@@ -1693,6 +1694,17 @@ fn tile_menu(id: &str) {
         let stop = format!("Stop {} ({})", w.name, w.progress());
         items.insert(at, Item::action(STOP_RUNEWORD, stop));
     }
+    let subagents = if live && !shell {
+        with_app(|app| app.stoppable_subagents(id)).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    if let (false, Some(at)) = (
+        subagents.is_empty(),
+        items.iter().rposition(|i| matches!(i, Item::Separator)),
+    ) {
+        items.insert(at, subagents_menu(&subagents));
+    }
     let tree = with_app(|app| app.diff_of(id)).flatten();
     if let Some((w, diff)) = &tree {
         items.insert(0, changes_menu(w, diff.as_ref()));
@@ -1728,6 +1740,13 @@ fn tile_menu(id: &str) {
             return;
         }
     }
+    if let Some((agent, _)) = picked
+        .and_then(|i| i.checked_sub(STOP_SUBAGENT))
+        .and_then(|i| subagents.get(i))
+    {
+        with_app(|app| app.stop_subagent(id, agent));
+        return;
+    }
     match picked {
         Some(OPEN) => {
             with_app(|app| app.reveal(id, false));
@@ -1746,6 +1765,21 @@ fn tile_menu(id: &str) {
         }
         _ => {}
     }
+}
+
+/// The first of a tile menu's ids for stopping a subagent, one for each
+/// after it, past every other id the menu uses.
+const STOP_SUBAGENT: usize = 900;
+
+/// The subagents a session runs, each a pick that stops it, by
+/// [`STOP_SUBAGENT`] and its place in `agents`.
+fn subagents_menu(agents: &[(String, String)]) -> Item {
+    let items = agents
+        .iter()
+        .enumerate()
+        .map(|(i, (_, label))| Item::action(STOP_SUBAGENT + i, format!("Stop {label}")))
+        .collect();
+    Item::Submenu(format!("Subagents ({})", agents.len()), items)
 }
 
 /// Asks for the new project's name, then asks the town session to found it:
@@ -3356,6 +3390,9 @@ struct App {
     /// The last notification said a release is out, so a click on it
     /// shows that release's notes.
     update_click: bool,
+    /// Subagents the human asked to stop, by session id, until that
+    /// session's mod next asks what Horadric knows and is told to.
+    stop_agents: HashMap<String, Vec<String>>,
     /// When the last update check started. The first tick checks.
     last_check: Option<Instant>,
     /// An update check is on its thread.
@@ -6814,7 +6851,38 @@ impl App {
                     .collect()
             })
             .unwrap_or_default();
-        call.reply.send(known(quest.as_deref(), &shared));
+        let stop = self.stop_agents.remove(&call.session).unwrap_or_default();
+        call.reply.send(known(quest.as_deref(), &shared, &stop));
+    }
+
+    /// Asks the session's mod to stop one of its subagents, the next time
+    /// it asks what Horadric knows (every few seconds).
+    fn stop_subagent(&mut self, id: &str, agent: &str) {
+        let wanted = self.stop_agents.entry(id.to_string()).or_default();
+        if !wanted.iter().any(|a| a == agent) {
+            wanted.push(agent.to_string());
+        }
+    }
+
+    /// The subagents a tile's menu can stop, with their labels.
+    fn stoppable_subagents(&self, id: &str) -> Vec<(String, String)> {
+        let now = SystemTime::now();
+        self.shared
+            .registry
+            .lock()
+            .ok()
+            .and_then(|r| {
+                r.get(id).map(|s| {
+                    s.running_subagents()
+                        .into_iter()
+                        .map(|a| {
+                            let label = horadric_core::session::subagent_label(a, now);
+                            (a.agent_id.clone(), label)
+                        })
+                        .collect()
+                })
+            })
+            .unwrap_or_default()
     }
 
     /// The notification was clicked: show the session it was about, or,
@@ -9012,11 +9080,19 @@ pub(crate) fn work_area(chosen: Option<&str>) -> (i32, i32, i32, i32) {
 
 /// What the mod is told: `quest` when there is one, and each file shared
 /// with sessions still in Horadric, by its name alone since the band is
-/// narrow. Empty when there is nothing to say.
-fn known(quest: Option<&str>, shared: &[(String, Vec<String>)]) -> serde_json::Value {
+/// narrow, and `stop` with the subagents the human asked to stop. Empty when
+/// there is nothing to say.
+fn known(
+    quest: Option<&str>,
+    shared: &[(String, Vec<String>)],
+    stop: &[String],
+) -> serde_json::Value {
     let mut out = serde_json::Map::new();
     if let Some(q) = quest {
         out.insert("quest".into(), q.into());
+    }
+    if !stop.is_empty() {
+        out.insert("stop".into(), stop.into());
     }
     let files: Vec<serde_json::Value> = shared
         .iter()
@@ -9038,7 +9114,11 @@ mod tests {
 
     #[test]
     fn the_mod_is_told_the_quest_and_files_shared_with_live_sessions() {
-        assert_eq!(known(None, &[]), serde_json::json!({}));
+        assert_eq!(known(None, &[], &[]), serde_json::json!({}));
+        assert_eq!(
+            known(None, &[], &["a1".to_string()]),
+            serde_json::json!({ "stop": ["a1"] })
+        );
         let shared = [
             (
                 r"C:\app\src\overlap.rs".to_string(),
@@ -9047,7 +9127,7 @@ mod tests {
             ("C:/app/gone.rs".to_string(), Vec::new()),
         ];
         assert_eq!(
-            known(Some("Serve the API"), &shared),
+            known(Some("Serve the API"), &shared, &[]),
             serde_json::json!({
                 "quest": "Serve the API",
                 "overlaps": [{
@@ -9056,6 +9136,32 @@ mod tests {
                     "others": ["fix-a"],
                 }],
             })
+        );
+    }
+
+    #[test]
+    fn the_subagents_menu_stops_each_by_its_place() {
+        let agents = [
+            ("a1".to_string(), "Explore: map (5s)".to_string()),
+            ("a2".to_string(), "Plan".to_string()),
+        ];
+        let Item::Submenu(title, items) = subagents_menu(&agents) else {
+            panic!("not a submenu");
+        };
+        assert_eq!(title, "Subagents (2)");
+        let picks: Vec<(usize, String)> = items
+            .into_iter()
+            .filter_map(|i| match i {
+                Item::Action { id, label, .. } => Some((id, label)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            picks,
+            vec![
+                (STOP_SUBAGENT, "Stop Explore: map (5s)".to_string()),
+                (STOP_SUBAGENT + 1, "Stop Plan".to_string()),
+            ]
         );
     }
 
