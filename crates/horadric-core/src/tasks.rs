@@ -128,13 +128,7 @@ impl Task {
     /// human's choice; of those two, the last written is the one that
     /// stands, so Warriv can still overrule an escalation it has seen.
     pub fn model(&self) -> Option<&'static str> {
-        let human = self.notes.iter().find_map(|n| model_line(n));
-        let machine = self.notes.iter().rev().find_map(|n| {
-            n.strip_prefix(crate::warriv::NOTE)
-                .and_then(model_line)
-                .or_else(|| crate::escalate::escalated_line(n))
-        });
-        human.or(machine)
+        model_of(&self.notes)
     }
 
     /// What its session is started with for its `Model:` line, Claude
@@ -189,6 +183,17 @@ pub fn model_line(note: &str) -> Option<&'static str> {
         return None;
     }
     MODELS.into_iter().find(|m| m.eq_ignore_ascii_case(name))
+}
+
+/// The model a quest with `notes` starts on, as [`Task::model`] tells it.
+pub fn model_of(notes: &[String]) -> Option<&'static str> {
+    let human = notes.iter().find_map(|n| model_line(n));
+    let machine = notes.iter().rev().find_map(|n| {
+        n.strip_prefix(crate::warriv::NOTE)
+            .and_then(model_line)
+            .or_else(|| crate::escalate::escalated_line(n))
+    });
+    human.or(machine)
 }
 
 /// What a `Part: <what>, in <files>` notes line names: one piece of a

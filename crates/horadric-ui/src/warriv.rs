@@ -1252,13 +1252,21 @@ impl App {
         };
         let into = crate::worktree::checked_out(&main).unwrap_or_else(|| "main".into());
         let mut fix = warriv::fix_up(&t.title, self.branch_of(&main, t).as_deref(), &into, what);
-        if let Some(up) = escalate::carried(t, &escalate::Struggle::SentBack) {
+        // Its session is gone, so the fix-up is the fresh start the
+        // escalation waits for.
+        let holder = t.holder.clone().unwrap_or_default();
+        let run = super::run_of(
+            &store::chronicle_all(),
+            key,
+            &holder,
+            escalate::Ending::SentBack,
+            unix_now(),
+        );
+        if let Some(up) = escalate::carried(t, &run.model, &escalate::Struggle::SentBack) {
             fix.notes.push('\n');
             fix.notes.push_str(&up);
         }
-        let holder = t.holder.clone().unwrap_or_default();
-        let (minutes, tokens) = super::run_facts(&store::chronicle_all(), key, &holder, unix_now());
-        super::write_run(&main, &t.title, escalate::Ending::SentBack, minutes, tokens);
+        super::write_run(&main, &t.title, Some(&run));
         if let Err(e) = file::update(&main, |text| warriv::send_back(text, &t.title, &fix).ok()) {
             eprintln!("horadric: cannot add \"{}\": {e}", fix.title);
             return;

@@ -4675,6 +4675,7 @@ impl App {
         if town::is(&folder_key(&cwd.to_string_lossy())) {
             extra.extend(town::add_dir_args(&self.town_projects()));
         }
+        self.record_launch(id, args, &extra);
         extra
     }
 

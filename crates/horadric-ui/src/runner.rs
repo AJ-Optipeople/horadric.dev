@@ -280,63 +280,68 @@ fn stamp(dir: &Path) -> Stamp {
     [of(file::file(dir)), of(file::config_file(dir))]
 }
 
-/// A run that ended, to be written under its quest: the project folder,
-/// the title, how it ended, its minutes and its tokens.
-type Ended = (PathBuf, String, escalate::Ending, Option<u64>, Option<u64>);
+/// What to write under a quest of the list in a project folder: the run
+/// that ended, or, for None, that it starts over.
+type RunChange = (PathBuf, String, Option<escalate::Run>);
 
-/// The runs that ended between two reads of the list of `key`, in `dir`,
-/// at `now`, with what the chronicle knows of their time and tokens. A
-/// landing mode's done is left to the landing, which knows the checks.
-fn runs_ended(key: &str, dir: &Path, old: &[Task], new: &[Task], now: u64) -> Vec<Ended> {
-    let endings = escalate::endings(old, new, file::mode(dir).lands());
-    if endings.is_empty() {
+/// The changes to runs between two reads of the list of `key`, in `dir`,
+/// at `now`, each run with what the chronicle knows of it. A landing
+/// mode's done is left to the landing, which knows the checks.
+fn run_changes(key: &str, dir: &Path, old: &[Task], new: &[Task], now: u64) -> Vec<RunChange> {
+    let changes = escalate::changes(old, new, file::mode(dir).lands());
+    if changes.is_empty() {
         return Vec::new();
     }
     let records = store::chronicle_all();
-    endings
+    changes
         .into_iter()
-        .map(|(title, ending)| {
-            let holder = new
-                .iter()
-                .chain(old)
-                .find(|t| t.title == title && t.holder.is_some())
-                .and_then(|t| t.holder.clone())
-                .unwrap_or_default();
-            let (minutes, tokens) = run_facts(&records, key, &holder, now);
-            (dir.to_path_buf(), title, ending, minutes, tokens)
+        .map(|(title, change)| {
+            let run = match change {
+                escalate::Change::Ended(ending) => {
+                    let holder = old
+                        .iter()
+                        .find(|t| t.title == title)
+                        .and_then(|t| t.holder.clone())
+                        .unwrap_or_default();
+                    Some(run_of(&records, key, &holder, ending, now))
+                }
+                escalate::Change::StartsOver => None,
+            };
+            (dir.to_path_buf(), title, run)
         })
         .collect()
 }
 
-/// How long the quest held by `holder` has run since it was last taken,
-/// in minutes, and what it spent by its last report.
-fn run_facts(
+/// The run of the quest held by `holder` that ended so at `now`: the
+/// model its session was launched on, how long since it was last taken,
+/// and what it spent in that time.
+fn run_of(
     records: &[chronicle::Record],
     key: &str,
     holder: &str,
+    ending: escalate::Ending,
     now: u64,
-) -> (Option<u64>, Option<u64>) {
-    if holder.is_empty() {
-        return (None, None);
+) -> escalate::Run {
+    let (model, escalated) = chronicle::launched(records, key, holder)
+        .unwrap_or_else(|| (escalate::DEFAULT.to_string(), false));
+    escalate::Run {
+        model,
+        escalated,
+        minutes: chronicle::taken_at(records, key, holder).map(|at| now.saturating_sub(at) / 60),
+        ending,
+        tokens: chronicle::run_tokens(records, key, holder),
     }
-    let minutes = chronicle::taken_at(records, key, holder).map(|at| now.saturating_sub(at) / 60);
-    (minutes, chronicle::tokens_spent(records, key, holder))
 }
 
-/// Writes how the run of `title` ended under it, and its escalation when
-/// it struggled, which its next start reads as its model.
-fn write_run(
-    dir: &Path,
-    title: &str,
-    ending: escalate::Ending,
-    minutes: Option<u64>,
-    tokens: Option<u64>,
-) {
-    let wrote = file::update(dir, |text| {
-        escalate::record(text, title, ending, minutes, tokens)
+/// Writes `run` under the quest `title`, or for None, its escalation when
+/// it starts over after a run that struggled.
+fn write_run(dir: &Path, title: &str, run: Option<&escalate::Run>) {
+    let wrote = file::update(dir, |text| match run {
+        Some(r) => escalate::record(text, title, r),
+        None => escalate::starts_over(text, title),
     });
     if let Err(e) = wrote {
-        eprintln!("horadric: cannot write how \"{title}\" ended: {e}");
+        eprintln!("horadric: cannot write how \"{title}\" ran: {e}");
     }
 }
 
@@ -495,7 +500,7 @@ impl App {
                 if let Some(old) = boards.get(key) {
                     // Before the marks are kept: a quest sent back is taken
                     // again, which would make its run look a moment long.
-                    let runs = runs_ended(key, dir, &old.tasks, &fresh.tasks, at);
+                    let runs = run_changes(key, dir, &old.tasks, &fresh.tasks, at);
                     ended.extend(runs.into_iter().map(|r| (key.clone(), r)));
                     for r in chronicle::marks(key, &old.tasks, &fresh.tasks, at) {
                         store::chronicle(&r);
@@ -536,9 +541,9 @@ impl App {
         // mark changed: each run is written once, and by one Horadric.
         if !ended.is_empty() {
             let left = self.dev_leaves_to_installed();
-            for (key, (dir, title, ending, minutes, tokens)) in ended {
+            for (key, (dir, title, run)) in ended {
                 if !left.contains(&key) {
-                    write_run(&dir, &title, ending, minutes, tokens);
+                    write_run(&dir, &title, run.as_ref());
                 }
             }
         }
@@ -659,6 +664,39 @@ impl App {
             .find(|t| t.mark.held() && t.holder.as_deref().is_some_and(|h| tombs::holds(h, id)))
             .map(|t| t.model_args(Agent::Claude))
             .unwrap_or_default()
+    }
+
+    /// Keeps the model session `id`, started or resumed on `args` with
+    /// `extra` before them, runs its quest on, so the run's outcome names
+    /// the model it ran on rather than what the notes say by then. Nothing
+    /// for a session that holds no quest.
+    pub(super) fn record_launch(&self, id: &str, args: &[String], extra: &[String]) {
+        let held = self.shared.boards.borrow().iter().find_map(|(key, b)| {
+            b.tasks
+                .iter()
+                .find(|t| t.mark.held() && t.holder.as_deref().is_some_and(|h| tombs::holds(h, id)))
+                .map(|t| (key.clone(), t.clone()))
+        });
+        let Some((key, task)) = held else {
+            return;
+        };
+        let all: Vec<String> = extra.iter().chain(args).cloned().collect();
+        let model = escalate::launched_model(&all).unwrap_or(escalate::DEFAULT);
+        // Escalated only when the quest's own line chose it, not the
+        // session's arguments.
+        let escalated = !Agent::Claude.chosen(Setting::Model, args)
+            && task.model() == Some(model)
+            && escalate::chosen_by_escalation(&task.notes);
+        store::chronicle(&chronicle::Record {
+            at: unix_now(),
+            project: key,
+            quest: id.to_string(),
+            title: task.title.clone(),
+            what: Happened::Launched {
+                model: model.to_string(),
+                escalated,
+            },
+        });
     }
 
     /// Whether session `id` starts with permission prompts bypassed.
@@ -1959,10 +1997,19 @@ impl App {
                 // Left to the human's merge, which says nothing of the work.
                 Landing::Failed(..) => None,
             };
+            // The fix-up's model is read from the quest as it stands before
+            // its outcome is written, and climbs from the model it ran on.
+            let mut fix_model = None;
             if let Some(ending) = ending {
-                let records = store::chronicle_all();
-                let (minutes, tokens) = run_facts(&records, &l.key, &holder, unix_now());
-                write_run(&l.dir, &l.title, ending, minutes, tokens);
+                let run = run_of(&store::chronicle_all(), &l.key, &holder, ending, unix_now());
+                if let Landing::Failed(merge::Failure::Red(check), _) = &l.landing {
+                    let red = escalate::Struggle::Red(check.clone());
+                    fix_model = tasks::parse(&file::read(&l.dir))
+                        .into_iter()
+                        .find(|t| t.title == l.title)
+                        .and_then(|t| escalate::carried(&t, &run.model, &red));
+                }
+                write_run(&l.dir, &l.title, Some(&run));
             }
             let main = PathBuf::from(&l.w.main);
             let branch = l.w.branch.clone();
@@ -1975,16 +2022,9 @@ impl App {
                 Landing::Failed(why, out) if why.fixable() => {
                     eprintln!("horadric: cannot merge {branch}: {why:?}");
                     let mut fix = merge::fix_up(&l.title, &branch, &l.into, &why, &out);
-                    if let merge::Failure::Red(check) = &why {
-                        let red = escalate::Struggle::Red(check.clone());
-                        let up = tasks::parse(&file::read(&l.dir))
-                            .into_iter()
-                            .find(|t| t.title == l.title)
-                            .and_then(|t| escalate::carried(&t, &red));
-                        if let Some(up) = up {
-                            fix.notes.push('\n');
-                            fix.notes.push_str(&up);
-                        }
+                    if let Some(up) = fix_model.take() {
+                        fix.notes.push('\n');
+                        fix.notes.push_str(&up);
                     }
                     // A conflict says nothing of the checks either way.
                     if matches!(why, merge::Failure::Red(_)) {
