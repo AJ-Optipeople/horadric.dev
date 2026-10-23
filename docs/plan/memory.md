@@ -27,10 +27,6 @@ holds only what is still not done.
 - **The yardstick has no validity questions.** Nothing measures recall
   of replaced notes, `history`, or "what is true now" against "what was
   said then".
-- **Judging recall without being asked.** The plan was to compare quests
-  with and without the injected memory in `horadric quest spend`, and to
-  count how often an injected hit's files or ids show up in what the
-  agent did next. Neither is built.
 - **A deleted worktree's dialogue keeps its own key.** A transcript's
   project is the one git names for its folder; a worktree since deleted
   falls back to its own folder, so its dialogue is not found under the

@@ -108,6 +108,9 @@ fn recall(args: &Value) -> Result<String, String> {
     });
     if let Some((text, given)) = ask_app(&body) {
         known().extend(given);
+        if unroll.trim().is_empty() {
+            handed(&text);
+        }
         return Ok(text);
     }
     let lore = place.read()?;
@@ -142,7 +145,26 @@ fn recall(args: &Value) -> Result<String, String> {
     let found = recall::rank(&ask, &cands, &[], |i| {
         !recall::changed(&cands[i], |p| place.hash(p)).is_empty()
     });
-    Ok(recall::describe(&cands, &found, ask.now, |p| place.hash(p)))
+    let text = recall::describe(&cands, &found, ask.now, |p| place.hash(p));
+    handed(&text);
+    Ok(text)
+}
+
+/// Logs the hits of a `lore_recall` answer as handed to this session, so
+/// `horadric quest spend` can tell whether they were used. One `horadric
+/// mcp` runs per session, and Claude Code passes it its conversation id.
+fn handed(text: &str) {
+    // A test's recalls are not a session's, and the state folder is real.
+    if cfg!(test) {
+        return;
+    }
+    let var = |k: &str| std::env::var(k).unwrap_or_default();
+    horadric_hooks::given::keep(
+        horadric_core::spend::uptake::ASKED,
+        &var(horadric_hooks::SESSION_ENV),
+        &var("CLAUDE_CODE_SESSION_ID"),
+        text,
+    );
 }
 
 /// How long a recall waits on the app: a little more than the listener

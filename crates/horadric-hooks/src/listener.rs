@@ -21,6 +21,7 @@ use std::thread;
 use std::time::{Duration, SystemTime};
 
 use horadric_core::overlap::{self, Claims, Overlap};
+use horadric_core::spend::uptake;
 use horadric_core::{Agent, HookEvent, Limits, Status};
 use serde_json::{json, Value};
 
@@ -597,6 +598,8 @@ fn prompt_recall(horadric_id: &str, event: &HookEvent, body: &[u8]) -> Option<Va
 /// Answers a prompt's hook with what the memory recalls on it, or with
 /// nothing when it recalls nothing close or takes too long.
 fn offer(stream: &TcpStream, ask: Value, commands: &Sender<Command>) -> io::Result<()> {
+    let said = |k: &str| ask[k].as_str().unwrap_or("").to_string();
+    let (session, conversation) = (said("session"), said("agent_session"));
     let (reply, rx) = Reply::new();
     let gone = Arc::clone(&reply.gone);
     let call = RecallCall { body: ask, reply };
@@ -620,7 +623,9 @@ fn offer(stream: &TcpStream, ask: Value, commands: &Sender<Command>) -> io::Resu
         stream,
         "200 OK",
         &overlap::reply_to("UserPromptSubmit", &text),
-    )
+    )?;
+    crate::given::keep(uptake::PROMPT, &session, &conversation, &text);
+    Ok(())
 }
 
 /// The longest a search is held for what the lore knows. The tool waits on
@@ -693,6 +698,7 @@ fn before_search(session: &str, event: &HookEvent, commands: &Sender<Command>) -
     if text.len() < answer["text"].as_str()?.len() {
         text.push_str(" ...");
     }
+    crate::given::keep(uptake::SEARCH, session, &event.session_id, &text);
     Some(format!(
         "Horadric: the lore knows this of `{name}` already:\n{text}"
     ))

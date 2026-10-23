@@ -12,6 +12,7 @@
 
 pub mod client;
 pub mod codex;
+pub mod given;
 pub mod grok;
 pub mod install;
 pub mod listener;
@@ -19,6 +20,7 @@ pub mod lock;
 pub mod lore;
 pub mod pace;
 pub mod tasks;
+pub mod tend;
 pub mod transcript;
 
 /// Environment variable Horadric sets on every `claude` it spawns.
