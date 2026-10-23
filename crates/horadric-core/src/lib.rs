@@ -42,6 +42,7 @@ pub mod release;
 pub mod runeword;
 pub mod sanctuary;
 pub mod saved;
+pub mod serving;
 pub mod session;
 pub mod ship;
 pub mod sky;
