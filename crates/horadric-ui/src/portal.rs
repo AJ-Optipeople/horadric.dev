@@ -9,15 +9,18 @@ use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::Term;
 use alacritty_terminal::vte::ansi::{NamedColor, Rgb};
-use horadric_core::ask::Ask;
 use horadric_core::diff::FileDiff;
-use horadric_core::portal::b64url;
 // The frame crypto is Windows CNG, so the Mac build has no portal yet.
 #[cfg(windows)]
 use horadric_core::portal::{key32, Config};
 use horadric_core::tasks::{Mark, Mode, Ready, Task};
-use horadric_core::{Phase, Session};
 use serde_json::{json, Value};
+
+// The messages a headless node builds too live in core.
+pub use horadric_core::portal::{
+    asked_size, fingerprint, newly_waiting, out_messages, phase_word, projects_message,
+    session_entry, session_name, size_message, NAME_MAX, OUT_CHUNK,
+};
 
 use crate::board::Board;
 use crate::palette;
@@ -25,54 +28,6 @@ use crate::palette;
 /// The most scrollback a screen message carries, so a long session does
 /// not send megabytes on every change.
 pub const HISTORY: usize = 500;
-
-/// What a phone calls a phase. It only needs to know what wants the human.
-pub fn phase_word(phase: &Phase) -> &'static str {
-    match phase {
-        Phase::Working => "working",
-        Phase::Waiting(_) => "waiting",
-        Phase::Idle | Phase::Done | Phase::Paused => "idle",
-        Phase::Ended => "ended",
-    }
-}
-
-/// One session as the list on a phone shows it. `paused` is a session with
-/// no live host, which the phone offers to resume. A session that waits on
-/// the human says what it asks; one whose program said it waits, with no
-/// hook to say on what, asks for input in its own words.
-pub fn session_entry(s: &Session, project: &str, paused: bool) -> Value {
-    let paused = paused || matches!(s.phase, Phase::Paused);
-    let line = if paused && s.last_line.is_empty() {
-        "paused".to_string()
-    } else {
-        s.last_line.clone()
-    };
-    let mut entry = json!({
-        "id": s.id,
-        "name": s.label(),
-        "project": project,
-        "phase": phase_word(&s.phase),
-        "line": line,
-        "paused": paused,
-    });
-    if !paused && s.phase.asks() {
-        let ask = s
-            .ask
-            .clone()
-            .unwrap_or_else(|| Ask::input(&s.last_line, s.since));
-        entry["ask"] = ask.to_json();
-    }
-    entry
-}
-
-/// The projects message: each as (path, name), in the tiles' order.
-pub fn projects_message(projects: &[(String, String)]) -> Value {
-    let list: Vec<Value> = projects
-        .iter()
-        .map(|(path, name)| json!({"path": path, "name": name}))
-        .collect();
-    json!({"t": "projects", "list": list})
-}
 
 /// One project's quest log as a phone sees it: what Warriv is about, the
 /// quests not done in the log's order, and how many are done.
@@ -171,16 +126,6 @@ pub fn new_quest(title: &str, notes: &str) -> Result<String, &'static str> {
         return Err("The notes must be at most 8000 characters.");
     }
     Ok(title)
-}
-
-/// A session in `now` that waits and did not in `before`: the edge a push
-/// is sent on, so one already waiting does not push again. The push is
-/// about this one. Of several, the same one every time.
-pub fn newly_waiting(
-    before: &std::collections::HashSet<String>,
-    now: &std::collections::HashSet<String>,
-) -> Option<String> {
-    now.iter().filter(|id| !before.contains(*id)).min().cloned()
 }
 
 /// Whose key opened a phone's first frame on a channel.
@@ -329,14 +274,6 @@ pub fn screen_message(id: &str, cols: usize, rows: usize, screen: &Screen) -> Va
     })
 }
 
-/// A cheap fingerprint, so an unchanged screen or list is not sent again.
-pub fn fingerprint(v: &Value) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    v.to_string().hash(&mut h);
-    h.finish()
-}
-
 /// The folders the human's projects live in: the parent of each project
 /// folder, once each (Windows paths compare without case and either
 /// slash), in first seen order. A drive's root is left out, and so is
@@ -481,23 +418,6 @@ pub fn listed(files: &[FileDiff], path: &str) -> bool {
     files.iter().any(|f| f.path == path)
 }
 
-/// The longest name a phone may give a session, in characters.
-pub const NAME_MAX: usize = 80;
-
-/// A name a phone gave a session, made fit for a tile: one line, at
-/// most [`NAME_MAX`] characters. Empty gives the naming back to Claude.
-pub fn session_name(raw: &str) -> String {
-    let line: String = raw
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .chars()
-        .filter(|c| !c.is_control())
-        .take(NAME_MAX)
-        .collect();
-    line.trim_end().to_string()
-}
-
 /// How long a photo sent from the phone is kept: long enough for the
 /// agent to read it, and the folder does not grow for ever.
 pub const ATTACH_KEEP_SECS: u64 = 7 * 24 * 3600;
@@ -540,56 +460,12 @@ pub fn attach_stale(modified: u64, now: u64) -> bool {
     now.saturating_sub(modified) >= ATTACH_KEEP_SECS
 }
 
-/// Raw output carried by one `out` message. Base64 makes it a third
-/// bigger, and the sealed frame must stay under the relay's 1 MB.
-pub const OUT_CHUNK: usize = 256 * 1024;
-
-/// A stream's output as `out` messages, `seq` the offset of the first
-/// byte, each at most [`OUT_CHUNK`] raw. `reset` marks the start of a
-/// replay, after which the viewer draws into a fresh terminal; it is sent
-/// even when the replay is empty, so the viewer still starts over.
-pub fn out_messages(id: &str, seq: u64, bytes: &[u8], reset: bool) -> Vec<Value> {
-    let mut out: Vec<Value> = bytes
-        .chunks(OUT_CHUNK)
-        .scan(seq, |at, chunk| {
-            let msg = json!({"t": "out", "id": id, "seq": *at, "b64": b64url(chunk)});
-            *at += chunk.len() as u64;
-            Some(msg)
-        })
-        .collect();
-    if reset {
-        if out.is_empty() {
-            out.push(json!({"t": "out", "id": id, "seq": seq, "b64": ""}));
-        }
-        out[0]["reset"] = json!(true);
-    }
-    out
-}
-
-/// The size a session's pseudo terminal has now, for every viewer to
-/// draw at.
-pub fn size_message(id: &str, cols: u16, rows: u16) -> Value {
-    json!({"t": "size", "id": id, "cols": cols, "rows": rows})
-}
-
-/// A size a viewer asked for, kept within what a terminal can be.
-pub fn asked_size(msg: &Value) -> Option<(u16, u16)> {
-    let n = |k: &str| {
-        msg[k]
-            .as_u64()
-            .filter(|&n| (1..=1000).contains(&n))
-            .map(|n| n as u16)
-    };
-    Some((n("cols")?, n("rows")?))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use alacritty_terminal::event::VoidListener;
     use alacritty_terminal::term::Config;
     use alacritty_terminal::vte::ansi::Processor;
-    use horadric_core::WaitReason;
 
     struct Size(usize, usize);
 
@@ -665,74 +541,6 @@ mod tests {
         let m = screen_message("a1", 10, 1, &screen_text(&t));
         assert_eq!(m["styles"], json!([[[1, null, null, ITALIC]]]));
         assert_eq!(m["lines"], json!(["i"]));
-    }
-
-    #[test]
-    fn phases_come_down_to_what_wants_the_human() {
-        assert_eq!(phase_word(&Phase::Working), "working");
-        assert_eq!(
-            phase_word(&Phase::Waiting(WaitReason::Permission)),
-            "waiting"
-        );
-        assert_eq!(phase_word(&Phase::Done), "idle");
-        assert_eq!(phase_word(&Phase::Paused), "idle");
-        assert_eq!(phase_word(&Phase::Ended), "ended");
-    }
-
-    #[test]
-    fn a_paused_session_says_so() {
-        let mut s = Session::new("a1", "fix", "C:/p/x");
-        s.phase = Phase::Paused;
-        let e = session_entry(&s, "x", false);
-        assert_eq!(e["line"], "paused");
-        assert_eq!(e["paused"], true);
-        assert_eq!(e["phase"], "idle");
-        assert_eq!(e["project"], "x");
-    }
-
-    #[test]
-    fn a_session_without_a_host_is_paused_whatever_its_phase() {
-        let s = Session::new("a1", "fix", "C:/p/x");
-        assert_eq!(session_entry(&s, "x", true)["paused"], true);
-        assert_eq!(session_entry(&s, "x", false)["paused"], false);
-    }
-
-    #[test]
-    fn a_waiting_session_says_what_it_asks() {
-        let mut s = Session::new("a1", "fix", "C:/p/x");
-        assert!(session_entry(&s, "x", false).get("ask").is_none());
-        s.phase = Phase::Waiting(WaitReason::Permission);
-        s.ask = Some(Ask::permission(
-            "Bash",
-            Some(&json!({"command": "ls"})),
-            false,
-            s.since,
-        ));
-        let e = session_entry(&s, "x", false);
-        assert_eq!(e["ask"]["kind"], "permission");
-        assert_eq!(e["ask"]["detail"], "ls");
-        assert!(session_entry(&s, "x", true).get("ask").is_none());
-    }
-
-    #[test]
-    fn a_wait_no_hook_explained_asks_for_input_in_its_own_words() {
-        let mut s = Session::new("a1", "fix", "C:/p/x");
-        s.phase = Phase::Waiting(WaitReason::Input);
-        s.last_line = "Which branch?".into();
-        let e = session_entry(&s, "x", false);
-        assert_eq!(e["ask"]["kind"], "input");
-        assert_eq!(e["ask"]["detail"], "Which branch?");
-        assert_eq!(e["ask"]["options"], json!([]));
-        s.phase = Phase::Waiting(WaitReason::Error("rate_limit".into()));
-        assert!(session_entry(&s, "x", false).get("ask").is_none());
-    }
-
-    #[test]
-    fn projects_keep_their_order() {
-        let m = projects_message(&[("C:/a".into(), "a".into()), ("C:/b".into(), "b".into())]);
-        assert_eq!(m["t"], "projects");
-        assert_eq!(m["list"][1]["name"], "b");
-        assert_eq!(m["list"][0]["path"], "C:/a");
     }
 
     fn log_of(text: &str) -> Board {
@@ -819,21 +627,6 @@ mod tests {
         assert!(new_quest("  ", "notes").is_err());
         assert!(new_quest(&"x".repeat(201), "").is_err());
         assert!(new_quest("ok", &"x".repeat(8001)).is_err());
-    }
-
-    #[test]
-    fn only_a_session_that_starts_waiting_pushes() {
-        let set = |ids: &[&str]| ids.iter().map(|s| s.to_string()).collect();
-        assert_eq!(newly_waiting(&set(&["a"]), &set(&["a"])), None);
-        assert_eq!(
-            newly_waiting(&set(&["a"]), &set(&["a", "b"])),
-            Some("b".into())
-        );
-        assert_eq!(
-            newly_waiting(&set(&["a"]), &set(&["d", "a", "c"])),
-            Some("c".into())
-        );
-        assert_eq!(newly_waiting(&set(&["a", "b"]), &set(&["b"])), None);
     }
 
     #[cfg(windows)]
@@ -975,16 +768,6 @@ mod tests {
     }
 
     #[test]
-    fn a_name_from_the_phone_is_one_short_line() {
-        assert_eq!(session_name("  Fix\nthe   login\t"), "Fix the login");
-        assert_eq!(session_name("a\u{7}b"), "ab");
-        assert_eq!(session_name("   "), "");
-        assert_eq!(session_name(&"x".repeat(200)).chars().count(), NAME_MAX);
-        let cut = format!("{} y", "x".repeat(NAME_MAX - 1));
-        assert_eq!(session_name(&cut), "x".repeat(NAME_MAX - 1));
-    }
-
-    #[test]
     fn attach_folders_stay_inside() {
         assert_eq!(attach_folder("3f2a-b_9"), Some("3f2a-b_9"));
         for bad in ["", "..", "a/b", r"a\b", "a.b", "C:"] {
@@ -1002,50 +785,6 @@ mod tests {
         assert_eq!(attach_file_name("...", 7), "7-photo.jpg");
         assert_eq!(attach_file_name("con.", 7), "7-con");
         assert_eq!(attach_file_name(&"x".repeat(200), 7).len(), 62);
-    }
-
-    #[test]
-    fn output_goes_in_chunks_that_fit_the_relay() {
-        let bytes: Vec<u8> = (0..OUT_CHUNK * 2 + 10).map(|i| (i % 251) as u8).collect();
-        let out = out_messages("s1", 100, &bytes, true);
-        assert_eq!(out.len(), 3);
-        assert_eq!(out[0]["reset"], true);
-        assert!(out[1].get("reset").is_none());
-        let mut back = Vec::new();
-        let mut at = 100;
-        for m in &out {
-            assert_eq!(m["t"], "out");
-            assert_eq!(m["id"], "s1");
-            assert_eq!(m["seq"], at);
-            // The nonce, the tag and the channel come on top.
-            assert!(m.to_string().len() < 1024 * 1024 - 64);
-            let chunk = horadric_core::portal::unb64url(m["b64"].as_str().unwrap()).unwrap();
-            at += chunk.len() as u64;
-            back.extend(chunk);
-        }
-        assert_eq!(back, bytes);
-    }
-
-    #[test]
-    fn an_empty_replay_still_resets_and_no_output_sends_nothing() {
-        let out = out_messages("s1", 7, b"", true);
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0]["reset"], true);
-        assert_eq!(out[0]["b64"], "");
-        assert!(out_messages("s1", 7, b"", false).is_empty());
-        assert_eq!(out_messages("s1", 7, b"hi", false)[0]["b64"], "aGk");
-    }
-
-    #[test]
-    fn a_size_asked_for_is_a_terminal_size() {
-        assert_eq!(asked_size(&json!({"cols": 80, "rows": 24})), Some((80, 24)));
-        assert_eq!(asked_size(&json!({"cols": 0, "rows": 24})), None);
-        assert_eq!(asked_size(&json!({"cols": 80})), None);
-        assert_eq!(asked_size(&json!({"cols": 80, "rows": 70000})), None);
-        assert_eq!(
-            size_message("s1", 80, 24),
-            json!({"t": "size", "id": "s1", "cols": 80, "rows": 24})
-        );
     }
 
     #[test]

@@ -13,6 +13,7 @@
 //! found, by meaning, words and files, is in `horadric_memory::recall`.
 
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 
 /// The most notes a project keeps; the oldest go first.
 pub const MOST_NOTES: usize = 500;
@@ -42,6 +43,11 @@ pub struct Lore {
     /// being true and which note took its place.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub past: Vec<Past>,
+    /// Fields a newer build wrote that this one does not know, kept as
+    /// they were: a session runs its old `horadric mcp` across a reload,
+    /// and its next note must not rewrite the lore without them.
+    #[serde(flatten, default, skip_serializing_if = "Map::is_empty")]
+    pub extra: Map<String, Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -72,6 +78,10 @@ pub struct Note {
     /// looked at later, once.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub parted: bool,
+    /// Fields a newer build wrote that this one does not know, kept as
+    /// they were, as [`Lore::extra`].
+    #[serde(flatten, default, skip_serializing_if = "Map::is_empty")]
+    pub extra: Map<String, Value>,
 }
 
 impl Note {
@@ -327,6 +337,7 @@ impl Lore {
             sources,
             parts: Vec::new(),
             parted: false,
+            extra: Map::new(),
         });
         if self.notes.len() > MOST_NOTES {
             let over = self.notes.len() - MOST_NOTES;
@@ -960,5 +971,16 @@ mod tests {
             ),
             vec!["RELEASING.md", "crates/x/src/lib.rs", "a/b.c"]
         );
+    }
+
+    #[test]
+    fn fields_a_newer_build_wrote_are_kept_when_the_lore_is_written_again() {
+        let text = r#"{"next":2,"notes":[{"id":1,"text":"t","at":5,"halo":[1,2]}],"tongue":"x"}"#;
+        let mut l: Lore = serde_json::from_str(text).unwrap();
+        l.add("u", vec![], "", 6, &[]).unwrap();
+        let again: Value = serde_json::to_value(&l).unwrap();
+        assert_eq!(again["tongue"], "x");
+        assert_eq!(again["notes"][0]["halo"], serde_json::json!([1, 2]));
+        assert!(again["notes"][1].get("halo").is_none());
     }
 }
