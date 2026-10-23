@@ -25,8 +25,9 @@ use horadric_hooks::lore::{now, Place};
 use horadric_hooks::tasks as tasks_file;
 use horadric_hooks::{client, COMMAND_HEADER, OWNER_ENV, RECALL_PATH};
 use horadric_memory::distill;
-use horadric_memory::horadrim::Tongue;
+use horadric_memory::horadrim::{self, Tongue};
 use horadric_memory::keeper;
+use horadric_memory::parts::Tree;
 use horadric_memory::recall::{self, Candidate};
 use horadric_memory::store::Store as MemoryStore;
 use serde_json::Value;
@@ -74,7 +75,22 @@ fn note(args: &Value) -> Result<String, String> {
         distill::earliest(&dir, &sources)?
     };
     let origin = Origin { since, sources };
-    let id = place.change(|l| l.add_from(text, marks, &commit, now(), &replaces, origin))?;
+    // The symbols it names are taken as they are now, so the note goes
+    // stale when they change, not whenever anything in their files does.
+    let parts: Vec<horadric_core::lore::Part> = marks
+        .iter()
+        .filter_map(|m| {
+            let bytes = fs::read(place.top.join(&m.path)).ok()?;
+            let pieces = code::pieces(&m.path, &bytes)?;
+            Some(horadric_core::lore::parts_of(text, &m.path, &pieces))
+        })
+        .flatten()
+        .collect();
+    let id = place.change(|l| {
+        let id = l.add_from(text, marks, &commit, now(), &replaces, origin)?;
+        l.set_parts(id, parts);
+        Ok(id)
+    })?;
     Ok(format!(
         "Kept as #{id}. Every session of this project can find it with lore_recall."
     ))
@@ -142,10 +158,14 @@ fn recall(args: &Value) -> Result<String, String> {
     if history {
         cands.extend(lore.past.iter().map(Candidate::past));
     }
+    let tree = Tree::new(&place.top, Some(code::pieces));
     let found = recall::rank(&ask, &cands, &[], |i| {
-        !recall::changed(&cands[i], |p| place.hash(p)).is_empty()
+        !recall::stale(&cands[i], &tree).is_empty()
     });
-    let text = recall::describe(&cands, &found, ask.now, |p| place.hash(p));
+    if found.is_empty() {
+        return Ok(recall::NOTHING.to_string());
+    }
+    let text = horadrim::plain(&recall::hits(&cands, &found, ask.now, &tree));
     handed(&text);
     Ok(text)
 }

@@ -40,9 +40,14 @@ pub fn now() -> u64 {
         .map_or(0, |d| d.as_secs())
 }
 
-/// The name a phone shows for this PC.
+/// The name a phone or a brother shows for this PC. `HORADRIC_PC_NAME`
+/// overrides it, so two dev instances on one machine can be told apart.
 pub fn pc_name() -> String {
-    std::env::var("COMPUTERNAME").unwrap_or_else(|_| "PC".into())
+    std::env::var("HORADRIC_PC_NAME")
+        .ok()
+        .filter(|n| !n.trim().is_empty())
+        .or_else(|| std::env::var("COMPUTERNAME").ok())
+        .unwrap_or_else(|| "PC".into())
 }
 
 fn open(url: &str) {

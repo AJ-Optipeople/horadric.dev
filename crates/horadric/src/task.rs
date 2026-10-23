@@ -358,7 +358,8 @@ fn report(cwd: &Path, blocked: Option<(&str, Option<On>)>, summary: &str) -> Res
 /// Agents seldom stop mid task to leave one (15 notes in 35 sessions over
 /// three days, 2026-10-24), and the end is when they know the most.
 const ASK_FOR_NOTE: &str = "Before you stop: if you found out something the next session would \
-     otherwise have to find out again, leave it with lore_note, naming its files.";
+     otherwise have to find out again, leave it with lore_note, naming its files and, in \
+     backticks, the functions and types it is about.";
 
 /// Whether any of the quest's conversations, or a subagent of one, left a
 /// note with `lore_note`.
@@ -1074,6 +1075,19 @@ fn quest_files(place: &lore::Place, project: &Path, id: &str, cwd: &Path) -> Vec
     horadric_core::lore::changed_paths(&rel)
 }
 
+/// What reads a file's symbols, which only the Windows build has (its
+/// code index lives with the MCP server); elsewhere files are judged
+/// whole.
+#[cfg(windows)]
+fn code_pieces() -> Option<horadric_memory::parts::PieceSource> {
+    Some(crate::code::pieces)
+}
+
+#[cfg(not(windows))]
+fn code_pieces() -> Option<horadric_memory::parts::PieceSource> {
+    None
+}
+
 /// What the agent ending a quest is asked of the notes on the files it
 /// changed: those maybe stale, and those of a file crowded with notes,
 /// to check against the code it just worked on. None when there are
@@ -1082,9 +1096,10 @@ fn notes_to_tend(project: &Path, id: &str, cwd: &Path) -> Option<String> {
     let place = lore::Place::of(cwd).ok()?;
     let changed = quest_files(&place, project, id, cwd);
     let notes = place.read().ok()?.notes;
+    let tree = horadric_memory::parts::Tree::new(&place.top, code_pieces());
     horadric_hooks::tend::ask(&notes, &changed, |n| {
         let c = horadric_memory::recall::Candidate::note(n);
-        !horadric_memory::recall::changed(&c, |p| place.hash(p)).is_empty()
+        !horadric_memory::recall::stale(&c, &tree).is_empty()
     })
 }
 

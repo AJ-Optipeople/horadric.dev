@@ -802,6 +802,7 @@ dependencies = [
  "objc2-core-graphics",
  "objc2-core-text",
  "objc2-foundation",
+ "serde",
  "serde_json",
  "syntect",
  "webview2-com",

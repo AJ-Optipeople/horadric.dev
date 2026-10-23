@@ -2,7 +2,9 @@
 //! which ships with Windows and uses the system's proxy, kept open on a
 //! thread of its own and opened again whenever it drops. Everything that
 //! crosses it is sealed with the key of the phone it is for, see
-//! [`crate::portal_crypto`]; which key that is, the app knows.
+//! [`crate::portal_crypto`]; which key that is, the app knows. What is
+//! for brothers, the other PCs of the same human, goes to
+//! [`crate::brothers`] before anything reaches the phones' side.
 //! The protocol is in `docs/PORTAL.md`.
 
 use std::ffi::c_void;
@@ -17,14 +19,16 @@ use windows::core::{w, HSTRING, PCWSTR};
 use windows::Win32::Networking::WinHttp::{
     WinHttpCloseHandle, WinHttpConnect, WinHttpOpen, WinHttpOpenRequest, WinHttpQueryHeaders,
     WinHttpReceiveResponse, WinHttpSendRequest, WinHttpSetOption, WinHttpSetTimeouts,
-    WinHttpWebSocketCompleteUpgrade, WinHttpWebSocketReceive, WinHttpWebSocketSend,
-    WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_FLAG_SECURE, WINHTTP_OPEN_REQUEST_FLAGS,
-    WINHTTP_OPTION_UPGRADE_TO_WEB_SOCKET, WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_QUERY_STATUS_CODE,
-    WINHTTP_WEB_SOCKET_BINARY_FRAGMENT_BUFFER_TYPE, WINHTTP_WEB_SOCKET_BINARY_MESSAGE_BUFFER_TYPE,
-    WINHTTP_WEB_SOCKET_BUFFER_TYPE, WINHTTP_WEB_SOCKET_CLOSE_BUFFER_TYPE,
-    WINHTTP_WEB_SOCKET_UTF8_FRAGMENT_BUFFER_TYPE, WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE,
+    WinHttpWebSocketCompleteUpgrade, WinHttpWebSocketQueryCloseStatus, WinHttpWebSocketReceive,
+    WinHttpWebSocketSend, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_FLAG_SECURE,
+    WINHTTP_OPEN_REQUEST_FLAGS, WINHTTP_OPTION_UPGRADE_TO_WEB_SOCKET, WINHTTP_QUERY_FLAG_NUMBER,
+    WINHTTP_QUERY_STATUS_CODE, WINHTTP_WEB_SOCKET_BINARY_FRAGMENT_BUFFER_TYPE,
+    WINHTTP_WEB_SOCKET_BINARY_MESSAGE_BUFFER_TYPE, WINHTTP_WEB_SOCKET_BUFFER_TYPE,
+    WINHTTP_WEB_SOCKET_CLOSE_BUFFER_TYPE, WINHTTP_WEB_SOCKET_UTF8_FRAGMENT_BUFFER_TYPE,
+    WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE,
 };
 
+use crate::joining;
 use crate::portal_crypto::seal;
 
 /// What the relay and the phones behind it say, as the UI thread drains it.
@@ -49,6 +53,11 @@ const MAX_BACKOFF: u64 = 30;
 /// How often the PC pings the relay, so a dead connection shows, in
 /// seconds.
 const PING_SECS: u64 = 25;
+
+/// A connection that lasted this long, in seconds, was a good one: the
+/// next try after it waits only a second. One the relay closes sooner
+/// keeps backing off, so a refused token is not offered every second.
+const LIVED_SECS: u64 = 10;
 
 /// Silence from the relay this long, in seconds, means the connection is
 /// dead even if TCP has not said so: drop it and connect again. It also
@@ -105,6 +114,8 @@ pub struct Link {
     stop: Arc<AtomicBool>,
     slot: Slot,
     out: Option<Sender<Out>>,
+    /// Which link this is to [`crate::brothers`].
+    generation: u64,
 }
 
 impl Link {
@@ -120,6 +131,15 @@ impl Link {
         let stop = Arc::new(AtomicBool::new(false));
         let slot: Slot = Arc::new(Mutex::new(None));
         let (out, rx) = mpsc::channel::<Out>();
+        let generation = {
+            let out = out.clone();
+            crate::brothers::start(
+                secret,
+                Box::new(move |text, bytes| {
+                    let _ = out.send((text, bytes));
+                }),
+            )
+        };
         // Milliseconds since `origin` when the relay last said anything.
         let origin = Instant::now();
         let heard = Arc::new(AtomicU64::new(0));
@@ -154,7 +174,7 @@ impl Link {
                         dialed.store(SIGNED.load(Ordering::SeqCst), Ordering::SeqCst);
                         url()
                     };
-                    read_loop(&url, &stop, &slot, &tx, &*wake, &hear)
+                    read_loop(&url, &stop, &slot, &tx, &*wake, &hear, generation)
                 })
                 .ok();
         }
@@ -169,6 +189,7 @@ impl Link {
             stop,
             slot,
             out: Some(out),
+            generation,
         }
     }
 
@@ -205,7 +226,9 @@ impl Drop for Link {
         if let Some(s) = self.slot.lock().unwrap().take() {
             s.close();
         }
-        // Dropping the sender ends the writer.
+        // Dropping the sender ends the writer, once brothers let go of
+        // theirs too.
+        crate::brothers::stop(self.generation);
         self.out = None;
     }
 }
@@ -299,14 +322,17 @@ fn read_loop(
     tx: &Sender<Incoming>,
     wake: &dyn Fn(),
     hear: &dyn Fn(),
+    generation: u64,
 ) {
     let deliver = |i: Incoming| {
         if tx.send(i).is_ok() {
             wake();
         }
     };
+    let debug = std::env::var_os("HORADRIC_DEBUG").is_some();
     let mut backoff = 1;
     while !stop.load(Ordering::SeqCst) {
+        let wait;
         match connect(&url()) {
             Ok(socket) => {
                 let socket = Arc::new(socket);
@@ -315,34 +341,68 @@ fn read_loop(
                     drop(slot.lock().unwrap().take());
                     return;
                 }
-                backoff = 1;
+                let began = Instant::now();
                 hear();
+                crate::brothers::connected(generation, true);
                 deliver(Incoming::Connected(true));
                 while let Some((text, data)) = receive(&socket) {
                     hear();
+                    if for_brothers(generation, text, &data) {
+                        continue;
+                    }
                     if let Some(i) = incoming(text, &data) {
                         deliver(i);
                     }
                 }
+                let code = close_code(&socket);
                 drop(slot.lock().unwrap().take());
                 drop(socket);
+                crate::brothers::connected(generation, false);
                 deliver(Incoming::Connected(false));
+                if began.elapsed() >= Duration::from_secs(LIVED_SECS) {
+                    backoff = 1;
+                }
+                let (w, next, stale) = joining::after_close(code, backoff, MAX_BACKOFF);
+                if stale {
+                    crate::workos::forget_access();
+                }
+                if debug {
+                    eprintln!("portal: closed with {code:?}, again in {w} s");
+                }
+                (wait, backoff) = (w, next);
             }
             Err(e) => {
-                if std::env::var_os("HORADRIC_DEBUG").is_some() {
+                if debug {
                     eprintln!("portal: {e}");
                 }
+                (wait, backoff) = (backoff, (backoff * 2).min(MAX_BACKOFF));
             }
         }
         // Sleep in small steps so a stop is not held up by the backoff.
-        for _ in 0..backoff * 10 {
+        for _ in 0..wait * 10 {
             if stop.load(Ordering::SeqCst) {
                 return;
             }
             std::thread::sleep(Duration::from_millis(100));
         }
-        backoff = (backoff * 2).min(MAX_BACKOFF);
     }
+}
+
+/// Hands a frame to [`crate::brothers`], true when it was theirs.
+fn for_brothers(generation: u64, text: bool, data: &[u8]) -> bool {
+    if text {
+        return serde_json::from_slice::<serde_json::Value>(data)
+            .is_ok_and(|v| crate::brothers::text(generation, &v));
+    }
+    unframe(data).is_some_and(|(ch, payload)| crate::brothers::binary(generation, ch, payload))
+}
+
+/// The close code the relay sent, if it sent one.
+fn close_code(s: &Socket) -> Option<u16> {
+    let mut status = 0u16;
+    let mut len = 0u32;
+    let err = unsafe { WinHttpWebSocketQueryCloseStatus(s.ws, &mut status, None, 0, &mut len) };
+    (err == 0 && status != 0).then_some(status)
 }
 
 /// What one frame from the relay means, `None` for anything to drop.
