@@ -159,19 +159,20 @@ pub fn look(top: &Path, lore: &Lore, source: PieceSource) -> Vec<(u64, Vec<Part>
 /// seconds) whose hash is one of `hashes`, by hash.
 fn versions(top: &Path, path: &str, since: u64, hashes: &[u64]) -> HashMap<u64, Vec<u8>> {
     let mut out = HashMap::new();
-    let Some(log) = git_out(
-        top,
-        &[
-            "log",
-            &format!("--since=@{since}"),
-            "--format=",
-            "--raw",
-            "--no-abbrev",
-            "--no-renames",
-            "--",
-            path,
-        ],
-    ) else {
+    // Git reads `--since=@0` now and then as a time that excludes every
+    // commit, so a note with no time searches all of history instead.
+    let since = (since > 0).then(|| format!("--since=@{since}"));
+    let mut args = vec!["log"];
+    args.extend(since.as_deref());
+    args.extend([
+        "--format=",
+        "--raw",
+        "--no-abbrev",
+        "--no-renames",
+        "--",
+        path,
+    ]);
+    let Some(log) = git_out(top, &args) else {
         return out;
     };
     let blobs = blobs(&log);
