@@ -11,7 +11,7 @@
 //! bytes on disk. What is decided from what git says is in
 //! `horadric_core::checkpoint`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -27,10 +27,45 @@ use horadric_core::checkpoint::{
 };
 use horadric_core::HookEvent;
 
-/// The longest a snapshot may hold a hook's reply. A tree that takes
-/// longer goes without a checkpoint for that turn, and the staging goes
-/// on in the background so the next one is quick.
-const SNAPSHOT_WAIT: Duration = Duration::from_secs(3);
+/// The longest a snapshot, every git call of it, may hold a hook's reply.
+/// A prompt's reply waits for the memory's recall after it, within Claude
+/// Code's few seconds for a hook. A tree that takes longer goes without a
+/// checkpoint for that turn, and its staging goes on in the background so
+/// the next one is quick.
+const SNAPSHOT_BUDGET: Duration = Duration::from_millis(if cfg!(test) { 30_000 } else { 1500 });
+
+/// The longest hashing a file an edit tool writes may hold its hook.
+const HASH_BUDGET: Duration = Duration::from_millis(if cfg!(test) { 30_000 } else { 500 });
+
+/// A temporary index older than this was left by a Horadric that stopped
+/// mid snapshot, never one still staging.
+const STALE_TEMP: Duration = Duration::from_secs(10 * 60);
+
+thread_local! {
+    /// When git calls on this thread give up, while a hook waits on them.
+    /// Each request has a thread of its own, and an undo has one with none.
+    static UNTIL: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
+}
+
+/// Bounds every git call on this thread until it is dropped.
+struct Budget;
+
+impl Budget {
+    fn start(budget: Duration) -> Budget {
+        UNTIL.with(|u| u.set(Some(Instant::now() + budget)));
+        Budget
+    }
+}
+
+impl Drop for Budget {
+    fn drop(&mut self) {
+        UNTIL.with(|u| u.set(None));
+    }
+}
+
+fn until() -> Option<Instant> {
+    UNTIL.with(std::cell::Cell::get)
+}
 
 fn open_turns() -> &'static Mutex<Turns> {
     static TURNS: OnceLock<Mutex<Turns>> = OnceLock::new();
@@ -59,16 +94,20 @@ pub fn hear(session: &str, event: &HookEvent) {
             let Some(top) = top else {
                 return;
             };
-            let blob = hash(&top, Path::new(&path));
+            let blob = {
+                let _budget = Budget::start(HASH_BUDGET);
+                hash(&top, Path::new(&path))
+            };
             if let Ok(mut t) = open_turns().lock() {
-                if event.hook_event_name == "PreToolUse" {
-                    t.before(session, &key, blob);
-                } else {
-                    t.after(session, &key, blob);
+                match event.hook_event_name.as_str() {
+                    "PreToolUse" => t.before(session, &key, blob),
+                    "PostToolUse" => t.after(session, &key, blob),
+                    _ => t.failed(session, &key, blob),
                 }
             }
         }
         "UserPromptSubmit" if main_loop => {
+            let _budget = Budget::start(SNAPSHOT_BUDGET);
             if let Err(e) = begin(session, &event.cwd) {
                 eprintln!("horadric: no checkpoint for {session}: {e}");
             }
@@ -76,6 +115,7 @@ pub fn hear(session: &str, event: &HookEvent) {
         "Stop" | "StopFailure" | "SessionEnd" if main_loop => {
             let open = open_turns().lock().ok().and_then(|mut t| t.finish(session));
             if let Some((top, n, record)) = open {
+                let _budget = Budget::start(SNAPSHOT_BUDGET);
                 if let Err(e) = end(session, Path::new(&top), n, &record) {
                     eprintln!("horadric: no checkpoint for {session}: {e}");
                 }
@@ -89,19 +129,22 @@ fn begin(session: &str, cwd: &str) -> Result<(), String> {
     let Some(top) = toplevel(Path::new(cwd)) else {
         return Ok(());
     };
+    let started = start_turn(session, &top);
+    if started.is_err() {
+        // No start, so nothing of this turn or the one before can be
+        // known to its end.
+        if let Ok(mut t) = open_turns().lock() {
+            t.finish(session);
+        }
+    }
+    started
+}
+
+fn start_turn(session: &str, top: &Path) -> Result<(), String> {
+    let top = top.to_path_buf();
     let refs = list(&top, session)?;
     let n = checkpoint::next(&refs, session);
-    let tree = match write_tree(&top) {
-        Ok(t) => t,
-        Err(e) => {
-            // No start, so nothing of this turn or the one before can be
-            // known to its end.
-            if let Ok(mut t) = open_turns().lock() {
-                t.finish(session);
-            }
-            return Err(e);
-        }
-    };
+    let tree = write_tree(&top)?;
     let start = commit(&top, &tree, &format!("Horadric turn {n} start\n"))?;
     let mut updates = vec![format!(
         "update {} {start}",
@@ -112,11 +155,11 @@ fn begin(session: &str, cwd: &str) -> Result<(), String> {
         .ok()
         .and_then(|mut t| t.begin(session, &top.to_string_lossy(), n, SystemTime::now()));
     let mut gone = prune(&refs, session, KEEP - 1);
-    for t in turns(&refs, session).iter().filter(|t| !t.end) {
+    for t in turns(&refs, session).iter().filter(|t| !t.start || !t.end) {
         match &left {
             // An interrupted turn sends no stop, so it ends where the next
             // starts.
-            Some((prev, record)) if *prev == t.n => {
+            Some((prev, record)) if *prev == t.n && t.start => {
                 let end = commit(&top, &tree, &record.to_message(t.n))?;
                 updates.push(format!(
                     "update {} {end}",
@@ -322,12 +365,21 @@ fn list(top: &Path, session: &str) -> Result<Vec<String>, String> {
 /// finished, whose stat cache spares hashing unchanged files again.
 fn write_tree(top: &Path) -> Result<String, String> {
     static SERIAL: AtomicU64 = AtomicU64::new(0);
+    // A repository whose staging ran past its budget stages on in the
+    // background; until it is done, its turns go without, rather than
+    // start one full `git add` after another.
+    static STAGING: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+    let staging = STAGING.get_or_init(Mutex::default);
+    if staging.lock().is_ok_and(|s| s.contains(top)) {
+        return Err("the last snapshot is still staging".into());
+    }
     let seed = top.join(text(git(
         top,
         &["rev-parse", "--git-path", "horadric-turns.index"],
         &[],
         None,
     )?));
+    sweep(&seed);
     let temp = seed.with_file_name(format!(
         "horadric-turn-{}-{}.index",
         std::process::id(),
@@ -349,17 +401,27 @@ fn write_tree(top: &Path) -> Result<String, String> {
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     let mut child = add.spawn().map_err(|e| format!("git add: {e}"))?;
-    let deadline = Instant::now() + SNAPSHOT_WAIT;
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
-            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
+            Ok(None) if until().is_none_or(|u| Instant::now() < u) => {
+                thread::sleep(Duration::from_millis(10))
+            }
             Ok(None) => {
                 // Left to finish, so the next snapshot starts from it.
-                thread::spawn(move || match child.wait() {
-                    Ok(s) if s.success() => keep(&temp, &seed),
-                    _ => {
-                        let _ = fs::remove_file(&temp);
+                if let Ok(mut s) = staging.lock() {
+                    s.insert(top.to_path_buf());
+                }
+                let top = top.to_path_buf();
+                thread::spawn(move || {
+                    match child.wait() {
+                        Ok(s) if s.success() => keep(&temp, &seed),
+                        _ => {
+                            let _ = fs::remove_file(&temp);
+                        }
+                    }
+                    if let Ok(mut s) = staging.lock() {
+                        s.remove(&top);
                     }
                 });
                 return Err("staging the tree took too long".into());
@@ -382,6 +444,35 @@ fn write_tree(top: &Path) -> Result<String, String> {
         let _ = fs::remove_file(&temp);
     }
     tree
+}
+
+/// Deletes the temporary indexes beside `seed` that a Horadric which
+/// stopped mid snapshot left behind, once per repository a run.
+fn sweep(seed: &Path) {
+    static SWEPT: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+    let Some(dir) = seed.parent() else {
+        return;
+    };
+    let first = SWEPT
+        .get_or_init(Mutex::default)
+        .lock()
+        .is_ok_and(|mut s| s.insert(dir.to_path_buf()));
+    let Some(entries) = first.then(|| fs::read_dir(dir).ok()).flatten() else {
+        return;
+    };
+    for e in entries.flatten() {
+        let old = e
+            .metadata()
+            .and_then(|m| m.modified())
+            .is_ok_and(|t| t.elapsed().unwrap_or_default() > STALE_TEMP);
+        if old
+            && e.file_name()
+                .to_string_lossy()
+                .starts_with("horadric-turn-")
+        {
+            let _ = fs::remove_file(e.path());
+        }
+    }
 }
 
 /// Makes `temp` the index the next snapshot starts from.
@@ -502,20 +593,59 @@ fn git(
     for (k, v) in env {
         cmd.env(k, v);
     }
+    let what = args.iter().find(|a| !a.starts_with('-')).unwrap_or(&"");
+    if until().is_some_and(|u| Instant::now() >= u) {
+        return Err(format!("no time left for git {what}"));
+    }
     let mut child = cmd.spawn().map_err(|e| format!("git: {e}"))?;
     if let (Some(bytes), Some(mut stdin)) = (input, child.stdin.take()) {
         stdin.write_all(bytes).map_err(|e| format!("git: {e}"))?;
     }
-    let out = child.wait_with_output().map_err(|e| format!("git: {e}"))?;
+    let out = match until() {
+        None => child.wait_with_output().map_err(|e| format!("git: {e}"))?,
+        Some(u) => bounded(child, u).ok_or_else(|| format!("git {what} took too long"))?,
+    };
     if out.status.success() {
         Ok(out.stdout)
     } else {
         Err(format!(
-            "git {}: {}",
-            args.first().unwrap_or(&""),
+            "git {what}: {}",
             String::from_utf8_lossy(&out.stderr).trim()
         ))
     }
+}
+
+/// What `child` printed once it exits, or None, with it killed, once
+/// `until` comes first. Its output is read meanwhile, so a full pipe never
+/// holds it up.
+fn bounded(mut child: std::process::Child, until: Instant) -> Option<std::process::Output> {
+    fn read<R: std::io::Read + Send + 'static>(pipe: Option<R>) -> thread::JoinHandle<Vec<u8>> {
+        thread::spawn(move || {
+            let mut bytes = Vec::new();
+            if let Some(mut p) = pipe {
+                let _ = p.read_to_end(&mut bytes);
+            }
+            bytes
+        })
+    }
+    let stdout = read(child.stdout.take());
+    let stderr = read(child.stderr.take());
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < until => thread::sleep(Duration::from_millis(5)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    };
+    Some(std::process::Output {
+        status,
+        stdout: stdout.join().unwrap_or_default(),
+        stderr: stderr.join().unwrap_or_default(),
+    })
 }
 
 #[cfg(test)]
@@ -657,6 +787,33 @@ mod tests {
         // Its stop, should it come late, finds no turn to end.
         hear(s, &event("Stop", &dir));
         assert!(list(&dir, s).unwrap().is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A's Write of a new file waits at a permission prompt, B makes the
+    /// file, A's write fails: undo must not delete B's file.
+    #[test]
+    fn a_failed_write_leaves_the_file_another_session_made() {
+        let dir = repo();
+        let s = "undo-test-3";
+        hear(s, &event("UserPromptSubmit", &dir));
+        hear(s, &tool("PreToolUse", &dir, "x.rs"));
+        fs::write(dir.join("x.rs"), "theirs\n").unwrap();
+        hear(s, &tool("PostToolUseFailure", &dir, "x.rs"));
+        hear(s, &event("Stop", &dir));
+        let cwd = dir.to_string_lossy().into_owned();
+        assert_eq!(undo(s, &cwd), Outcome::NotOwned(vec!["x.rs".into()]));
+        assert_eq!(fs::read_to_string(dir.join("x.rs")).unwrap(), "theirs\n");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn git_gives_up_once_the_budget_is_spent() {
+        let dir = repo();
+        let budget = Budget::start(Duration::ZERO);
+        assert!(git(&dir, &["status"], &[], None).is_err());
+        drop(budget);
+        assert!(git(&dir, &["status"], &[], None).is_ok());
         let _ = fs::remove_dir_all(&dir);
     }
 

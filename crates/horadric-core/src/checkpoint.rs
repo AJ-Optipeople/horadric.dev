@@ -323,6 +323,18 @@ impl Turns {
         w.after = blob;
     }
 
+    /// The tool failed and the file is `blob`. A failed write wrote
+    /// nothing, so whatever changed the file since its hash before was
+    /// someone else.
+    pub fn failed(&mut self, session: &str, file: &str, blob: Blob) {
+        let Some(open) = self.open.get_mut(session) else {
+            return;
+        };
+        if let Some(w) = open.record.files.get_mut(file) {
+            w.broken |= w.after != blob;
+        }
+    }
+
     /// The turn of `session` stopped: its tree, number and record.
     pub fn finish(&mut self, session: &str) -> Option<(String, u64, Record)> {
         self.open.remove(session).map(|o| (o.tree, o.n, o.record))
@@ -686,6 +698,30 @@ mod tests {
                 broken: false
             }
         );
+    }
+
+    #[test]
+    fn a_failed_write_never_adopts_what_another_session_made() {
+        let mut t = Turns::default();
+        t.begin("a", "C:/app", 1, at(0));
+        // A's Write of a new file waits at a permission prompt; B makes the
+        // file meanwhile; A's write fails.
+        t.before("a", "x", None);
+        t.failed("a", "x", b("theirs"));
+        let w = &t.record("a", 1).unwrap().files["x"];
+        assert_eq!(w.after, None);
+        assert!(w.broken);
+        let (mine, others) = attribute(
+            vec![change("x", None, Some("theirs"))],
+            &t.record("a", 1).unwrap(),
+            "",
+        );
+        assert!(mine.is_empty());
+        assert_eq!(others, ["x"]);
+        // A failure that left the file as it was breaks nothing.
+        t.before("a", "y", b("s"));
+        t.failed("a", "y", b("s"));
+        assert!(!t.record("a", 1).unwrap().files["y"].broken);
     }
 
     #[test]
