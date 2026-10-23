@@ -9,6 +9,7 @@
 - A [/] quest whose session a dev instance started (state in %APPDATA%\Horadric-dev) died with it: no tell reaches it, hand it to the human with "restart it" at once (lore #51).
 
 ## Lately
+- 2026-10-24 Round (hourly, 01:00, main at f830202): the task notification quest landed (ee29dd2) and 16 more commits after the 23:55 reload, but 16 files hold uncommitted code (229+/299-, plus new brothers.rs and joining.rs, Brotherhood work from a live session committing every few minutes), so held "Ship Local": it builds from the shared tree. Gave "Hand a picked thing to the agent" Model: opus.
 - 2026-10-23 Round (quest landed, main at 07e1476): "Browser pane draws pages offset" landed after the last reload (10-21), tree has no code edits (only the human's Brotherhood plan doc), so cast "Ship Local". Task notification quest still with the human. Look back (1 done, 1 merged, 0 Warriv sessions): the day was clean, nothing happened twice. The day gave 1 note (#431 Brotherhood joining: login finds devices, approval click trusts them, provider open between Google and WorkOS).
 - 2026-10-21 Eleven hourly rounds (main 8b733f7 to 148d108, only my memory since v0.31.0): nothing landed, uncommitted code in the tree is another session's, task notification quest still with the human. Nothing to do.
 - 2026-10-21 Look back (0 done, 0 merged, 14 Warriv sessions): the day was clean, nothing happened twice. The day gave 2 notes (#428 alert and confirm left to the user on purpose, replaces #427; #429 task.rs must gate mcp and browser calls for the Mac). Round (hourly, main at ff50a82, only my memory since v0.31.0): task notification quest still with the human. Nothing to do.
@@ -120,5 +121,4 @@
 
 ## Open
 - Once quests run with a pack, the pack comparison resumes by itself.
-- "Memory: no recall on a task notification" handed to the human to restart (2026-10-17); when it lands, cast Ship Local.
-- Answered: on "Memory: no recall on a task notification, and none of them kept as dialogue" you asked "Restart it: its session died with a dev instance 14 hours ago and nothing runs it now.". The human settled it without words Horadric heard: read the quest and its notes for how.
+- 17 commits on main since the 2026-10-23 23:55 reload (task notification quest, Brotherhood, Linux node). Cast "Ship Local" once the tree holds no uncommitted code.
