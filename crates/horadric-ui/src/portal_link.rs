@@ -123,11 +123,19 @@ impl Link {
         // Milliseconds since `origin` when the relay last said anything.
         let origin = Instant::now();
         let heard = Arc::new(AtomicU64::new(0));
-        let url = format!(
-            "{}/pc?secret={}",
-            relay.trim_end_matches('/'),
-            uri_encode(secret)
-        );
+        let (relay, secret) = (relay.to_string(), secret.to_string());
+        // Asked again on every connect: an access token lasts minutes,
+        // the link for as long as the app runs.
+        let url = move || {
+            let token = crate::workos::access_token().ok();
+            let name = crate::portal_pair::pc_name();
+            pc_url(
+                &relay,
+                &secret,
+                token.as_deref().map(|t| (t, name.as_str())),
+            )
+        };
+        let dialed = Arc::new(AtomicU64::new(0));
         {
             let slot = slot.clone();
             std::thread::Builder::new()
@@ -136,11 +144,16 @@ impl Link {
                 .ok();
         }
         {
-            let (stop, slot, heard) = (stop.clone(), slot.clone(), heard.clone());
+            let (stop, slot, heard, dialed) =
+                (stop.clone(), slot.clone(), heard.clone(), dialed.clone());
             std::thread::Builder::new()
                 .name("portal-read".into())
                 .spawn(move || {
                     let hear = || heard.store(ms(origin), Ordering::SeqCst);
+                    let url = || {
+                        dialed.store(SIGNED.load(Ordering::SeqCst), Ordering::SeqCst);
+                        url()
+                    };
                     read_loop(&url, &stop, &slot, &tx, &*wake, &hear)
                 })
                 .ok();
@@ -149,7 +162,7 @@ impl Link {
             let (stop, slot, out) = (stop.clone(), slot.clone(), out.clone());
             std::thread::Builder::new()
                 .name("portal-ping".into())
-                .spawn(move || ping_loop(&stop, &slot, &out, &heard, origin))
+                .spawn(move || ping_loop(&stop, &slot, &out, &heard, &dialed, origin))
                 .ok();
         }
         Link {
@@ -197,6 +210,34 @@ impl Drop for Link {
     }
 }
 
+/// Goes up on every sign in and sign out, so each link connects again as
+/// the PC it now is.
+static SIGNED: AtomicU64 = AtomicU64::new(0);
+
+/// Makes every link connect again, with a token now or without one.
+pub fn renew() {
+    SIGNED.fetch_add(1, Ordering::SeqCst);
+}
+
+/// The relay's `/pc` address. A signed in PC (`signed` is its access
+/// token and name) is a v3 PC the relay groups with its brothers; without
+/// it the PC is served as v2.
+pub fn pc_url(relay: &str, secret: &str, signed: Option<(&str, &str)>) -> String {
+    let mut url = format!(
+        "{}/pc?secret={}",
+        relay.trim_end_matches('/'),
+        uri_encode(secret)
+    );
+    if let Some((token, name)) = signed {
+        url.push_str(&format!(
+            "&token={}&name={}",
+            uri_encode(token),
+            uri_encode(name)
+        ));
+    }
+    url
+}
+
 fn ms(origin: Instant) -> u64 {
     origin.elapsed().as_millis() as u64
 }
@@ -224,6 +265,7 @@ fn ping_loop(
     slot: &Slot,
     out: &Sender<Out>,
     heard: &AtomicU64,
+    dialed: &AtomicU64,
     origin: Instant,
 ) {
     let mut since_ping = 0;
@@ -238,7 +280,8 @@ fn ping_loop(
             since_ping = 0;
             let _ = out.send((true, br#"{"ping":1}"#.to_vec()));
         }
-        if silent(ms(origin), heard.load(Ordering::SeqCst)) {
+        let renewed = dialed.load(Ordering::SeqCst) != SIGNED.load(Ordering::SeqCst);
+        if renewed || silent(ms(origin), heard.load(Ordering::SeqCst)) {
             socket.close();
         }
     }
@@ -250,7 +293,7 @@ fn silent(now: u64, heard: u64) -> bool {
 }
 
 fn read_loop(
-    url: &str,
+    url: &dyn Fn() -> String,
     stop: &AtomicBool,
     slot: &Slot,
     tx: &Sender<Incoming>,
@@ -264,7 +307,7 @@ fn read_loop(
     };
     let mut backoff = 1;
     while !stop.load(Ordering::SeqCst) {
-        match connect(url) {
+        match connect(&url()) {
             Ok(socket) => {
                 let socket = Arc::new(socket);
                 *slot.lock().unwrap() = Some(socket.clone());
@@ -458,6 +501,18 @@ mod tests {
         assert!(!silent(70_000, 0));
         assert!(silent(70_001, 0));
         assert!(!silent(5, 10));
+    }
+
+    #[test]
+    fn a_signed_in_pc_brings_its_token_and_name() {
+        assert_eq!(
+            pc_url("wss://r.dev/", "s+1", None),
+            "wss://r.dev/pc?secret=s%2B1"
+        );
+        assert_eq!(
+            pc_url("wss://r.dev", "s", Some(("h.p.s", "Big PC"))),
+            "wss://r.dev/pc?secret=s&token=h.p.s&name=Big%20PC"
+        );
     }
 
     #[test]

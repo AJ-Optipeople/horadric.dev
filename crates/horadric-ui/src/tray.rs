@@ -89,6 +89,9 @@ pub enum Choice {
     Account(Agent, usize),
     /// Log this agent in to another account.
     AddAccount(Agent),
+    /// Sign in to WorkOS, so this PC finds its brothers.
+    SignIn,
+    SignOut,
     /// End every session in every project, after asking.
     EndAll,
     Quit,
@@ -259,6 +262,8 @@ pub fn menu(
     const UPDATE: usize = 12;
     const LISTEN: usize = 13;
     const STOP: usize = 15;
+    const SIGN_IN: usize = 16;
+    const SIGN_OUT: usize = 17;
     const RECENT: usize = 100;
     let mut items = Vec::new();
     if let Some(xp) = xp {
@@ -352,6 +357,13 @@ pub fn menu(
     if !logins.is_empty() {
         items.push(Item::Submenu("Account".into(), account_items(logins)));
     }
+    match crate::workos::user() {
+        Some(user) => {
+            items.push(Item::Disabled(format!("Signed in as {}", user.email)));
+            items.push(Item::action(SIGN_OUT, "Sign out"));
+        }
+        None => items.push(Item::action(SIGN_IN, "Sign in\u{2026}")),
+    }
     items.push(Item::action(SETTINGS, "Settings\u{2026}"));
     if let Some(version) = update {
         items.push(Item::action(UPDATE, format!("Update to {version}\u{2026}")));
@@ -373,6 +385,8 @@ pub fn menu(
         UPDATE => Some(Choice::Update),
         END_ALL => Some(Choice::EndAll),
         STOP => Some(Choice::StopWarriv),
+        SIGN_IN => Some(Choice::SignIn),
+        SIGN_OUT => Some(Choice::SignOut),
         i if (ACCOUNT..ACCOUNT + 100 * Agent::ALL.len()).contains(&i) => {
             let agent = Agent::ALL[(i - ACCOUNT) / 100];
             match (i - ACCOUNT) % 100 {

@@ -1465,6 +1465,8 @@ fn tray_menu(hwnd: HWND) {
         Some(Choice::AddAccount(agent)) => {
             with_app(|app| app.add_account(agent));
         }
+        Some(Choice::SignIn) => crate::workos::sign_in_in_background(),
+        Some(Choice::SignOut) => crate::workos::sign_out(),
         Some(Choice::EndAll) => {
             if confirm_end(None) {
                 with_app(|app| app.end_all(None));

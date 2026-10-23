@@ -207,4 +207,6 @@ pub use web::AGENT_PROMPT;
 #[cfg(windows)]
 mod window;
 #[cfg(windows)]
+pub mod workos;
+#[cfg(windows)]
 mod worktree;
