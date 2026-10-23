@@ -214,7 +214,19 @@ pub fn fetch_bundle(dir: &Path, bundle: &Path, refname: &str) -> Result<String, 
     let bundle = bundle.to_string_lossy();
     git(dir, &["bundle", "verify", "-q", &bundle], &[])?;
     let spec = format!("+{refname}:{refname}");
-    git(dir, &["fetch", "-q", "--no-tags", &bundle, &spec], &[])?;
+    // Fetch otherwise starts a detached gc or maintenance run, which on
+    // Linux was still writing into a keeper's repository as it was pruned.
+    let quiet = [
+        "-c",
+        "gc.auto=0",
+        "-c",
+        "maintenance.auto=false",
+        "fetch",
+        "-q",
+        "--no-tags",
+    ];
+    let args: Vec<&str> = quiet.iter().copied().chain([&*bundle, &spec]).collect();
+    git(dir, &args, &[])?;
     rev(dir, refname).ok_or_else(|| format!("the bundle held no {refname}"))
 }
 
