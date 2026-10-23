@@ -87,7 +87,9 @@ impl Pty {
                 &mut master,
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
-                &mut size,
+                // A raw pointer, since Linux takes the size as const and
+                // the Mac as mut.
+                &raw mut size,
             )
         };
         if pid < 0 {

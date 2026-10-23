@@ -16,11 +16,15 @@ path = "src/horadricw.rs"
 [dependencies]
 horadric-core = { path = "../horadric-core" }
 horadric-hooks = { path = "../horadric-hooks" }
-horadric-memory = { path = "../horadric-memory" }
 horadric-pty = { path = "../horadric-pty" }
-horadric-ui = { path = "../horadric-ui" }
 serde = { workspace = true }
 serde_json = { workspace = true }
+
+# A Linux build is a headless node (`horadric node`): no tiles, and no
+# memory, whose tokenizer is C that a static musl build would have to carry.
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+horadric-memory = { path = "../horadric-memory" }
+horadric-ui = { path = "../horadric-ui" }
 
 [target.'cfg(windows)'.dependencies]
 tree-sitter = "0.25"

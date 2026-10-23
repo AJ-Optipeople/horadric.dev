@@ -125,6 +125,9 @@ pub struct Ring {
     cap: usize,
     /// Whether the oldest bytes were ever dropped.
     trimmed: bool,
+    /// Every byte ever pushed, so a reader that took the ring up to some
+    /// point can ask for what came after it.
+    pushed: u64,
 }
 
 impl Ring {
@@ -133,10 +136,12 @@ impl Ring {
             bytes: VecDeque::new(),
             cap,
             trimmed: false,
+            pushed: 0,
         }
     }
 
     pub fn push(&mut self, bytes: &[u8]) {
+        self.pushed += bytes.len() as u64;
         self.bytes.extend(bytes);
         let over = self.bytes.len().saturating_sub(self.cap);
         if over > 0 {
@@ -150,15 +155,43 @@ impl Ring {
     /// after the first line break instead, where the terminal is in a
     /// state it knows.
     pub fn replay(&self) -> Vec<u8> {
+        self.replay_at().1
+    }
+
+    /// The replay with the offset of its first byte, counted as
+    /// [`Ring::end`] counts.
+    pub fn replay_at(&self) -> (u64, Vec<u8>) {
         let (a, b) = self.bytes.as_slices();
         let all = [a, b].concat();
+        let start = self.end() - all.len() as u64;
         if !self.trimmed {
-            return all;
+            return (start, all);
         }
         match all.iter().position(|&c| c == b'\n') {
-            Some(i) => all[i + 1..].to_vec(),
-            None => Vec::new(),
+            Some(i) => (start + i as u64 + 1, all[i + 1..].to_vec()),
+            None => (self.end(), Vec::new()),
         }
+    }
+
+    /// How many bytes were ever pushed: the offset the next byte will have.
+    pub fn end(&self) -> u64 {
+        self.pushed
+    }
+
+    /// The bytes from offset `from` on, or None when the ring has dropped
+    /// some of them, and a reader that wants them all has to start over
+    /// from a replay.
+    pub fn since(&self, from: u64) -> Option<Vec<u8>> {
+        let start = self.end() - self.bytes.len() as u64;
+        if from < start || from > self.end() {
+            return None;
+        }
+        Some(
+            self.bytes
+                .range((from - start) as usize..)
+                .copied()
+                .collect(),
+        )
     }
 
     pub fn len(&self) -> usize {
@@ -269,6 +302,27 @@ mod tests {
         assert_eq!(r.replay(), b"defghij", "after the line break it kept");
         r.push(b"\nkl");
         assert_eq!(r.replay(), b"kl");
+    }
+
+    #[test]
+    fn a_reader_takes_what_came_after_it_until_the_ring_drops_it() {
+        let mut r = Ring::new(8);
+        r.push(b"ab");
+        assert_eq!(r.replay_at(), (0, b"ab".to_vec()));
+        assert_eq!(r.end(), 2);
+        assert_eq!(r.since(2), Some(Vec::new()));
+        r.push(b"cd");
+        assert_eq!(r.since(2), Some(b"cd".to_vec()));
+        assert_eq!(r.since(5), None, "nothing is there yet");
+        r.push(b"ef\ngh\n");
+        assert_eq!(r.end(), 10);
+        assert_eq!(r.since(1), None, "dropped");
+        assert_eq!(r.since(2), Some(b"cdef\ngh\n".to_vec()));
+        assert_eq!(
+            r.replay_at(),
+            (7, b"gh\n".to_vec()),
+            "after the first break"
+        );
     }
 
     #[test]

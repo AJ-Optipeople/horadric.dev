@@ -19,7 +19,7 @@
 //! read and refused when written, never misread. `tests/formats.rs`
 //! reads a file of every earlier version.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, ErrorKind, Read, Seek, SeekFrom, Write};
@@ -194,7 +194,16 @@ pub struct Store {
     /// Vector files whose header could not be read at all, by month and
     /// tag: never written over, since a newer Horadric may have made them.
     unreadable: BTreeSet<(Month, String)>,
+    /// Chunks forgotten, by [`Store::hide`]: still in their segment,
+    /// which is never rewritten, but no longer an answer or embedded.
+    hidden: HashSet<ChunkId>,
+    /// How much of the forgotten file has been read.
+    hidden_read: u64,
 }
+
+/// The file the forgotten chunks are listed in, one id a line. A build
+/// from before it ignores it.
+const FORGOTTEN: &str = "forgotten.txt";
 
 impl Store {
     /// Opens the store in `dir`, making the folder if it is not there,
@@ -206,6 +215,8 @@ impl Store {
             segments: BTreeMap::new(),
             models: BTreeMap::new(),
             unreadable: BTreeSet::new(),
+            hidden: HashSet::new(),
+            hidden_read: 0,
         };
         store.refresh()?;
         Ok(store)
@@ -221,12 +232,15 @@ impl Store {
             segments: BTreeMap::new(),
             models: BTreeMap::new(),
             unreadable: BTreeSet::new(),
+            hidden: HashSet::new(),
+            hidden_read: 0,
         };
         let entries = match fs::read_dir(dir) {
             Ok(e) => e,
             Err(e) if e.kind() == ErrorKind::NotFound => return Ok(store),
             Err(e) => return Err(e),
         };
+        store.read_hidden()?;
         let mut months = Vec::new();
         for entry in entries {
             let name = entry?.file_name();
@@ -259,6 +273,7 @@ impl Store {
                 }
             }
         }
+        self.read_hidden()?;
         self.drop_replaced_vectors(&found);
         // Text first, so vectors find the chunks they belong to.
         found.sort_by_key(|(m, tag)| (tag.is_some(), *m));
@@ -296,6 +311,47 @@ impl Store {
         }
         self.models.retain(|_, m| !m.files.is_empty());
         self.unreadable.retain(|(m, t)| is_found(m, t));
+    }
+
+    /// Reads the forgotten chunks another writer listed since the last
+    /// read. A torn last line waits for the next read.
+    fn read_hidden(&mut self) -> io::Result<()> {
+        let Some(bytes) = read_from(&self.dir.join(FORGOTTEN), self.hidden_read)? else {
+            return Ok(());
+        };
+        let whole = bytes.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
+        let text = String::from_utf8_lossy(&bytes[..whole]);
+        self.hidden
+            .extend(text.lines().filter_map(|l| ChunkId::parse(l.trim())));
+        self.hidden_read += whole as u64;
+        Ok(())
+    }
+
+    /// Forgets the chunks `ids`: they stay in their segment, since a
+    /// segment is never rewritten, but are never an answer, embedded or
+    /// listed again. For good: nothing brings one back.
+    pub fn hide(&mut self, ids: &[ChunkId]) -> io::Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let _lock = Lock::take(&self.dir.join("write.lock"))?;
+        self.refresh()?;
+        let path = self.dir.join(FORGOTTEN);
+        let mut file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(&path)?;
+        // A tail past the last whole line is a write that died half way.
+        file.set_len(self.hidden_read)?;
+        file.seek(SeekFrom::End(0))?;
+        let out: String = ids.iter().map(|id| format!("{id}\n")).collect();
+        file.write_all(out.as_bytes())?;
+        file.sync_data()?;
+        self.hidden_read += out.len() as u64;
+        self.hidden.extend(ids.iter().copied());
+        Ok(())
     }
 
     fn segment_path(&self, month: Month) -> PathBuf {
@@ -484,6 +540,9 @@ impl Store {
     }
 
     pub fn chunk(&self, id: ChunkId) -> Option<&Chunk> {
+        if self.hidden.contains(&id) {
+            return None;
+        }
         self.segments
             .get(&id.month)?
             .chunks
@@ -493,11 +552,13 @@ impl Store {
 
     /// Every chunk that could be read, oldest segment first.
     pub fn chunks(&self) -> impl Iterator<Item = (ChunkId, &Chunk)> {
-        self.segments.iter().flat_map(|(&month, seg)| {
+        let hidden = &self.hidden;
+        self.segments.iter().flat_map(move |(&month, seg)| {
             seg.chunks
                 .iter()
                 .enumerate()
                 .filter_map(move |(n, c)| Some((ChunkId { month, n: n as u32 }, c.as_ref()?)))
+                .filter(move |(id, _)| !hidden.contains(id))
         })
     }
 
@@ -687,7 +748,7 @@ fn newer(path: &Path) -> io::Error {
 }
 
 /// The bytes of `path` from `start` on, or `None` when it is not there.
-fn read_from(path: &Path, start: u64) -> io::Result<Option<Vec<u8>>> {
+pub(crate) fn read_from(path: &Path, start: u64) -> io::Result<Option<Vec<u8>>> {
     let mut file = match File::open(path) {
         Ok(f) => f,
         Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
@@ -775,10 +836,10 @@ fn dot(query: &[f32], v: &[i8]) -> f32 {
 /// A lock file, as `horadric-hooks` guards the quest log and the lore
 /// with: held while the file exists, taken as left by a dead process
 /// after three seconds.
-struct Lock(PathBuf);
+pub(crate) struct Lock(PathBuf);
 
 impl Lock {
-    fn take(path: &Path) -> io::Result<Lock> {
+    pub(crate) fn take(path: &Path) -> io::Result<Lock> {
         let wait = Duration::from_secs(3);
         let step = Duration::from_millis(20);
         let mut waited = Duration::ZERO;
@@ -1084,6 +1145,44 @@ mod tests {
         assert_eq!(again.models(), [("m", 1)]);
         assert_eq!(again.nearest("m", &[0.0, 1.0], 1)[0].0, a);
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_forgotten_chunk_is_gone_for_every_writer_and_stays_gone() {
+        let dir = temp("hide");
+        let mut one = Store::open(&dir).unwrap();
+        let ids = one
+            .add_all(&[chunk("keep"), chunk("forget"), chunk("also keep")], OCT)
+            .unwrap();
+        one.put_vector(ids[1], "m", &unit(&[1.0, 0.0])).unwrap();
+        let mut two = Store::open(&dir).unwrap();
+        two.hide(&[ids[1]]).unwrap();
+        assert!(two.chunk(ids[1]).is_none());
+        one.refresh().unwrap();
+        for s in [&one, &two] {
+            assert!(s.chunk(ids[1]).is_none());
+            let left: Vec<&str> = s.chunks().map(|(_, c)| c.text.as_str()).collect();
+            assert_eq!(left, ["keep", "also keep"]);
+            assert!(s.nearest("m", &unit(&[1.0, 0.0]), 3).is_empty());
+            assert!(!s.missing("m").contains(&ids[1]));
+        }
+        // A torn last line waits, and the next write cuts it.
+        let path = dir.join(FORGOTTEN);
+        let mut f = OpenOptions::new().append(true).open(&path).unwrap();
+        f.write_all(b"2026-10#").unwrap();
+        drop(f);
+        one.refresh().unwrap();
+        assert_eq!(one.len(), 2);
+        one.hide(&[ids[0]]).unwrap();
+        let three = Store::open(&dir).unwrap();
+        assert_eq!(three.len(), 1);
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            format!("{}\n{}\n", ids[1], ids[0])
+        );
+        let since = Store::text_since(&dir, Month::of(OCT)).unwrap();
+        assert_eq!(since.len(), 1);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

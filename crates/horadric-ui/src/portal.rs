@@ -11,6 +11,7 @@ use alacritty_terminal::term::Term;
 use alacritty_terminal::vte::ansi::{NamedColor, Rgb};
 use horadric_core::ask::Ask;
 use horadric_core::diff::FileDiff;
+use horadric_core::portal::b64url;
 // The frame crypto is Windows CNG, so the Mac build has no portal yet.
 #[cfg(windows)]
 use horadric_core::portal::{key32, Config};
@@ -20,10 +21,6 @@ use serde_json::{json, Value};
 
 use crate::board::Board;
 use crate::palette;
-
-/// The protocol version this side speaks. 2 brought a key per phone and
-/// the per-connection `s` and `n`.
-pub const VERSION: u64 = 2;
 
 /// The most scrollback a screen message carries, so a long session does
 /// not send megabytes on every change.
@@ -543,6 +540,49 @@ pub fn attach_stale(modified: u64, now: u64) -> bool {
     now.saturating_sub(modified) >= ATTACH_KEEP_SECS
 }
 
+/// Raw output carried by one `out` message. Base64 makes it a third
+/// bigger, and the sealed frame must stay under the relay's 1 MB.
+pub const OUT_CHUNK: usize = 256 * 1024;
+
+/// A stream's output as `out` messages, `seq` the offset of the first
+/// byte, each at most [`OUT_CHUNK`] raw. `reset` marks the start of a
+/// replay, after which the viewer draws into a fresh terminal; it is sent
+/// even when the replay is empty, so the viewer still starts over.
+pub fn out_messages(id: &str, seq: u64, bytes: &[u8], reset: bool) -> Vec<Value> {
+    let mut out: Vec<Value> = bytes
+        .chunks(OUT_CHUNK)
+        .scan(seq, |at, chunk| {
+            let msg = json!({"t": "out", "id": id, "seq": *at, "b64": b64url(chunk)});
+            *at += chunk.len() as u64;
+            Some(msg)
+        })
+        .collect();
+    if reset {
+        if out.is_empty() {
+            out.push(json!({"t": "out", "id": id, "seq": seq, "b64": ""}));
+        }
+        out[0]["reset"] = json!(true);
+    }
+    out
+}
+
+/// The size a session's pseudo terminal has now, for every viewer to
+/// draw at.
+pub fn size_message(id: &str, cols: u16, rows: u16) -> Value {
+    json!({"t": "size", "id": id, "cols": cols, "rows": rows})
+}
+
+/// A size a viewer asked for, kept within what a terminal can be.
+pub fn asked_size(msg: &Value) -> Option<(u16, u16)> {
+    let n = |k: &str| {
+        msg[k]
+            .as_u64()
+            .filter(|&n| (1..=1000).contains(&n))
+            .map(|n| n as u16)
+    };
+    Some((n("cols")?, n("rows")?))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -962,6 +1002,50 @@ mod tests {
         assert_eq!(attach_file_name("...", 7), "7-photo.jpg");
         assert_eq!(attach_file_name("con.", 7), "7-con");
         assert_eq!(attach_file_name(&"x".repeat(200), 7).len(), 62);
+    }
+
+    #[test]
+    fn output_goes_in_chunks_that_fit_the_relay() {
+        let bytes: Vec<u8> = (0..OUT_CHUNK * 2 + 10).map(|i| (i % 251) as u8).collect();
+        let out = out_messages("s1", 100, &bytes, true);
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[0]["reset"], true);
+        assert!(out[1].get("reset").is_none());
+        let mut back = Vec::new();
+        let mut at = 100;
+        for m in &out {
+            assert_eq!(m["t"], "out");
+            assert_eq!(m["id"], "s1");
+            assert_eq!(m["seq"], at);
+            // The nonce, the tag and the channel come on top.
+            assert!(m.to_string().len() < 1024 * 1024 - 64);
+            let chunk = horadric_core::portal::unb64url(m["b64"].as_str().unwrap()).unwrap();
+            at += chunk.len() as u64;
+            back.extend(chunk);
+        }
+        assert_eq!(back, bytes);
+    }
+
+    #[test]
+    fn an_empty_replay_still_resets_and_no_output_sends_nothing() {
+        let out = out_messages("s1", 7, b"", true);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0]["reset"], true);
+        assert_eq!(out[0]["b64"], "");
+        assert!(out_messages("s1", 7, b"", false).is_empty());
+        assert_eq!(out_messages("s1", 7, b"hi", false)[0]["b64"], "aGk");
+    }
+
+    #[test]
+    fn a_size_asked_for_is_a_terminal_size() {
+        assert_eq!(asked_size(&json!({"cols": 80, "rows": 24})), Some((80, 24)));
+        assert_eq!(asked_size(&json!({"cols": 0, "rows": 24})), None);
+        assert_eq!(asked_size(&json!({"cols": 80})), None);
+        assert_eq!(asked_size(&json!({"cols": 80, "rows": 70000})), None);
+        assert_eq!(
+            size_message("s1", 80, 24),
+            json!({"t": "size", "id": "s1", "cols": 80, "rows": 24})
+        );
     }
 
     #[test]
