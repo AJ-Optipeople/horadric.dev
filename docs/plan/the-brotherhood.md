@@ -11,17 +11,20 @@ mages who carried the Cube.
 Asked for on 2026-10-11 as Waypoints (seeing every machine's sessions),
 grown on 2026-10-19 into the Brotherhood (moving sessions between them
 and taking over from a brother that died). Waypoints' plan is steps 1
-to 5 below, unchanged in substance.
+and 3 to 6 below, unchanged in substance. On 2026-10-23 it gained a
+login (WorkOS), so joining is signing in, and a shared lore, so every
+brother remembers what any of them found out. Teams are on the horizon,
+and the login was picked with them in mind.
 
 Not the same as Horadrim, the written tongue recall's answers are
 inscribed in. That name stays with memory.
 
 ## What it is and is not
 
-**Is:** remote sessions (their tiles, phases and terminals), starting and
-resuming them on any brother, handing a session from one brother to
-another between turns, and taking over a brother's sessions when it goes
-quiet.
+**Is:** a Horadric login, remote sessions (their tiles, phases and
+terminals), starting and resuming them on any brother, handing a session
+from one brother to another between turns, taking over a brother's
+sessions when it goes quiet, and one lore shared by every brother.
 
 **Is not, at first:** one machine. The files tile, the file viewer, the
 browser pane, the git glance, the quest log and Warriv all assume a
@@ -53,8 +56,45 @@ screen. What it lacks:
 - **Nothing moves.** A session is a `claude` process on one machine, its
   transcript in that machine's `~/.claude/projects`, its work in that
   machine's working tree. Handoff and takeover have to carry all three.
+- **Nobody is anyone.** Pairing is a secret per PC and a link per phone.
+  There is no account, so a new machine cannot find its brothers without
+  something pasted, and nothing could ever group machines into a team.
+- **Each lore is one machine's.** The lore lives in that machine's state
+  folder, and an earlier session found that two machines writing one
+  memory file corrupt it. So it cannot simply sit in a synced folder.
 
 ## Decisions
+
+### Signing in
+
+- **WorkOS AuthKit, not accounts of our own.** No passwords, no user
+  table, no reset mails to run. AuthKit signs in with Google, GitHub,
+  Microsoft, an email link or a passkey, is free up to a million monthly
+  users, and has organizations and SSO for when teams come. Chosen over
+  Google sign in alone (which Drive backup already has) for those two
+  reasons: more ways in, and teams without a second migration.
+- **The login finds brothers, it never lets one in.** A stolen password
+  must not open every shell the human has. Signing in shows a new machine
+  its brotherhood; a brother already in must approve it ("Laptop wants to
+  join. Let it in?") before it gets a key. Like linking a new device in
+  Signal. The very first machine needs no approval.
+- **Keys stay per device.** The account groups devices, the keys still
+  encrypt end to end, one pair of keys per link as today. The relay sees
+  who belongs together and nothing more.
+- **In the app.** "Sign in..." in the tray menu opens the default browser
+  (never the browser pane) on AuthKit, with PKCE and a loopback redirect
+  on 127.0.0.1, as Google sign in for backup does. The refresh token goes
+  in Credential Manager. WinHTTP and JSON only, so no new crate.
+- **The relay checks the token.** A PC connects with its WorkOS access
+  token beside its secret. The relay checks it against WorkOS's public
+  keys and groups live connections by user. It still keeps nothing on
+  disk: the roster lives on the brothers, the relay only knows who is
+  connected now. Verifying a JWT in Node is the relay's own dependency
+  decision (`jose`, or Node's `crypto` by hand).
+- **When WorkOS is down,** nobody new can join. Brothers already joined
+  keep working, since their keys and roster are local.
+- **Drive backup keeps its own Google sign in.** WorkOS says who you are,
+  it does not open your Drive.
 
 ### Joining
 
@@ -62,14 +102,14 @@ screen. What it lacks:
   other's sessions, hold each other's snapshots and can take over from
   each other. A phone stays paired with one PC and sees that PC's
   sessions, as today.
-- **Joining once joins everyone.** "Join a brotherhood..." in the tray
-  menu. A Windows PC pastes a link that a brother shows ("Pair a PC"
-  beside "Pair a phone"); a Linux node is added by its SSH destination,
-  picked with the Fleets picker from `~/.ssh/config`, where the trust is
-  the SSH key. The brother that let it in passes on the roster, so the
-  newcomer links to every other brother directly, and every brother
-  learns of it. Each pair still has a key of its own, so one brother can
-  be cast out alone.
+- **Joining once joins everyone.** A Windows PC joins by signing in and
+  an approval click on a brother. A Linux node is added by its SSH
+  destination, picked with the Fleets picker from `~/.ssh/config`, where
+  the trust is the SSH key and no login is needed, since it speaks over
+  `ssh` and not the relay. The brother that let it in passes on the
+  roster, so the newcomer links to every other brother directly, and
+  every brother learns of it. Each pair still has a key of its own, so
+  one brother can be cast out alone.
 - **The roster.** Every brother keeps the same list: each brother's
   name, key and link, and each session's owner. Changes carry a number
   that only goes up, and the highest wins, so two brothers that were
@@ -79,7 +119,8 @@ screen. What it lacks:
 - **Cast out.** Any brother can cast another out ("Cast out Laptop..."),
   for a stolen or retired machine. Every brother drops its key and
   refuses it from then on. It needs the human's click on a brother, never
-  a phone, and it cannot be undone except by joining again.
+  a phone, and it cannot be undone except by joining again. Signing out
+  of WorkOS everywhere does not cast anyone out; the keys are what count.
 - **Each link can be view only.** "Can control this brother" is a switch
   per brother, on by default for one the human joined themselves. Off,
   the other sees tiles and screens but sends no input, start, resume,
@@ -209,11 +250,42 @@ screen. What it lacks:
   A brother missing a login a session needs blocks it with the wait for
   that login, rather than running it as someone else.
 
+### Sharing the lore
+
+- **Every brother keeps a whole copy.** Never one file in a synced folder,
+  never a server holding the lore. Each brother writes only its own, and
+  the copies meet over the mesh.
+- **Entries are appended, never edited.** A note, a dialogue, a quest's
+  summary each get an id of the brother that wrote it and a number that
+  only goes up on that brother. A note that `replaces` another is a new
+  entry, as today. So two copies merge by taking what the other has and
+  this one lacks, with nothing to resolve.
+- **Catching up.** When two brothers link they swap, per writing brother,
+  the highest number each holds, and send what the other is missing. Then
+  every new entry goes to every linked brother as it is written.
+- **Vectors stay local.** A brother embeds what it receives itself, as a
+  restore does. Only text crosses.
+- **A project is found by its repository,** by the remote URL or the first
+  commit, the same rule as handing off. Two checkouts of horadric.dev on
+  two brothers share one lore. A project with no git shares nothing.
+- **The code index is not shared.** It is built from each brother's own
+  working tree and would be wrong anywhere else.
+- **Forgetting crosses too.** Removing an entry is itself an entry, so a
+  forgotten thing does not come back from a brother that was away.
+- **Drive as the brother that never sleeps.** The encrypted Drive backup
+  already holds each machine's lore. A brother that wakes with every
+  other one silent can catch up from there. A later step, not the first.
+
 ## Protocol v3
 
 Added to PORTAL.md when built. A v2 phone or PC keeps working; a brother
 that answers `v` 2 shows as "needs a newer Horadric".
 
+- The relay's `/pc` takes `token=<WorkOS access token>` beside the
+  secret, and tells a signed in PC which of its user's brothers are
+  connected (`{"brothers":[...]}`) and when one asks to join
+  (`{"join":<ch>,"name"}`). A PC without a token is a v2 PC, served as
+  today.
 - Hello gains `"kind":"phone"` or `"brother"`, and the answer
   `"brother":"<name>"` and `"control":true|false`.
 - `{"t":"attach","id","cols","rows"}`: stream this session raw. The
@@ -235,6 +307,9 @@ that answers `v` 2 shows as "needs a newer Horadric".
 - `{"t":"keep","id","n","b64"}`: a turn's snapshot to the keeper.
 - `{"t":"takeover","id","n"}`: the roster change that moves a silent
   brother's session to its keeper.
+- `{"t":"lore","project","have":{"<brother>":n,...}}` on connect, then
+  `{"t":"entries","project","b64"}` with what the other lacks, and the
+  same for each new entry as it is written.
 - `input`, `start`, `resume`, `create`, `handoff` and `takeover` are
   refused with `error` "view only" on a link without control.
 
@@ -247,8 +322,16 @@ Each step is useful alone and each is verified before the next starts.
    side, with the size rule as a pure function. Verified with a small
    script client against a dev instance first: attach, replay, type, see
    it on the dev stage.
-2. **The Windows UI as a client of another PC.** Joining two PCs, the
-   roster in `portal.json` beside phones, one link out per brother.
+2. **Signing in.** A WorkOS project with AuthKit (Google, GitHub,
+   Microsoft, email), "Sign in..." in the tray, PKCE in the default
+   browser, the refresh token in Credential Manager. The relay checks
+   the token, lists a user's connected brothers and passes a join
+   request to them. The approval prompt on the brother. Verified with
+   two dev instances on this machine and the real relay: sign in on
+   both, the second asks, the first lets it in, both hold a key for the
+   other.
+3. **The Windows UI as a client of another PC.** Joining two PCs by step
+   2, the roster in `portal.json` beside phones, one link out per brother.
    Remote sessions in the registry with a `brother` field, never served
    on. Remote clusters with the brother in the title and its mark on the
    frame, remote panes fed by `out` into a local grid, typing sent as
@@ -258,12 +341,12 @@ Each step is useful alone and each is verified before the next starts.
    both through the real relay: a tile on each for the other's sessions,
    a session started from one running on the other, the link cut and the
    tiles dimming, then coming back.
-3. **The serving pulled out of the UI.** What `app/portal.rs` does for a
+4. **The serving pulled out of the UI.** What `app/portal.rs` does for a
    phone (sessions, projects, folders, start, resume, create, screens,
    streams) moves behind a trait the Windows UI implements, so a headless
    node can implement it too. No behaviour change, checked by step 1 and
-   2's runs still passing.
-4. **`horadric node` on Linux.** A Linux build of `horadric-core`,
+   3's runs still passing.
+5. **`horadric node` on Linux.** A Linux build of `horadric-core`,
    `horadric-hooks`, the POSIX host the Mac port already has
    (`posix.rs`, `socket.rs`) and the serving from step 3, with no UI.
    `horadric node` runs the listener and the hosts; `horadric node
@@ -273,23 +356,30 @@ Each step is useful alone and each is verified before the next starts.
    release, and `install.sh` learns Linux. Tested in CI on Linux like the
    Mac's smoke run: a node, a fake session posted to its port, a shell
    session through it, read over `--stdio`.
-5. **Linux nodes on the stage.** Joining with an SSH destination; the UI
+6. **Linux nodes on the stage.** Joining with an SSH destination; the UI
    keeps `ssh <host> horadric node --stdio` running per node through
    `System32\OpenSSH\ssh.exe`, as SSH terminals do, and reconnects when
    it drops. Verified against a real VPS: a session started from the
    stage running there, its hooks lighting the tile here.
-6. **The spike: does a moved transcript resume?** By hand, before any
+7. **The spike: does a moved transcript resume?** By hand, before any
    code: copy a finished session's transcript from this PC to the VPS,
    file it under the VPS's path, `claude --resume` it there, and see what
    it remembers and what breaks. Again Windows to Windows. Settles
    whether `cwd` lines need rewriting and whether subagent files and
-   `ai-title` come along. Written down here before step 7.
-7. **The mesh and the roster.** Joining once joins everyone, the roster
+   `ai-title` come along. Written down here before step 10.
+8. **The mesh and the roster.** Joining once joins everyone, the roster
    with its number, session owners, cast out, view only per link,
    "asleep", "silent" and "out of reach" on the tiles. Pure and tested:
    merging two rosters, the owner rule, refusing a cast out key.
    Verified with three dev instances.
-8. **Handoff between Windows PCs.** The bundle (transcript, record, work
+9. **The shared lore.** Entries with a writing brother and a number,
+   removal as an entry, the catch up on connect and the stream after,
+   projects matched by repository, vectors embedded on arrival. Pure and
+   tested: merging two copies in any order gives the same lore, a
+   removal is not undone by a brother that was away. Verified with two
+   dev instances: a note left on one is recalled on the other, also
+   after the link was cut while it was written.
+10. **Handoff between Windows PCs.** The bundle (transcript, record, work
    as a private ref and a `git bundle`), finding or cloning the project,
    a worktree for the session, the transcript filed under the new path,
    the resume with its first line, the sender letting go, the owner
@@ -297,22 +387,25 @@ Each step is useful alone and each is verified before the next starts.
    Verified with two dev instances on this machine, then between this PC
    and the laptop: a session mid task handed over, its next turn
    continuing the work with the files in place.
-9. **Handoff to and from a Linux node.** The same over `--stdio`, and the
-   path rewrite between Windows and Linux. Verified against the VPS both
-   ways.
-10. **Keepers.** Turn end snapshots to the first keeper, kept in its
+11. **Handoff to and from a Linux node.** The same over `--stdio`, and the
+    path rewrite between Windows and Linux. Verified against the VPS both
+    ways.
+12. **Keepers.** Turn end snapshots to the first keeper, kept in its
     state folder, pruned when the session ends or moves. Pure and tested:
     a snapshot's bundle against the last, applying a chain of them.
-11. **Takeover.** "Take over" on a silent brother's tiles, the fencing on
+13. **Takeover.** "Take over" on a silent brother's tiles, the fencing on
     return, the orphaned branch, the warning line, automatic takeover as
     a switch. Verified by pulling the network cable on the laptop mid
     quest: the desktop takes over from the last turn end, the laptop
     comes back and pauses its copy.
-12. **Later, each its own decision.** Linux nodes on the relay; the Mac
-    as a brother (its portal has no crypto yet either); remote files and
-    the git glance over the same protocol, read only first; Codex and
-    Grok Build handoff; a quest moving with its session, so the quest log
-    on the receiver knows it.
+14. **Later, each its own decision.** Teams: a WorkOS organization as a
+    brotherhood of several people, each seeing the others' sessions view
+    only by default, and the lore shared or not per project; Linux nodes
+    on the relay, signing in with AuthKit's device code flow; catching
+    the lore up from Drive; the Mac as a brother (its portal has no
+    crypto yet either); remote files and the git glance over the same
+    protocol, read only first; Codex and Grok Build handoff; a quest
+    moving with its session, so the quest log on the receiver knows it.
 
 ## Pure and tested
 
@@ -320,7 +413,9 @@ The v3 messages both ways, splitting and joining `out` and `bundle`, the
 size rule, refusing what a view only link sends, never serving a session
 another brother owns, merging rosters, the owner and fencing rule, the
 silent and asleep timers, picking the keeper, the dimmed tile's line, the
-stdio framing, the systemd unit's text, the transcript path rewrite.
+stdio framing, the systemd unit's text, the transcript path rewrite,
+the PKCE pair and the sign in URL, merging two lores and what to send a
+brother given its `have`, matching a project by repository.
 
 ## Open questions
 
@@ -340,3 +435,9 @@ stdio framing, the systemd unit's text, the transcript path rewrite.
   for five busy brothers may want a cap.
 - Handing off a plain terminal: a shell has no transcript to resume, so
   probably never, only its folder.
+- In a team, should dialogue be shared at all? The lore holds
+  conversations word for word. Notes and quest summaries are meant for
+  others; a teammate's dialogue may not be. Likely notes and quests by
+  default, dialogue only within one person's own brothers.
+- Who pays when teams use SSO? AuthKit is free, enterprise SSO is priced
+  per connection. Fine to defer until a team asks for it.
