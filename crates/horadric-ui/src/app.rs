@@ -6339,6 +6339,7 @@ impl App {
             }
         }
         self.paused.remove(id);
+        self.stop_agents.remove(id);
         self.browsers.retain(|&hwnd, b| {
             let keep = b.session != id;
             if !keep {
@@ -6851,7 +6852,13 @@ impl App {
                     .collect()
             })
             .unwrap_or_default();
-        let stop = self.stop_agents.remove(&call.session).unwrap_or_default();
+        // A mod that gave up waiting never hears this answer, so its stops
+        // wait for the next ask rather than being lost.
+        let stop = if call.reply.wanted() {
+            self.stop_agents.remove(&call.session).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         call.reply.send(known(quest.as_deref(), &shared, &stop));
     }
 
@@ -6873,8 +6880,11 @@ impl App {
             .ok()
             .and_then(|r| {
                 r.get(id).map(|s| {
+                    // Only a mod that stamps start times knows how to stop
+                    // one; an older mod still running would drop the stop.
                     s.running_subagents()
                         .into_iter()
+                        .filter(|a| a.started_ms.is_some())
                         .map(|a| {
                             let label = horadric_core::session::subagent_label(a, now);
                             (a.agent_id.clone(), label)
