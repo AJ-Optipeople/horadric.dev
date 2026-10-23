@@ -1,9 +1,20 @@
 {
-  "tasks": {
-    "mode": "auto",
-    "parallel": 4
-  },
+  "checks": [
+    "cargo fmt --all -- --check",
+    "cargo clippy --workspace --all-targets -- -D warnings",
+    "cargo test --workspace"
+  ],
   "runewords": {
+    "Lore Upkeep": {
+      "about": "Weekly, merges the lore's overlapping notes on the three most noted files and corrects the wrong ones, always through lore_note with replaces",
+      "every": "sunday 10:00",
+      "for": "1h",
+      "steps": [
+        {
+          "say": "Lore upkeep, a bounded pass. This project's lore piles up: notes overlap and go out of date. Consolidate it in the open, as lore note #228 settled: only through lore_note with `replaces`, never by editing or deleting kept text.\n\n1. Pick the files. The notes are in %APPDATA%\\Horadric\\lore, in the file named after this project's folder that ends in `.json` but not `.code.json` or `.sanctuary.json`. Read it only, never write it. Its `notes` are the live notes, each naming `files[].path`; its `past` are the replaced ones, each with `by` (the id of the note that replaced it) and `until` (unix seconds). Count the live notes naming each file. Leave out a file that a live note replacing something in the last 28 days names (its id is a `by` in `past` with a recent `until`), since an earlier run already did it. Take the three files with the most notes, fewer if a file has under 8 notes, none if no file qualifies.\n\n2. Check. For each file, read every live note naming it (all of them from that file, since a recall shows at most 10; lore_recall with `files` adds the maybe stale marks). Check each claim against the code as it is now, with lore_find, lore_outline and grep, reading only the lines you need.\n\n3. Consolidate with lore_note. Notes that say the same thing or overlap become one note whose `replaces` lists them all. A wrong note gets a right one that replaces it. A note that is no longer true at all is replaced by one saying what is true now (what took its place, or that it was removed and why). A quest summary (\"Quest ... done:\") whose fact a fuller note holds goes into that note's `replaces`. Keep what the old notes knew that code cannot show: why, who asked, when it was decided, what was tried and failed, what was never tested on screen. Drop only what the code proves wrong. Leave a correct note that overlaps nothing alone.\n\n4. Rules. Never replace a note without the new one keeping what it held that is still true. Every note names its files: those of the notes it replaces that still exist, plus any the check showed. One fact per note, a few sentences, plain words, no em dashes, en dashes or double hyphens. Do not edit code, commit, or file quests. Stop after three files even when more need it.\n\n5. End with one line: the files done and the notes in and out, like \"app.rs, runner.rs: 72 notes in, 41 out\"."
+        }
+      ]
+    },
     "Ship Local": {
       "about": "Ships the work on main to this machine only, as CLAUDE.md describes",
       "steps": [
@@ -21,9 +32,8 @@
       ]
     }
   },
-  "checks": [
-    "cargo fmt --all -- --check",
-    "cargo clippy --workspace --all-targets -- -D warnings",
-    "cargo test --workspace"
-  ]
+  "tasks": {
+    "mode": "auto",
+    "parallel": 4
+  }
 }
