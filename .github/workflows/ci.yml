@@ -40,8 +40,11 @@ jobs:
       - run: rustup toolchain install
       - run: cargo clippy $CRATES --all-targets -- -D warnings
       - run: cargo test $CRATES --no-fail-fast -- --test-threads=1
-      - run: cargo build -p horadric
-      - run: bash .github/linux-smoke.sh
+      # The smoke run says something of its own even when a test failed.
+      - if: ${{ !cancelled() }}
+        run: cargo build -p horadric
+      - if: ${{ !cancelled() }}
+        run: bash .github/linux-smoke.sh
       - if: always()
         uses: actions/upload-artifact@v4
         with:
