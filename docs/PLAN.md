@@ -60,6 +60,9 @@ one. The registry is an `Arc<Mutex<Registry>>`, each console's grid an
 - [The Brotherhood](plan/the-brotherhood.md): every machine with Horadric as one brotherhood, joined by a WorkOS login: each sees every session, hands sessions to another, takes over from one that falls silent, and shares one lore.
 - [Secrets](plan/secrets.md): tokens for quests that push, call APIs or deploy.
 - [Identities](plan/identities.md): each project's gh, git, npm and Vercel logins, so no session switches another's account.
+- [Signals](plan/signals.md): what is left of the status line JSON, OpenTelemetry export, and OSC 9;4 progress from the agents.
+- [Small local models](plan/local-models.md): static embeddings as memory's first pass, and a small model for the sentence per session.
+- [Ghostty's terminal core](plan/ghostty.md): move the grid from `alacritty_terminal` to libghostty, after a trial.
 
 ## Loose ends
 

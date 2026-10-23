@@ -1,0 +1,59 @@
+name: Linux release
+# A tag builds the Linux node (`horadric node`, no tiles) as one static
+# musl binary, so it runs on any x86_64 Linux whatever its glibc, and
+# attaches Horadric-linux-x86_64.tar.gz (for install.sh) to the draft
+# release of that tag. A node has no updater yet, so nothing is signed.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: The release tag to build and attach to, such as v0.17.0
+        required: true
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
+      TARGET: x86_64-unknown-linux-musl
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - run: rustup toolchain install
+      - run: rustup target add "$TARGET"
+      - run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - run: cargo build --release -p horadric --bin horadric --target "$TARGET"
+      - name: Check and pack
+        run: |
+          mkdir -p dist
+          cp "target/$TARGET/release/horadric" dist/horadric
+          file dist/horadric
+          # Static, so it needs nothing from the machine it lands on.
+          if ldd dist/horadric 2>/dev/null | grep -q '=>'; then
+            echo "dist/horadric links shared libraries"
+            exit 1
+          fi
+          dist/horadric --help >/dev/null
+          tar -czf dist/Horadric-linux-x86_64.tar.gz -C dist horadric
+          sha256sum dist/Horadric-linux-x86_64.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Horadric-linux-x86_64
+          path: dist/Horadric-linux-x86_64.tar.gz
+      - name: Attach to the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # The draft is made by hand after the tag is pushed, so wait for it.
+          for i in $(seq 1 60); do
+            if gh release view "$TAG" >/dev/null 2>&1; then
+              gh release upload "$TAG" dist/Horadric-linux-x86_64.tar.gz --clobber
+              exit 0
+            fi
+            sleep 30
+          done
+          echo "no release $TAG after 30 minutes; the archive is in this run's artifacts"

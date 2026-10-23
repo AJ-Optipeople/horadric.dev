@@ -17,6 +17,15 @@ Recheck after each Claude Code upgrade: run `claude agents --json --all`
 with a cloud session running and look for a new `kind`. On 2.1.296 it
 listed only `interactive` and `background`.
 
+**This wait may never end (found 2026-10-24).** The official doc says
+agent view covers only background sessions on this machine
+(https://code.claude.com/docs/en/agent-view), so `claude agents --json`
+may never list cloud sessions. Check the doc on each upgrade too, and
+if it still says so, look for another source before waiting longer:
+the `ccr.session.id` attribute in OpenTelemetry (see
+[signals.md](signals.md)) or Remote Control's session list. Neither is
+verified.
+
 **Open questions for the human**, for when the list appears:
 
 - Is a cloud tile only worth having if it shows sessions started on the

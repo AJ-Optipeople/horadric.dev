@@ -536,6 +536,618 @@ pub fn read_codex(jsonl: &str) -> Spend {
     out
 }
 
+/// Whether the memory helps: which hits were handed to a session, and
+/// whether what it did next read, changed or named a file of theirs, or
+/// cited their id. A hit nobody touched after was only words in the
+/// window.
+pub mod uptake {
+    use std::collections::{BTreeMap, HashMap, HashSet};
+
+    use serde::{Deserialize, Serialize};
+    use serde_json::Value;
+
+    /// The hits a quest's prompt carried.
+    pub const QUEST: &str = "quest";
+    /// The hits the UserPromptSubmit hook put beside a prompt.
+    pub const PROMPT: &str = "prompt";
+    /// The hits put before a Grep or Glob for a name.
+    pub const SEARCH: &str = "search";
+    /// The hits of a `lore_recall` the agent asked for.
+    pub const ASKED: &str = "asked";
+    /// Every way, in the order a report says them.
+    pub const VIAS: [&str; 4] = [QUEST, PROMPT, SEARCH, ASKED];
+
+    /// Whether hits that came `via` this way were put in unasked.
+    pub fn unasked(via: &str) -> bool {
+        via != ASKED
+    }
+
+    /// How a quest's prompt opens its recall, see `tasks::recalled`.
+    const QUEST_HEAD: &str = "Memory: what the lore recalls of this quest";
+
+    /// One hit as it was handed: its id and the files it names.
+    #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct Hit {
+        pub id: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub files: Vec<String>,
+    }
+
+    /// The hits handed to a session at once.
+    #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct Given {
+        /// Unix milliseconds, as fine as a transcript's timestamps, so a
+        /// call in the same second is still told before from after.
+        pub at: u64,
+        /// The Horadric session.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        pub session: String,
+        /// The agent's own conversation id, whose transcript says what
+        /// came next.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        pub conversation: String,
+        pub via: String,
+        pub hits: Vec<Hit>,
+    }
+
+    /// The hits in an answer of the memory: each head line (`#12 (note,`
+    /// or `2026-10#5 (dialogue,`) starts one, its `Files:` line names its
+    /// files. A sigil told at the top of the answer is read back to its
+    /// name; one told in an earlier answer is left for the caller.
+    pub fn hits(text: &str) -> Vec<Hit> {
+        let mut lexicon: HashMap<&str, &str> = HashMap::new();
+        let mut out: Vec<Hit> = Vec::new();
+        for line in text.lines().map(str::trim) {
+            if out.is_empty() {
+                if let Some((sigil, name)) = line.split_once(" = ") {
+                    if sigil.starts_with('§') && !sigil.contains(' ') {
+                        lexicon.insert(sigil, name.trim());
+                        continue;
+                    }
+                }
+            }
+            if let Some(id) = head_id(line) {
+                out.push(Hit {
+                    id,
+                    files: Vec::new(),
+                });
+                continue;
+            }
+            let (Some(hit), Some(files)) = (out.last_mut(), line.strip_prefix("Files: ")) else {
+                continue;
+            };
+            for f in files.split(", ").map(str::trim).filter(|f| !f.is_empty()) {
+                let f = lexicon.get(f).copied().unwrap_or(f).to_string();
+                if !hit.files.contains(&f) {
+                    hit.files.push(f);
+                }
+            }
+        }
+        let mut seen = HashSet::new();
+        out.retain(|h| seen.insert(h.id.clone()));
+        out
+    }
+
+    /// The id a hit's head line starts with, None for any other line.
+    fn head_id(line: &str) -> Option<String> {
+        let (id, rest) = line.split_once(" (")?;
+        let kind = rest.split([',', ')']).next()?;
+        if !matches!(kind, "note" | "quest" | "dialogue" | "code") {
+            return None;
+        }
+        let (month, n) = id.split_once('#')?;
+        let month_ok = month.is_empty()
+            || (month.len() == 7
+                && month.as_bytes()[4] == b'-'
+                && month.bytes().all(|b| b.is_ascii_digit() || b == b'-'));
+        let n_ok = !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit());
+        (month_ok && n_ok).then(|| id.to_string())
+    }
+
+    /// Sigils left in `hits` read back to their names by `lexicon`.
+    pub fn resolve(hits: &mut [Hit], lexicon: &HashMap<String, String>) {
+        for f in hits.iter_mut().flat_map(|h| h.files.iter_mut()) {
+            if let Some(name) = lexicon.get(f.as_str()) {
+                *f = name.clone();
+            }
+        }
+    }
+
+    /// One thing the agent did: a tool call, or words it said.
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct Act {
+        /// Unix milliseconds.
+        pub at: u64,
+        /// The files the call read or wrote, as [`norm`] has them.
+        pub files: Vec<String>,
+        /// Every string of its input, or its text, as [`norm`] has it, so
+        /// a path in a shell command or an id in a note's sources counts.
+        pub words: String,
+    }
+
+    /// What a transcript holds for judging recall: the hits it was handed
+    /// and what the agent did, in order.
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct Session {
+        pub given: Vec<Given>,
+        pub acts: Vec<Act>,
+    }
+
+    /// A path or text the same whichever slashes and case it was written
+    /// with.
+    pub fn norm(s: &str) -> String {
+        s.replace('\\', "/").to_lowercase()
+    }
+
+    /// An ISO timestamp as Claude Code writes it (`2026-10-17T09:00:24.650Z`)
+    /// in Unix milliseconds, None when it is not one.
+    pub fn millis(ts: &str) -> Option<u64> {
+        let num = |s: &str| s.parse::<u64>().ok();
+        let (date, time) = ts.trim_end_matches('Z').split_once('T')?;
+        let mut d = date.split('-');
+        let (y, m, day) = (num(d.next()?)?, num(d.next()?)?, num(d.next()?)?);
+        let (hms, frac) = time.split_once('.').unwrap_or((time, "0"));
+        let mut t = hms.split(':');
+        let (h, min, s) = (num(t.next()?)?, num(t.next()?)?, num(t.next()?)?);
+        let ms: String = frac.chars().chain("000".chars()).take(3).collect();
+        // Days from the civil date, Howard Hinnant's way.
+        let y = if m <= 2 { y - 1 } else { y };
+        let era = y / 400;
+        let yoe = y - era * 400;
+        let mp = (m + 9) % 12;
+        let doy = (153 * mp + 2) / 5 + day - 1;
+        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+        let days = (era * 146_097 + doe).checked_sub(719_468)?;
+        Some(((days * 24 + h) * 60 + min) * 60_000 + s * 1000 + num(&ms)?)
+    }
+
+    /// Every string in `v`, one a line.
+    fn strings(v: &Value, out: &mut String) {
+        match v {
+            Value::String(s) => {
+                out.push_str(s);
+                out.push('\n');
+            }
+            Value::Array(a) => a.iter().for_each(|x| strings(x, out)),
+            Value::Object(o) => o.values().for_each(|x| strings(x, out)),
+            _ => {}
+        }
+    }
+
+    /// The text of a message's content or a tool's result: a string, or
+    /// its text blocks.
+    fn text_of(content: &Value) -> String {
+        match content {
+            Value::String(s) => s.clone(),
+            Value::Array(blocks) => blocks
+                .iter()
+                .filter_map(|b| b.as_str().or_else(|| b.get("text")?.as_str()))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            _ => String::new(),
+        }
+    }
+
+    /// What a Claude Code transcript was handed and did. Hits come from
+    /// the quest's prompt, the hooks' added context and `lore_recall`'s
+    /// answers (an unroll is the agent citing a hit, not being handed
+    /// one). Lines that are not JSON are left out.
+    pub fn read(jsonl: &str, conversation: &str) -> Session {
+        let mut out = Session::default();
+        let mut recalls: HashSet<String> = HashSet::new();
+        let mut at = 0;
+        let give = |out: &mut Session, at: u64, via: &str, text: &str| {
+            let hits = hits(text);
+            if !hits.is_empty() {
+                out.given.push(Given {
+                    at,
+                    session: String::new(),
+                    conversation: conversation.to_string(),
+                    via: via.to_string(),
+                    hits,
+                });
+            }
+        };
+        for line in jsonl.lines() {
+            let Ok(v) = serde_json::from_str::<Value>(line) else {
+                continue;
+            };
+            if let Some(t) = v.get("timestamp").and_then(Value::as_str).and_then(millis) {
+                at = t;
+            }
+            let content = v.get("message").and_then(|m| m.get("content"));
+            match v.get("type").and_then(Value::as_str) {
+                Some("assistant") => {
+                    for c in content.and_then(Value::as_array).into_iter().flatten() {
+                        let mut act = Act {
+                            at,
+                            ..Act::default()
+                        };
+                        match c.get("type").and_then(Value::as_str) {
+                            Some("text") => {
+                                act.words = norm(c["text"].as_str().unwrap_or(""));
+                            }
+                            Some("tool_use") => {
+                                let input = c.get("input").cloned().unwrap_or(Value::Null);
+                                let name = c.get("name").and_then(Value::as_str).unwrap_or("");
+                                let unroll = input.get("unroll").and_then(Value::as_str);
+                                if name.ends_with("lore_recall")
+                                    && unroll.is_none_or(|u| u.trim().is_empty())
+                                {
+                                    if let Some(id) = c.get("id").and_then(Value::as_str) {
+                                        recalls.insert(id.to_string());
+                                    }
+                                }
+                                for key in ["file_path", "notebook_path", "file"] {
+                                    if let Some(f) = input.get(key).and_then(Value::as_str) {
+                                        act.files.push(norm(f));
+                                    }
+                                }
+                                let mut words = String::new();
+                                strings(&input, &mut words);
+                                act.words = norm(&words);
+                            }
+                            _ => continue,
+                        }
+                        out.acts.push(act);
+                    }
+                }
+                Some("user") => {
+                    let Some(content) = content else { continue };
+                    if let Some(blocks) = content.as_array() {
+                        for b in blocks {
+                            let id = b.get("tool_use_id").and_then(Value::as_str);
+                            if id.is_some_and(|id| recalls.contains(id)) {
+                                let text = text_of(b.get("content").unwrap_or(&Value::Null));
+                                give(&mut out, at, ASKED, &text);
+                            }
+                        }
+                    }
+                    let text = text_of(content);
+                    if let Some(i) = text.find(QUEST_HEAD) {
+                        give(&mut out, at, QUEST, &text[i..]);
+                    }
+                }
+                Some("attachment") => {
+                    let a = &v["attachment"];
+                    if a["type"] != "hook_additional_context" {
+                        continue;
+                    }
+                    let via = match a["hookEvent"].as_str() {
+                        Some("UserPromptSubmit") => PROMPT,
+                        Some("PreToolUse") => SEARCH,
+                        _ => continue,
+                    };
+                    give(&mut out, at, via, &text_of(&a["content"]));
+                }
+                _ => {}
+            }
+        }
+        out
+    }
+
+    /// Whether the agent of a transcript left a note of its own with
+    /// `lore_note`.
+    pub fn left_note(jsonl: &str) -> bool {
+        jsonl.lines().any(|line| {
+            line.contains("lore_note")
+                && serde_json::from_str::<Value>(line).is_ok_and(|v| {
+                    v["type"] == "assistant"
+                        && v["message"]["content"].as_array().is_some_and(|c| {
+                            c.iter().any(|b| {
+                                b["type"] == "tool_use"
+                                    && b["name"].as_str().is_some_and(|n| n.ends_with("lore_note"))
+                            })
+                        })
+                })
+        })
+    }
+
+    /// Whether `words` name the hit `id`: `#4` is not `#41`, nor the
+    /// `#4` of `2026-10#4`.
+    fn cites(words: &str, id: &str) -> bool {
+        words.match_indices(id).any(|(i, _)| {
+            let before = words[..i].chars().next_back();
+            let after = words[i + id.len()..].chars().next();
+            !before.is_some_and(|c| c.is_ascii_alphanumeric() || c == '-')
+                && !after.is_some_and(|c| c.is_ascii_digit())
+        })
+    }
+
+    /// Whether `act` read, wrote or named the file or folder `file`, a
+    /// path relative to the project.
+    fn touches(act: &Act, file: &str) -> bool {
+        let f = norm(file);
+        let f = f.trim_start_matches("./").trim_end_matches('/');
+        if f.is_empty() || f.starts_with('§') {
+            return false;
+        }
+        let under = |p: &str| {
+            p == f
+                || p.ends_with(&format!("/{f}"))
+                || p.starts_with(&format!("{f}/"))
+                || p.contains(&format!("/{f}/"))
+        };
+        act.files.iter().any(|p| under(p)) || act.words.contains(f)
+    }
+
+    /// Hits handed and hits used, for one way of handing them.
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    pub struct Tally {
+        pub hits: u64,
+        pub used: u64,
+    }
+
+    impl Tally {
+        pub fn add(&mut self, o: &Tally) {
+            self.hits += o.hits;
+            self.used += o.used;
+        }
+    }
+
+    /// For each way hits were handed, how many distinct hits a session got
+    /// that way and how many of them a later act of its own used. A hit
+    /// handed twice counts once, by the first handing.
+    pub fn tally(given: &[Given], acts: &[Act]) -> BTreeMap<String, Tally> {
+        let mut given: Vec<&Given> = given.iter().collect();
+        given.sort_by_key(|g| g.at);
+        let mut seen = HashSet::new();
+        let mut out: BTreeMap<String, Tally> = BTreeMap::new();
+        for g in given {
+            for h in &g.hits {
+                if !seen.insert(h.id.as_str()) {
+                    continue;
+                }
+                let used = acts.iter().any(|a| {
+                    a.at > g.at && (cites(&a.words, &h.id) || h.files.iter().any(|f| touches(a, f)))
+                });
+                let t = out.entry(g.via.clone()).or_default();
+                t.hits += 1;
+                t.used += u64::from(used);
+            }
+        }
+        out
+    }
+
+    /// A done quest's tally by way of handing, and its tokens and calls
+    /// when its spend was kept.
+    pub type Judged = (BTreeMap<String, Tally>, Option<(u64, u64)>);
+
+    /// The report: hits used by way of handing, then what quests spent with
+    /// memory put in unasked against without. `quests` is each done
+    /// quest's tally and its tokens and calls.
+    pub fn report(quests: &[Judged]) -> String {
+        let mut by: BTreeMap<&str, (Tally, u64)> = BTreeMap::new();
+        for (t, _) in quests {
+            for (via, n) in t {
+                let e = by.entry(via.as_str()).or_default();
+                e.0.add(n);
+                e.1 += 1;
+            }
+        }
+        if by.is_empty() {
+            return "Recall: no done quest was handed a hit yet.".into();
+        }
+        let mut out = String::from(
+            "Recall, judged by what the session did next (a hit is used when a later call \
+             reads, changes or names a file of it, or cites its id):\n",
+        );
+        for via in VIAS {
+            let Some((t, n)) = by.get(via) else { continue };
+            let label = match via {
+                QUEST => "quest's prompt",
+                PROMPT => "beside a prompt",
+                SEARCH => "before a search",
+                _ => "lore_recall",
+            };
+            out.push_str(&format!(
+                "  {label:<16} {} hits in {n} quests, {} used ({}%)\n",
+                t.hits,
+                t.used,
+                t.used * 100 / t.hits.max(1)
+            ));
+        }
+        let median = |mut v: Vec<(u64, u64)>| {
+            v.sort_unstable();
+            let mut calls: Vec<u64> = v.iter().map(|x| x.1).collect();
+            calls.sort_unstable();
+            (v.len(), v[v.len() / 2].0, calls[calls.len() / 2])
+        };
+        let (with, without): (Vec<_>, Vec<_>) = quests
+            .iter()
+            .filter_map(|(t, s)| Some((t.keys().any(|v| unasked(v.as_str())), (*s)?)))
+            .partition(|(w, _)| *w);
+        for (label, group) in [("with", with), ("without", without)] {
+            let group: Vec<(u64, u64)> = group.into_iter().map(|(_, s)| s).collect();
+            if group.is_empty() {
+                out.push_str(&format!("Quests {label} memory put in unasked: none\n"));
+                continue;
+            }
+            let (n, tokens, calls) = median(group);
+            out.push_str(&format!(
+                "Quests {label} memory put in unasked: {n}, median {} tokens over {calls} calls\n",
+                super::count(tokens)
+            ));
+        }
+        out.trim_end().to_string()
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        const ANSWER: &str = "Stay awhile and listen. These hits are inscribed.\n\
+            §memory = docs/plan/memory.md\n\
+            \n\
+            #41 (quest, 7 days ago, at 43b29d65)\n\
+            Quest done\n\
+            \n\
+            2026-10#32134 (dialogue, session 2d094c09, 6 days ago)\n\
+            Agent: see #3 (note) somewhere\n\
+            \n\
+            #33 (note, 7 days ago) MAYBE STALE: §memory changed since\n\
+            Recall is cheap.\n\
+            Files: §memory, §old, crates/a.rs\n\
+            From: 2026-10#16417\n";
+
+        #[test]
+        fn an_answers_hits_are_its_head_lines_with_their_files() {
+            let got = hits(ANSWER);
+            let ids: Vec<&str> = got.iter().map(|h| h.id.as_str()).collect();
+            assert_eq!(ids, ["#41", "2026-10#32134", "#33"]);
+            assert!(got[0].files.is_empty());
+            assert_eq!(got[2].files, ["docs/plan/memory.md", "§old", "crates/a.rs"]);
+            assert!(hits("Nothing matches.").is_empty());
+            assert!(hits("#x (note, now)\n#1 (car, now)").is_empty());
+        }
+
+        #[test]
+        fn a_sigil_told_earlier_is_read_back_by_the_lexicon() {
+            let mut h = hits("#1 (note, now)\nFiles: §old");
+            let lex = HashMap::from([("§old".to_string(), "src/old.rs".to_string())]);
+            resolve(&mut h, &lex);
+            assert_eq!(h[0].files, ["src/old.rs"]);
+        }
+
+        #[test]
+        fn a_timestamp_reads_as_unix_milliseconds() {
+            assert_eq!(millis("1970-01-01T00:00:00.000Z"), Some(0));
+            assert_eq!(millis("2026-10-17T09:00:24.650Z"), Some(1_792_227_624_650));
+            assert_eq!(millis("2000-03-01T00:00:01Z"), Some(951_868_801_000));
+            assert_eq!(millis("yesterday"), None);
+        }
+
+        fn line(v: Value) -> String {
+            v.to_string()
+        }
+
+        fn transcript() -> String {
+            let ts = |s: u64| format!("2026-10-17T09:00:{s:02}.000Z");
+            [
+                line(serde_json::json!({"type": "user", "timestamp": ts(0), "message": {"content":
+                    "Do it\n\nMemory: what the lore recalls of this quest, the strong hits only.\n#5 (note, now)\nFiles: src/a.rs"}})),
+                line(serde_json::json!({"type": "assistant", "timestamp": ts(1), "message": {"content": [
+                    {"type": "tool_use", "id": "t1", "name": "mcp__horadric__lore_recall", "input": {"query": "b"}},
+                    {"type": "tool_use", "id": "t2", "name": "mcp__horadric__lore_recall", "input": {"unroll": "#5"}}]}})),
+                line(serde_json::json!({"type": "user", "timestamp": ts(2), "message": {"content": [
+                    {"type": "tool_result", "tool_use_id": "t1", "content": [{"type": "text", "text": "#6 (note, now)\nFiles: src/b.rs"}]},
+                    {"type": "tool_result", "tool_use_id": "t2", "content": "#5 (note, now)"}]}})),
+                line(serde_json::json!({"type": "attachment", "timestamp": ts(3), "attachment": {
+                    "type": "hook_additional_context", "hookEvent": "PreToolUse",
+                    "content": ["Horadric: the lore knows this of `x` already:\n#7 (code, now)\nFiles: src/c.rs"]}})),
+                line(serde_json::json!({"type": "assistant", "timestamp": ts(4), "message": {"content": [
+                    {"type": "tool_use", "id": "t3", "name": "Read", "input": {"file_path": "C:\\p\\SRC\\a.rs"}},
+                    {"type": "text", "text": "As #70 says"}]}})),
+                "torn {".to_string(),
+            ]
+            .join("\n")
+        }
+
+        #[test]
+        fn a_transcript_says_what_it_was_handed_and_what_it_did() {
+            let s = read(&transcript(), "c1");
+            let vias: Vec<(&str, &str)> = s
+                .given
+                .iter()
+                .map(|g| (g.via.as_str(), g.hits[0].id.as_str()))
+                .collect();
+            assert_eq!(vias, [(QUEST, "#5"), (ASKED, "#6"), (SEARCH, "#7")]);
+            assert!(s.given.iter().all(|g| g.conversation == "c1"));
+            assert_eq!(s.acts.len(), 4);
+            assert_eq!(s.acts[2].files, ["c:/p/src/a.rs"]);
+            assert!(s.acts[1].words.contains("#5"));
+        }
+
+        #[test]
+        fn a_hit_is_used_when_a_later_act_touches_its_file_or_cites_it() {
+            let s = read(&transcript(), "c1");
+            let t = tally(&s.given, &s.acts);
+            // #5's file is read after, and the unroll cites it too.
+            assert_eq!(t[QUEST], Tally { hits: 1, used: 1 });
+            // Nothing touches src/b.rs, and #70 is not #7.
+            assert_eq!(t[ASKED], Tally { hits: 1, used: 0 });
+            assert_eq!(t[SEARCH], Tally { hits: 1, used: 0 });
+        }
+
+        #[test]
+        fn a_hit_handed_twice_counts_once_and_an_act_before_it_does_not() {
+            let hit = |id: &str| Hit {
+                id: id.into(),
+                files: vec!["crates/x/".into()],
+            };
+            let given = [
+                Given {
+                    at: 10,
+                    via: PROMPT.into(),
+                    hits: vec![hit("#1")],
+                    ..Given::default()
+                },
+                Given {
+                    at: 5,
+                    via: SEARCH.into(),
+                    hits: vec![hit("#1"), hit("#2")],
+                    ..Given::default()
+                },
+            ];
+            let act = |at, words: &str| Act {
+                at,
+                files: Vec::new(),
+                words: words.into(),
+            };
+            let t = tally(&given, &[act(4, "cat crates/x/a.rs"), act(8, "2026-10#1")]);
+            assert_eq!(t[SEARCH], Tally { hits: 2, used: 0 });
+            assert!(!t.contains_key(PROMPT));
+            let t = tally(&given, &[act(6, "cat crates/x/a.rs")]);
+            assert_eq!(t[SEARCH], Tally { hits: 2, used: 2 });
+        }
+
+        #[test]
+        fn a_note_left_is_a_lore_note_call() {
+            let note = line(
+                serde_json::json!({"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "id": "t", "name": "mcp__horadric__lore_note", "input": {"text": "x"}}]}}),
+            );
+            assert!(left_note(&note));
+            assert!(!left_note(&transcript()));
+            let said = line(
+                serde_json::json!({"type": "assistant", "message": {"content": [
+                {"type": "text", "text": "leave it with lore_note"}]}}),
+            );
+            assert!(!left_note(&said));
+        }
+
+        #[test]
+        fn the_report_says_hits_used_and_spend_with_and_without() {
+            let t =
+                |via: &str, hits, used| BTreeMap::from([(via.to_string(), Tally { hits, used })]);
+            let quests = [
+                (t(QUEST, 4, 1), Some((300, 30))),
+                (t(QUEST, 2, 1), Some((100, 10))),
+                (t(ASKED, 1, 1), Some((2_000_000, 50))),
+                (BTreeMap::new(), None),
+            ];
+            let r = report(&quests);
+            assert!(
+                r.contains("quest's prompt   6 hits in 2 quests, 2 used (33%)"),
+                "{r}"
+            );
+            assert!(
+                r.contains("lore_recall      1 hits in 1 quests, 1 used (100%)"),
+                "{r}"
+            );
+            assert!(
+                r.contains("with memory put in unasked: 2, median 300 tokens over 30 calls"),
+                "{r}"
+            );
+            assert!(
+                r.contains("without memory put in unasked: 1, median 2M tokens"),
+                "{r}"
+            );
+            assert_eq!(report(&[]), "Recall: no done quest was handed a hit yet.");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

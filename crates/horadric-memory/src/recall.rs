@@ -13,8 +13,9 @@
 //! Nothing here reads a file or runs the model, so all of it is tested.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
-use horadric_core::lore::{self, Note, Past};
+use horadric_core::lore::{self, Note, Past, Piece};
 
 use crate::horadrim::{self, Hit};
 use crate::store::{Chunk, ChunkId, Kind};
@@ -410,6 +411,56 @@ pub fn changed<'a>(c: &Candidate<'a>, now_hash: impl Fn(&str) -> Option<u64>) ->
         .collect()
 }
 
+/// The project's files as they are now, which staleness is judged by.
+pub trait Now {
+    /// [`lore::hash`] of the file's bytes, None when it is not there.
+    fn hash(&self, path: &str) -> Option<u64>;
+    /// The file's symbols, None when they can not be read (no code index
+    /// here, or a language it does not read): then the file is judged
+    /// whole.
+    fn pieces(&self, _path: &str) -> Option<Arc<Vec<Piece>>> {
+        None
+    }
+}
+
+/// Files known by their hashes only, so every one is judged whole.
+pub struct Hashes<F>(F);
+
+/// [`Hashes`] of `now_hash`, which says what a file's hash is now.
+pub fn hashes<F: Fn(&str) -> Option<u64>>(now_hash: F) -> Hashes<F> {
+    Hashes(now_hash)
+}
+
+impl<F: Fn(&str) -> Option<u64>> Now for Hashes<F> {
+    fn hash(&self, path: &str) -> Option<u64> {
+        (self.0)(path)
+    }
+}
+
+/// What changed since a candidate was taken, as its stale line says it:
+/// for a note that names symbols of a changed file, those of them that
+/// changed (`fn recall in src/a.rs`), so a busy file's other edits leave
+/// it fresh; else each changed file.
+pub fn stale(c: &Candidate, now: &dyn Now) -> Vec<String> {
+    let parts = c.note_of().map_or(&[][..], |n| &n.parts[..]);
+    let mut out = Vec::new();
+    for (path, then) in c.files() {
+        let hash = now.hash(path);
+        if hash == then {
+            continue;
+        }
+        let named: Vec<&lore::Part> = parts.iter().filter(|p| p.path == path).collect();
+        match now
+            .pieces(path)
+            .filter(|_| hash.is_some() && !named.is_empty())
+        {
+            Some(pieces) => out.extend(named.iter().filter_map(|p| lore::part_changed(p, &pieces))),
+            None => out.push(path.to_string()),
+        }
+    }
+    out
+}
+
 /// What a recall answers with, for the agent to read: each hit says what
 /// it is, when it was said, and which of its files changed since. A note
 /// opens with `#id (`, which the app reads to light it in the Arcane
@@ -423,7 +474,7 @@ pub fn describe(
     if found.is_empty() {
         return NOTHING.into();
     }
-    horadrim::plain(&hits(cands, found, now, now_hash))
+    horadrim::plain(&hits(cands, found, now, &hashes(now_hash)))
 }
 
 /// What heads the hits put before an agent unasked, so it knows where
@@ -436,12 +487,7 @@ pub const NOTHING: &str = "Nothing matches. When you find something out that the
 /// The hits of `found` as an answer shows them, before they are written
 /// out word for word ([`describe`]) or inscribed
 /// ([`horadrim::inscribe`]).
-pub fn hits(
-    cands: &[Candidate],
-    found: &[(usize, f64)],
-    now: u64,
-    now_hash: impl Fn(&str) -> Option<u64>,
-) -> Vec<Hit> {
+pub fn hits(cands: &[Candidate], found: &[(usize, f64)], now: u64, files: &dyn Now) -> Vec<Hit> {
     found
         .iter()
         .map(|&(i, _)| {
@@ -474,7 +520,7 @@ pub fn hits(
                 head.push_str(&format!(", at {}", short(commit)));
             }
             head.push(')');
-            let changed = changed(c, &now_hash);
+            let changed = stale(c, files);
             if !changed.is_empty() {
                 head.push_str(&format!(
                     " MAYBE STALE: {} changed since",
@@ -530,6 +576,8 @@ mod tests {
             at,
             since: None,
             sources: Vec::new(),
+            parts: Vec::new(),
+            parted: false,
         }
     }
 
@@ -696,6 +744,59 @@ mod tests {
         let offer = offered(&found, |i| Some(cos[i]), |i| i == 2);
         assert_eq!(ids(&offer), vec![0, 3, 4]);
         assert!(offered(&found, |_| None, |_| false).is_empty());
+    }
+
+    /// Files that changed since the notes, with `pieces` for the ones
+    /// read for symbols.
+    struct Tree(Vec<(&'static str, Option<Vec<Piece>>)>);
+
+    impl Now for Tree {
+        fn hash(&self, path: &str) -> Option<u64> {
+            Some(if self.0.iter().any(|(p, _)| *p == path) {
+                2
+            } else {
+                1
+            })
+        }
+        fn pieces(&self, path: &str) -> Option<Arc<Vec<Piece>>> {
+            let (_, pieces) = self.0.iter().find(|(p, _)| *p == path)?;
+            pieces.clone().map(Arc::new)
+        }
+    }
+
+    fn piece(name: &str, hash: u64) -> Piece {
+        Piece {
+            kind: "fn".into(),
+            name: name.into(),
+            hash,
+        }
+    }
+
+    #[test]
+    fn a_note_is_stale_only_by_the_symbols_it_names() {
+        let mut n = note(1, "fn paint draws it", &["a.rs", "b.rs", "c.md"], NOW);
+        n.parts = lore::parts_of(&n.text, "a.rs", &[piece("paint", 5), piece("other", 6)]);
+        n.parts
+            .extend(lore::parts_of("fn gone", "b.rs", &[piece("gone", 7)]));
+        n.parted = true;
+        let c = Candidate::note(&n);
+        // a.rs changed around paint, b.rs lost gone, c.md has no symbols.
+        let tree = Tree(vec![
+            ("a.rs", Some(vec![piece("paint", 5), piece("other", 9)])),
+            ("b.rs", Some(vec![piece("new", 1)])),
+            ("c.md", None),
+        ]);
+        assert_eq!(stale(&c, &tree), ["fn gone in b.rs (gone)", "c.md"]);
+        let edited = Tree(vec![("a.rs", Some(vec![piece("paint", 8)]))]);
+        assert_eq!(stale(&c, &edited), ["fn paint in a.rs"]);
+        // Without symbols to read, and for a note never looked at, the
+        // file is judged whole.
+        assert_eq!(stale(&c, &Tree(vec![("a.rs", None)])), ["a.rs"]);
+        let plain = note(2, "fn paint draws it", &["a.rs"], NOW);
+        assert_eq!(stale(&Candidate::note(&plain), &edited), ["a.rs"]);
+        // A deleted file is gone whatever it named.
+        let deleted = hashes(|p| (p != "a.rs").then_some(1));
+        assert_eq!(stale(&c, &deleted), ["a.rs"]);
     }
 
     #[test]

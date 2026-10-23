@@ -596,6 +596,8 @@ mod tests {
             at: 0,
             since: None,
             sources: Vec::new(),
+            parts: Vec::new(),
+            parted: false,
         }
     }
 

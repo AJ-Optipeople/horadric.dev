@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 use horadric_core::chronicle::{self, Command, Happened, Record};
 use horadric_core::pack::{self, Touched};
-use horadric_core::spend::Sitting;
+use horadric_core::spend::{uptake, Sitting};
 use horadric_core::tasks::{self, Mark, Wait};
 use horadric_core::{aim, runeword, tombs, warriv};
 use horadric_hooks::listener::TasksChanged;
@@ -343,7 +343,40 @@ fn report(cwd: &Path, blocked: Option<(&str, Option<On>)>, summary: &str) -> Res
         }
         _ => println!("Marked for review. The human looks next; stop here."),
     }
+    if why.is_none() {
+        if let Some(ask) = notes_to_tend(&project, &id, cwd) {
+            println!("{ask}");
+        }
+        if !noted(&project, &id, cwd) {
+            println!("{ASK_FOR_NOTE}");
+        }
+    }
     Ok(())
+}
+
+/// What a quest's session is asked as it ends, when it left no note.
+/// Agents seldom stop mid task to leave one (15 notes in 35 sessions over
+/// three days, 2026-10-24), and the end is when they know the most.
+const ASK_FOR_NOTE: &str = "Before you stop: if you found out something the next session would \
+     otherwise have to find out again, leave it with lore_note, naming its files.";
+
+/// Whether any of the quest's conversations, or a subagent of one, left a
+/// note with `lore_note`.
+fn noted(project: &Path, id: &str, cwd: &Path) -> bool {
+    conversations(project, id, cwd)
+        .iter()
+        .any(|(conversation, cwd)| {
+            let Some(path) = transcript::path(cwd, conversation) else {
+                return false;
+            };
+            let read = |p: &Path| std::fs::read_to_string(p).unwrap_or_default();
+            let mut subagents = std::fs::read_dir(path.with_extension("").join("subagents"))
+                .into_iter()
+                .flatten()
+                .flatten()
+                .map(|e| e.path());
+            uptake::left_note(&read(&path)) || subagents.any(|p| uptake::left_note(&read(&p)))
+        })
 }
 
 /// Moves the log's done quests that last saw anything happen days ago to
@@ -697,7 +730,55 @@ fn spend(cwd: &Path) -> Result<(), String> {
     }
     let quests = chronicle::quests(&horadric_ui::chronicle_all(), &[], &key, &list);
     println!("{}", pack::compare(&quests));
+    println!("\n{}", recall_uptake(&project, &quests));
     Ok(())
+}
+
+/// Whether the memory's hits were used by the done quests they were
+/// handed to, and what quests spent with memory put in unasked against
+/// without. The hits come from the log of handings and from each quest's
+/// transcript (its prompt, the hooks' added context, `lore_recall`), so
+/// quests from before the log count too.
+fn recall_uptake(project: &Path, quests: &[chronicle::Quest]) -> String {
+    let log = horadric_hooks::given::read();
+    let lexicon: HashMap<String, String> = lore::Place::of(project)
+        .ok()
+        .and_then(|place| {
+            let dir = horadric_hooks::state_dir()?.join("memory");
+            let tongue = horadric_memory::horadrim::Tongue::load(&dir).ok()?;
+            let lex = tongue.projects.get(place.key())?.clone();
+            Some(lex.sigils.into_iter().map(|s| (s.sigil, s.name)).collect())
+        })
+        .unwrap_or_default();
+    let mut judged = Vec::new();
+    for q in quests
+        .iter()
+        .filter(|q| !q.main && q.outcome == chronicle::Outcome::Done)
+    {
+        let Some((conversation, cwd)) = &q.conversation else {
+            continue;
+        };
+        let Some(text) =
+            transcript::path(cwd, conversation).and_then(|p| std::fs::read_to_string(p).ok())
+        else {
+            continue;
+        };
+        let mut session = uptake::read(&text, conversation);
+        session.given.extend(
+            log.iter()
+                .filter(|g| {
+                    g.conversation == *conversation
+                        || (g.conversation.is_empty() && g.session == q.id)
+                })
+                .cloned(),
+        );
+        for g in &mut session.given {
+            uptake::resolve(&mut g.hits, &lexicon);
+        }
+        let spent = q.spend.as_ref().map(|s| (s.tokens.total(), s.calls));
+        judged.push((uptake::tally(&session.given, &session.acts), spent));
+    }
+    uptake::report(&judged)
 }
 
 /// What a session's first window is made of: Horadric's own prompts and
@@ -969,6 +1050,44 @@ fn conversations(project: &Path, id: &str, cwd: &Path) -> Vec<(String, String)> 
     seen
 }
 
+/// The files a quest changed, relative to the top of `place`. A
+/// worktree's branch says exactly what the quest changed. In the main
+/// tree other sessions' changes are mixed in, so the files its own
+/// conversations wrote are taken instead.
+fn quest_files(place: &lore::Place, project: &Path, id: &str, cwd: &Path) -> Vec<String> {
+    if let Some(files) = place.branch_changes() {
+        return files;
+    }
+    let mut written = Vec::new();
+    for (conversation, cwd) in conversations(project, id, cwd) {
+        let text = transcript::path(&cwd, &conversation)
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .unwrap_or_default();
+        written.extend(horadric_core::lore::edited(&text));
+    }
+    let rel = written
+        .iter()
+        .filter_map(|f| place.relative([f.as_str()]).ok())
+        .flatten()
+        .collect::<Vec<_>>()
+        .join("\n");
+    horadric_core::lore::changed_paths(&rel)
+}
+
+/// What the agent ending a quest is asked of the notes on the files it
+/// changed: those maybe stale, and those of a file crowded with notes,
+/// to check against the code it just worked on. None when there are
+/// none, or the lore can not be read: tending it is no reason to fail.
+fn notes_to_tend(project: &Path, id: &str, cwd: &Path) -> Option<String> {
+    let place = lore::Place::of(cwd).ok()?;
+    let changed = quest_files(&place, project, id, cwd);
+    let notes = place.read().ok()?.notes;
+    horadric_hooks::tend::ask(&notes, &changed, |n| {
+        let c = horadric_memory::recall::Candidate::note(n);
+        !horadric_memory::recall::changed(&c, |p| place.hash(p)).is_empty()
+    })
+}
+
 /// Takes a lore note of what the quest achieved, naming the files it
 /// changed, so a later session asking about them finds it. An agent mid
 /// task rarely stops to take one itself. A quest done again replaces its
@@ -979,31 +1098,7 @@ fn record_lore(project: &Path, id: &str, cwd: &Path, summary: &str) {
         return;
     };
     let kept = lore::Place::of(cwd).and_then(|place| {
-        // A worktree's branch says exactly what the quest changed. In the
-        // main tree other sessions' changes are mixed in, so the files its
-        // own conversations wrote are taken instead.
-        let files = match place.branch_changes() {
-            Some(files) => files,
-            None => {
-                let mut written = Vec::new();
-                for (conversation, cwd) in conversations(project, id, cwd) {
-                    let text = transcript::path(&cwd, &conversation)
-                        .and_then(|p| std::fs::read_to_string(p).ok())
-                        .unwrap_or_default();
-                    written.extend(horadric_core::lore::edited(&text));
-                }
-                let rel = written
-                    .iter()
-                    .filter_map(|f| place.relative([f.as_str()]).ok())
-                    .flatten()
-                    .collect::<Vec<_>>()
-                    .join(
-                        "
-",
-                    );
-                horadric_core::lore::changed_paths(&rel)
-            }
-        };
+        let files = quest_files(&place, project, id, cwd);
         let text = horadric_core::lore::quest_note(&title, summary);
         let marks = place.marks(files);
         let commit = place.commit();

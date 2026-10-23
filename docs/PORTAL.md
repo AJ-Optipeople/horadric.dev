@@ -382,3 +382,46 @@ with a body only the phone can read.
   `error`, so a phone reads only what the session changed.
 - Both run git away from the UI, so the answer may come after other
   messages. A PC before 0.24 ignores both, and the page shows no list.
+
+## Protocol v3: raw streams
+
+For another PC of the same human (a brother, see
+`docs/plan/the-brotherhood.md`), which draws a session in a grid of its
+own rather than reading a phone's screen text. A v2 phone is served
+exactly as before.
+
+- Hello gains `"kind":"phone"` or `"kind":"brother"`; a hello without
+  `kind` is a phone. The PC answers in the client's own `v`, up to 3 and
+  never below 2, so a page that sends `v` 2 still hears 2. The answer
+  gains `"brother":"<computer name>"` and `"control":true|false`.
+- `input`, `start`, `resume`, `create`, `handoff` and `takeover` on a
+  link without control answer `{"t":"error","text":"view only","for":"<t>"}`
+  and do nothing. Every link has control for now; a switch per brother
+  comes with joining.
+- `{"t":"attach","id","cols","rows"}`, without `data` (with `data` it is
+  the photo of 0.24): stream this session raw. The PC sends
+  `{"t":"size","id","cols","rows"}`, the size the session's pseudo
+  terminal has, then the output it keeps (the last MB, from the first
+  line break once older output was dropped), then live output as it
+  comes, each as `{"t":"out","id","seq","b64"}`. `b64` is the raw bytes,
+  b64url without padding, at most 256 KB a message so the sealed frame
+  stays under the relay's 1 MB. `seq` is the offset of the message's
+  first byte in the session's output, so the next `seq` is this one plus
+  its length. The first message of a replay carries `"reset":true` (and
+  may have empty `b64`): the viewer starts a fresh terminal at the last
+  `size` and draws into it. A replay comes again whenever the viewer
+  fell too far behind or the session was resumed into a new console.
+- Several attaches at once, one per session; `{"t":"detach","id"}` stops
+  one, and a new hello stops them all. A session that is not running
+  answers `{"t":"error","id","text"}` with "paused" or why, once, and the
+  stream begins with a replay when it runs again.
+- `{"t":"resize","id","cols","rows"}`: the size this viewer would draw
+  the session at, sent whenever its pane changes. `size` follows
+  whenever the session's size changes, to every viewer.
+- Whose size wins: the viewer that last typed in the session, the PC's
+  own stage included, like tmux's `latest`. An `input` with empty `data`
+  counts as a click: it types nothing but takes the size. On a tie, or
+  before anyone typed, the stage keeps it. A phone's attach, resize and
+  input never move the size. Once the viewer that held the size
+  detaches, or the stage types, the session goes back to the stage's
+  size.
