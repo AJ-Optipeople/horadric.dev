@@ -11,6 +11,7 @@
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
+use horadric_core::lore::Piece;
 use serde::{Deserialize, Serialize};
 use tree_sitter::{Language, Node, Parser, Query, QueryCursor, StreamingIterator};
 
@@ -816,6 +817,36 @@ pub fn outline(path: &str, f: &FileIndex) -> String {
     out
 }
 
+/// The symbols of the file at `path` holding `src`, each with a hash of
+/// its own lines, which is what a lore note is judged stale by. None for
+/// a file the index does not read.
+pub fn pieces(path: &str, src: &[u8]) -> Option<Vec<Piece>> {
+    let lang = Lang::of(path).filter(|_| src.len() as u64 <= LARGEST)?;
+    // Where each line starts, so a symbol's lines are cut without
+    // splitting the file again for each.
+    let starts: Vec<usize> = std::iter::once(0)
+        .chain(
+            src.iter()
+                .enumerate()
+                .filter(|(_, b)| **b == b'\n')
+                .map(|(i, _)| i + 1),
+        )
+        .collect();
+    let at = |line: u32| starts.get(line as usize).copied().unwrap_or(src.len());
+    let lines = |from: u32, to: u32| &src[at(from.saturating_sub(1))..at(to.max(from))];
+    Some(
+        read(lang, src)
+            .symbols
+            .into_iter()
+            .map(|s| Piece {
+                hash: horadric_core::lore::hash(lines(s.line, s.end)),
+                kind: s.kind,
+                name: s.name,
+            })
+            .collect(),
+    )
+}
+
 /// What the index keeps on disk: each file read, by its language and the
 /// hash of its bytes, so a file is read once whichever worktree has it.
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -870,6 +901,20 @@ mod tests {
 
     fn names(f: &FileIndex) -> Vec<String> {
         f.symbols.iter().map(|s| full(f, s)).collect()
+    }
+
+    #[test]
+    fn a_symbol_is_hashed_by_its_own_lines() {
+        let a = b"fn one() {\n    1\n}\n\nfn two() {\n    2\n}\n";
+        let b = b"// moved down\nfn one() {\n    1\n}\n\nfn two() {\n    3\n}\n";
+        let (a, b) = (pieces("x.rs", a).unwrap(), pieces("x.rs", b).unwrap());
+        assert_eq!(a.len(), 2);
+        assert_eq!((a[0].kind.as_str(), a[0].name.as_str()), ("fn", "one"));
+        assert_eq!(a[0].hash, b[0].hash, "moving a symbol is not changing it");
+        assert_ne!(a[1].hash, b[1].hash);
+        let one = horadric_core::lore::hash(b"fn one() {\n    1\n}\n");
+        assert_eq!(a[0].hash, one);
+        assert!(pieces("notes.md", b"# fn one").is_none());
     }
 
     #[test]

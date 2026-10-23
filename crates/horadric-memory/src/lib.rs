@@ -13,6 +13,7 @@ mod gemma;
 pub mod horadrim;
 pub mod keeper;
 pub mod models;
+pub mod parts;
 pub mod recall;
 pub mod share;
 pub mod store;

@@ -13,7 +13,10 @@
 //! The code index lives in the `horadric` binary, so it hands over what
 //! the memory keeps of it with [`set_code_source`]. A recall owes the
 //! project's code a sync, done when nothing is asked, so a project the
-//! index has never read does not hold the first recall up.
+//! index has never read does not hold the first recall up. It hands over
+//! its reader of a file's symbols too ([`set_piece_source`]), so a note
+//! is judged stale by the symbols it names, and a recall that finds notes
+//! not yet looked at for them has them looked at on a thread.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -26,6 +29,7 @@ use std::time::{Duration, Instant};
 use horadric_hooks::listener::{RecallCall, Reply};
 use horadric_hooks::lore::{now, Place};
 use horadric_memory::keeper::{Answer, CodeFile, Keeper, Theirs, Unasked};
+use horadric_memory::parts::{self, PieceSource, Tree};
 use horadric_memory::recall::{self, Ask};
 use horadric_memory::transcripts::Format;
 use horadric_memory::{models, Embedder, Kind};
@@ -68,6 +72,51 @@ static CODE: OnceLock<CodeSource> = OnceLock::new();
 /// Without it the memory finds notes and passages but no code.
 pub fn set_code_source(f: CodeSource) {
     let _ = CODE.set(f);
+}
+
+static PIECES: OnceLock<PieceSource> = OnceLock::new();
+
+/// Gives the memory the function that reads a file's symbols. Without it
+/// every note is judged stale by its whole files.
+pub fn set_piece_source(f: PieceSource) {
+    let _ = PIECES.set(f);
+}
+
+/// Has the notes of `place` that were never looked at for the symbols
+/// they name looked at, on a thread, one at a time per project: the
+/// first look after an update reads git history for every note, which
+/// takes seconds a recall must not wait.
+fn look_later(place: &Place) {
+    static LOOKING: Mutex<Option<HashSet<String>>> = Mutex::new(None);
+    let Some(source) = PIECES.get().copied() else {
+        return;
+    };
+    let key = place.key().to_string();
+    let top = place.top.clone();
+    {
+        let mut looking = LOOKING.lock().unwrap_or_else(|e| e.into_inner());
+        if !looking.get_or_insert_with(HashSet::new).insert(key.clone()) {
+            return;
+        }
+    }
+    thread::spawn(move || {
+        let done = Place::of(&top).and_then(|place| {
+            let found = parts::look(&place.top, &place.read()?, source);
+            place.change(|l| {
+                for (id, p) in found {
+                    l.set_parts(id, p);
+                }
+                Ok(())
+            })
+        });
+        if let Err(e) = done {
+            eprintln!("horadric: the notes of {key} could not be looked at for symbols: {e}");
+        }
+        let mut looking = LOOKING.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(l) = looking.as_mut() {
+            l.remove(&key);
+        }
+    });
 }
 
 /// A transcript that has grown: a hook said so, with the folder the
@@ -420,6 +469,10 @@ fn answer(
     let dir = body["dir"].as_str().ok_or("say which folder: dir")?;
     let place = Place::of(Path::new(dir))?;
     let lore = place.read()?;
+    if parts::owed(&lore) {
+        look_later(&place);
+    }
+    let tree = Tree::new(&place.top, PIECES.get().copied());
     let kind = match body["kind"].as_str().filter(|k| !k.is_empty()) {
         Some(k) => Some(recall::kind_named(k).ok_or_else(|| format!("no kind {k}"))?),
         None => None,
@@ -447,9 +500,7 @@ fn answer(
     let theirs = |key: &str| horadric_hooks::lore::of_key(key).ok();
     let across: Option<Theirs> = ACROSS.load(Ordering::Relaxed).then_some(&theirs);
     if let Some(id) = body["unroll"].as_str().filter(|u| !u.trim().is_empty()) {
-        return keeper.unroll(place.key(), &lore, id, across.is_some(), ask.now, |p| {
-            place.hash(p)
-        });
+        return keeper.unroll(place.key(), &lore, id, across.is_some(), ask.now, &tree);
     }
     if body["prompt"].as_bool() == Some(true) {
         // Keyed by the agent's own session: a `/clear` starts a new one,
@@ -469,7 +520,7 @@ fn answer(
             &ask,
             across,
             PROMPT_BUDGET,
-            |p| place.hash(p),
+            &tree,
             &given.known,
             Some(unasked),
         )?;
@@ -499,7 +550,7 @@ fn answer(
         &ask,
         across,
         budget,
-        |p| place.hash(p),
+        &tree,
         &known,
         None,
     )

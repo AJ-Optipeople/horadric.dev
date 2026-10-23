@@ -395,7 +395,7 @@ fn inscribe(
             .take(recall::MOST_FOUND)
             .map(|&c| (c, 0.0))
             .collect();
-        let hits = recall::hits(cands, &shown, 0, |_| None);
+        let hits = recall::hits(cands, &shown, 0, &recall::hashes(|_| None));
         let verbatim = horadrim::plain(&hits);
         let alone = horadrim::inscribe(&mut lex.clone(), &[], &hits, 0);
         if i % SESSION == 0 {
