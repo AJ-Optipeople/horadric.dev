@@ -1359,6 +1359,17 @@ fn read_tab<T>(key: &str, id: Option<u64>, f: impl FnOnce(&Tab) -> T) -> Option<
     })
 }
 
+/// Forgets that tab `id` was just called on, for calls made for the human
+/// rather than an agent: a page asking "Leave site?" in the next moments
+/// is the human's to answer, and a popup is not an agent's.
+pub fn forget_call(key: &str, id: u64) {
+    WEBS.with(|w| {
+        if let Some(tab) = w.borrow_mut().get_mut(key).and_then(|w| w.by_id(id)) {
+            tab.called = None;
+        }
+    });
+}
+
 /// The id of the tab the pane shows.
 pub fn shown_tab(key: &str) -> Option<u64> {
     read_tab(key, None, |t| t.id)

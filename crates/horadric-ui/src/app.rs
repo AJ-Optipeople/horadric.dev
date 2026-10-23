@@ -1960,12 +1960,15 @@ fn pick_in_page(key: &str, to: String) {
     .to_string();
     let owned = key.to_string();
     web::devtools(key, tab, "Runtime.evaluate", &params, move |answer| {
-        // Esc, or the page went away under the pick.
+        // Given up, or the page went away under the pick.
         let Some(mut element) = answer.ok().as_deref().and_then(pick::element_of) else {
+            web::forget_call(&owned, tab);
             return;
         };
         let crop = pick::crop_params(element.rect);
+        let key = owned.clone();
         web::devtools(&owned, tab, "Page.captureScreenshot", &crop, move |shot| {
+            web::forget_call(&key, tab);
             element.crop = shot.ok().and_then(|s| save_crop(&s));
             if let Some(reference) = pick::save(&pick::Pick::Element(element)) {
                 push(Input::Hand(to, reference));

@@ -237,8 +237,12 @@ fn forget_old(dir: &Path) {
 
 /// The page script that lets the human pick an element: it outlines what
 /// is under the mouse, takes the next click for itself and answers with
-/// the element as JSON, or null for Esc. Run with `awaitPromise`.
+/// the element as JSON, or null when given up. Esc, a right click, the
+/// page losing the keyboard or two idle minutes give it up, so a pick the
+/// human walked away from cannot take a click much later; so does a
+/// second pick, which replaces it. Run with `awaitPromise`.
 pub const SCRIPT: &str = r#"new Promise(done => {
+  if (window.__horadricPick) window.__horadricPick(null);
   const glow = '#c9a24a';
   const box = document.createElement('div');
   box.style.cssText = `position:fixed;z-index:2147483647;pointer-events:none;border:2px solid ${glow};background:rgba(201,162,74,.14);border-radius:3px;display:none`;
@@ -259,6 +263,7 @@ pub const SCRIPT: &str = r#"new Promise(done => {
     return parts.join(' > ');
   };
   const show = e => {
+    rearm();
     const el = document.elementFromPoint(e.clientX, e.clientY);
     if (!el || el === box || el === tag) return;
     at = el;
@@ -269,31 +274,47 @@ pub const SCRIPT: &str = r#"new Promise(done => {
     Object.assign(tag.style, { display: 'block', left: Math.max(0, r.left) + 'px', top: (below ? r.bottom + 4 : Math.max(0, r.top - 24)) + 'px' });
   };
   const swallow = e => { e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation(); };
-  const kinds = ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'auxclick', 'contextmenu'];
+  const kinds = ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'auxclick'];
+  // Cut by characters, not UTF-16 units: half an emoji is a lone
+  // surrogate, which the JSON reader on the other side refuses.
+  const cut = (t, n) => t.length <= n ? t : Array.from(t.slice(0, n + 1)).slice(0, -1).join('');
+  let idle = null;
+  const rearm = () => { clearTimeout(idle); idle = setTimeout(() => end(null), 120000); };
   const end = v => {
+    clearTimeout(idle);
     removeEventListener('mousemove', show, true);
     removeEventListener('click', click, true);
     removeEventListener('keydown', key, true);
+    removeEventListener('contextmenu', give_up, true);
+    removeEventListener('blur', give_up);
+    document.removeEventListener('visibilitychange', give_up);
     kinds.forEach(k => removeEventListener(k, swallow, true));
     box.remove(); tag.remove();
+    if (window.__horadricPick === end) delete window.__horadricPick;
     done(v);
   };
+  const give_up = e => { if (e.type === 'contextmenu') swallow(e); end(null); };
   const click = e => {
     swallow(e);
     if (!at) return;
     const r = at.getBoundingClientRect();
     end(JSON.stringify({
       url: location.href, title: document.title, selector: sel(at), tag: at.localName,
-      text: (at.innerText || at.textContent || '').slice(0, 20000),
-      html: at.outerHTML.slice(0, 40000),
+      text: cut(at.innerText || at.textContent || '', 20000),
+      html: cut(at.outerHTML, 40000),
       rect: [r.left + scrollX, r.top + scrollY, r.width, r.height],
     }));
   };
   const key = e => { if (e.key === 'Escape') { swallow(e); end(null); } };
+  window.__horadricPick = end;
   addEventListener('mousemove', show, true);
   addEventListener('click', click, true);
   addEventListener('keydown', key, true);
+  addEventListener('contextmenu', give_up, true);
+  addEventListener('blur', give_up);
+  document.addEventListener('visibilitychange', give_up);
   kinds.forEach(k => addEventListener(k, swallow, true));
+  rearm();
 })"#;
 
 /// The element out of `Runtime.evaluate`'s answer to [`SCRIPT`]: None when

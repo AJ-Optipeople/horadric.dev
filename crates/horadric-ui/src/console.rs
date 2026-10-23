@@ -1128,11 +1128,12 @@ impl Console {
         let range = s.term.selection.as_ref()?.to_range(&s.term)?;
         let history = s.term.grid().history_size() as i32;
         let line = |p: Point| {
-            let row = (p.line.0 + history).max(0) as usize;
+            // A drag past the end of the file ends on its last line.
+            let row = ((p.line.0 + history).max(0) as usize).min(view.rows.len().checked_sub(1)?);
             view.rows.get(row).map(|r| r.line + 1)
         };
         let first = line(range.start)?;
-        let last = line(range.end).unwrap_or(first);
+        let last = line(range.end)?;
         Some((first.min(last), first.max(last)))
     }
 
