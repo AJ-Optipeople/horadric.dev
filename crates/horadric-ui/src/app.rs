@@ -6199,7 +6199,6 @@ impl App {
         if let Some((short, _, _)) = self.background_of(id) {
             agents::stop(&short);
         }
-        self.drop_turns(id);
         self.forget(id);
         self.reconcile(false);
     }
@@ -6212,7 +6211,7 @@ impl App {
             .registry
             .lock()
             .ok()
-            .and_then(|r| Some(r.get(id)?.cwd.clone()))
+            .and_then(|r| r.get(id).filter(|s| !s.shell).map(|s| s.cwd.clone()))
         else {
             return;
         };
@@ -6220,12 +6219,14 @@ impl App {
         thread::spawn(move || horadric_hooks::checkpoint::forget(&id, &cwd));
     }
 
-    /// Whether the tile menu offers to undo the session's last turn: an
-    /// agent's session, live or paused, between turns.
+    /// Whether the tile menu offers to undo the session's last turn: a
+    /// Claude Code session, live or paused, between turns. Only its edit
+    /// tools name the files they write; Codex and Grok tools do not.
     fn can_undo(&self, id: &str) -> bool {
         let between = self.shared.registry.lock().is_ok_and(|r| {
-            r.get(id)
-                .is_some_and(|s| !s.shell && !s.phase.mid_turn() && !s.phase.asks())
+            r.get(id).is_some_and(|s| {
+                !s.shell && s.agent == Agent::Claude && !s.phase.mid_turn() && !s.phase.asks()
+            })
         });
         between
             && matches!(
@@ -6284,7 +6285,6 @@ impl App {
             Err(_) => return,
         };
         for id in &ids {
-            self.drop_turns(id);
             self.forget(id);
         }
         self.reconcile(false);
@@ -6385,6 +6385,8 @@ impl App {
     /// Kills a session's process and drops every trace of it, without
     /// updating the windows.
     fn forget(&mut self, id: &str) {
+        // Every way a session goes for good comes through here.
+        self.drop_turns(id);
         if let Some(c) = self.consoles.remove(id) {
             if c.exit_code().is_none() {
                 c.kill();

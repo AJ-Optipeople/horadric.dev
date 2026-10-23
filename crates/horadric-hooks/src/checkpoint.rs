@@ -1,10 +1,14 @@
 //! The git half of undoing a turn: writing each turn's tree into hidden
-//! refs as its hooks arrive, and putting a turn's files back.
+//! refs as its hooks arrive, hashing the files its edit tools write, and
+//! putting a turn's own files back.
 //!
 //! A snapshot never touches the working tree, the real index, HEAD or the
-//! stash. It stages into an index of its own, a copy of the real one so
-//! unchanged files are not hashed again, and keeps the commit under
-//! `refs/horadric/turns/`. What is decided from what git says is in
+//! stash. It stages into a temporary index of its own and keeps the commit
+//! under `refs/horadric/turns/`. The temporary index starts as a copy of
+//! the last one Horadric staged in that repository, never of the real
+//! index: the real one holds blob ids made through line ending filters,
+//! and its stat cache would carry them into a snapshot that must hold the
+//! bytes on disk. What is decided from what git says is in
 //! `horadric_core::checkpoint`.
 
 use std::collections::HashMap;
@@ -14,13 +18,19 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
-use std::time::SystemTime;
+use std::thread;
+use std::time::{Duration, Instant, SystemTime};
 
 use horadric_core::checkpoint::{
-    self, attribute, parse_diff, plan, prefix, prune, turn_ref, turns, Edge, Outcome, Record,
-    Turns, KEEP,
+    self, attribute, parse_diff, plan, prefix, prune, turn_ref, turns, written, Blob, Edge,
+    Outcome, Record, Turns, KEEP,
 };
 use horadric_core::HookEvent;
+
+/// The longest a snapshot may hold a hook's reply. A tree that takes
+/// longer goes without a checkpoint for that turn, and the staging goes
+/// on in the background so the next one is quick.
+const SNAPSHOT_WAIT: Duration = Duration::from_secs(3);
 
 fn open_turns() -> &'static Mutex<Turns> {
     static TURNS: OnceLock<Mutex<Turns>> = OnceLock::new();
@@ -28,18 +38,34 @@ fn open_turns() -> &'static Mutex<Turns> {
 }
 
 /// Takes in a hook event of the Horadric session `session`: a prompt
-/// snapshots the tree as the turn starts, a stop as it ends. Runs git, so
-/// it is called on the listener's thread for the request, never the UI's.
-/// A folder outside git is left alone.
+/// snapshots the tree as the turn starts, a stop as it ends, and an edit
+/// tool's file is hashed before and after it writes. Runs git, so it is
+/// called on the listener's thread for the request, never the UI's. A
+/// folder outside git is left alone.
 pub fn hear(session: &str, event: &HookEvent) {
     if session.is_empty() || event.cwd.is_empty() {
         return;
     }
     let main_loop = !event.is_subagent();
     match event.hook_event_name.as_str() {
-        "PostToolUse" => {
+        "PreToolUse" | "PostToolUse" | "PostToolUseFailure" => {
+            let Some((path, key)) = written(event) else {
+                return;
+            };
+            let top = open_turns()
+                .lock()
+                .ok()
+                .and_then(|t| t.tree(session).map(PathBuf::from));
+            let Some(top) = top else {
+                return;
+            };
+            let blob = hash(&top, Path::new(&path));
             if let Ok(mut t) = open_turns().lock() {
-                t.hear(session, event);
+                if event.hook_event_name == "PreToolUse" {
+                    t.before(session, &key, blob);
+                } else {
+                    t.after(session, &key, blob);
+                }
             }
         }
         "UserPromptSubmit" if main_loop => {
@@ -65,33 +91,46 @@ fn begin(session: &str, cwd: &str) -> Result<(), String> {
     };
     let refs = list(&top, session)?;
     let n = checkpoint::next(&refs, session);
-    let tree = write_tree(&top)?;
+    let tree = match write_tree(&top) {
+        Ok(t) => t,
+        Err(e) => {
+            // No start, so nothing of this turn or the one before can be
+            // known to its end.
+            if let Ok(mut t) = open_turns().lock() {
+                t.finish(session);
+            }
+            return Err(e);
+        }
+    };
     let start = commit(&top, &tree, &format!("Horadric turn {n} start\n"))?;
     let mut updates = vec![format!(
         "update {} {start}",
         turn_ref(session, n, Edge::Start)
     )];
-    let tree_key = top.to_string_lossy().replace('\\', "/").to_lowercase();
     let left = open_turns()
         .lock()
         .ok()
-        .and_then(|mut t| t.begin(session, &tree_key, n, SystemTime::now()));
-    // A turn interrupted sends no stop, so it ends where the next starts.
-    if let Some((prev, record)) = left {
-        let has_end = turns(&refs, session)
-            .iter()
-            .any(|t| t.n == prev && t.start && t.end);
-        if !has_end && turns(&refs, session).iter().any(|t| t.n == prev) {
-            let end = commit(&top, &tree, &record.to_message(prev))?;
-            updates.push(format!(
-                "update {} {end}",
-                turn_ref(session, prev, Edge::End)
-            ));
+        .and_then(|mut t| t.begin(session, &top.to_string_lossy(), n, SystemTime::now()));
+    let mut gone = prune(&refs, session, KEEP - 1);
+    for t in turns(&refs, session).iter().filter(|t| !t.end) {
+        match &left {
+            // An interrupted turn sends no stop, so it ends where the next
+            // starts.
+            Some((prev, record)) if *prev == t.n => {
+                let end = commit(&top, &tree, &record.to_message(t.n))?;
+                updates.push(format!(
+                    "update {} {end}",
+                    turn_ref(session, t.n, Edge::End)
+                ));
+            }
+            // A turn no one saw end, through a reload or a slow snapshot,
+            // can never be undone.
+            _ => gone.extend(checkpoint::refs_of(session, t)),
         }
     }
-    for gone in prune(&refs, session, KEEP - 1) {
-        updates.push(format!("delete {gone}"));
-    }
+    gone.sort();
+    gone.dedup();
+    updates.extend(gone.into_iter().map(|r| format!("delete {r}")));
     update_refs(&top, &updates)
 }
 
@@ -105,8 +144,9 @@ fn end(session: &str, top: &Path, n: u64, record: &Record) -> Result<(), String>
 }
 
 /// Puts back the files the last kept turn of `session`, working in `cwd`,
-/// changed, unless any was changed again since. The turn's checkpoints go
-/// once it is undone, so the next undo reaches the turn before.
+/// wrote with its own edit tools, unless any was changed again since. The
+/// turn's checkpoints go once something is undone, so the next undo
+/// reaches the turn before.
 pub fn undo(session: &str, cwd: &str) -> Outcome {
     let Some(top) = toplevel(Path::new(cwd)) else {
         return Outcome::NoRepo;
@@ -126,12 +166,16 @@ fn try_undo(session: &str, top: &Path) -> Result<Outcome, String> {
     let end = if last.end {
         turn_ref(session, last.n, Edge::End)
     } else {
-        // Interrupted with no stop heard: it ends now.
-        let record = open_turns()
+        // Interrupted with no stop heard: it ends now. Its record still
+        // holds each file as its tools left it, so a file changed by hand
+        // since is not taken for the turn's.
+        let open = open_turns()
             .lock()
             .ok()
-            .and_then(|t| t.record(session, last.n))
-            .unwrap_or_else(Record::unknown);
+            .and_then(|t| t.record(session, last.n));
+        let Some(record) = open else {
+            return Ok(Outcome::Unended);
+        };
         let tree = write_tree(top)?;
         commit(top, &tree, &record.to_message(last.n))?
     };
@@ -144,35 +188,82 @@ fn try_undo(session: &str, top: &Path) -> Result<Outcome, String> {
         None,
     )?;
     let top_text = top.to_string_lossy().replace('\\', "/");
-    let (mine, unsure) = attribute(parse_diff(&raw), &record, &top_text);
-    let now = hashes(top, mine.iter().map(|c| c.path.as_str()))?;
+    let (mine, left) = attribute(parse_diff(&raw), &record, &top_text);
+    if mine.is_empty() {
+        return Ok(Outcome::NotOwned(left));
+    }
+    let now: HashMap<String, Blob> = mine
+        .iter()
+        .map(|c| (c.path.clone(), hash(top, &top.join(&c.path))))
+        .collect();
     let p = plan(&mine, &now);
     if !p.refused.is_empty() {
         return Ok(Outcome::Refused(p.refused));
     }
-    for (path, blob) in &p.restore {
-        let bytes = git(top, &["cat-file", "blob", blob], &[], None)?;
-        let file = top.join(path);
-        if let Some(dir) = file.parent() {
-            fs::create_dir_all(dir).map_err(|e| format!("{path}: {e}"))?;
+    let outcome = if p.restore.is_empty() && p.delete.is_empty() {
+        Outcome::Already
+    } else {
+        put_back(top, &p.restore, &p.delete)?;
+        Outcome::Undone {
+            restored: p.restore.into_iter().map(|(path, _)| path).collect(),
+            deleted: p.delete,
+            left,
         }
-        fs::write(&file, bytes).map_err(|e| format!("{path}: {e}"))?;
-    }
-    for path in &p.delete {
-        let file = top.join(path);
-        fs::remove_file(&file).map_err(|e| format!("{path}: {e}"))?;
-        remove_empty_parents(top, &file);
-    }
+    };
     let gone: Vec<String> = checkpoint::refs_of(session, &last)
         .into_iter()
         .map(|r| format!("delete {r}"))
         .collect();
-    update_refs(top, &gone)?;
-    Ok(Outcome::Undone {
-        restored: p.restore.into_iter().map(|(path, _)| path).collect(),
-        deleted: p.delete,
-        unsure,
-    })
+    // The files are back already; should this fail, the next undo finds
+    // them as the start had them and says so.
+    let _ = update_refs(top, &gone);
+    if !last.end {
+        if let Ok(mut t) = open_turns().lock() {
+            t.finish(session);
+        }
+    }
+    Ok(outcome)
+}
+
+/// Writes each path in `restore` back as its blob, and deletes each in
+/// `delete`. Every blob is read before any file is touched, and a write
+/// that fails puts back the ones done before it, so an undo happens whole
+/// or not at all.
+fn put_back(top: &Path, restore: &[(String, String)], delete: &[String]) -> Result<(), String> {
+    let mut ops: Vec<(&str, Option<Vec<u8>>)> = Vec::new();
+    for (path, blob) in restore {
+        ops.push((
+            path,
+            Some(git(top, &["cat-file", "blob", blob], &[], None)?),
+        ));
+    }
+    ops.extend(delete.iter().map(|p| (p.as_str(), None)));
+    let mut done: Vec<(PathBuf, Option<Vec<u8>>)> = Vec::new();
+    for (path, bytes) in ops {
+        let file = top.join(path);
+        let was = fs::read(&file).ok();
+        let r = match &bytes {
+            Some(b) => file
+                .parent()
+                .map_or(Ok(()), fs::create_dir_all)
+                .and_then(|_| fs::write(&file, b)),
+            None => fs::remove_file(&file),
+        };
+        if let Err(e) = r {
+            for (f, was) in done.into_iter().rev() {
+                let _ = match was {
+                    Some(b) => fs::write(&f, b),
+                    None => fs::remove_file(&f),
+                };
+            }
+            return Err(format!("{path}: {e}"));
+        }
+        done.push((file, was));
+    }
+    for path in delete {
+        remove_empty_parents(top, &top.join(path));
+    }
+    Ok(())
 }
 
 /// Deletes every checkpoint of `session`, which ended for good.
@@ -223,59 +314,107 @@ fn list(top: &Path, session: &str) -> Result<Vec<String>, String> {
 }
 
 /// The tree as `git add -A` would stage it, but byte for byte: undo must
-/// put back what was on disk, not what a checkout would make of it. Staged
-/// into an index of Horadric's own, so the real one never changes; kept
-/// between turns, so unchanged files are known by their stat and not read
-/// again, which keeps a big tree's snapshot quick.
+/// put back what was on disk, not what a checkout would make of it.
+///
+/// Each snapshot stages into a temporary index of its own name, so two at
+/// once, in one repository or two, never wait on each other and a lock
+/// left behind never sticks. It starts as a copy of the last one that
+/// finished, whose stat cache spares hashing unchanged files again.
 fn write_tree(top: &Path) -> Result<String, String> {
     static SERIAL: AtomicU64 = AtomicU64::new(0);
-    static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
-    let _held = ONE_AT_A_TIME.lock();
-    let kept = text(git(
+    let seed = top.join(text(git(
         top,
         &["rev-parse", "--git-path", "horadric-turns.index"],
         &[],
         None,
-    )?);
-    let kept = top.join(kept);
+    )?));
+    let temp = seed.with_file_name(format!(
+        "horadric-turn-{}-{}.index",
+        std::process::id(),
+        SERIAL.fetch_add(1, Ordering::Relaxed)
+    ));
+    if seed.is_file() {
+        let _ = fs::copy(&seed, &temp);
+    }
     let raw = raw(top)?;
-    let raw: Vec<&str> = raw.iter().map(String::as_str).collect();
-    let stage = |index: &Path| {
-        let env = [("GIT_INDEX_FILE", index.as_os_str().to_owned())];
-        let add = [&raw[..], &["add", "-A"]].concat();
-        let write = [&raw[..], &["write-tree"]].concat();
-        git(top, &add, &env, None)
-            .and_then(|_| git(top, &write, &env, None))
-            .map(text)
-    };
-    match stage(&kept) {
-        Ok(tree) => Ok(tree),
-        // Another Horadric holds it, or it is damaged: stage afresh.
-        Err(_) => {
-            let temp = kept.with_file_name(format!(
-                "horadric-turn-{}-{}.index",
-                std::process::id(),
-                SERIAL.fetch_add(1, Ordering::Relaxed)
-            ));
-            let tree = stage(&temp);
-            let _ = fs::remove_file(&temp);
-            tree
+    let env = [("GIT_INDEX_FILE", temp.as_os_str().to_owned())];
+    let mut add = Command::new("git");
+    crate::no_window(&mut add)
+        .arg("--no-optional-locks")
+        .args(&raw)
+        .args(["add", "-A"])
+        .current_dir(top)
+        .env("GIT_INDEX_FILE", &temp)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut child = add.spawn().map_err(|e| format!("git add: {e}"))?;
+    let deadline = Instant::now() + SNAPSHOT_WAIT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
+            Ok(None) => {
+                // Left to finish, so the next snapshot starts from it.
+                thread::spawn(move || match child.wait() {
+                    Ok(s) if s.success() => keep(&temp, &seed),
+                    _ => {
+                        let _ = fs::remove_file(&temp);
+                    }
+                });
+                return Err("staging the tree took too long".into());
+            }
+            Err(e) => {
+                let _ = fs::remove_file(&temp);
+                return Err(format!("git add: {e}"));
+            }
         }
+    };
+    let raw: Vec<&str> = raw.iter().map(String::as_str).collect();
+    let tree = if status.success() {
+        git(top, &[&raw[..], &["write-tree"]].concat(), &env, None).map(text)
+    } else {
+        Err("git add failed".into())
+    };
+    if tree.is_ok() {
+        keep(&temp, &seed);
+    } else {
+        let _ = fs::remove_file(&temp);
+    }
+    tree
+}
+
+/// Makes `temp` the index the next snapshot starts from.
+fn keep(temp: &Path, seed: &Path) {
+    if fs::rename(temp, seed).is_err() {
+        let _ = fs::remove_file(temp);
     }
 }
 
 /// The options that make git read and write files as their bytes: no
 /// line ending conversion and no filters, since attributes are read from
 /// the empty tree instead of the working tree. The empty tree is written
-/// first, as a repository need not have it.
-fn raw(top: &Path) -> Result<[String; 3], String> {
-    let empty = text(git(
-        top,
-        &["hash-object", "-t", "tree", "-w", "--stdin"],
-        &[],
-        Some(b""),
-    )?);
-    Ok([
+/// once per repository, which need not have it.
+fn raw(top: &Path) -> Result<Vec<String>, String> {
+    static EMPTY: OnceLock<Mutex<HashMap<PathBuf, String>>> = OnceLock::new();
+    let known = EMPTY.get_or_init(Mutex::default);
+    let cached = known.lock().ok().and_then(|k| k.get(top).cloned());
+    let empty = match cached {
+        Some(e) => e,
+        None => {
+            let e = text(git(
+                top,
+                &["hash-object", "-t", "tree", "-w", "--stdin"],
+                &[],
+                Some(b""),
+            )?);
+            if let Ok(mut k) = known.lock() {
+                k.insert(top.to_path_buf(), e.clone());
+            }
+            e
+        }
+    };
+    Ok(vec![
         "-c".into(),
         "core.autocrlf=false".into(),
         format!("--attr-source={empty}"),
@@ -304,37 +443,26 @@ fn update_refs(top: &Path, lines: &[String]) -> Result<(), String> {
     git(top, &["update-ref", "--stdin"], &[], Some(input.as_bytes())).map(|_| ())
 }
 
-/// Each path's blob as `git add` would make it, None where it is gone.
-fn hashes<'a>(
-    top: &Path,
-    paths: impl Iterator<Item = &'a str>,
-) -> Result<HashMap<String, Option<String>>, String> {
-    let mut out = HashMap::new();
-    let mut there = Vec::new();
-    for p in paths {
-        if top.join(p).is_file() {
-            there.push(p.to_string());
-        } else if top.join(p).exists() {
-            // A folder where the file was: changed, by someone.
-            out.insert(p.to_string(), Some("not a file".to_string()));
-        } else {
-            out.insert(p.to_string(), None);
-        }
+/// A file's blob as a snapshot stores it, its bytes unfiltered. Gone is
+/// None; something that cannot be hashed matches no blob at all.
+fn hash(top: &Path, file: &Path) -> Blob {
+    if !file.exists() {
+        return None;
     }
-    if there.is_empty() {
-        return Ok(out);
-    }
-    let input = there.join("\n") + "\n";
-    let hashed = text(git(
-        top,
-        &["hash-object", "--no-filters", "--stdin-paths"],
-        &[],
-        Some(input.as_bytes()),
-    )?);
-    for (p, h) in there.into_iter().zip(hashed.lines()) {
-        out.insert(p, Some(h.to_string()));
-    }
-    Ok(out)
+    let path = file.to_string_lossy();
+    let hashed = file
+        .is_file()
+        .then(|| {
+            git(
+                top,
+                &["hash-object", "--no-filters", "--", &path],
+                &[],
+                None,
+            )
+            .ok()
+        })
+        .flatten();
+    Some(hashed.map_or_else(|| "unreadable".to_string(), text))
 }
 
 /// Deletes the folders a deleted file leaves empty, up to the tree's top.
@@ -416,17 +544,25 @@ mod tests {
         }
     }
 
-    fn wrote(cwd: &Path, file: &str) -> HookEvent {
+    fn tool(hook: &str, cwd: &Path, file: &str) -> HookEvent {
         HookEvent {
             tool_name: Some("Write".into()),
             tool_input: Some(json!({ "file_path": file })),
-            ..event("PostToolUse", cwd)
+            ..event(hook, cwd)
         }
     }
 
-    /// Runs git for real: a turn that edits, makes and deletes files is put
-    /// back, the real index and the stash never move, and a file changed
-    /// since refuses the undo.
+    /// The edit tool `Write` writing `text` into `file`, with its hooks.
+    fn write(s: &str, dir: &Path, file: &str, text: &[u8]) {
+        hear(s, &tool("PreToolUse", dir, file));
+        fs::create_dir_all(dir.join(file).parent().unwrap()).unwrap();
+        fs::write(dir.join(file), text).unwrap();
+        hear(s, &tool("PostToolUse", dir, file));
+    }
+
+    /// Runs git for real: what the turn's own tools wrote is put back byte
+    /// for byte, what a command changed is named and left, the real index
+    /// never moves, and a file changed since refuses the undo.
     #[test]
     fn a_turn_is_snapshotted_and_undone_in_a_real_repository() {
         let dir = repo();
@@ -441,13 +577,12 @@ mod tests {
 
         let s = "undo-test-1";
         hear(s, &event("UserPromptSubmit", &dir));
-        fs::write(dir.join("kept.txt"), "two\n").unwrap();
-        fs::write(dir.join("crlf.txt"), "c\r\n").unwrap();
+        write(s, &dir, "kept.txt", b"two\n");
+        write(s, &dir, "crlf.txt", b"c\r\n");
+        write(s, &dir, "sub/made.txt", b"new\n");
+        // A command's work, not the turn's tools'.
         fs::remove_file(dir.join("gone.txt")).unwrap();
-        fs::create_dir_all(dir.join("sub")).unwrap();
-        fs::write(dir.join("sub/made.txt"), "new\n").unwrap();
         fs::write(dir.join("ignored.txt"), "x\n").unwrap();
-        hear(s, &wrote(&dir, "kept.txt"));
         hear(s, &event("Stop", &dir));
         assert_eq!(fs::read(dir.join(".git/index")).unwrap(), index);
 
@@ -456,17 +591,17 @@ mod tests {
             Outcome::Undone {
                 restored,
                 deleted,
-                unsure,
+                left,
             } => {
-                assert_eq!(restored.len(), 3, "{restored:?}");
+                assert_eq!(restored, ["crlf.txt", "kept.txt"]);
                 assert_eq!(deleted, ["sub/made.txt"]);
-                assert!(unsure.is_empty());
+                assert_eq!(left, ["gone.txt"]);
             }
             other => panic!("{other:?}"),
         }
         assert_eq!(fs::read_to_string(dir.join("kept.txt")).unwrap(), "one\n");
-        assert_eq!(fs::read_to_string(dir.join("gone.txt")).unwrap(), "old\n");
         assert_eq!(fs::read(dir.join("crlf.txt")).unwrap(), b"a\r\nb\r\n");
+        assert!(!dir.join("gone.txt").exists());
         assert!(!dir.join("sub").exists());
         assert!(dir.join("ignored.txt").exists());
         assert_eq!(fs::read(dir.join(".git/index")).unwrap(), index);
@@ -474,14 +609,53 @@ mod tests {
 
         // A file changed after the turn refuses it, and nothing moves.
         hear(s, &event("UserPromptSubmit", &dir));
-        fs::write(dir.join("kept.txt"), "three\n").unwrap();
-        fs::write(dir.join("gone.txt"), "mine\n").unwrap();
+        write(s, &dir, "kept.txt", b"three\n");
+        write(s, &dir, "gone.txt", b"mine\n");
         hear(s, &event("Stop", &dir));
         fs::write(dir.join("kept.txt"), "someone else\n").unwrap();
         assert_eq!(undo(s, &cwd), Outcome::Refused(vec!["kept.txt".into()]));
         assert_eq!(fs::read_to_string(dir.join("gone.txt")).unwrap(), "mine\n");
 
+        // A file someone else changed between the turn's own writes is not
+        // the turn's: nothing is undone and the turn stays.
+        fs::write(dir.join("kept.txt"), "three\n").unwrap();
+        hear(s, &event("UserPromptSubmit", &dir));
+        write(s, &dir, "kept.txt", b"four\n");
+        fs::write(dir.join("kept.txt"), "theirs\n").unwrap();
+        write(s, &dir, "kept.txt", b"theirs and mine\n");
+        hear(s, &event("Stop", &dir));
+        assert_eq!(undo(s, &cwd), Outcome::NotOwned(vec!["kept.txt".into()]));
+        assert_eq!(list(&dir, s).unwrap().len(), 4);
+
         forget(s, &cwd);
+        assert!(list(&dir, s).unwrap().is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// An interrupted turn sends no stop. Undone before the next prompt it
+    /// ends at the click, and a file edited by hand since is left alone.
+    #[test]
+    fn an_interrupted_turn_leaves_a_hand_edit_alone() {
+        let dir = repo();
+        fs::write(dir.join("a.txt"), "a\n").unwrap();
+        fs::write(dir.join("b.txt"), "b\n").unwrap();
+        let s = "undo-test-2";
+        hear(s, &event("UserPromptSubmit", &dir));
+        write(s, &dir, "a.txt", b"a2\n");
+        write(s, &dir, "b.txt", b"b2\n");
+        fs::write(dir.join("b.txt"), "by hand\n").unwrap();
+        let cwd = dir.to_string_lossy().into_owned();
+        match undo(s, &cwd) {
+            Outcome::Undone { restored, left, .. } => {
+                assert_eq!(restored, ["a.txt"]);
+                assert_eq!(left, ["b.txt"]);
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(fs::read_to_string(dir.join("a.txt")).unwrap(), "a\n");
+        assert_eq!(fs::read_to_string(dir.join("b.txt")).unwrap(), "by hand\n");
+        // Its stop, should it come late, finds no turn to end.
+        hear(s, &event("Stop", &dir));
         assert!(list(&dir, s).unwrap().is_empty());
         let _ = fs::remove_dir_all(&dir);
     }
