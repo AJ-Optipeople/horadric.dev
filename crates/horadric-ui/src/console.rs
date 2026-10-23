@@ -822,6 +822,12 @@ impl Console {
         self.view.is_some()
     }
 
+    /// An agent's session, which a pick can be handed to: not a shell, a
+    /// file view or a page.
+    pub fn is_agent(&self) -> bool {
+        self.remote.is_some() && !self.shell
+    }
+
     /// A console with no program for the browser pane of project `key`.
     /// Its grid is never drawn, but a pane is made of a console.
     pub fn web(id: String, serial: usize, key: String) -> Arc<Console> {
@@ -1112,6 +1118,22 @@ impl Console {
             cell(range.start),
             cell(range.end),
         ))
+    }
+
+    /// For a view, the file's lines the selection touches, counted from
+    /// one.
+    pub fn selection_lines(&self) -> Option<(usize, usize)> {
+        let s = self.screen.lock().ok()?;
+        let view = self.view.as_ref()?.lock().ok()?;
+        let range = s.term.selection.as_ref()?.to_range(&s.term)?;
+        let history = s.term.grid().history_size() as i32;
+        let line = |p: Point| {
+            let row = (p.line.0 + history).max(0) as usize;
+            view.rows.get(row).map(|r| r.line + 1)
+        };
+        let first = line(range.start)?;
+        let last = line(range.end).unwrap_or(first);
+        Some((first.min(last), first.max(last)))
     }
 
     pub fn write(&self, bytes: impl Into<Vec<u8>>) {

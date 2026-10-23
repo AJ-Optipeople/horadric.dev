@@ -1359,6 +1359,11 @@ fn read_tab<T>(key: &str, id: Option<u64>, f: impl FnOnce(&Tab) -> T) -> Option<
     })
 }
 
+/// The id of the tab the pane shows.
+pub fn shown_tab(key: &str) -> Option<u64> {
+    read_tab(key, None, |t| t.id)
+}
+
 /// The shown page's title and address, for the pane's header.
 pub fn label(key: &str) -> Option<(String, String)> {
     label_of(key, None)

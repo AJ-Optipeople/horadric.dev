@@ -136,6 +136,9 @@ pub struct TerminalWindow {
     zoomed: Cell<bool>,
     /// The session that has, or last had, the keyboard.
     active: RefCell<Option<String>>,
+    /// The agent's session that last had the keyboard: where a pick goes
+    /// first, since the human picks in another pane.
+    last_agent: RefCell<Option<String>>,
     title: RefCell<String>,
     drag: Cell<Option<Drag>>,
     /// The other Horadric windows, read when a move or resize starts: they
@@ -203,6 +206,7 @@ impl TerminalWindow {
             grid: RefCell::new(Vec::new()),
             zoomed: Cell::new(false),
             active: RefCell::new(None),
+            last_agent: RefCell::new(None),
             title: RefCell::new(String::new()),
             drag: Cell::new(None),
             others: RefCell::new(Vec::new()),
@@ -593,6 +597,14 @@ impl TerminalWindow {
     /// Another session has the keyboard now. Zoomed, the stage shows it.
     fn set_active(&self, id: String) {
         let changed = self.active.borrow().as_deref() != Some(id.as_str());
+        let agent = self
+            .panes
+            .borrow()
+            .iter()
+            .any(|p| p.session() == id && p.console().is_agent());
+        if agent {
+            *self.last_agent.borrow_mut() = Some(id.clone());
+        }
         *self.active.borrow_mut() = Some(id);
         if changed && self.zoomed.get() {
             self.layout();
@@ -686,6 +698,48 @@ impl TerminalWindow {
             .iter()
             .map(|p| p.session().to_string())
             .collect()
+    }
+
+    /// The agents' sessions on the stage, as id and name, the one that last
+    /// had the keyboard first.
+    pub fn agents(&self) -> Vec<(String, String)> {
+        let last = self.last_agent.borrow().clone();
+        let mut out: Vec<_> = self
+            .panes
+            .borrow()
+            .iter()
+            .filter(|p| p.console().is_agent())
+            .map(|p| (p.session().to_string(), p.name()))
+            .collect();
+        if let Some(i) = out.iter().position(|(id, _)| Some(id) == last.as_ref()) {
+            out[..=i].rotate_right(1);
+        }
+        out
+    }
+
+    /// The console of this session's pane, and the pane's name.
+    pub fn console_of(&self, id: &str) -> Option<(Arc<Console>, String)> {
+        self.panes
+            .borrow()
+            .iter()
+            .find(|p| p.session() == id)
+            .map(|p| (Arc::clone(p.console()), p.name()))
+    }
+
+    /// Puts `text` in this session's prompt as a paste, not sent, and gives
+    /// it the keyboard so the human can say what to do with it.
+    pub fn hand(&self, id: &str, text: &str) -> bool {
+        let found = match self.panes.borrow().iter().find(|p| p.session() == id) {
+            Some(p) => {
+                p.hand(text);
+                true
+            }
+            None => false,
+        };
+        if found {
+            self.focus_session(id);
+        }
+        found
     }
 
     /// The session whose pane is at this point on the screen, when the
