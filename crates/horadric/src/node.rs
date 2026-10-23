@@ -115,6 +115,10 @@ impl Node {
 
 fn serve() -> Result<(), String> {
     let port = horadric_hooks::port();
+    // Bound before the port, so whoever sees the port up can connect a
+    // viewer at once.
+    let first = Pipe::serve(&socket_name(), true)
+        .map_err(|e| format!("cannot serve {}: {e}", socket_name()))?;
     let (tx, rx) = mpsc::channel::<Tagged>();
     let (asked_tx, asked_rx) = mpsc::channel::<Asked>();
     let (ready_tx, ready_rx) = mpsc::channel::<io::Result<()>>();
@@ -125,8 +129,6 @@ fn serve() -> Result<(), String> {
     if let Ok(Err(e)) = ready_rx.recv_timeout(Duration::from_millis(300)) {
         return Err(format!("cannot listen on 127.0.0.1:{port}: {e}"));
     }
-    let first = Pipe::serve(&socket_name(), true)
-        .map_err(|e| format!("cannot serve {}: {e}", socket_name()))?;
 
     let node: Shared = Arc::default();
     let instance = horadric_hooks::instance();

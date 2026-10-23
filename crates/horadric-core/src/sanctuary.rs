@@ -598,6 +598,7 @@ mod tests {
             sources: Vec::new(),
             parts: Vec::new(),
             parted: false,
+            extra: Default::default(),
         }
     }
 

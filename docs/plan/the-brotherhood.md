@@ -127,6 +127,29 @@ screen. What it lacks:
   create, handoff or takeover. The reason is the blast radius: every
   machine typing into every other machine's shells means one stolen
   laptop opens all of them.
+- **A six digit code proves no one sat between them** (built
+  2026-10-24, `horadric-ui/src/joining.rs` and `brothers.rs`). The
+  relay carries the handshake, so it could swap keys. Each PC keeps one
+  ECDH P-256 key pair; the asker sends a commitment (a hash of its
+  public key and a nonce) first, the giver answers with its key and
+  nonce, then the asker reveals. Both work out the link key and a code
+  from the ECDH secret, both keys and both nonces, and show the code:
+  the asker in a note, the giver in the prompt, which says yes only if
+  the two match. The commitment makes the relay pick its keys before it
+  learns an honest side's nonce, so a forged pair of codes matches one
+  time in a million rather than after a short search, which is why six
+  digits are enough where Signal's safety numbers, compared at leisure,
+  are sixty. The link key never crosses the relay. Rejected: a code from
+  the keys alone, which a relay grinding keys could match in seconds.
+- **The joined brothers live in `brothers.json`**, beside
+  `portal.json` rather than in it, since the portal's config drops what
+  it does not know when it saves. Each entry is the brother's id, name,
+  public key and link key. This PC's own key pair is there too. A link
+  comes back by itself: of two joined brothers the one with the lower id
+  asks the relay for a channel when it sees the other listed, and a
+  hello sealed with the link key, answered in kind, is the proof. The
+  roster (`horadric-core/src/brotherhood.rs`) takes over from this file
+  in step 3.
 
 ### Seeing
 
@@ -335,6 +358,17 @@ Each step is useful alone and each is verified before the next starts.
    two dev instances on this machine and the real relay: sign in on
    both, the second asks, the first lets it in, both hold a key for the
    other.
+
+   Done on 2026-10-24: "Alpha" and "Beta" (`HORADRIC_PC_NAME`), each
+   with `APPDATA` in a scratch folder, both signed in, through
+   `wss://portal.horadric.dev`. Alpha's tray, Brothers, "Beta, Ask to
+   join...": Alpha's note and Beta's prompt both showed 587 941, Beta
+   said yes, both `brothers.json` held the other's public key and the
+   same link key. Beta restarted, then both: each time they linked
+   again with no prompt, and the menu read "Beta, linked". A 4401 drops
+   the access token in hand so the next try refreshes it; a 4503 waits
+   30 seconds; a relay that closes within 10 seconds of connecting keeps
+   the backoff growing.
 3. **The Windows UI as a client of another PC.** Joining two PCs by step
    2, the roster in `portal.json` beside phones, one link out per brother.
    Remote sessions in the registry with a `brother` field, never served

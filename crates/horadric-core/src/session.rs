@@ -694,6 +694,16 @@ impl Session {
         out
     }
 
+    /// The subagents the mod's roster says are at work, which are the ones
+    /// Horadric can stop: the mod stops one by the id it listed.
+    pub fn running_subagents(&self) -> Vec<&ModAgent> {
+        self.roster
+            .iter()
+            .flatten()
+            .filter(|a| matches!(a.status.as_str(), "pending" | "running" | "waiting"))
+            .collect()
+    }
+
     /// How many subagents are at work, see [`Session::subagent_types`].
     pub fn subagents(&self, now: SystemTime) -> usize {
         self.subagent_types(now).len()
@@ -860,6 +870,30 @@ pub fn waiting_on(tool: &str) -> String {
         .and_then(|rest| rest.split_once("__"))
         .map_or(tool, |(_, name)| name);
     format!("waiting on {short}")
+}
+
+/// A subagent as the tile's menu lists it: its type, what it was asked to
+/// do, and how long it has run when the mod said when it started.
+pub fn subagent_label(a: &ModAgent, now: SystemTime) -> String {
+    let kind = if a.agent_type.is_empty() {
+        "agent"
+    } else {
+        &a.agent_type
+    };
+    let mut out = kind.to_string();
+    // A tab would split a menu line into text and its right hand detail.
+    let what = a.description.trim().replace('\t', " ");
+    if !what.is_empty() {
+        out.push_str(": ");
+        out.push_str(&what);
+    }
+    let started = a
+        .started_ms
+        .map(|ms| SystemTime::UNIX_EPOCH + Duration::from_millis(ms));
+    if let Some(ran) = started.and_then(|t| now.duration_since(t).ok()) {
+        out.push_str(&format!(" ({})", crate::heavy::duration(ran.as_secs())));
+    }
+    out
 }
 
 /// The tile's line while subagents run: each type once, with a count when
@@ -1051,12 +1085,52 @@ mod tests {
         // Long past the quiet guess, the roster still holds them.
         let later = t0 + Duration::from_secs(300);
         assert_eq!(s.subagent_types(later), vec!["Explore", "general-purpose"]);
+        let stoppable: Vec<&str> = s
+            .running_subagents()
+            .iter()
+            .map(|a| a.agent_id.as_str())
+            .collect();
+        assert_eq!(stoppable, vec!["a1", "a2"]);
         // It ends when the mod says so, however recently it was heard.
         s.apply(&roster(vec![agent("a1", "Explore", "completed")]), later);
         assert_eq!(s.subagents(later), 0);
         // A new turn forgets the roster and the types.
         s.apply(&ev("Stop"), later);
         assert!(s.roster.is_none() && s.agent_types.is_empty());
+    }
+
+    #[test]
+    fn a_subagent_is_labelled_by_type_task_and_time_run() {
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+        let mut a = ModAgent {
+            agent_id: "a1".into(),
+            agent_type: "Explore".into(),
+            description: " Map the listener ".into(),
+            started_ms: Some(1_000_000),
+            ..Default::default()
+        };
+        assert_eq!(
+            subagent_label(&a, t0 + Duration::from_secs(125)),
+            "Explore: Map the listener (2m 05s)"
+        );
+        // A start in the future (clocks apart) or unknown says no time.
+        assert_eq!(
+            subagent_label(&a, t0 - Duration::from_secs(1)),
+            "Explore: Map the listener"
+        );
+        a.started_ms = None;
+        a.agent_type.clear();
+        a.description.clear();
+        assert_eq!(subagent_label(&a, t0), "agent");
+    }
+
+    #[test]
+    fn a_roster_from_an_older_mod_has_no_start() {
+        let a: ModAgent = serde_json::from_str(r#"{"agent_id":"a1","status":"running"}"#).unwrap();
+        assert_eq!(a.started_ms, None);
+        let b: ModAgent =
+            serde_json::from_str(r#"{"agent_id":"a1","started_ms":1761300000000}"#).unwrap();
+        assert_eq!(b.started_ms, Some(1_761_300_000_000));
     }
 
     #[test]

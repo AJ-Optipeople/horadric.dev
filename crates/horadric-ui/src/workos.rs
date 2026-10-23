@@ -132,6 +132,13 @@ pub fn access_token() -> Result<String, String> {
     Ok(auth.access)
 }
 
+/// Drops the access token in hand, so the next [`access_token`]
+/// refreshes. For a token the relay refused (4401) while this clock still
+/// thought it good.
+pub fn forget_access() {
+    *ACCESS.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
 fn keep(access: String) {
     let exp = workos::expiry(&access).unwrap_or(0);
     *ACCESS.lock().unwrap_or_else(|e| e.into_inner()) = Some((access, exp));

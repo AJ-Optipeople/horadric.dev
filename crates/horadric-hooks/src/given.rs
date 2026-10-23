@@ -54,7 +54,10 @@ pub fn keep(via: &str, session: &str, conversation: &str, text: &str) {
 fn append(path: &Path, given: &Given) -> std::io::Result<()> {
     if fs::metadata(path).is_ok_and(|m| m.len() > MOST) {
         let text = fs::read_to_string(path)?;
-        fs::write(path, newer_half(&text))?;
+        // Written beside, then over it, so a reader never sees it cut.
+        let beside = path.with_extension("jsonl.new");
+        fs::write(&beside, newer_half(&text))?;
+        fs::rename(&beside, path)?;
     }
     let mut line = serde_json::to_string(given)?;
     line.push('\n');
@@ -67,9 +70,11 @@ fn append(path: &Path, given: &Given) -> std::io::Result<()> {
 }
 
 /// The lines of `text` from its middle on, starting at a whole line.
+/// The newline is found by its byte, so a middle inside a `§` is never
+/// cut at.
 fn newer_half(text: &str) -> &str {
     let mid = text.len() / 2;
-    match text[mid..].find('\n') {
+    match text.as_bytes()[mid..].iter().position(|&b| b == b'\n') {
         Some(i) => &text[mid + i + 1..],
         None => "",
     }
@@ -97,6 +102,10 @@ mod tests {
     fn the_newer_half_starts_at_a_whole_line() {
         assert_eq!(newer_half("aaaa\nbb\ncc\n"), "cc\n");
         assert_eq!(newer_half("one line"), "");
+        // The middle byte is inside the `§`.
+        let text = "abcde§\nxyz\n";
+        assert!(!text.is_char_boundary(text.len() / 2));
+        assert_eq!(newer_half(text), "xyz\n");
     }
 
     #[test]
