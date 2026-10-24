@@ -955,6 +955,7 @@ mod tests {
         waiting: HashSet<String>,
         handed: Vec<(String, String)>,
         handing: Vec<(String, Value)>,
+        kept: Vec<(String, Value)>,
     }
 
     impl Serve for Fake {
@@ -1059,6 +1060,13 @@ mod tests {
             let id = msg["id"].clone();
             (msg["t"] == "bundle")
                 .then(|| -> Job { Box::new(move || json!({"t": "took", "id": id, "number": 2})) })
+        }
+        fn keeping(&mut self, who: &str, msg: &Value) -> Option<Job> {
+            self.kept.push((who.into(), msg.clone()));
+            let id = msg["id"].clone();
+            (msg["t"] == "keep").then(|| -> Job {
+                Box::new(move || json!({"t": "kept", "id": id, "snapshot": 1, "ok": true}))
+            })
         }
     }
 
@@ -1478,6 +1486,33 @@ mod tests {
         let part = json!({"t": "bundle", "id": "s1", "part": 0, "of": 1, "b64": ""});
         assert!(say(&mut server, &mut serve, 1, part, 0).is_empty());
         assert!(serve.handing.is_empty());
+    }
+
+    #[test]
+    fn only_a_brother_keeps_and_takes_over_and_never_a_view_only_one_takes_over() {
+        let mut serve = Fake::default();
+        let hello = json!({"t": "hello", "v": 3, "kind": "brother"});
+        let (mut server, _) = greeted(&mut serve, "Laptop", hello);
+        let part = json!({"t": "keep", "id": "s1", "part": 0, "of": 1, "b64": ""});
+        let msgs = say(&mut server, &mut serve, 1, part, 0);
+        assert_eq!(of(&msgs, "kept")[0]["ok"], true);
+        let takeover = json!({"t": "takeover", "sessions": {}});
+        assert!(say(&mut server, &mut serve, 2, takeover, 0).is_empty());
+        assert_eq!(serve.kept.len(), 2);
+
+        let mut serve = Fake::default();
+        let (mut server, _) = greeted(&mut serve, "phone", json!({"t": "hello", "v": 3}));
+        let part = json!({"t": "keep", "id": "s1", "part": 0, "of": 1, "b64": ""});
+        assert!(say(&mut server, &mut serve, 1, part, 0).is_empty());
+        assert!(serve.kept.is_empty());
+
+        let mut serve = Fake::default();
+        let hello = json!({"t": "hello", "v": 3, "kind": "brother"});
+        let (mut server, _) = greeted(&mut serve, "viewer", hello);
+        let takeover = json!({"t": "takeover", "sessions": {}});
+        let msgs = say(&mut server, &mut serve, 1, takeover, 0);
+        assert_eq!(of(&msgs, "error")[0]["text"], crate::brotherhood::VIEW_ONLY);
+        assert!(serve.kept.is_empty());
     }
 
     #[test]

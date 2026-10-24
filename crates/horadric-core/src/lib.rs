@@ -29,6 +29,7 @@ pub mod heavy;
 pub mod history;
 pub mod journal;
 pub mod keepers;
+pub mod keeping;
 pub mod lookback;
 pub mod lore;
 pub mod merge;
