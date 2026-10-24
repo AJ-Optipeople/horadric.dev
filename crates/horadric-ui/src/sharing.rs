@@ -16,7 +16,7 @@ use std::sync::Mutex;
 use horadric_hooks::lore::Place;
 use horadric_memory::brethren::{self, Entry, Have};
 use horadric_memory::share::{self, Shared};
-use horadric_memory::store::{Month, Store};
+use horadric_memory::store::Store;
 use serde_json::{json, Value};
 
 /// The most packed bytes one `entries` message carries, so a first catch
@@ -106,13 +106,12 @@ impl Project {
     /// be read.
     pub fn export(&self, project: &Value, theirs: &Have, token: &str) -> Value {
         let run = || -> Result<Value, String> {
-            let store = Store::text_since(&self.memory, Month { year: 0, month: 1 })
-                .map_err(|e| e.to_string())?;
             let mut shared = Shared::open(&self.memory, self.place.key(), &self.me)
                 .map_err(|e| e.to_string())?;
             let lore = self.place.read()?;
-            shared.stamp(&lore, &store).map_err(|e| e.to_string())?;
-            let entries = shared.export(theirs, &store, usize::MAX);
+            let entries = shared
+                .stamp_and_export(&lore, theirs, usize::MAX)
+                .map_err(|e| e.to_string())?;
             let held = reached(theirs, &entries);
             let mut sent = self.sent.lock().unwrap_or_else(|e| e.into_inner());
             sent.insert(token.to_string(), (held, self.mark()));

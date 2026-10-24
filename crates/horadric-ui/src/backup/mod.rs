@@ -378,6 +378,10 @@ pub fn swap_in(state: &Path, restored: &Path, stamp: &str) -> Result<Vec<PathBuf
         let _ = std::fs::create_dir_all(state.join(top));
     }
     let _ = std::fs::remove_dir(restored);
+    // The restored lore log may stop short of numbers this brother sent.
+    if let Err(e) = horadric_memory::share::renew(state) {
+        eprintln!("horadric: cannot name this brother anew after the restore: {e}");
+    }
     Ok(kept)
 }
 
@@ -511,8 +515,14 @@ mod tests {
         assert_eq!(read(&into, "memory/day/2026-10-16.md"), "a day");
         assert_eq!(read(&into, "lore/p-1.json"), "[]");
 
+        let before = horadric_memory::share::brother(&state).unwrap();
         let kept = swap_in(&state, &into, "now").unwrap();
         assert_eq!(kept.len(), 2);
+        assert_ne!(
+            horadric_memory::share::brother(&state).unwrap(),
+            before,
+            "a restored lore is written under a new brother"
+        );
         assert_eq!(read(&state, "lore/p-1.json"), "[]");
         assert!(!local(&state, "memory/2026-10.x@1.vec").exists());
         assert_eq!(

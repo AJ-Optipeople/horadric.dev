@@ -740,6 +740,125 @@ impl Store {
     }
 }
 
+/// Where a reader of the text alone got to in one segment, so its next
+/// read takes only what was added since. The store runs to tens of MB,
+/// and a reader that wants a few passages must not parse it all again.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Tail {
+    /// Bytes read, always to the end of a whole line.
+    pub read_to: u64,
+    /// Chunk lines read, the next chunk's number.
+    pub lines: u32,
+    /// Written by a newer Horadric: never read.
+    pub foreign: bool,
+}
+
+/// The chunks a [`read_tail`] found, with where it got to.
+pub type TailRead = (Vec<(ChunkId, Chunk)>, Tail);
+
+/// The months the store in `dir` has a text segment for.
+pub fn text_months(dir: &Path) -> io::Result<Vec<Month>> {
+    let entries = match fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+    let mut months = Vec::new();
+    for entry in entries {
+        let name = entry?.file_name();
+        months.extend(
+            name.to_str()
+                .and_then(|n| n.strip_suffix(".jsonl"))
+                .and_then(Month::parse),
+        );
+    }
+    months.sort();
+    Ok(months)
+}
+
+/// The chunks `month`'s segment in `dir` holds past `at`, and where that
+/// read got to. None when the segment is gone or shorter than `at`, as
+/// after a restore, and the reader has to start again.
+pub fn read_tail(dir: &Path, month: Month, at: Tail) -> io::Result<Option<TailRead>> {
+    let path = dir.join(format!("{month}.jsonl"));
+    if fs::metadata(&path).map_or(true, |m| m.len() < at.read_to) {
+        return Ok(None);
+    }
+    let mut tail = at;
+    let mut chunks = Vec::new();
+    if tail.foreign {
+        return Ok(Some((chunks, tail)));
+    }
+    let Some(bytes) = read_from(&path, tail.read_to)? else {
+        return Ok(None);
+    };
+    let whole = bytes.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
+    let mut lines = bytes[..whole].split(|&b| b == b'\n');
+    lines.next_back();
+    for line in lines {
+        if tail.read_to == 0 {
+            let header: Option<TextHeader> = serde_json::from_slice(line).ok();
+            if !header.is_some_and(|h| h.format == TEXT_FORMAT && h.version <= TEXT_VERSION) {
+                tail.foreign = true;
+                return Ok(Some((Vec::new(), tail)));
+            }
+        } else {
+            let id = ChunkId {
+                month,
+                n: tail.lines,
+            };
+            if let Ok(c) = serde_json::from_slice(line) {
+                chunks.push((id, c));
+            }
+            tail.lines += 1;
+        }
+        tail.read_to += line.len() as u64 + 1;
+    }
+    Ok(Some((chunks, tail)))
+}
+
+/// The chunks forgotten in the store in `dir`.
+pub fn hidden_in(dir: &Path) -> io::Result<HashSet<ChunkId>> {
+    let Some(bytes) = read_from(&dir.join(FORGOTTEN), 0)? else {
+        return Ok(HashSet::new());
+    };
+    let whole = bytes.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
+    Ok(String::from_utf8_lossy(&bytes[..whole])
+        .lines()
+        .filter_map(|l| ChunkId::parse(l.trim()))
+        .collect())
+}
+
+/// The chunks `ids` of the store in `dir`, parsing only their lines.
+/// One that is forgotten, unreadable or not there is left out.
+pub fn read_chunks(dir: &Path, ids: &BTreeSet<ChunkId>) -> io::Result<HashMap<ChunkId, Chunk>> {
+    let hidden = hidden_in(dir)?;
+    let mut found = HashMap::new();
+    let months: BTreeSet<Month> = ids.iter().map(|id| id.month).collect();
+    for month in months {
+        let Some(bytes) = read_from(&dir.join(format!("{month}.jsonl")), 0)? else {
+            continue;
+        };
+        let whole = bytes.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
+        let mut lines = bytes[..whole].split(|&b| b == b'\n');
+        lines.next_back();
+        let header: Option<TextHeader> = lines.next().and_then(|l| serde_json::from_slice(l).ok());
+        if !header.is_some_and(|h| h.format == TEXT_FORMAT && h.version <= TEXT_VERSION) {
+            continue;
+        }
+        for (n, line) in lines.enumerate() {
+            let id = ChunkId { month, n: n as u32 };
+            if !ids.contains(&id) || hidden.contains(&id) {
+                continue;
+            }
+            if let Ok(c) = serde_json::from_slice(line) {
+                found.insert(id, c);
+            }
+        }
+    }
+    Ok(found)
+}
+
 fn newer(path: &Path) -> io::Error {
     io::Error::new(
         ErrorKind::InvalidData,
@@ -902,6 +1021,42 @@ mod tests {
     fn unit(v: &[f32]) -> Vec<f32> {
         let len = v.iter().map(|x| x * x).sum::<f32>().sqrt();
         v.iter().map(|x| x / len).collect()
+    }
+
+    #[test]
+    fn a_reader_of_the_text_takes_only_what_was_added() {
+        let dir = temp("tail");
+        let mut store = Store::open(&dir).unwrap();
+        let a = store.add(&chunk("a"), OCT).unwrap();
+        let b = store.add(&chunk("b"), OCT).unwrap();
+        let oct = Month::of(OCT);
+        assert_eq!(text_months(&dir).unwrap(), [oct]);
+        let (first, at) = read_tail(&dir, oct, Tail::default()).unwrap().unwrap();
+        assert_eq!(first.iter().map(|(id, _)| *id).collect::<Vec<_>>(), [a, b]);
+        assert_eq!(at.lines, 2);
+        let c = store.add(&chunk("c"), OCT).unwrap();
+        let (more, after) = read_tail(&dir, oct, at).unwrap().unwrap();
+        assert_eq!(more.len(), 1);
+        assert_eq!((more[0].0, more[0].1.text.as_str()), (c, "c"));
+        assert_eq!(after.lines, 3);
+        // Nothing new reads nothing.
+        assert!(read_tail(&dir, oct, after).unwrap().unwrap().0.is_empty());
+        // A segment shorter than where the reader got to was put back.
+        let past = Tail {
+            read_to: after.read_to + 100,
+            ..after
+        };
+        assert!(read_tail(&dir, oct, past).unwrap().is_none());
+        assert!(read_tail(&dir, Month::of(NOV), Tail::default())
+            .unwrap()
+            .is_none());
+        // Only the chunks asked for, and never a forgotten one.
+        store.hide(&[b]).unwrap();
+        assert_eq!(hidden_in(&dir).unwrap(), HashSet::from([b]));
+        let found = read_chunks(&dir, &BTreeSet::from([b, c])).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[&c].text, "c");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

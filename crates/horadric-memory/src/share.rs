@@ -28,7 +28,7 @@
 //! session's note lands between the stamping and the change.
 
 use std::collections::hash_map::RandomState;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::{self, OpenOptions};
 use std::hash::BuildHasher;
 use std::io::{self, ErrorKind, Seek, SeekFrom, Write};
@@ -39,7 +39,7 @@ use horadric_core::lore::{self, Lore, Note, Origin, Past, MOST_NOTES, MOST_PAST}
 use serde::{Deserialize, Serialize};
 
 use crate::brethren::{Entry, Have, Log, Said, SharedNote, Stamp};
-use crate::store::{read_from, Chunk, ChunkId, Kind, Lock, Store};
+use crate::store::{self as stored, read_from, Chunk, ChunkId, Kind, Lock, Store, Tail};
 
 /// The log's format. Raising it means a test reads a log of the old one.
 pub const LOG_VERSION: u32 = 1;
@@ -85,6 +85,20 @@ pub fn brother(state: &Path) -> io::Result<String> {
     }
 }
 
+/// Gives this brother a new id, for a memory put back from a backup. The
+/// restored log may end below numbers this id already sent, and numbers
+/// handed out again would be taken for entries the others hold. Under a
+/// new id everything written from here on is new to every brother.
+pub fn renew(state: &Path) -> io::Result<String> {
+    fs::create_dir_all(state)?;
+    let id = mint();
+    let path = state.join(BROTHER);
+    let new = path.with_extension("new");
+    fs::write(&new, &id)?;
+    fs::rename(&new, &path)?;
+    Ok(id)
+}
+
 /// Whether `s` reads as an id [`brother`] made.
 pub fn is_brother(s: &str) -> bool {
     (8..=64).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_hexdigit())
@@ -107,9 +121,22 @@ struct Header {
     version: u32,
 }
 
+/// What the stamping read of the store, kept beside the log, so the next
+/// export reads only what was added since rather than the whole store.
+/// A cache: lost or put back, it is made again from the store.
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct Seen {
+    /// By month, where the reading got to.
+    months: BTreeMap<String, Tail>,
+    /// The project's passages read so far, by id, with their fingerprints.
+    said: Vec<(String, u64)>,
+}
+
 /// One project's shared lore, as this brother keeps it.
 pub struct Shared {
     path: PathBuf,
+    /// The store's folder, which the log's folder is in.
+    memory: PathBuf,
     project: String,
     me: String,
     log: Log,
@@ -214,6 +241,7 @@ impl Shared {
         let name = lore::file_name(project);
         let mut shared = Shared {
             path: dir.join(format!("{name}l")),
+            memory: memory.to_path_buf(),
             project: project.to_string(),
             me: me.to_string(),
             log: Log::default(),
@@ -339,6 +367,24 @@ impl Shared {
         if self.foreign {
             return Ok(Vec::new());
         }
+        let passages: Vec<(ChunkId, u64)> = store
+            .chunks()
+            .filter(|(_, c)| c.kind == Kind::Dialogue && c.project == self.project)
+            .map(|(id, c)| (id, said_of(c).fingerprint()))
+            .collect();
+        let here: HashMap<ChunkId, u64> = passages.iter().copied().collect();
+        self.stamp_from(lore, &passages, &here)
+    }
+
+    /// Stamps `passages` (the project's, oldest first) and the lore's
+    /// notes that the log does not name yet. `here` gives the fingerprint
+    /// of every passage a note may name as its source.
+    fn stamp_from(
+        &mut self,
+        lore: &Lore,
+        passages: &[(ChunkId, u64)],
+        here: &HashMap<ChunkId, u64>,
+    ) -> io::Result<Vec<Stamp>> {
         let mut fresh = Vec::new();
         let mut n = self.log.next(&self.me);
         let mut next = |me: &str| {
@@ -355,13 +401,7 @@ impl Shared {
             .filter_map(|e| Some((e.said_fingerprint()?, e.stamp())))
             .collect();
         // Passages first, so a note can name the ones it came from.
-        let mut here: HashMap<ChunkId, u64> = HashMap::new();
-        for (id, c) in store.chunks() {
-            if c.kind != Kind::Dialogue || c.project != self.project {
-                continue;
-            }
-            let fp = said_of(c).fingerprint();
-            here.insert(id, fp);
+        for &(_, fp) in passages {
             if let std::collections::hash_map::Entry::Vacant(v) = said.entry(fp) {
                 let s = next(&self.me);
                 v.insert(s.clone());
@@ -434,22 +474,120 @@ impl Shared {
 
     fn as_sent<'a>(&self, entries: impl Iterator<Item = &'a Entry>, store: &Store) -> Vec<Entry> {
         let mut here: Option<HashMap<u64, ChunkId>> = None;
-        entries
-            .map(|e| {
-                let mut w = e.clone();
-                if let Some(fp) = w.kept.take() {
-                    let here = here.get_or_insert_with(|| said_here(store, &self.project));
-                    w.said = here.get(&fp).and_then(|id| store.chunk(*id)).map(said_of);
-                }
-                w
-            })
-            .collect()
+        sent_with(entries, |fp| {
+            let here = here.get_or_insert_with(|| said_here(store, &self.project));
+            here.get(&fp).and_then(|id| store.chunk(*id)).map(said_of)
+        })
     }
 
     /// What a brother whose copy holds `theirs` lacks, at most `most`, as
     /// it crosses. Stamp first, so what was kept since goes too.
     pub fn export(&self, theirs: &Have, store: &Store, most: usize) -> Vec<Entry> {
         self.as_sent(self.log.to_send(theirs, most).into_iter(), store)
+    }
+
+    /// [`Shared::stamp`] then [`Shared::export`], reading of the store only
+    /// what was added since the last time and the passages that go. The
+    /// store is tens of MB, and an export runs whenever it grows.
+    pub fn stamp_and_export(
+        &mut self,
+        lore: &Lore,
+        theirs: &Have,
+        most: usize,
+    ) -> io::Result<Vec<Entry>> {
+        let (seen, hidden) = {
+            let _lock = self.lock()?;
+            self.reload()?;
+            if self.foreign {
+                return Ok(Vec::new());
+            }
+            let mut seen = self.load_seen();
+            let fresh = self.catch_up(&mut seen)?;
+            let hidden = stored::hidden_in(&self.memory)?;
+            let fresh: Vec<(ChunkId, u64)> = fresh
+                .into_iter()
+                .filter(|(id, _)| !hidden.contains(id))
+                .collect();
+            let here: HashMap<ChunkId, u64> = seen
+                .said
+                .iter()
+                .filter_map(|(id, fp)| Some((ChunkId::parse(id)?, *fp)))
+                .collect();
+            self.stamp_from(lore, &fresh, &here)?;
+            // Only once stamped: a cache ahead of the log would skip passages.
+            self.save_seen(&seen)?;
+            (seen, hidden)
+        };
+        let mut at: HashMap<u64, ChunkId> = HashMap::new();
+        for (id, fp) in &seen.said {
+            if let Some(id) = ChunkId::parse(id).filter(|id| !hidden.contains(id)) {
+                at.entry(*fp).or_insert(id);
+            }
+        }
+        let entries = self.log.to_send(theirs, most);
+        let ids: BTreeSet<ChunkId> = entries
+            .iter()
+            .filter_map(|e| at.get(&e.kept?).copied())
+            .collect();
+        let chunks = stored::read_chunks(&self.memory, &ids)?;
+        Ok(sent_with(entries.into_iter(), |fp| {
+            at.get(&fp).and_then(|id| chunks.get(id)).map(said_of)
+        }))
+    }
+
+    fn seen_path(&self) -> PathBuf {
+        self.path.with_extension("seen")
+    }
+
+    fn load_seen(&self) -> Seen {
+        fs::read(self.seen_path())
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default()
+    }
+
+    fn save_seen(&self, seen: &Seen) -> io::Result<()> {
+        let path = self.seen_path();
+        let new = path.with_extension("seen.new");
+        fs::write(&new, serde_json::to_vec(seen)?)?;
+        fs::rename(&new, &path)
+    }
+
+    /// Reads what the store added since `seen` and gives the project's
+    /// passages among it, oldest first. A store put back (a segment gone
+    /// or shorter than read) is read again from the start.
+    fn catch_up(&self, seen: &mut Seen) -> io::Result<Vec<(ChunkId, u64)>> {
+        for _ in 0..2 {
+            let months = stored::text_months(&self.memory)?;
+            let names: Vec<String> = months.iter().map(ToString::to_string).collect();
+            if seen.months.keys().any(|m| !names.contains(m)) {
+                *seen = Seen::default();
+            }
+            let mut fresh = Vec::new();
+            let mut whole = true;
+            for (month, name) in months.into_iter().zip(names) {
+                let at = seen.months.get(&name).copied().unwrap_or_default();
+                let Some((chunks, tail)) = stored::read_tail(&self.memory, month, at)? else {
+                    whole = false;
+                    break;
+                };
+                for (id, c) in chunks {
+                    if c.kind == Kind::Dialogue && c.project == self.project {
+                        let fp = said_of(&c).fingerprint();
+                        seen.said.push((id.to_string(), fp));
+                        fresh.push((id, fp));
+                    }
+                }
+                seen.months.insert(name, tail);
+            }
+            if whole {
+                return Ok(fresh);
+            }
+            *seen = Seen::default();
+        }
+        Err(io::Error::other(
+            "the store changed under the lore's reading",
+        ))
     }
 
     /// Takes in what another brother sent: what this copy lacks goes into
@@ -696,6 +834,24 @@ impl Shared {
         store.hide(&[id])?;
         Ok(true)
     }
+}
+
+/// `entries` as they cross: a passage the log names by fingerprint gets
+/// its text from `text`, or goes without when the store no longer shows
+/// it (forgotten), so the other brother's count still moves past it.
+fn sent_with<'a>(
+    entries: impl Iterator<Item = &'a Entry>,
+    mut text: impl FnMut(u64) -> Option<Said>,
+) -> Vec<Entry> {
+    entries
+        .map(|e| {
+            let mut w = e.clone();
+            if let Some(fp) = w.kept.take() {
+                w.said = text(fp);
+            }
+            w
+        })
+        .collect()
 }
 
 /// Takes the note `text` written `at` out of the lore, current or
@@ -1107,6 +1263,65 @@ mod tests {
     }
 
     #[test]
+    fn an_export_reads_only_what_the_store_added_and_what_goes() {
+        let root = temp("export");
+        let project = "c:/work/horadric.dev";
+        let mut a = Brother::new(&root, "aaaa0001", project);
+        let first = a
+            .store
+            .add(&said(project, "s1", "how is it kept?", NOW - 30), NOW)
+            .unwrap();
+        a.store
+            .add(
+                &said("c:/elsewhere", "s9", "not this project", NOW - 25),
+                NOW,
+            )
+            .unwrap();
+        a.note("notes are kept in one file", NOW - 20, &[]);
+        let none = Have::default();
+        let sent = a
+            .shared
+            .stamp_and_export(&a.lore, &none, usize::MAX)
+            .unwrap();
+        // The same as stamping and exporting from the whole store.
+        assert_eq!(sent, a.shared.export(&none, &a.store, usize::MAX));
+        assert_eq!(sent.len(), 2);
+        assert_eq!(sent[0].said.as_ref().unwrap().text, "how is it kept?");
+        assert!(a.shared.seen_path().is_file());
+        // The next one stamps what was added since, and sends only that.
+        let mut theirs = Have::default();
+        theirs.insert("aaaa0001".into(), 2);
+        a.store
+            .add(&said(project, "s1", "in a log per project", NOW - 10), NOW)
+            .unwrap();
+        let sent = a
+            .shared
+            .stamp_and_export(&a.lore, &theirs, usize::MAX)
+            .unwrap();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(
+            (sent[0].n, sent[0].said.as_ref().unwrap().text.as_str()),
+            (3, "in a log per project")
+        );
+        // A forgotten passage goes without its words.
+        a.store.hide(&[first]).unwrap();
+        let sent = a
+            .shared
+            .stamp_and_export(&a.lore, &none, usize::MAX)
+            .unwrap();
+        assert_eq!(sent.len(), 3);
+        assert!(sent[0].said.is_none());
+        // A cache that went is made again, and stamps nothing twice.
+        fs::remove_file(a.shared.seen_path()).unwrap();
+        let again = a
+            .shared
+            .stamp_and_export(&a.lore, &none, usize::MAX)
+            .unwrap();
+        assert_eq!(again, sent);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn a_brother_is_named_once() {
         let root = temp("brother");
         let id = brother(&root).unwrap();
@@ -1121,6 +1336,17 @@ mod tests {
         assert_eq!(brother(&root).unwrap(), again);
         assert!(!is_brother("short"));
         assert!(!is_brother("not hex at all, not hex"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_restore_makes_a_new_brother() {
+        let root = temp("renew");
+        let old = brother(&root).unwrap();
+        let new = renew(&root).unwrap();
+        assert!(is_brother(&new));
+        assert_ne!(new, old);
+        assert_eq!(brother(&root).unwrap(), new);
         let _ = fs::remove_dir_all(&root);
     }
 }
