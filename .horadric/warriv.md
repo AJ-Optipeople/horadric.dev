@@ -9,6 +9,7 @@
 - A [/] quest whose session a dev instance started (state in %APPDATA%\Horadric-dev) died with it: no tell reaches it, hand it to the human with "restart it" at once (lore #51).
 
 ## Lately
+- 2026-10-24 Round (quest landed, main at 6b80f52): "Land the picked thing branch" landed, code files show no diff, no cargo running, so cast "Ship Local" for everything since the 10-23 23:55 reload. Log empty, no aim.
 - 2026-10-24 Round (05:01, main at c04ea81): app.rs, console.rs and lib.rs are committed now and the code files left show no diff, so told "Land the picked thing branch" to merge main in, recheck and fast-forward. Held "Ship Local" one round so it carries the picked thing with the Brotherhood commits.
 - 2026-10-24 Look back on 2026-10-23: the day was clean, nothing happened twice. The day gave 3 notes (#430 to #432).
 - 2026-10-24 Round (04:41, human left, main at bbe9e55): 10 code files plus keeping.rs still uncommitted (app.rs among them), last commit 02:48, so "Land the picked thing branch" still waits with the human and "Ship Local" stays held. Nothing to do.
@@ -128,5 +129,4 @@
 
 ## Open
 - Once quests run with a pack, the pack comparison resumes by itself.
-- Many commits on main since the 2026-10-23 23:55 reload (task notification quest, Brotherhood, Linux node, keepers). Ship once the picked thing lands, see below.
-- "Land the picked thing branch" told to land at 05:01. Next round: if it landed, cast "Ship Local" (tree has no code diff); if its session did not answer, hand it to the human with "restart it" and cast "Ship Local" anyway.
+- Ship Local cast at 6b80f52. Next round: check reload.log says reloaded after it.
