@@ -142,9 +142,8 @@ fn recall(args: &Value) -> Result<String, String> {
             return Ok(a.text);
         }
         let store = MemoryStore::open(&dir).map_err(|e| e.to_string())?;
-        return keeper::unroll(&store, place.key(), &lore, unroll, false, now(), |p| {
-            place.hash(p)
-        });
+        let tree = Tree::new(&place.top, Some(code::pieces));
+        return keeper::unroll(&store, place.key(), &lore, unroll, false, now(), &tree);
     }
     let ask = recall::Ask {
         query: query.to_string(),

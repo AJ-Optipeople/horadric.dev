@@ -130,7 +130,9 @@ impl Place {
     }
 
     pub fn hash(&self, rel: &str) -> Option<u64> {
-        fs::read(self.top.join(rel)).ok().map(|b| lore::hash(&b))
+        fs::read(self.top.join(rel))
+            .ok()
+            .map(|b| lore::text_hash(&b))
     }
 
     pub fn exists(&self, rel: &str) -> bool {

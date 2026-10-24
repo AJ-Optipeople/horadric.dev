@@ -841,7 +841,8 @@ pub fn pieces(path: &str, src: &[u8]) -> Option<Vec<Piece>> {
             .symbols
             .into_iter()
             .map(|s| Piece {
-                hash: horadric_core::lore::hash(lines(s.line, s.end)),
+                hash: horadric_core::lore::text_hash(lines(s.line, s.end)),
+                raw: horadric_core::lore::hash(lines(s.line, s.end)),
                 kind: s.kind,
                 name: s.name,
             })
@@ -917,6 +918,10 @@ mod tests {
         let one = horadric_core::lore::hash(b"fn one() {\n    1\n}\n");
         assert_eq!(a[0].hash, one);
         assert!(pieces("notes.md", b"# fn one").is_none());
+        let crlf = pieces("x.rs", b"fn one() {\r\n    1\r\n}\r\n").unwrap();
+        assert_eq!(crlf[0].hash, one, "line endings are set aside");
+        let raw = horadric_core::lore::hash(b"fn one() {\r\n    1\r\n}\r\n");
+        assert_eq!(crlf[0].raw, raw);
     }
 
     #[test]

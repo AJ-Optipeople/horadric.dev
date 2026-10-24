@@ -413,8 +413,14 @@ pub fn changed<'a>(c: &Candidate<'a>, now_hash: impl Fn(&str) -> Option<u64>) ->
 
 /// The project's files as they are now, which staleness is judged by.
 pub trait Now {
-    /// [`lore::hash`] of the file's bytes, None when it is not there.
+    /// [`lore::text_hash`] of the file's bytes, None when it is not there.
     fn hash(&self, path: &str) -> Option<u64>;
+    /// Whether the file is as it was when a mark holding `then` was
+    /// taken. A tree that has the bytes says it by [`lore::unchanged`],
+    /// which takes a mark from before line endings were set aside too.
+    fn same(&self, path: &str, then: Option<u64>) -> bool {
+        self.hash(path) == then
+    }
     /// The file's symbols, None when they can not be read (no code index
     /// here, or a language it does not read): then the file is judged
     /// whole.
@@ -445,10 +451,10 @@ pub fn stale(c: &Candidate, now: &dyn Now) -> Vec<String> {
     let parts = c.note_of().map_or(&[][..], |n| &n.parts[..]);
     let mut out = Vec::new();
     for (path, then) in c.files() {
-        let hash = now.hash(path);
-        if hash == then {
+        if now.same(path, then) {
             continue;
         }
+        let hash = now.hash(path);
         let named: Vec<&lore::Part> = parts.iter().filter(|p| p.path == path).collect();
         match now
             .pieces(path)
@@ -770,6 +776,7 @@ mod tests {
             kind: "fn".into(),
             name: name.into(),
             hash,
+            raw: hash,
         }
     }
 

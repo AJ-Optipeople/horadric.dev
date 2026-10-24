@@ -65,7 +65,7 @@ pub struct Tree<'a> {
     read: RefCell<HashMap<String, Option<File>>>,
 }
 
-/// A file as read: the hash of its bytes, and the bytes.
+/// A file as read: its [`lore::text_hash`], and the bytes.
 type File = (u64, Arc<Vec<u8>>);
 
 impl<'a> Tree<'a> {
@@ -86,7 +86,7 @@ impl<'a> Tree<'a> {
             .or_insert_with(|| {
                 fs::read(self.top.join(path))
                     .ok()
-                    .map(|b| (lore::hash(&b), Arc::new(b)))
+                    .map(|b| (lore::text_hash(&b), Arc::new(b)))
             })
             .clone()
     }
@@ -95,6 +95,10 @@ impl<'a> Tree<'a> {
 impl Now for Tree<'_> {
     fn hash(&self, path: &str) -> Option<u64> {
         self.file(path).map(|(h, _)| h)
+    }
+
+    fn same(&self, path: &str, then: Option<u64>) -> bool {
+        lore::unchanged(then, self.file(path).as_ref().map(|(_, b)| &b[..]))
     }
 
     fn pieces(&self, path: &str) -> Option<Arc<Vec<Piece>>> {
@@ -123,7 +127,7 @@ pub fn look(top: &Path, lore: &Lore, source: PieceSource) -> Vec<(u64, Vec<Part>
     for n in &owed {
         for m in &n.files {
             let Some(h) = m.hash else { continue };
-            if tree.hash(&m.path) != Some(h) && source(&m.path, b"").is_some() {
+            if !tree.same(&m.path, Some(h)) && source(&m.path, b"").is_some() {
                 let w = wanted.entry(&m.path).or_insert((n.at, Vec::new()));
                 w.0 = w.0.min(n.at);
                 w.1.push(h);
@@ -139,7 +143,7 @@ pub fn look(top: &Path, lore: &Lore, source: PieceSource) -> Vec<(u64, Vec<Part>
             let mut parts = Vec::new();
             for m in &n.files {
                 let Some(h) = m.hash else { continue };
-                let pieces = if tree.hash(&m.path) == Some(h) {
+                let pieces = if tree.same(&m.path, Some(h)) {
                     tree.pieces(&m.path)
                 } else {
                     past.get(m.path.as_str())
@@ -217,8 +221,12 @@ fn versions(top: &Path, path: &str, since: u64, hashes: &[u64]) -> HashMap<u64, 
                 break;
             }
             bytes.pop();
-            let h = lore::hash(&bytes);
-            if hashes.contains(&h) {
+            // Git keeps text with LF, so a note taken of CRLF bytes before
+            // line endings were set aside finds no version here, as before.
+            if let Some(h) = [lore::text_hash(&bytes), lore::hash(&bytes)]
+                .into_iter()
+                .find(|h| hashes.contains(h))
+            {
                 out.insert(h, bytes);
             }
         }
@@ -282,7 +290,8 @@ mod tests {
                 .map(|l| Piece {
                     kind: "fn".into(),
                     name: l.split('(').next().unwrap_or("").to_string(),
-                    hash: lore::hash(l.as_bytes()),
+                    hash: lore::text_hash(l.as_bytes()),
+                    raw: lore::hash(l.as_bytes()),
                 })
                 .collect()
         })
@@ -377,5 +386,62 @@ mod tests {
         assert_eq!(tree.hash("gone.rs"), None);
         assert!(Tree::new(&dir, None).pieces("a.rs").is_none());
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_tree_judges_a_mark_by_text_and_by_its_old_hash() {
+        let dir = std::env::temp_dir().join(format!("horadric-crlf-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("a.rs"), "fn one()\r\nfn two()\r\n").unwrap();
+        let tree = Tree::new(&dir, Some(lines));
+        let lf = lore::text_hash(b"fn one()\nfn two()\n");
+        assert_eq!(tree.hash("a.rs"), Some(lf), "taken here, as on Linux");
+        assert!(tree.same("a.rs", Some(lf)), "a note from the LF brother");
+        let old = lore::hash(b"fn one()\r\nfn two()\r\n");
+        assert!(tree.same("a.rs", Some(old)), "a note taken here before");
+        assert!(!tree.same("a.rs", Some(lore::text_hash(b"fn one()\n"))));
+        assert!(!tree.same("a.rs", None));
+        assert!(tree.same("gone.rs", None));
+        assert!(!tree.same("gone.rs", Some(lf)));
+        let mut l = Lore::default();
+        for h in [lf, old, 7] {
+            let mark = Mark {
+                path: "a.rs".into(),
+                hash: Some(h),
+            };
+            l.add(&format!("note {h}"), vec![mark], "", 0, &[]).unwrap();
+        }
+        let stale: Vec<Vec<String>> = l
+            .notes
+            .iter()
+            .map(|n| crate::recall::stale(&crate::recall::Candidate::note(n), &tree))
+            .collect();
+        assert_eq!(stale, [vec![], vec![], vec!["a.rs".to_string()]]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_note_taken_on_crlf_finds_the_version_git_kept_with_lf() {
+        let dir = std::env::temp_dir().join(format!("horadric-crlf-git-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        git(&dir, &["init", "-q"]);
+        fs::write(dir.join("a.rs"), "fn paint(x)\nfn other()\n").unwrap();
+        git(&dir, &["add", "."]);
+        git(&dir, &["commit", "-q", "-m", "one"]);
+        let mut l = Lore::default();
+        let crlf = b"fn paint(x)\r\nfn other()\r\n";
+        let mark = Mark {
+            path: "a.rs".into(),
+            hash: Some(lore::text_hash(crlf)),
+        };
+        l.add("fn paint does it", vec![mark], "", 0, &[]).unwrap();
+        fs::write(dir.join("a.rs"), "fn paint(y)\nfn other()\n").unwrap();
+        git(&dir, &["commit", "-q", "-am", "two"]);
+        let found = look(&dir, &l, lines);
+        let _ = fs::remove_dir_all(&dir);
+        let names: Vec<&str> = found[0].1.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["paint"]);
     }
 }

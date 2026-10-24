@@ -448,7 +448,7 @@ impl<E: Embed> Keeper<E> {
         }
         self.store.refresh().map_err(|e| e.to_string())?;
         Ok(Answer {
-            text: unroll_in(&self.store, project, lore, id, across, now, files)?,
+            text: unroll(&self.store, project, lore, id, across, now, files)?,
             ..Answer::default()
         })
     }
@@ -522,22 +522,9 @@ impl<E: Embed> Keeper<E> {
 
 /// The hit named `id` of `project`, from its lore or the store, word for
 /// word as recall shows it with the tongue off. `horadric mcp` uses it
-/// too, when the app is not running.
+/// too, when the app is not running. Staleness is judged by `files`,
+/// which may read symbols.
 pub fn unroll(
-    store: &Store,
-    project: &str,
-    lore: &Lore,
-    id: &str,
-    across: bool,
-    now: u64,
-    now_hash: impl Fn(&str) -> Option<u64>,
-) -> Result<String, String> {
-    let files = recall::hashes(now_hash);
-    unroll_in(store, project, lore, id, across, now, &files)
-}
-
-/// [`unroll`], judging staleness by `files`, which may read symbols.
-fn unroll_in(
     store: &Store,
     project: &str,
     lore: &Lore,

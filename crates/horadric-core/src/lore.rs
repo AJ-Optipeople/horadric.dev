@@ -114,17 +114,22 @@ pub struct Origin {
 pub struct Mark {
     /// Relative to the top of the project, with forward slashes.
     pub path: String,
-    /// [`hash`] of its bytes, None when it did not exist.
+    /// [`text_hash`] of its bytes, None when it did not exist. A mark
+    /// taken before line endings were set aside holds [`hash`] instead,
+    /// which [`unchanged`] still takes.
     pub hash: Option<u64>,
 }
 
 /// A symbol of a file as the code index reads it: its kind (`fn`,
-/// `struct`, `class`), its name, and the [`hash`] of its source lines.
+/// `struct`, `class`), its name, and the [`text_hash`] of its source
+/// lines, with the [`hash`] of them as bytes beside it for the parts
+/// notes took before line endings were set aside.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Piece {
     pub kind: String,
     pub name: String,
     pub hash: u64,
+    pub raw: u64,
 }
 
 /// A symbol a note names, as it was when the note was taken. Every
@@ -221,7 +226,7 @@ pub fn parts_of(text: &str, path: &str, pieces: &[Piece]) -> Vec<Part> {
         {
             continue;
         }
-        if let Some((kind, hash)) = whole(pieces, &p.name) {
+        if let Some((kind, hash, _)) = whole(pieces, &p.name) {
             out.push(Part {
                 path: path.to_string(),
                 kind: kind.to_string(),
@@ -234,15 +239,19 @@ pub fn parts_of(text: &str, path: &str, pieces: &[Piece]) -> Vec<Part> {
 }
 
 /// The kind of the first symbol named `name` and one hash of all of
-/// them, in order, so a change to any one of them shows.
-fn whole<'a>(pieces: &'a [Piece], name: &str) -> Option<(&'a str, u64)> {
+/// them, in order, so a change to any one of them shows: of their
+/// [`Piece::hash`], then of their [`Piece::raw`].
+fn whole<'a>(pieces: &'a [Piece], name: &str) -> Option<(&'a str, u64, u64)> {
     let same: Vec<&Piece> = pieces
         .iter()
         .filter(|p| p.name == name && !WIDE.contains(&p.kind.as_str()))
         .collect();
     let first = same.first()?;
-    let bytes: Vec<u8> = same.iter().flat_map(|p| p.hash.to_le_bytes()).collect();
-    Some((&first.kind, hash(&bytes)))
+    let of = |h: fn(&Piece) -> u64| {
+        let bytes: Vec<u8> = same.iter().flat_map(|p| h(p).to_le_bytes()).collect();
+        hash(&bytes)
+    };
+    Some((&first.kind, of(|p| p.hash), of(|p| p.raw)))
 }
 
 /// What a hit says of a `part` whose file's symbols are now `pieces`:
@@ -251,7 +260,7 @@ fn whole<'a>(pieces: &'a [Piece], name: &str) -> Option<(&'a str, u64)> {
 pub fn part_changed(part: &Part, pieces: &[Piece]) -> Option<String> {
     let said = format!("{} {} in {}", part.kind, part.name, part.path);
     match whole(pieces, &part.name) {
-        Some((_, h)) if h == part.hash => None,
+        Some((_, h, raw)) if h == part.hash || raw == part.hash => None,
         Some(_) => Some(said),
         None => Some(format!("{said} (gone)")),
     }
@@ -398,6 +407,33 @@ pub fn hash(bytes: &[u8]) -> u64 {
     bytes.iter().fold(0xcbf2_9ce4_8422_2325, |h, b| {
         (h ^ u64::from(*b)).wrapping_mul(0x0100_0000_01b3)
     })
+}
+
+/// [`hash`] of a file with each CRLF read as LF, which is what a mark
+/// keeps: Git for Windows with `core.autocrlf` checks a commit out with
+/// CRLF where Linux has LF, and brothers share their notes, so a note
+/// taken on one must be fresh on the other while the file is the same.
+pub fn text_hash(bytes: &[u8]) -> u64 {
+    let mut h = 0xcbf2_9ce4_8422_2325;
+    for (i, b) in bytes.iter().enumerate() {
+        if *b == b'\r' && bytes.get(i + 1) == Some(&b'\n') {
+            continue;
+        }
+        h = (h ^ u64::from(*b)).wrapping_mul(0x0100_0000_01b3);
+    }
+    h
+}
+
+/// Whether a file holding `bytes` (None when it is not there) is as it
+/// was when a mark holding `then` was taken. A mark from before line
+/// endings were set aside holds [`hash`] of the bytes, so that counts
+/// too: such a note stays fresh on the machine that took it, as it was.
+pub fn unchanged(then: Option<u64>, bytes: Option<&[u8]>) -> bool {
+    match (then, bytes) {
+        (None, None) => true,
+        (Some(h), Some(b)) => text_hash(b) == h || hash(b) == h,
+        _ => false,
+    }
 }
 
 /// A file a tool was given, as notes keep it: relative to `top`, the top
@@ -655,7 +691,69 @@ mod tests {
             kind: kind.into(),
             name: name.into(),
             hash,
+            raw: hash,
         }
+    }
+
+    #[test]
+    fn a_text_hash_sets_line_endings_aside_and_nothing_else() {
+        let lf = b"fn one() {\n    1\n}\n";
+        let crlf = b"fn one() {\r\n    1\r\n}\r\n";
+        assert_eq!(text_hash(lf), text_hash(crlf));
+        assert_eq!(text_hash(lf), hash(lf), "an LF file hashes as before");
+        assert_ne!(text_hash(lf), text_hash(b"fn one() {\n    2\n}\n"));
+        assert_ne!(text_hash(lf), text_hash(b"fn one() {\r\n    2\r\n}\r\n"));
+        assert_ne!(text_hash(b"a\rb"), text_hash(b"ab"), "a lone CR is kept");
+        assert_eq!(text_hash(b"a\r\r\n"), hash(b"a\r\n"));
+        assert_eq!(text_hash(b""), hash(b""));
+    }
+
+    #[test]
+    fn a_mark_is_unchanged_across_line_endings_and_by_its_old_hash() {
+        let lf: &[u8] = b"one\ntwo\n";
+        let crlf: &[u8] = b"one\r\ntwo\r\n";
+        // Taken now on either machine, fresh on both.
+        assert!(unchanged(Some(text_hash(crlf)), Some(lf)));
+        assert!(unchanged(Some(text_hash(lf)), Some(crlf)));
+        // Taken before, of the bytes: fresh where it was taken.
+        assert!(unchanged(Some(hash(crlf)), Some(crlf)));
+        assert!(
+            unchanged(Some(hash(lf)), Some(crlf)),
+            "LF bytes hash as text"
+        );
+        // A real change shows whichever way the mark was taken.
+        let edited: &[u8] = b"one\r\nthree\r\n";
+        assert!(!unchanged(Some(text_hash(crlf)), Some(edited)));
+        assert!(!unchanged(Some(hash(crlf)), Some(edited)));
+        assert!(!unchanged(Some(hash(lf)), Some(b"one\n")));
+        // Gone, or come since.
+        assert!(!unchanged(Some(hash(lf)), None));
+        assert!(!unchanged(None, Some(lf)));
+        assert!(unchanged(None, None));
+    }
+
+    #[test]
+    fn a_part_taken_of_the_bytes_still_matches() {
+        let now = [Piece {
+            kind: "fn".into(),
+            name: "paint".into(),
+            hash: 1,
+            raw: 2,
+        }];
+        let taken = parts_of("`paint` runs", "a.rs", &now);
+        assert_eq!(part_changed(&taken[0], &now), None);
+        // Before line endings were set aside a part held the raw hash.
+        let mut before = taken[0].clone();
+        before.hash = whole(&now, "paint").unwrap().2;
+        assert_ne!(before.hash, taken[0].hash);
+        assert_eq!(part_changed(&before, &now), None);
+        let edited = [Piece {
+            hash: 3,
+            raw: 4,
+            ..now[0].clone()
+        }];
+        assert!(part_changed(&before, &edited).is_some());
+        assert!(part_changed(&taken[0], &edited).is_some());
     }
 
     #[test]
