@@ -232,6 +232,30 @@ impl Book {
         Some(o)
     }
 
+    /// The number `session` is handed off under: its owner's, or 1 for
+    /// one never claimed, as [`Book::next`] would claim it.
+    pub fn number(&self, session: &str) -> u64 {
+        self.owners.get(session).map_or(1, |o| o.n)
+    }
+
+    /// A handoff moved `session` to brother `to` under number `n`, said
+    /// by `took` on the sender and by landing on the receiver. Taken only
+    /// above the number known, as a takeover's is, so the copy left
+    /// behind is fenced by the roster and an old word changes nothing.
+    /// True when taken.
+    pub fn handed(&mut self, session: &str, to: &str, n: u64, now: u64) -> bool {
+        if self.owners.get(session).is_some_and(|o| o.n >= n) {
+            return false;
+        }
+        let o = Owner {
+            n,
+            brother: to.to_string(),
+            since: now,
+        };
+        self.owners.insert(session.to_string(), o);
+        true
+    }
+
     /// The owners `me` tells a brother whose link came up: its own only,
     /// the only ones a brother takes from it.
     pub fn mine(&self, me: &str) -> BTreeMap<String, Owner> {
@@ -656,6 +680,34 @@ mod tests {
         );
         assert_eq!(b.take_over("t", 1, "desk", T), None);
         assert_eq!(b.owners["t"].brother, "lap");
+    }
+
+    #[test]
+    fn a_handoff_raises_the_number_and_fences_the_copy_left_behind() {
+        let mut lap = Book::default();
+        lap.next("s", "desk", "lap", T - 600);
+        assert_eq!(lap.number("s"), 1);
+        assert_eq!(lap.number("never"), 1);
+        // Handed to desk: took says the number one up.
+        let n = lap.number("s") + 1;
+        assert!(lap.handed("s", "desk", n, T));
+        assert_eq!(lap.owners["s"].n, 2);
+        assert_eq!(lap.owners["s"].brother, "desk");
+        // Handed back later, higher again; an old word changes nothing.
+        assert!(lap.handed("s", "lap", 3, T + 60));
+        assert!(!lap.handed("s", "desk", 2, T + 120));
+        assert_eq!(
+            (lap.owners["s"].n, lap.owners["s"].brother.as_str()),
+            (3, "lap")
+        );
+        // A copy left with the old number is fenced by the new owner's word.
+        let mut stale = Book::default();
+        stale.next("s", "desk", "lap", T - 600);
+        let mut desk = Book::default();
+        assert!(desk.handed("s", "desk", 2, T));
+        let fenced = stale.hear("lap", "desk", &desk.owners, &names(), 0);
+        assert_eq!(fenced.len(), 1);
+        assert_eq!(stale.fenced("s"), Some("taken over by Desktop at 14:12"));
     }
 
     #[test]

@@ -282,6 +282,35 @@ impl App {
         })
     }
 
+    /// The roster number session `id` is handed off under, so the
+    /// receiver owns it one higher.
+    pub(super) fn keeping_number(&self, id: &str) -> u64 {
+        with(|s| s.book.number(id))
+    }
+
+    /// A handoff moved session `id` to brother `to` (its name, None for
+    /// this PC) under number `n`. Recorded as a takeover is, so the copy
+    /// left behind is fenced. Not told to the brothers here: the receiver
+    /// would beat its own `took` to the sender and fence the session it
+    /// is letting go. They hear it when their links next come up.
+    pub(super) fn keeping_handed(&mut self, id: &str, to: Option<&str>, n: u64) {
+        let to = match to {
+            Some(name) => match id_of(name) {
+                Some(b) => b,
+                None => return,
+            },
+            None => with(|s| s.me.clone()),
+        };
+        with(|s| {
+            if to != s.me {
+                s.book.forget(id);
+            }
+            if s.book.handed(id, &to, n, unix_now()) {
+                save(&s.book);
+            }
+        });
+    }
+
     /// The tile line of a session taken over elsewhere, which never
     /// resumes here.
     pub(super) fn keeping_fenced(&self, id: &str) -> Option<String> {

@@ -402,6 +402,7 @@ impl App {
                 model: model_of(&args),
                 from: crate::portal_pair::pc_name(),
                 interrupted: !clean,
+                n: self.keeping_number(id),
                 ..Record::default()
             })
         });
@@ -461,7 +462,9 @@ impl App {
             );
             let result = self.adopt_landed(&l.record, l.landed, first);
             if let Ok(id) = &result {
-                with(|s| s.took.insert(id.clone(), l.record.n + 1));
+                let n = l.record.n.saturating_add(1);
+                with(|s| s.took.insert(id.clone(), n));
+                self.keeping_handed(id, None, n);
             }
             let _ = l.done.send(result);
         }
@@ -469,11 +472,12 @@ impl App {
 
     /// The receiver runs the session: the tile goes, and its worktree with
     /// it, since the work is on the receiver now.
-    fn let_go(&mut self, id: &str, to: &str, _n: u64) {
+    fn let_go(&mut self, id: &str, to: &str, n: u64) {
         with(|s| {
             s.out.remove(id);
             s.took.remove(id);
         });
+        self.keeping_handed(id, Some(to), n);
         let (tree, cwd, session) = match self.shared.registry.lock() {
             Ok(mut r) => match r.get_mut(id) {
                 Some(s) => (
@@ -597,7 +601,7 @@ impl App {
             }
             wake(notify);
             match told.recv_timeout(ADOPT_WAIT) {
-                Ok(Ok(_)) => took_message(&id, record.n + 1),
+                Ok(Ok(_)) => took_message(&id, record.n.saturating_add(1)),
                 Ok(Err(e)) => refused(&id, &format!("cannot resume it: {e}")),
                 Err(_) => refused(&id, "it did not start in time"),
             }
