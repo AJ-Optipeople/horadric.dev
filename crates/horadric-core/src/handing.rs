@@ -531,9 +531,11 @@ pub fn land(package: &Package, repo: &Path, projects: &Path) -> Result<Landed, S
         ],
         &[],
     )?;
-    let top = worktree::main_tree(&place)
-        .map(|p| p.top)
-        .ok_or_else(|| format!("{} is not a main working tree", repo.display()))?;
+    // A linked worktree of the receiver's (one an earlier handoff made,
+    // say) is as good a way in as the main tree, beside which the new one
+    // goes.
+    let top = worktree::main_top(&place)
+        .ok_or_else(|| format!("{} has no working tree", repo.display()))?;
     let wanted = r
         .branch
         .as_deref()

@@ -287,6 +287,25 @@ pub fn main_tree(out: &str) -> Option<Place> {
     })
 }
 
+/// The top of the main working tree of the repository a folder is in,
+/// from what `git rev-parse --git-dir --git-common-dir --show-toplevel`
+/// printed there: the folder's own top in the main tree, the folder its
+/// common `.git` is in from a linked worktree. None in a bare repository.
+pub fn main_top(out: &str) -> Option<String> {
+    if let Some(place) = main_tree(out) {
+        return Some(place.top);
+    }
+    let mut lines = out.lines().skip(1);
+    let common = lines.next()?.trim().replace('\\', "/");
+    lines.next().filter(|top| !top.trim().is_empty())?;
+    let common = common.trim_end_matches('/');
+    if !common.to_ascii_lowercase().ends_with("/.git") {
+        return None;
+    }
+    let main = &common[..common.len() - 5];
+    (!main.is_empty()).then(|| main.to_string())
+}
+
 /// A linked worktree as `git worktree list --porcelain` lists it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Linked {
@@ -578,6 +597,38 @@ mod tests {
         // `--show-toplevel` prints nothing in a bare repository.
         assert_eq!(main_tree("C:/Code/app.git\nC:/Code/app.git\n"), None);
         assert_eq!(main_tree(""), None);
+    }
+
+    #[test]
+    fn the_main_top_is_found_from_a_linked_worktree_too() {
+        let main = "C:/Code/app/.git
+C:/Code/app/.git
+C:/Code/app
+";
+        assert_eq!(main_top(main).as_deref(), Some("C:/Code/app"));
+        let linked = "C:/Code/app/.git/worktrees/fix
+C:/Code/app/.git
+C:/Code/app.fix
+";
+        assert_eq!(main_top(linked).as_deref(), Some("C:/Code/app"));
+        assert_eq!(
+            main_top(
+                "C:/Code/app.git
+C:/Code/app.git
+"
+            ),
+            None
+        );
+        assert_eq!(
+            main_top(
+                "x/.git/worktrees/a
+x/.git
+
+"
+            ),
+            None
+        );
+        assert_eq!(main_top(""), None);
     }
 
     #[test]
