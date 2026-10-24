@@ -171,6 +171,13 @@ What a terminal could never do, the reason for all this.
 These come after the Folio works; each gets its own line here when it is
 next.
 
+**Markdown is our own** (decided 2026-10-25): no `pulldown-cmark`. The
+human wants as few dependencies as possible, and a reply needs only a
+subset: paragraphs, headings, lists, code blocks and inline code,
+emphasis, links, tables, quotes. A pure parser in `horadric-core`,
+tested against replies from the fixtures; anything it does not know
+shows as plain text.
+
 ## Steps
 
 1. **Spike.** A host that starts headless `claude.exe`, a hidden debug
@@ -197,10 +204,6 @@ Then "What it opens", one by one.
 
 ## Open questions
 
-- **Markdown.** A parser is a dependency decision: `pulldown-cmark` is
-  pure Rust, small and the usual choice. The alternative is our own
-  subset (paragraphs, headings, lists, code, emphasis, links, tables).
-  To decide at step 5.
 - **Quests and Warriv.** Whether quest sessions go headless too. Warriv
   reads sessions through hooks and transcripts, so it should not care.
 - **The Brotherhood.** A headless session handed to another machine
