@@ -20,7 +20,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::joining::{self, Handshake, Identity, Listed, Out, Store};
-use crate::portal_crypto::{open, random, seal};
+use crate::portal_crypto::random;
 use crate::portal_pair::{now, pc_name};
 use crate::portal_push::{ecdh, ecdh_pair, EcdhKey};
 
@@ -154,6 +154,41 @@ pub fn ask(brother: &str) {
     }
 }
 
+/// Drops the brother with this id: its key goes from `brothers.json` and
+/// every channel to it closes. The caller has already written it into
+/// [`crate::standing`], which refuses it from then on.
+pub fn cast_out(id: &str) {
+    let mut held = STATE.lock().unwrap_or_else(|e| e.into_inner());
+    match held.as_mut() {
+        Some(b) => {
+            b.store.brothers.retain(|j| j.id != id);
+            b.save();
+            b.wanted.remove(id);
+            b.tried.remove(id);
+            let chans: Vec<u32> = b
+                .chans
+                .iter()
+                .filter(|(_, h)| h.peer() == id)
+                .map(|(ch, _)| *ch)
+                .collect();
+            for ch in chans {
+                b.close(ch);
+            }
+        }
+        // No relay link: only the file, which the next link loads.
+        None => {
+            let Some(dir) = horadric_hooks::state_dir() else {
+                return;
+            };
+            let mut store = Store::load(&dir).unwrap_or_default();
+            store.brothers.retain(|j| j.id != id);
+            if let Err(e) = store.save(&dir) {
+                eprintln!("horadric: cannot keep the brothers: {e}");
+            }
+        }
+    }
+}
+
 /// The human's answer to a join prompt.
 fn answer(generation: u64, ch: u32, yes: bool) {
     with(generation, |b| {
@@ -281,6 +316,17 @@ impl Brothers {
 
     /// A brother asked for a channel to this PC.
     fn given(&mut self, ch: u32, id: &str, name: &str) {
+        // A brother cast out is never asked about again: no prompt for a
+        // stolen PC to wear the human down with.
+        if self
+            .dir
+            .as_deref()
+            .is_some_and(|d| crate::standing::Standing::load(d).refuses(id, None))
+        {
+            debug(&format!("{id} was cast out, its channel closes"));
+            self.relay(json!({"close": ch}));
+            return;
+        }
         let Some((public, _)) = self.identity() else {
             return;
         };
@@ -298,39 +344,26 @@ impl Brothers {
             return;
         };
         let me = pc_name();
+        let mut nonce = [0u8; 16];
+        random(&mut nonce);
         let (h, out) = match (intent, self.store.key(id)) {
-            (Intent::Link, Some(key)) => Handshake::link((&me, &public), (id, name), key),
-            _ => {
-                let mut nonce = [0u8; 16];
-                random(&mut nonce);
-                Handshake::ask((&me, &public), (id, name), nonce)
-            }
+            (Intent::Link, Some(key)) => Handshake::link((&me, &public), (id, name), key, nonce),
+            _ => Handshake::ask((&me, &public), (id, name), nonce),
         };
         self.chans.insert(ch, h);
         self.run(ch, out);
     }
 
     fn binary(&mut self, ch: u32, payload: &[u8]) -> bool {
-        let Some(key) = self.chans.get(&ch).map(Handshake::key) else {
+        if !self.chans.contains_key(&ch) {
             return false;
-        };
-        let sealed = key
-            .and_then(|k| open(&k, payload))
-            .and_then(|plain| serde_json::from_slice::<Value>(&plain).ok());
-        let linked = self.chans.get(&ch).is_some_and(Handshake::linked);
-        let out = if let (true, Some(msg)) = (linked, &sealed) {
-            let peer = self.chans.get(&ch).map(|h| h.peer().to_string());
-            route(ch, peer.unwrap_or_default(), msg.clone());
-            Vec::new()
-        } else if let Some(msg) = sealed {
-            self.chans
-                .get_mut(&ch)
-                .map(|h| h.opened(&msg, now()))
-                .unwrap_or_default()
-        } else if let Some(msg) = serde_json::from_slice::<Value>(payload)
+        }
+        // A sealed frame starts with its number or a GCM nonce, so one
+        // that reads as JSON from a brace on is the handshake's plain kind.
+        let plain = serde_json::from_slice::<Value>(payload)
             .ok()
-            .filter(|_| payload.first() == Some(&b'{'))
-        {
+            .filter(|_| payload.first() == Some(&b'{'));
+        let out = if let Some(msg) = plain {
             let Some((_, private)) = self.identity() else {
                 return true;
             };
@@ -340,10 +373,30 @@ impl Brothers {
                 .map(|h| h.heard(&msg, &shared))
                 .unwrap_or_default()
         } else {
-            Vec::new()
+            let Some(h) = self.chans.get_mut(&ch) else {
+                return true;
+            };
+            let (msg, out) = h.sealed(payload, now());
+            if let Some(msg) = msg {
+                route(ch, h.peer().to_string(), msg);
+            }
+            out
         };
         self.run(ch, out);
         true
+    }
+
+    /// Asks the human on a thread of its own, so nothing waits on the
+    /// click, then hands the handshake the answer.
+    fn ask_human(&self, ch: u32, text: String) {
+        let generation = self.generation;
+        std::thread::Builder::new()
+            .name("brother-join".into())
+            .spawn(move || {
+                let yes = show(&text, MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) == IDYES.0;
+                answer(generation, ch, yes);
+            })
+            .ok();
     }
 
     /// Does what a handshake step said, on channel `ch`.
@@ -351,26 +404,9 @@ impl Brothers {
         for o in out {
             match o {
                 Out::Plain(v) => (self.send)(false, frame(ch, v.to_string().as_bytes())),
-                Out::Sealed(v) => {
-                    if let Some(key) = self.chans.get(&ch).and_then(Handshake::key) {
-                        let sealed = seal(&key, v.to_string().as_bytes());
-                        (self.send)(false, frame(ch, &sealed));
-                    }
-                }
-                Out::Prompt { name, code } => {
-                    let generation = self.generation;
-                    std::thread::Builder::new()
-                        .name("brother-join".into())
-                        .spawn(move || {
-                            let yes = prompt(&name, &code);
-                            answer(generation, ch, yes);
-                        })
-                        .ok();
-                }
-                Out::Code { name, code } => tell(&format!(
-                    "Asking {name} to let this PC in.\n\n{name} will show a code. \
-                     It must be {code}. If it is not, say no there."
-                )),
+                Out::Sealed(sealed) => (self.send)(false, frame(ch, &sealed)),
+                Out::Prompt { name, code } => self.ask_human(ch, prompt(&name, &code)),
+                Out::Confirm { name, code } => self.ask_human(ch, confirm(&name, &code)),
                 Out::Keep(joined) => {
                     let name = joined.name.clone();
                     self.store.keep(joined);
@@ -400,14 +436,26 @@ fn debug(what: &str) {
     }
 }
 
-/// The approval: never automatic, a stolen login must not let anyone in.
-fn prompt(name: &str, code: &str) -> bool {
-    let text = format!(
+/// The approval on the giving side: never automatic, a stolen login
+/// must not let anyone in. No is the default button.
+fn prompt(name: &str, code: &str) -> String {
+    format!(
         "{name} wants to join. Let it in?\n\n\
          Say yes only if {name} shows the code {code}. \
          A brother sees this PC's sessions and can type into them."
-    );
-    show(&text, MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) == IDYES.0
+    )
+}
+
+/// The check on the asking side: the relay could play the brother this
+/// PC asked, and a brother kept here can type into this PC's sessions
+/// too. No is the default button.
+fn confirm(name: &str, code: &str) -> String {
+    format!(
+        "Does {name} show the code {code}?\n\n\
+         Say yes only if {name}'s screen shows exactly this code. \
+         If it shows another, or none, something between the two PCs \
+         may be pretending to be {name}: say no."
+    )
 }
 
 /// Says something on a thread of its own, so nothing waits on the click.
@@ -467,23 +515,20 @@ pub fn take_requests() -> Vec<(u32, String, Value)> {
     std::mem::take(&mut *REQUESTS.lock().unwrap_or_else(|e| e.into_inner()))
 }
 
-/// Sends `msg` to the brother on channel `ch`, sealed with their link key.
+/// Sends `msg` to the brother on channel `ch`, sealed with this link's
+/// key, its way and its next number.
 /// For this PC's answers to what the brother asked and for what this PC
 /// asks of it alike. False when the channel is not linked.
 pub fn reply(ch: u32, msg: &Value) -> bool {
-    let held = STATE.lock().unwrap_or_else(|e| e.into_inner());
-    let Some(b) = held.as_ref() else {
+    let mut held = STATE.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(b) = held.as_mut() else {
         return false;
     };
-    let Some(key) = b
-        .chans
-        .get(&ch)
-        .filter(|h| h.linked())
-        .and_then(Handshake::key)
-    else {
+    // Sealed and sent under the one lock, so frames leave in the order
+    // of their numbers.
+    let Some(sealed) = b.chans.get_mut(&ch).and_then(|h| h.seal(msg)) else {
         return false;
     };
-    let sealed = seal(&key, msg.to_string().as_bytes());
     (b.send)(false, frame(ch, &sealed));
     true
 }

@@ -6,15 +6,24 @@
 //!
 //! The relay carries the handshake, so it could swap the keys and sit in
 //! the middle. It cannot do so unseen: both sides show a six digit code
-//! drawn from both keys and a nonce from each side, and the human lets a
-//! brother in only when the two codes match. The asker commits to its key
-//! and nonce before it hears the giver's, so the relay must pick its own
-//! before it learns one honest side's: a forged pair of codes matches one
-//! time in a million, and a mismatch costs the relay its try.
+//! drawn from both keys and a nonce from each side, and on both sides the
+//! human says yes only when the two codes match: a side keeps a brother
+//! only after its own human's yes and the other side's welcome. The asker
+//! commits to its key and nonce before it hears the giver's, so the relay
+//! must pick its own before it learns one honest side's: a forged pair of
+//! codes matches one time in a million, and a mismatch costs the relay
+//! its try.
+//!
+//! The relay also carries every frame after, so each link seals under a
+//! key of its own, worked out from the long term key and a fresh nonce
+//! from each side, and binds each frame to its way and a number that only
+//! goes up. A frame echoed back, played again, or kept from an earlier
+//! link does not open.
 
 use std::io;
 use std::path::Path;
 
+use crate::portal_crypto::{open_bound, seal_bound};
 use horadric_core::portal::{b64url, sha256, unb64url};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -148,18 +157,132 @@ fn code_of(digest: &[u8; 32]) -> String {
     format!("{:03} {:03}", n / 1000, n % 1000)
 }
 
+/// Which way a sealed frame goes on a brother channel. Every frame is
+/// bound to its way, so a frame the relay echoes back to the side that
+/// sent it does not open there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Way {
+    /// From the side that asked the relay for the channel.
+    FromAsker,
+    FromGiver,
+}
+
+impl Way {
+    fn byte(self) -> u8 {
+        match self {
+            Way::FromAsker => b'a',
+            Way::FromGiver => b'g',
+        }
+    }
+
+    fn back(self) -> Way {
+        match self {
+            Way::FromAsker => Way::FromGiver,
+            Way::FromGiver => Way::FromAsker,
+        }
+    }
+}
+
+/// The key one link seals its frames with, from the long term link key
+/// and a fresh nonce from each side. Nothing sealed on an earlier link
+/// opens under it, so the relay cannot play an old link's frames again.
+pub fn session_key(link: &[u8; 32], asker_nonce: &[u8], giver_nonce: &[u8]) -> [u8; 32] {
+    derive(
+        "horadric link session v1",
+        &[link, asker_nonce, giver_nonce],
+    )
+}
+
+/// What a frame on a link is bound to: its way and its number.
+pub fn frame_aad(way: Way, n: u64) -> Vec<u8> {
+    let mut aad = b"horadric link frame v1".to_vec();
+    aad.push(way.byte());
+    aad.extend_from_slice(&n.to_be_bytes());
+    aad
+}
+
+/// What a hello under the long term key is bound to: its way, and for
+/// the giver's the asker's nonce, so an old answer played again to a new
+/// hello does not open.
+pub fn hello_aad(way: Way, asker_nonce: &[u8]) -> Vec<u8> {
+    let mut aad = b"horadric link hello v1".to_vec();
+    aad.push(way.byte());
+    aad.extend_from_slice(asker_nonce);
+    aad
+}
+
+/// Whether a frame numbered `n` may follow the last one heard. Numbers
+/// only go up, so a frame played again, or one older than the last, is
+/// refused. They need not be next: a gap costs nothing to trust.
+pub fn fresh(heard: Option<u64>, n: u64) -> bool {
+    heard.is_none_or(|h| n > h)
+}
+
+/// One link's sealing: its own key, the way this side sends, and the
+/// numbers sent and heard. A frame is the number, 8 bytes big endian,
+/// then what [`seal_bound`] makes of it under [`frame_aad`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Session {
+    key: [u8; 32],
+    way: Way,
+    sent: u64,
+    heard: Option<u64>,
+}
+
+impl Session {
+    pub fn new(key: [u8; 32], way: Way) -> Session {
+        Session {
+            key,
+            way,
+            sent: 0,
+            heard: None,
+        }
+    }
+
+    pub fn seal(&mut self, plain: &[u8]) -> Vec<u8> {
+        let n = self.sent;
+        self.sent += 1;
+        let mut out = n.to_be_bytes().to_vec();
+        out.extend_from_slice(&seal_bound(&self.key, plain, &frame_aad(self.way, n)));
+        out
+    }
+
+    /// What a frame from the other side opens to, `None` when it is
+    /// forged, from another link, this side's own, or not newer than the
+    /// last.
+    pub fn open(&mut self, frame: &[u8]) -> Option<Vec<u8>> {
+        let (head, rest) = frame.split_first_chunk::<8>()?;
+        let n = u64::from_be_bytes(*head);
+        if !fresh(self.heard, n) {
+            return None;
+        }
+        let plain = open_bound(&self.key, rest, &frame_aad(self.way.back(), n))?;
+        self.heard = Some(n);
+        Some(plain)
+    }
+
+    fn seal_json(&mut self, v: &Value) -> Vec<u8> {
+        self.seal(v.to_string().as_bytes())
+    }
+
+    fn open_json(&mut self, frame: &[u8]) -> Option<Value> {
+        serde_json::from_slice(&self.open(frame)?).ok()
+    }
+}
+
 /// What the side running a handshake does next.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Out {
     /// Send this as is: there is no key yet, and nothing in it is secret.
     Plain(Value),
-    /// Send this sealed with [`Handshake::key`].
-    Sealed(Value),
-    /// Ask the human on the giving side, with the code to compare.
-    /// [`Handshake::answer`] follows.
+    /// Send these bytes as they are, sealed already.
+    Sealed(Vec<u8>),
+    /// Ask the human on the giving side whether to let the brother in,
+    /// with the code to compare. [`Handshake::answer`] follows.
     Prompt { name: String, code: String },
-    /// Show the human on the asking side the code the giver will show.
-    Code { name: String, code: String },
+    /// Ask the human on the asking side whether the giver shows this
+    /// code. [`Handshake::answer`] follows.
+    Confirm { name: String, code: String },
     /// Keep this brother: it joined.
     Keep(Joined),
     /// The link is up, to the brother with this id.
@@ -174,14 +297,21 @@ enum State {
     Committed {
         nonce: [u8; 16],
     },
-    /// Asker: revealed its key, waits for the welcome under the link key.
-    Revealed {
+    /// Either side, the code worked out: waits for this side's human to
+    /// say yes and for the other side's welcome. A brother is kept only
+    /// with both, so a relay that swapped keys gets nothing on a side
+    /// whose human saw the codes differ.
+    Confirming {
         public: Vec<u8>,
-        key: [u8; 32],
+        link: [u8; 32],
+        session: Session,
+        yes: bool,
+        welcomed: bool,
     },
     /// Asker of a brother it holds a key for: said hello under it.
     Greeting {
-        key: [u8; 32],
+        link: [u8; 32],
+        nonce: [u8; 16],
     },
     /// Giver: waits for a join, or a hello under the key it holds.
     Waiting {
@@ -193,19 +323,21 @@ enum State {
         nonce: [u8; 16],
         commit: Vec<u8>,
     },
-    /// Giver: the human is being asked.
-    Asking {
-        public: Vec<u8>,
-        key: [u8; 32],
+    /// Giver of a joined brother: answered the hello, waits for the
+    /// asker's first frame under the link's key, which only the brother
+    /// holding the long term key can seal. A hello played again stops
+    /// here.
+    Greeted {
+        session: Session,
     },
     Linked {
-        key: [u8; 32],
+        session: Session,
     },
     Over,
 }
 
-/// One brother channel's handshake, either side. Pure: the randomness,
-/// the ECDH and the time come in as parameters.
+/// One brother channel's handshake, either side. Pure but for the
+/// sealing: the randomness, the ECDH and the time come in as parameters.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Handshake {
     /// This PC's name and public key.
@@ -232,6 +364,17 @@ fn point(v: &Value, field: &str) -> Option<Vec<u8>> {
     bytes(v, field).filter(|p| p.len() == 65 && p[0] == 4)
 }
 
+fn kind(v: &Value) -> &str {
+    v.get("t").and_then(Value::as_str).unwrap_or("")
+}
+
+/// A hello under the long term key, opened and read for its nonce.
+fn open_hello(link: &[u8; 32], payload: &[u8], aad: &[u8]) -> Option<[u8; 16]> {
+    let msg: Value = serde_json::from_slice(&open_bound(link, payload, aad)?).ok()?;
+    (kind(&msg) == "hello").then_some(())?;
+    nonce16(&msg, "nonce")
+}
+
 impl Handshake {
     fn new(me: (&str, &[u8]), peer: (&str, &str), state: State) -> Handshake {
         Handshake {
@@ -252,15 +395,23 @@ impl Handshake {
         (hs, vec![Out::Plain(join)])
     }
 
-    /// Links again to a brother that joined before, under its key.
-    pub fn link(me: (&str, &[u8]), peer: (&str, &str), key: [u8; 32]) -> (Handshake, Vec<Out>) {
-        let hs = Handshake::new(me, peer, State::Greeting { key });
-        let hello = hs.hello();
-        (hs, vec![Out::Sealed(hello)])
+    /// Links again to a brother that joined before, under its key, with
+    /// `nonce` fresh random bytes for this link's own key.
+    pub fn link(
+        me: (&str, &[u8]),
+        peer: (&str, &str),
+        link: [u8; 32],
+        nonce: [u8; 16],
+    ) -> (Handshake, Vec<Out>) {
+        let hs = Handshake::new(me, peer, State::Greeting { link, nonce });
+        let hello = hs.hello(&nonce).to_string();
+        let sealed = seal_bound(&link, hello.as_bytes(), &hello_aad(Way::FromAsker, &[]));
+        (hs, vec![Out::Sealed(sealed)])
     }
 
     /// The side a brother asked: waits for its first word. `known` is the
-    /// key held for that brother, if it joined before.
+    /// key held for that brother, if it joined before, `nonce` fresh
+    /// random bytes.
     pub fn give(
         me: (&str, &[u8]),
         peer: (&str, &str),
@@ -270,8 +421,8 @@ impl Handshake {
         Handshake::new(me, peer, State::Waiting { nonce, known })
     }
 
-    fn hello(&self) -> Value {
-        json!({"t": "hello", "v": 3, "kind": "brother", "name": self.name})
+    fn hello(&self, nonce: &[u8]) -> Value {
+        json!({"t": "hello", "v": 3, "kind": "brother", "name": self.name, "nonce": b64url(nonce)})
     }
 
     pub fn peer(&self) -> &str {
@@ -282,24 +433,13 @@ impl Handshake {
         &self.peer_name
     }
 
-    /// The key a sealed frame on this channel opens with, now.
-    pub fn key(&self) -> Option<[u8; 32]> {
-        match &self.state {
-            State::Revealed { key, .. } | State::Greeting { key } | State::Linked { key } => {
-                Some(*key)
-            }
-            State::Waiting { known, .. } => *known,
-            _ => None,
-        }
-    }
-
     pub fn linked(&self) -> bool {
         matches!(self.state, State::Linked { .. })
     }
 
     /// Whether the human is being asked about this one.
     pub fn asking(&self) -> bool {
-        matches!(self.state, State::Asking { .. })
+        matches!(self.state, State::Confirming { yes: false, .. })
     }
 
     fn joined(&self, public: &[u8], key: &[u8; 32], now: u64) -> Joined {
@@ -318,12 +458,28 @@ impl Handshake {
         vec![Out::Failed(why)]
     }
 
+    /// The code is worked out: both humans are asked, each its own way.
+    fn confirm(&mut self, public: Vec<u8>, a: Agreed, nonces: (&[u8], &[u8]), way: Way) -> Out {
+        let session = Session::new(session_key(&a.key, nonces.0, nonces.1), way);
+        self.state = State::Confirming {
+            public,
+            link: a.key,
+            session,
+            yes: false,
+            welcomed: false,
+        };
+        let (name, code) = (self.peer_name.clone(), a.code);
+        match way {
+            Way::FromAsker => Out::Confirm { name, code },
+            Way::FromGiver => Out::Prompt { name, code },
+        }
+    }
+
     /// A message that came as is. `ecdh` gives the shared secret with a
     /// peer's public key, from this PC's private key.
     pub fn heard(&mut self, msg: &Value, ecdh: &dyn Fn(&[u8]) -> Option<[u8; 32]>) -> Vec<Out> {
-        let t = msg.get("t").and_then(Value::as_str).unwrap_or("");
         let state = std::mem::replace(&mut self.state, State::Over);
-        match (t, state) {
+        match (kind(msg), state) {
             ("join", State::Waiting { nonce, known }) => {
                 let Some(commit) = bytes(msg, "commit").filter(|c| c.len() == 32) else {
                     self.state = State::Waiting { nonce, known };
@@ -349,21 +505,13 @@ impl Handshake {
                     return self.fail(format!("{}'s key is not a key.", self.peer_name));
                 };
                 let a = agree(&shared, (&self.public, &nonce), (&theirs, &their_nonce));
-                self.state = State::Revealed {
-                    public: theirs,
-                    key: a.key,
-                };
-                vec![
-                    Out::Plain(json!({
-                        "t": "reveal",
-                        "pub": b64url(&self.public),
-                        "nonce": b64url(&nonce),
-                    })),
-                    Out::Code {
-                        name: self.peer_name.clone(),
-                        code: a.code,
-                    },
-                ]
+                let reveal = Out::Plain(json!({
+                    "t": "reveal",
+                    "pub": b64url(&self.public),
+                    "nonce": b64url(&nonce),
+                }));
+                let ask = self.confirm(theirs, a, (&nonce, &their_nonce), Way::FromAsker);
+                vec![reveal, ask]
             }
             ("reveal", State::Offered { nonce, commit }) => {
                 let (Some(theirs), Some(their_nonce)) = (point(msg, "pub"), nonce16(msg, "nonce"))
@@ -383,18 +531,18 @@ impl Handshake {
                     return vec![Out::Plain(json!({"t": "refused"}))];
                 };
                 let a = agree(&shared, (&theirs, &their_nonce), (&self.public, &nonce));
-                self.state = State::Asking {
-                    public: theirs,
-                    key: a.key,
-                };
-                vec![Out::Prompt {
-                    name: self.peer_name.clone(),
-                    code: a.code,
-                }]
+                vec![self.confirm(theirs, a, (&their_nonce, &nonce), Way::FromGiver)]
             }
-            ("refused", State::Committed { .. } | State::Revealed { .. }) => {
+            ("refused", State::Committed { .. }) => {
                 self.fail(format!("{} did not let this PC in.", self.peer_name))
             }
+            ("refused", State::Confirming { session, .. }) => match session.way {
+                Way::FromAsker => self.fail(format!("{} did not let this PC in.", self.peer_name)),
+                Way::FromGiver => self.fail(format!(
+                    "{} said the codes did not match, so it was not let in.",
+                    self.peer_name
+                )),
+            },
             (_, state) => {
                 self.state = state;
                 vec![]
@@ -402,54 +550,136 @@ impl Handshake {
         }
     }
 
-    /// A message that opened with [`Handshake::key`].
-    pub fn opened(&mut self, msg: &Value, now: u64) -> Vec<Out> {
-        let t = msg.get("t").and_then(Value::as_str).unwrap_or("");
+    /// A frame that is not plain JSON: sealed under the key of this
+    /// channel's state. Gives what it opens to for the brother's client,
+    /// once linked, and what to do next. Anything that does not open, or
+    /// is out of turn, changes nothing.
+    pub fn sealed(&mut self, payload: &[u8], now: u64) -> (Option<Value>, Vec<Out>) {
         let state = std::mem::replace(&mut self.state, State::Over);
-        match (t, state) {
-            ("welcome", State::Revealed { public, key }) => {
-                let joined = self.joined(&public, &key, now);
-                self.state = State::Linked { key };
-                vec![Out::Keep(joined), Out::Linked(self.peer.clone())]
+        let (state, msg, out) = self.step(state, payload, now);
+        self.state = state;
+        (msg, out)
+    }
+
+    fn step(&self, state: State, payload: &[u8], now: u64) -> (State, Option<Value>, Vec<Out>) {
+        match state {
+            State::Linked { mut session } => {
+                let msg = session.open_json(payload);
+                (State::Linked { session }, msg, vec![])
             }
-            ("hello", State::Greeting { key }) => {
-                self.state = State::Linked { key };
-                vec![Out::Linked(self.peer.clone())]
+            State::Confirming {
+                public,
+                link,
+                mut session,
+                yes,
+                welcomed,
+            } => {
+                let welcome = session
+                    .open_json(payload)
+                    .is_some_and(|m| kind(&m) == "welcome");
+                if welcome && yes {
+                    let out = vec![
+                        Out::Keep(self.joined(&public, &link, now)),
+                        Out::Linked(self.peer.clone()),
+                    ];
+                    return (State::Linked { session }, None, out);
+                }
+                let state = State::Confirming {
+                    public,
+                    link,
+                    session,
+                    yes,
+                    welcomed: welcomed || welcome,
+                };
+                (state, None, vec![])
             }
-            (
-                "hello",
-                State::Waiting {
-                    known: Some(key), ..
-                },
-            ) => {
-                self.state = State::Linked { key };
-                vec![Out::Sealed(self.hello()), Out::Linked(self.peer.clone())]
+            State::Greeting { link, nonce } => {
+                let aad = hello_aad(Way::FromGiver, &nonce);
+                let Some(theirs) = open_hello(&link, payload, &aad) else {
+                    return (State::Greeting { link, nonce }, None, vec![]);
+                };
+                let mut session = Session::new(session_key(&link, &nonce, &theirs), Way::FromAsker);
+                let ready = session.seal_json(&json!({"t": "ready"}));
+                let out = vec![Out::Sealed(ready), Out::Linked(self.peer.clone())];
+                (State::Linked { session }, None, out)
             }
-            (_, state) => {
-                self.state = state;
-                vec![]
+            State::Waiting {
+                nonce,
+                known: Some(link),
+            } => {
+                let aad = hello_aad(Way::FromAsker, &[]);
+                let Some(theirs) = open_hello(&link, payload, &aad) else {
+                    let state = State::Waiting {
+                        nonce,
+                        known: Some(link),
+                    };
+                    return (state, None, vec![]);
+                };
+                let session = Session::new(session_key(&link, &theirs, &nonce), Way::FromGiver);
+                let hello = self.hello(&nonce).to_string();
+                let answer =
+                    seal_bound(&link, hello.as_bytes(), &hello_aad(Way::FromGiver, &theirs));
+                (State::Greeted { session }, None, vec![Out::Sealed(answer)])
             }
+            State::Greeted { mut session } => {
+                if session
+                    .open_json(payload)
+                    .is_some_and(|m| kind(&m) == "ready")
+                {
+                    let out = vec![Out::Linked(self.peer.clone())];
+                    return (State::Linked { session }, None, out);
+                }
+                (State::Greeted { session }, None, vec![])
+            }
+            state => (state, None, vec![]),
         }
     }
 
-    /// The human's answer on the giving side.
+    /// Seals a message for the brother on a linked channel, `None` when
+    /// it is not linked.
+    pub fn seal(&mut self, msg: &Value) -> Option<Vec<u8>> {
+        match &mut self.state {
+            State::Linked { session } => Some(session.seal_json(msg)),
+            _ => None,
+        }
+    }
+
+    /// The human's answer, on either side. Yes sends the welcome, and the
+    /// brother is kept once the other side's welcome is in too. No
+    /// refuses, on either side.
     pub fn answer(&mut self, yes: bool, now: u64) -> Vec<Out> {
         if !self.asking() {
             return vec![];
         }
-        let State::Asking { public, key } = std::mem::replace(&mut self.state, State::Over) else {
+        let State::Confirming {
+            public,
+            link,
+            mut session,
+            welcomed,
+            ..
+        } = std::mem::replace(&mut self.state, State::Over)
+        else {
             return vec![];
         };
         if !yes {
             return vec![Out::Plain(json!({"t": "refused"}))];
         }
-        let joined = self.joined(&public, &key, now);
-        self.state = State::Linked { key };
-        vec![
-            Out::Sealed(json!({"t": "welcome", "name": self.name})),
-            Out::Keep(joined),
-            Out::Linked(self.peer.clone()),
-        ]
+        let welcome = session.seal_json(&json!({"t": "welcome", "name": self.name}));
+        let mut out = vec![Out::Sealed(welcome)];
+        if welcomed {
+            out.push(Out::Keep(self.joined(&public, &link, now)));
+            out.push(Out::Linked(self.peer.clone()));
+            self.state = State::Linked { session };
+        } else {
+            self.state = State::Confirming {
+                public,
+                link,
+                session,
+                yes: true,
+                welcomed,
+            };
+        }
+        out
     }
 }
 
@@ -540,7 +770,7 @@ mod tests {
         for o in out {
             match o {
                 Out::Plain(v) => back.extend(to.heard(v, &fake_ecdh(key))),
-                Out::Sealed(v) => back.extend(to.opened(v, now)),
+                Out::Sealed(b) => back.extend(to.sealed(b, now).1),
                 _ => {}
             }
         }
@@ -550,62 +780,119 @@ mod tests {
     fn codes(out: &[Out]) -> Vec<String> {
         out.iter()
             .filter_map(|o| match o {
-                Out::Code { code, .. } | Out::Prompt { code, .. } => Some(code.clone()),
+                Out::Confirm { code, .. } | Out::Prompt { code, .. } => Some(code.clone()),
                 _ => None,
             })
             .collect()
     }
 
-    #[test]
-    fn a_brother_joins_once_the_human_says_yes() {
+    fn kept(out: &[Out]) -> Vec<&Joined> {
+        out.iter()
+            .filter_map(|o| match o {
+                Out::Keep(j) => Some(j),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn sealed_bytes(out: &[Out]) -> Vec<Vec<u8>> {
+        out.iter()
+            .filter_map(|o| match o {
+                Out::Sealed(b) => Some(b.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Laptop asks Desktop, up to both humans being asked.
+    fn to_the_prompts() -> (Handshake, Handshake, Vec<Out>, Vec<Out>) {
         let (lap, desk) = (key_of(1), key_of(2));
         let (mut a, out) = Handshake::ask(("Laptop", &lap), ("d", "Desktop"), [7; 16]);
         let mut g = Handshake::give(("Desktop", &desk), ("l", "Laptop"), None, [9; 16]);
         let offer = pass(&out, &mut g, &desk, 0);
         let reveal = pass(&offer, &mut a, &lap, 0);
         let prompt = pass(&reveal, &mut g, &desk, 0);
-        assert!(g.asking());
-        // Both screens show the same code.
-        let (shown, asked) = (codes(&reveal), codes(&prompt));
-        assert_eq!(shown.len(), 1);
-        assert_eq!(shown, asked);
-        assert_eq!(a.key(), g_key(&g));
-        let welcome = g.answer(true, 50);
-        assert!(g.linked());
-        let kept = pass(&welcome, &mut a, &lap, 50);
-        assert!(a.linked());
-        let Some(Out::Keep(desk_kept)) = kept.first() else {
-            panic!("{kept:?}")
-        };
-        let Some(Out::Keep(lap_kept)) = welcome.get(1) else {
-            panic!("{welcome:?}")
-        };
-        assert_eq!(desk_kept.id, "d");
-        assert_eq!(desk_kept.public, b64url(&desk));
-        assert_eq!(lap_kept.id, "l");
-        assert_eq!(lap_kept.public, b64url(&lap));
-        assert_eq!(desk_kept.key, lap_kept.key);
-        assert_eq!(kept.last(), Some(&Out::Linked("d".into())));
+        (a, g, reveal, prompt)
     }
 
-    fn g_key(g: &Handshake) -> Option<[u8; 32]> {
-        match &g.state {
-            State::Asking { key, .. } => Some(*key),
-            _ => None,
+    #[test]
+    fn a_brother_joins_once_both_humans_say_yes() {
+        let (lap, desk) = (key_of(1), key_of(2));
+        for giver_first in [true, false] {
+            let (mut a, mut g, reveal, prompt) = to_the_prompts();
+            assert!(a.asking() && g.asking());
+            // Both screens show the same code, the asker's as a question.
+            assert!(matches!(reveal.last(), Some(Out::Confirm { .. })));
+            assert!(matches!(prompt.last(), Some(Out::Prompt { .. })));
+            let (shown, asked) = (codes(&reveal), codes(&prompt));
+            assert_eq!(shown.len(), 1);
+            assert_eq!(shown, asked);
+            let (first, second) = if giver_first {
+                (&mut g, &mut a)
+            } else {
+                (&mut a, &mut g)
+            };
+            let (first_key, second_key) = if giver_first {
+                (&desk, &lap)
+            } else {
+                (&lap, &desk)
+            };
+            // The first yes keeps nothing on either side yet.
+            let yes1 = first.answer(true, 50);
+            assert!(kept(&yes1).is_empty() && !first.linked());
+            let heard1 = pass(&yes1, second, second_key, 50);
+            assert!(heard1.is_empty() && !second.linked());
+            // The second yes keeps the brother on both.
+            let yes2 = second.answer(true, 50);
+            assert_eq!(kept(&yes2).len(), 1);
+            assert!(second.linked());
+            let heard2 = pass(&yes2, first, first_key, 50);
+            assert_eq!(kept(&heard2).len(), 1);
+            assert!(first.linked());
+            let (lap_kept, desk_kept) = if giver_first {
+                (kept(&yes2)[0].clone(), kept(&heard2)[0].clone())
+            } else {
+                (kept(&heard2)[0].clone(), kept(&yes2)[0].clone())
+            };
+            assert_eq!(lap_kept.id, "d");
+            assert_eq!(lap_kept.public, b64url(&desk));
+            assert_eq!(desk_kept.id, "l");
+            assert_eq!(desk_kept.public, b64url(&lap));
+            assert_eq!(lap_kept.key, desk_kept.key);
+            // The link carries frames both ways.
+            let to_g = a.seal(&json!({"t": "x"})).unwrap();
+            assert_eq!(g.sealed(&to_g, 60).0, Some(json!({"t": "x"})));
+            let to_a = g.seal(&json!({"t": "y"})).unwrap();
+            assert_eq!(a.sealed(&to_a, 60).0, Some(json!({"t": "y"})));
         }
     }
 
     #[test]
-    fn a_no_keeps_nothing_and_says_so_on_the_asking_side() {
+    fn the_asker_saying_no_keeps_nothing_on_either_side() {
         let (lap, desk) = (key_of(1), key_of(2));
-        let (mut a, out) = Handshake::ask(("Laptop", &lap), ("d", "Desktop"), [7; 16]);
-        let mut g = Handshake::give(("Desktop", &desk), ("l", "Laptop"), None, [9; 16]);
-        let offer = pass(&out, &mut g, &desk, 0);
-        let reveal = pass(&offer, &mut a, &lap, 0);
-        pass(&reveal, &mut g, &desk, 0);
+        let (mut a, mut g, _, _) = to_the_prompts();
+        let yes = g.answer(true, 0);
+        assert!(pass(&yes, &mut a, &lap, 0).is_empty());
+        let no = a.answer(false, 0);
+        assert_eq!(no, vec![Out::Plain(json!({"t": "refused"}))]);
+        assert!(!a.linked());
+        let told = pass(&no, &mut g, &desk, 0);
+        assert_eq!(
+            told,
+            vec![Out::Failed(
+                "Laptop said the codes did not match, so it was not let in.".into()
+            )]
+        );
+        assert!(!g.linked());
+    }
+
+    #[test]
+    fn the_giver_saying_no_keeps_nothing_and_says_so_on_the_asking_side() {
+        let lap = key_of(1);
+        let (mut a, mut g, _, _) = to_the_prompts();
         let no = g.answer(false, 0);
         assert_eq!(no, vec![Out::Plain(json!({"t": "refused"}))]);
-        assert!(!g.linked() && g.key().is_none());
+        assert!(!g.linked());
         let told = pass(&no, &mut a, &lap, 0);
         assert_eq!(
             told,
@@ -613,10 +900,30 @@ mod tests {
         );
         // A second answer, from a prompt clicked twice, does nothing.
         assert!(g.answer(true, 0).is_empty());
+        assert!(a.answer(true, 0).is_empty());
     }
 
     #[test]
-    fn a_relay_that_swaps_keys_shows_two_different_codes() {
+    fn before_both_yeses_other_sealed_frames_are_dropped() {
+        let (_, mut g, _, _) = to_the_prompts();
+        let State::Confirming { mut session, .. } = g.state.clone() else {
+            panic!()
+        };
+        // A frame the giver could open, were it the asker's, and is not a
+        // welcome: an asker cannot act before it is in.
+        let mut asker = Session::new(session.key, Way::FromAsker);
+        let input = asker.seal_json(&json!({"t": "input", "s": "S", "n": 1}));
+        assert_eq!(g.sealed(&input, 0), (None, vec![]));
+        assert!(g.asking());
+        // Nor does the giver's own welcome, echoed back, count.
+        let own = session.seal_json(&json!({"t": "welcome"}));
+        g.sealed(&own, 0);
+        let yes = g.answer(true, 0);
+        assert!(kept(&yes).is_empty() && !g.linked());
+    }
+
+    #[test]
+    fn a_relay_that_swaps_keys_shows_two_codes_and_gets_nothing_kept() {
         let (lap, desk, relay) = (key_of(1), key_of(2), key_of(3));
         let (mut a, out) = Handshake::ask(("Laptop", &lap), ("d", "Desktop"), [7; 16]);
         // The relay talks to each side as the other, with its own key.
@@ -625,10 +932,22 @@ mod tests {
         let mut g = Handshake::give(("Desktop", &desk), ("l", "Laptop"), None, [9; 16]);
         let offer_to_a = pass(&out, &mut as_desk, &relay, 0);
         let reveal = pass(&offer_to_a, &mut a, &lap, 0);
+        pass(&reveal, &mut as_desk, &relay, 0);
         let offer_to_relay = pass(&fake_join, &mut g, &desk, 0);
         let fake_reveal = pass(&offer_to_relay, &mut as_lap, &relay, 0);
         let prompt = pass(&fake_reveal, &mut g, &desk, 0);
         assert_ne!(codes(&reveal), codes(&prompt));
+        // The relay says yes on both of its faces at once: neither honest
+        // side keeps anything while its own human has not said yes.
+        let welcome_to_a = as_desk.answer(true, 0);
+        assert!(kept(&pass(&welcome_to_a, &mut a, &lap, 0)).is_empty());
+        let welcome_to_g = as_lap.answer(true, 0);
+        assert!(kept(&pass(&welcome_to_g, &mut g, &desk, 0)).is_empty());
+        assert!(!a.linked() && !g.linked());
+        // Seeing the codes differ, each human says no, and nothing is kept.
+        assert!(kept(&a.answer(false, 0)).is_empty());
+        assert!(kept(&g.answer(false, 0)).is_empty());
+        assert!(!a.linked() && !g.linked());
     }
 
     #[test]
@@ -644,19 +963,131 @@ mod tests {
         assert!(!g.asking());
     }
 
+    /// A link between two joined brothers under `key`, with these nonces.
+    fn relink(key: [u8; 32], an: u8, gn: u8) -> (Handshake, Handshake, Vec<Out>, Vec<Out>) {
+        let (lap, desk) = (key_of(1), key_of(2));
+        let (mut a, hello) = Handshake::link(("Laptop", &lap), ("d", "Desktop"), key, [an; 16]);
+        let mut g = Handshake::give(("Desktop", &desk), ("l", "Laptop"), Some(key), [gn; 16]);
+        let answer = pass(&hello, &mut g, &desk, 0);
+        let ready = pass(&answer, &mut a, &lap, 0);
+        (a, g, answer, ready)
+    }
+
     #[test]
     fn a_joined_brother_links_again_without_asking() {
-        let (lap, desk) = (key_of(1), key_of(2));
-        let key = [4; 32];
-        let (mut a, out) = Handshake::link(("Laptop", &lap), ("d", "Desktop"), key);
-        let mut g = Handshake::give(("Desktop", &desk), ("l", "Laptop"), Some(key), [9; 16]);
-        assert_eq!(g.key(), Some(key));
-        let back = pass(&out, &mut g, &desk, 0);
+        let (mut a, mut g, answer, ready) = relink([4; 32], 7, 9);
+        assert!(!answer.iter().any(|o| matches!(o, Out::Prompt { .. })));
+        assert!(a.linked());
+        assert_eq!(ready.last(), Some(&Out::Linked("d".into())));
+        // The giver links on the asker's first frame under the new key.
+        assert!(!g.linked());
+        let done = pass(&ready, &mut g, &key_of(2), 0);
         assert!(g.linked());
-        assert_eq!(back.last(), Some(&Out::Linked("l".into())));
-        assert!(!back.iter().any(|o| matches!(o, Out::Prompt { .. })));
-        let done = pass(&back, &mut a, &lap, 0);
-        assert_eq!(done, vec![Out::Linked("d".into())]);
+        assert_eq!(done, vec![Out::Linked("l".into())]);
+        let f = g.seal(&json!({"t": "roster"})).unwrap();
+        assert_eq!(a.sealed(&f, 0).0, Some(json!({"t": "roster"})));
+    }
+
+    #[test]
+    fn a_hello_echoed_back_links_to_nobody() {
+        let key = [4; 32];
+        let (mut a, hello) =
+            Handshake::link(("Laptop", &key_of(1)), ("d", "Desktop"), key, [7; 16]);
+        for b in sealed_bytes(&hello) {
+            assert_eq!(a.sealed(&b, 0), (None, vec![]));
+        }
+        assert!(!a.linked());
+    }
+
+    #[test]
+    fn frames_reflected_or_played_again_are_refused() {
+        let (mut a, mut g, _, ready) = relink([4; 32], 7, 9);
+        pass(&ready, &mut g, &key_of(2), 0);
+        let f = a.seal(&json!({"t": "took"})).unwrap();
+        // Reflected to the side that sent it.
+        assert_eq!(a.sealed(&f, 0).0, None);
+        // Heard once, then not again.
+        assert!(g.sealed(&f, 0).0.is_some());
+        assert_eq!(g.sealed(&f, 0).0, None);
+        // A later one still opens after an earlier one is refused.
+        let later = a.seal(&json!({"t": "state"})).unwrap();
+        assert!(g.sealed(&later, 0).0.is_some());
+        assert_eq!(g.sealed(&f, 0).0, None);
+    }
+
+    #[test]
+    fn frames_from_an_earlier_link_are_refused() {
+        let key = [4; 32];
+        let (mut a1, mut g1, answer1, ready1) = relink(key, 7, 9);
+        pass(&ready1, &mut g1, &key_of(2), 0);
+        let old_state = g1.seal(&json!({"t": "state", "state": "awake"})).unwrap();
+        let old_took = a1.seal(&json!({"t": "took"})).unwrap();
+        // A new link: fresh nonces both sides.
+        let (mut a2, mut g2, _, ready2) = relink(key, 8, 10);
+        pass(&ready2, &mut g2, &key_of(2), 0);
+        assert_eq!(a2.sealed(&old_state, 0).0, None);
+        assert_eq!(g2.sealed(&old_took, 0).0, None);
+        // The old giver's hello, played to a new hello, does not link.
+        let (mut a3, _) = Handshake::link(("Laptop", &key_of(1)), ("d", "Desktop"), key, [11; 16]);
+        assert!(pass(&answer1, &mut a3, &key_of(1), 0).is_empty());
+        assert!(!a3.linked());
+        // The old asker's hello played to a giver gets an answer but no
+        // link: nobody can seal the first frame under the new key.
+        let hello1 = Handshake::link(("Laptop", &key_of(1)), ("d", "Desktop"), key, [7; 16]).1;
+        let mut g4 = Handshake::give(
+            ("Desktop", &key_of(2)),
+            ("l", "Laptop"),
+            Some(key),
+            [12; 16],
+        );
+        pass(&hello1, &mut g4, &key_of(2), 0);
+        assert!(pass(&ready1, &mut g4, &key_of(2), 0).is_empty());
+        assert!(!g4.linked());
+    }
+
+    #[test]
+    fn a_link_key_follows_both_nonces_and_frames_their_way_and_number() {
+        let k = [1; 32];
+        let base = session_key(&k, b"a", b"g");
+        assert_ne!(base, session_key(&[2; 32], b"a", b"g"));
+        assert_ne!(base, session_key(&k, b"b", b"g"));
+        assert_ne!(base, session_key(&k, b"a", b"h"));
+        assert_ne!(base, session_key(&k, b"g", b"a"));
+        assert_ne!(frame_aad(Way::FromAsker, 0), frame_aad(Way::FromGiver, 0));
+        assert_ne!(frame_aad(Way::FromAsker, 0), frame_aad(Way::FromAsker, 1));
+        assert_ne!(
+            hello_aad(Way::FromAsker, b""),
+            hello_aad(Way::FromGiver, b"")
+        );
+        assert_ne!(
+            hello_aad(Way::FromGiver, b"1"),
+            hello_aad(Way::FromGiver, b"2")
+        );
+        assert_eq!(Way::FromAsker.back(), Way::FromGiver);
+        assert_eq!(Way::FromGiver.back(), Way::FromAsker);
+    }
+
+    #[test]
+    fn frame_numbers_only_go_up() {
+        assert!(fresh(None, 0));
+        assert!(fresh(Some(0), 1));
+        assert!(fresh(Some(0), 5));
+        assert!(!fresh(Some(3), 3));
+        assert!(!fresh(Some(3), 2));
+    }
+
+    #[test]
+    fn a_session_refuses_short_and_forged_frames() {
+        let mut s = Session::new([3; 32], Way::FromGiver);
+        assert_eq!(s.open(&[0; 7]), None);
+        let mut other = Session::new([4; 32], Way::FromAsker);
+        assert_eq!(s.open(&other.seal(b"x")), None);
+        let mut peer = Session::new([3; 32], Way::FromAsker);
+        let mut f = peer.seal(b"x");
+        let last = f.len() - 1;
+        f[last] ^= 1;
+        assert_eq!(s.open(&f), None);
+        assert_eq!(s.open(&peer.seal(b"y")), Some(b"y".to_vec()));
     }
 
     #[test]
@@ -670,8 +1101,9 @@ mod tests {
         assert!(g
             .heard(&json!({"t": "join", "commit": "x"}), &fake_ecdh(&desk))
             .is_empty());
-        assert!(g.opened(&json!({"t": "welcome"}), 0).is_empty());
+        assert_eq!(g.sealed(b"{\"t\":\"welcome\"}", 0), (None, vec![]));
         assert!(g.answer(true, 0).is_empty());
+        assert!(g.seal(&json!({"t": "x"})).is_none());
         assert_eq!(g, before);
     }
 

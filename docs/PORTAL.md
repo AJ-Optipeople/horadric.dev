@@ -457,14 +457,41 @@ On a brother channel, until there is a key, frames are plain UTF-8 JSON:
   `"horadric join code v1"`, each over `s`, the asker's key and nonce,
   the giver's key and nonce, length led as above. The code is the first
   4 bytes big endian, mod 1,000,000, as six digits in two groups ("587
-  941"). The asker shows it; the giver asks the human, naming it.
-- Giver, on yes: `{"t":"welcome","name"}` sealed with the link key, as
-  phone frames are. On no: plain `{"t":"refused"}`, and it closes.
+  941"). Both sides ask their human, No the default: the giver "Laptop
+  wants to join. Let it in?", the asker "Does Desktop show the code 587
+  941?". The asker must confirm too: otherwise a relay playing the giver
+  (or listing a "Desktop" of its own) is kept with full control.
+- Both, on yes: `{"t":"welcome","name"}` as a link frame (below), under
+  the link's key from the asker's and giver's join nonces. A side keeps
+  the brother only once its own human said yes and the other side's
+  welcome opened; until then any other sealed frame is dropped. On no:
+  plain `{"t":"refused"}`, and it closes.
 
-A brother that joined before links again with `{"t":"hello","v":3,
-"kind":"brother","name"}` sealed with the link key, answered in kind. Of
-two joined brothers the one with the lower id asks for the channel when
-it sees the other in `brothers`.
+A brother that joined before links again. The asker sends
+`{"t":"hello","v":3,"kind":"brother","name","nonce"}` sealed with the
+long term key and the additional data `"horadric link hello v1"`,
+`"a"`. The giver answers with its own hello, a fresh `nonce`, sealed
+with the additional data `"horadric link hello v1"`, `"g"`, then the
+asker's nonce, so an old answer does not open for a new hello. The
+asker then sends `{"t":"ready"}` as the link's first frame, and the
+giver counts the link up only once that opens: a hello played again
+gets an answer and nothing more. Of two joined brothers the one with
+the lower id asks for the channel when it sees the other in
+`brothers`.
+
+Link frames, after the hellos or the welcomes, are sealed with the
+link's own key, SHA-256 of `"horadric link session v1"` over the long
+term key, the asker's nonce and the giver's, length led as above, so
+nothing from an earlier link opens. A frame is its number, 8 bytes big
+endian, then the AES-256-GCM payload as phone frames are, with the
+additional data `"horadric link frame v1"`, the way (`"a"` from the
+asker, `"g"` from the giver) and the number, 8 bytes big endian. Each
+side numbers its frames from 0 up and refuses a frame from its own way
+(one echoed back), one whose number is not above the last it opened
+(one played again), or one that does not open. Brothers joined or
+linked before this framing link again with no new join, since the long
+term key is unchanged, once both run it; one joined when only the giver
+confirmed the code should be joined again.
 
 A refused token closes the PC's socket with 4401: the PC drops its
 access token, refreshes it and tries again with the usual backoff. 4503

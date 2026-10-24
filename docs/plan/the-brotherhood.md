@@ -133,9 +133,11 @@ screen. What it lacks:
   ECDH P-256 key pair; the asker sends a commitment (a hash of its
   public key and a nonce) first, the giver answers with its key and
   nonce, then the asker reveals. Both work out the link key and a code
-  from the ECDH secret, both keys and both nonces, and show the code:
-  the asker in a note, the giver in the prompt, which says yes only if
-  the two match. The commitment makes the relay pick its keys before it
+  from the ECDH secret, both keys and both nonces, and both ask their
+  human whether the codes match, No by default. Each keeps the brother
+  only after its own yes and the other's welcome (fixed 2026-10-24: at
+  first only the giver asked, so a relay playing the giver was kept by
+  the asker with full control). The commitment makes the relay pick its keys before it
   learns an honest side's nonce, so a forged pair of codes matches one
   time in a million rather than after a short search, which is why six
   digits are enough where Signal's safety numbers, compared at leisure,
@@ -147,7 +149,11 @@ screen. What it lacks:
   public key and link key. This PC's own key pair is there too. A link
   comes back by itself: of two joined brothers the one with the lower id
   asks the relay for a channel when it sees the other listed, and a
-  hello sealed with the link key, answered in kind, is the proof. The
+  hello sealed with the link key, answered in kind, is the proof. Each
+  hello carries a fresh nonce, and every frame after is sealed with a
+  key of that link alone, bound to its way and a rising number, so the
+  relay cannot echo a frame back, play one again, or bring one from an
+  earlier link (a stale `state` heartbeat, an old `took`). The
   roster (`horadric-core/src/brotherhood.rs`) takes over from this file
   in step 3.
 
