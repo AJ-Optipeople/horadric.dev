@@ -1,39 +1,139 @@
-//! The light that moves inside a terminal's glass: motes rising while its
-//! agent works, a sweep when a turn ends, and the sparks a cursor sheds as
-//! it glides after a key.
+//! The light that moves inside a terminal's glass. While its agent works a
+//! comet runs round the rim, lighting the runes cut into it as it passes
+//! and flaring gold at every tool the agent casts. A typed letter is burnt
+//! into the glass white hot and cools to its own colour, and a deleted one
+//! crumbles to ash. A turn ending sweeps the glass and seals the ring.
 //!
-//! Like the rain, every spark is a function of the time and a seed alone,
-//! so a pane keeps no particles between frames, only when each burst
-//! began. Positions are in DIPs from the glass's top left corner.
+//! Like the rain, all of it is a function of the time alone, so a pane
+//! keeps no particles between frames, only when each burst began.
 
-use std::f32::consts::PI;
-use std::time::{Duration, Instant};
+use std::f32::consts::{FRAC_PI_2, PI};
+use std::time::{Duration, Instant, SystemTime};
 
+use alacritty_terminal::vte::ansi::Rgb;
 use horadric_core::Phase;
 
+use crate::frame::Frame;
 use crate::motion;
 use crate::theme::{self, Color};
-
-/// One point of light: where it is, how big, and how bright it burns.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Spark {
-    pub x: f32,
-    pub y: f32,
-    pub r: f32,
-    pub light: f32,
-}
 
 /// The line of light that runs down the glass when a turn ends.
 pub const SWEEP: Duration = Duration::from_millis(1100);
 /// The cursor sliding from one cell to the next. Short, so typing never
 /// feels behind the keys.
 pub const GLIDE: Duration = Duration::from_millis(70);
-/// How long the sparks a cursor sheds take to burn out.
-pub const TRAIL: Duration = Duration::from_millis(650);
-/// Between frames while only the motes rise. They drift slowly, and twenty
-/// frames a second of them looks nearly the same as sixty, while every
-/// frame redraws the whole grid of each working pane.
-pub const FRAME_MOTES: Duration = Duration::from_millis(50);
+/// One lap of the comet round the rim of a working pane.
+pub const LAP: Duration = Duration::from_millis(6500);
+/// A cast's gold flare racing ahead of the comet, and dying.
+pub const CAST: Duration = Duration::from_millis(1100);
+/// A rune cooling back to its cut after the light passed over it.
+pub const RUNE_COOL: Duration = Duration::from_millis(2000);
+/// Every rune flaring as a turn ends, and cooling.
+pub const SEAL: Duration = Duration::from_millis(1600);
+/// A typed letter cooling from white hot to its own colour.
+pub const BURN: Duration = Duration::from_millis(850);
+/// A deleted letter falling apart.
+pub const ASH: Duration = Duration::from_millis(900);
+/// Between frames while only the ring turns. The comet moves a few DIPs a
+/// frame at this beat and its tail hides the step, while every frame
+/// redraws the whole grid of each working pane.
+pub const FRAME_RING: Duration = Duration::from_millis(33);
+/// Between frames while only the cube turns.
+pub const FRAME_DRIFT: Duration = Duration::from_millis(50);
+/// The slices a deleted letter breaks into.
+pub const SHARDS: usize = 6;
+
+/// Runes cut round the rim this far apart, in DIPs.
+const RUNE_GAP: f32 = 56.0;
+/// How faintly a rune shows while no light is on it.
+const RUNE_CUT: f32 = 0.16;
+/// The ring coming and going as work starts and stops.
+const RING_FADE: Duration = Duration::from_millis(600);
+/// The summoning cube giving way to the agent's first screen.
+const SUMMON_FADE: Duration = Duration::from_millis(450);
+/// A cursor moving this soon after a key moved because of it. A program
+/// moving it about as it redraws would otherwise smear every frame.
+const TYPED: Duration = Duration::from_millis(150);
+/// The cursor jumping further than this, in DIPs, lands at once: a new
+/// prompt, a cleared screen.
+const LEAP: f32 = 400.0;
+/// More letters than this at once is a paste, not typing.
+const PASTE: usize = 48;
+/// The rim breathes this long after the agent begins waiting, then holds
+/// still: a pane left waiting over lunch should not draw all lunch.
+const BREATHE_FOR: Duration = Duration::from_secs(20);
+/// The cube gives up after this long. An agent that hangs before drawing,
+/// or a grid that stays empty, should not turn it all day.
+const SUMMON_FOR: Duration = Duration::from_secs(30);
+
+/// Elder runes as strokes in a box one high and about half wide, the top
+/// at 0. Each stroke is a polyline. Straight cuts only, as they were
+/// carved: a knife does not curve in wood.
+pub const RUNES: [&[&[(f32, f32)]]; 12] = [
+    // Fehu
+    &[
+        &[(-0.15, 0.0), (-0.15, 1.0)],
+        &[(-0.15, 0.3), (0.25, 0.0)],
+        &[(-0.15, 0.55), (0.25, 0.25)],
+    ],
+    // Uruz
+    &[&[(-0.2, 1.0), (-0.2, 0.0), (0.2, 0.3), (0.2, 1.0)]],
+    // Thurisaz
+    &[
+        &[(-0.15, 0.0), (-0.15, 1.0)],
+        &[(-0.15, 0.25), (0.22, 0.5), (-0.15, 0.75)],
+    ],
+    // Ansuz
+    &[
+        &[(-0.15, 0.0), (-0.15, 1.0)],
+        &[(-0.15, 0.0), (0.22, 0.25)],
+        &[(-0.15, 0.3), (0.22, 0.55)],
+    ],
+    // Raidho
+    &[&[
+        (-0.18, 1.0),
+        (-0.18, 0.0),
+        (0.2, 0.22),
+        (-0.18, 0.45),
+        (0.2, 1.0),
+    ]],
+    // Kenaz
+    &[&[(0.15, 0.1), (-0.15, 0.5), (0.15, 0.9)]],
+    // Hagalaz
+    &[
+        &[(-0.2, 0.0), (-0.2, 1.0)],
+        &[(0.2, 0.0), (0.2, 1.0)],
+        &[(-0.2, 0.35), (0.2, 0.65)],
+    ],
+    // Algiz
+    &[
+        &[(0.0, 0.0), (0.0, 1.0)],
+        &[(-0.28, 0.0), (0.0, 0.4), (0.28, 0.0)],
+    ],
+    // Tiwaz
+    &[
+        &[(0.0, 0.0), (0.0, 1.0)],
+        &[(-0.28, 0.3), (0.0, 0.0), (0.28, 0.3)],
+    ],
+    // Sowilo
+    &[&[(0.2, 0.0), (-0.2, 0.35), (0.2, 0.65), (-0.2, 1.0)]],
+    // Dagaz
+    &[&[
+        (-0.25, 0.0),
+        (-0.25, 1.0),
+        (0.25, 0.0),
+        (0.25, 1.0),
+        (-0.25, 0.0),
+    ]],
+    // Othala
+    &[&[
+        (-0.2, 1.0),
+        (0.2, 0.55),
+        (0.0, 0.3),
+        (-0.2, 0.55),
+        (0.2, 1.0),
+    ]],
+];
 
 /// FNV-1a over the words, stable across runs and builds.
 fn hash(words: &[u64]) -> u64 {
@@ -49,35 +149,613 @@ fn unit(words: &[u64]) -> f32 {
     (hash(words) % 10_000) as f32 / 10_000.0
 }
 
-/// The motes rising through glass `w` by `h` at `t` seconds. Each rises
-/// from the bottom on its own slow beat, swaying as it goes, and burns out
-/// before it reaches the top, so they gather low like the glow over a
-/// forge. Each `seed` has its own, so panes side by side differ.
-pub fn motes(seed: u64, w: f32, h: f32, t: f32) -> Vec<Spark> {
-    if w <= 0.0 || h <= 0.0 {
-        return Vec::new();
+/// A point on a ring and the way out of the ring there.
+pub type Place = ((f32, f32), (f32, f32));
+
+/// A rounded rectangle's outline, walked clockwise from the left end of
+/// its top edge.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Ring {
+    pub left: f32,
+    pub top: f32,
+    pub right: f32,
+    pub bottom: f32,
+    pub radius: f32,
+}
+
+impl Ring {
+    pub fn new(left: f32, top: f32, right: f32, bottom: f32, radius: f32) -> Self {
+        let (w, h) = ((right - left).max(0.0), (bottom - top).max(0.0));
+        Ring {
+            left,
+            top,
+            right: left + w,
+            bottom: top + h,
+            radius: radius.clamp(0.0, w.min(h) / 2.0),
+        }
     }
-    let count = (w / 28.0).clamp(4.0, 56.0) as u64;
-    (0..count)
-        .map(|i| {
-            let period = 5.0 + 6.0 * unit(&[seed, i, 1]);
-            let age = (t / period + unit(&[seed, i, 2])).rem_euclid(1.0);
-            // Each time round it comes up somewhere else.
-            let round = (t / period + unit(&[seed, i, 2])).floor() as u64;
-            let base = unit(&[seed, i, round, 3]) * w;
-            let sway = 6.0 + 14.0 * unit(&[seed, i, 4]);
-            let x = base + sway * (2.0 * PI * (age * 1.5 + unit(&[seed, i, 5]))).sin();
-            let climb = 0.35 + 0.45 * unit(&[seed, i, round, 6]);
-            let y = h * (1.0 - age * climb);
-            let flicker = 0.75 + 0.25 * (t * (5.0 + 7.0 * unit(&[seed, i, 7]))).sin();
-            Spark {
-                x: x.clamp(0.0, w),
-                y,
-                r: 1.0 + 1.8 * unit(&[seed, i, 8]),
-                light: (PI * age).sin().powf(1.5) * flicker,
+
+    fn sides(&self) -> (f32, f32, f32) {
+        let r = self.radius;
+        let across = self.right - self.left - 2.0 * r;
+        let down = self.bottom - self.top - 2.0 * r;
+        (across, down, FRAC_PI_2 * r)
+    }
+
+    pub fn length(&self) -> f32 {
+        let (across, down, corner) = self.sides();
+        2.0 * (across + down) + 4.0 * corner
+    }
+
+    /// The point `d` along the outline, any `d` wrapping round, and the
+    /// way out of the ring there.
+    pub fn at(&self, d: f32) -> Place {
+        let (across, down, corner) = self.sides();
+        let r = self.radius;
+        let mut d = d.rem_euclid(self.length().max(f32::EPSILON));
+        let arc = |cx: f32, cy: f32, from: f32, d: f32| {
+            let a = from + if r > 0.0 { d / r } else { 0.0 };
+            let n = (a.cos(), a.sin());
+            ((cx + r * n.0, cy + r * n.1), n)
+        };
+        let (l, t, rt, b) = (self.left, self.top, self.right, self.bottom);
+        let legs: [(f32, &dyn Fn(f32) -> Place); 8] = [
+            (across, &|d| ((l + r + d, t), (0.0, -1.0))),
+            (corner, &|d| arc(rt - r, t + r, -FRAC_PI_2, d)),
+            (down, &|d| ((rt, t + r + d), (1.0, 0.0))),
+            (corner, &|d| arc(rt - r, b - r, 0.0, d)),
+            (across, &|d| ((rt - r - d, b), (0.0, 1.0))),
+            (corner, &|d| arc(l + r, b - r, FRAC_PI_2, d)),
+            (down, &|d| ((l, b - r - d), (-1.0, 0.0))),
+            (corner, &|d| arc(l + r, t + r, PI, d)),
+        ];
+        for (len, leg) in legs {
+            if d <= len {
+                return leg(d);
             }
-        })
-        .collect()
+            d -= len;
+        }
+        legs[0].1(0.0)
+    }
+
+    /// Where the runes are cut: spread evenly along each straight side,
+    /// none on the corners, each a rune of its own picked by `seed`.
+    pub fn runes(&self, seed: u64) -> Vec<Cut> {
+        let (across, down, corner) = self.sides();
+        let mut cuts = Vec::new();
+        let mut start = 0.0;
+        for (side, len) in [across, down, across, down].into_iter().enumerate() {
+            let n = (len / RUNE_GAP).floor() as usize;
+            let gap = len / n.max(1) as f32;
+            for i in 0..n {
+                let d = start + gap * (i as f32 + 0.5);
+                let rune = hash(&[seed, side as u64, i as u64]) as usize % RUNES.len();
+                cuts.push(Cut { d, rune });
+            }
+            start += len + corner;
+        }
+        cuts
+    }
+}
+
+/// A rune cut into the rim: how far round, and which.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Cut {
+    pub d: f32,
+    pub rune: usize,
+}
+
+/// How far behind `from` the point `to` lies going round a ring `len`
+/// long, so always from 0 up to `len`.
+fn behind(from: f32, to: f32, len: f32) -> f32 {
+    (from - to).rem_euclid(len.max(f32::EPSILON))
+}
+
+/// How hot something still burns `since` seconds after it was lit, going
+/// out over `over`.
+pub fn cool(since: f32, over: Duration) -> f32 {
+    if since < 0.0 {
+        return 0.0;
+    }
+    (1.0 - since / over.as_secs_f32()).max(0.0).powi(2)
+}
+
+/// What lit a rune, for its colour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lit {
+    /// The comet, in the colour of work.
+    Work,
+    /// A cast's flare, in gold.
+    Cast,
+    /// The ring sealing as the turn ends, in the colour of a finished turn.
+    Seal,
+}
+
+/// A light running round the rim: its head, how long its tail, how bright.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Comet {
+    pub head: f32,
+    pub tail: f32,
+    pub light: f32,
+    pub lit: Lit,
+}
+
+/// What the ring shows at one moment.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RingLight {
+    pub comets: Vec<Comet>,
+    /// Each cut with how hot it burns and what lit it.
+    pub runes: Vec<(Cut, f32, Lit)>,
+}
+
+/// The ring of a working pane, as [`Glass::step`] leaves it for drawing.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Orbit {
+    /// Seconds the pane has had light, which places the comet.
+    pub t: f32,
+    pub seed: u64,
+    /// How far the ring has faded in.
+    pub strength: f32,
+    /// Seconds since each cast that still flares.
+    pub casts: Vec<f32>,
+    /// Seconds since the ring was sealed, while it still glows.
+    pub seal: Option<f32>,
+}
+
+impl Orbit {
+    /// Lays the ring onto `ring`, and onto `runes` cut a little inside it.
+    /// The two are walked at the same pace, so a rune lights as the comet
+    /// passes it.
+    pub fn light(&self, ring: &Ring, cuts: &[Cut]) -> RingLight {
+        let len = ring.length();
+        let speed = len / LAP.as_secs_f32();
+        let head = self.t * speed + unit(&[self.seed, 9]) * len;
+        let mut comets = Vec::new();
+        if self.strength > 0.0 {
+            comets.push(Comet {
+                head,
+                tail: (len * 0.3).clamp(80.0, 560.0),
+                light: self.strength,
+                lit: Lit::Work,
+            });
+        }
+        // A flare leaves from wherever the comet was when the tool was
+        // cast, and races a third of the way round as it dies.
+        let flares: Vec<(f32, f32, f32)> = self
+            .casts
+            .iter()
+            .map(|&e| {
+                let from = head - e * speed;
+                let k = e / CAST.as_secs_f32();
+                (from, from + len * 0.5 * motion::ease_out(k), e)
+            })
+            .collect();
+        for &(from, at, e) in &flares {
+            let k = e / CAST.as_secs_f32();
+            comets.push(Comet {
+                head: at,
+                tail: (at - from).clamp(0.0, 240.0),
+                light: (1.0 - k).max(0.0).powf(1.5),
+                lit: Lit::Cast,
+            });
+        }
+        let runes = cuts
+            .iter()
+            .map(|&c| {
+                let mut best = (RUNE_CUT * self.strength, Lit::Work);
+                let mut take = |heat: f32, lit: Lit| {
+                    if heat > best.0 {
+                        best = (heat, lit);
+                    }
+                };
+                let since = behind(head, c.d, len) / speed;
+                take(self.strength * cool(since, RUNE_COOL), Lit::Work);
+                for &(from, at, e) in &flares {
+                    let gone = behind(at, from, len);
+                    let reached = behind(c.d, from, len);
+                    if reached <= gone && gone > 0.0 {
+                        take(cool(e * (1.0 - reached / gone), RUNE_COOL), Lit::Cast);
+                    }
+                }
+                if let Some(s) = self.seal {
+                    // The seal runs round from the comet both ways at once.
+                    let away = behind(head, c.d, len).min(behind(c.d, head, len));
+                    take(cool(s - away / (len * 1.2), SEAL), Lit::Seal);
+                }
+                (c, best.0.min(1.0), best.1)
+            })
+            .collect();
+        RingLight { comets, runes }
+    }
+}
+
+/// The colour of a letter `heat` from white hot down to cold, and how much
+/// of it covers the letter's own colour.
+pub fn heat_color(heat: f32) -> Color {
+    let white = Color {
+        r: 1.0,
+        g: 0.97,
+        b: 0.88,
+        a: 1.0,
+    };
+    let gold = Color {
+        r: 1.0,
+        g: 0.74,
+        b: 0.28,
+        a: 1.0,
+    };
+    let ember = Color {
+        r: 0.90,
+        g: 0.32,
+        b: 0.08,
+        a: 1.0,
+    };
+    let h = heat.clamp(0.0, 1.0);
+    let c = if h > 0.6 {
+        gold.mix(white, (h - 0.6) / 0.4)
+    } else {
+        ember.mix(gold, h / 0.6)
+    };
+    // The last of the heat lets the letter's own colour through.
+    c.with_alpha((h / 0.35).min(1.0))
+}
+
+/// A slice of a falling apart letter: how far it has drifted, in cells,
+/// and how much is left of it. Slice 0 is the top.
+pub fn shard(seed: u64, slice: usize, t: f32) -> (f32, f32, f32) {
+    let i = slice as u64;
+    // The top goes first, as a page burns from where the flame licks.
+    let start = 0.35 * slice as f32 / SHARDS as f32 + 0.1 * unit(&[seed, i, 1]);
+    let k = ((t - start) / (1.0 - start)).clamp(0.0, 1.0);
+    let rise = (0.5 + 0.7 * unit(&[seed, i, 2])) * motion::ease_out(k);
+    let drift = (unit(&[seed, i, 3]) - 0.5) * 0.9 * k;
+    let left = 1.0 - motion::ease_in_out(k);
+    (drift, -rise, left)
+}
+
+/// The colour of ash `t` of the way through falling apart: the last of an
+/// ember, then grey.
+pub fn ash_color(t: f32) -> Color {
+    let ember = Color {
+        r: 0.95,
+        g: 0.45,
+        b: 0.15,
+        a: 1.0,
+    };
+    let grey = Color {
+        r: 0.42,
+        g: 0.40,
+        b: 0.38,
+        a: 1.0,
+    };
+    grey.mix(ember, (1.0 - t * 2.5).clamp(0.0, 1.0))
+}
+
+/// One cell's letter, as drawn.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Ink {
+    pub glyph: u16,
+    pub style: u8,
+    pub color: Rgb,
+}
+
+/// The letters along `row` of `frame`, `cols` wide, None where nothing is
+/// written. `blank` is the space's glyph in a style: a run carries the
+/// spaces between its words.
+pub fn line(frame: &Frame, row: usize, cols: usize, blank: impl Fn(u8) -> u16) -> Vec<Option<Ink>> {
+    let mut cells = vec![None; cols];
+    for r in frame.runs.iter().filter(|r| r.row == row) {
+        let space = blank(r.style);
+        for (i, &glyph) in r.glyphs.iter().enumerate() {
+            if glyph != 0 && glyph != space {
+                if let Some(c) = cells.get_mut(r.col + i) {
+                    *c = Some(Ink {
+                        glyph,
+                        style: r.style,
+                        color: r.color,
+                    });
+                }
+            }
+        }
+    }
+    cells
+}
+
+/// A letter being burnt in: where, what, and how hot.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Burn {
+    pub row: usize,
+    pub col: usize,
+    pub ink: Ink,
+    pub heat: f32,
+}
+
+/// A deleted letter falling apart: where it was, what it was, how far
+/// through, and its seed.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Ash {
+    pub row: usize,
+    pub col: usize,
+    pub ink: Ink,
+    pub t: f32,
+    pub seed: u64,
+}
+
+/// What moves inside a pane's glass besides its text. Empty when nothing
+/// does, which is most of the time.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct Fx {
+    /// The ring round a working pane's rim.
+    pub orbit: Option<Orbit>,
+    /// The cube turning while the session is summoned, behind the text,
+    /// at this time and this strength.
+    pub summon: Option<(f32, f32)>,
+    /// The line running down the glass as a turn ends: how far, how bright.
+    pub sweep: Option<(f32, f32)>,
+    pub burns: Vec<Burn>,
+    pub ashes: Vec<Ash>,
+    /// Where the gliding cursor is now, from the grid's top left, in place
+    /// of its cell.
+    pub caret: Option<(f32, f32)>,
+    /// The glass glowing in this colour while the agent waits on you, and
+    /// how far into a breath.
+    pub rim: Option<(Color, f32)>,
+    /// The rim still breathes, so it wants frames.
+    pub breathing: bool,
+}
+
+impl Fx {
+    /// How soon the next frame is wanted, None for no more. Anything that
+    /// flies takes every frame, the ring and the cube fewer, and a
+    /// breathing rim fewer still.
+    pub fn next_frame(&self) -> Option<Duration> {
+        let flaring = self
+            .orbit
+            .as_ref()
+            .is_some_and(|o| !o.casts.is_empty() || o.seal.is_some());
+        if self.caret.is_some()
+            || !self.burns.is_empty()
+            || !self.ashes.is_empty()
+            || self.sweep.is_some()
+            || flaring
+        {
+            Some(motion::FRAME_FAST)
+        } else if self.orbit.is_some() {
+            Some(FRAME_RING)
+        } else if self.summon.is_some() {
+            Some(FRAME_DRIFT)
+        } else if self.breathing {
+            Some(motion::FRAME_BREATH)
+        } else {
+            None
+        }
+    }
+}
+
+/// What a pane is showing as it draws, for [`Glass::step`].
+pub struct Seen<'a> {
+    /// Its session's phase, None for a pane with no agent behind it.
+    pub phase: Option<&'a Phase>,
+    /// When its agent last did something: a prompt, a tool.
+    pub cast: Option<SystemTime>,
+    /// The cursor's cell while the pane has the keyboard, drawn or not.
+    pub caret: Option<(usize, usize)>,
+    /// The letters on the cursor's row.
+    pub line: Vec<Option<Ink>>,
+    /// A cell's width and height, in DIPs.
+    pub cell: (f32, f32),
+    /// When a key last went to the program.
+    pub typed: Option<Instant>,
+    /// Nothing on the grid yet: the agent is still being summoned.
+    pub empty: bool,
+    /// Windows lets things move. Off, the glass holds still.
+    pub animate: bool,
+}
+
+/// Where a cursor went from and to, in DIPs.
+type Path = ((f32, f32), (f32, f32));
+
+/// The light in one pane's glass, kept from frame to frame: when each
+/// burst began and how far each fade has got.
+#[derive(Default)]
+pub struct Glass {
+    epoch: Option<Instant>,
+    last: Option<Instant>,
+    ring: f32,
+    summon: f32,
+    summoned: Option<Instant>,
+    phase: Option<Phase>,
+    /// The last cast heard, once a first frame has seen where things stand.
+    cast: Option<Option<SystemTime>>,
+    casts: Vec<Instant>,
+    sealed: Option<Instant>,
+    swept: Option<Instant>,
+    waiting: Option<Instant>,
+    caret: Option<(usize, usize)>,
+    line: Vec<Option<Ink>>,
+    glide: Option<(Instant, Path)>,
+    burns: Vec<(Instant, usize, usize, Ink)>,
+    ashes: Vec<(Instant, usize, usize, Ink, u64)>,
+    shed: u64,
+}
+
+impl Glass {
+    /// Moves everything on to `now` and says what to draw. `seed` keeps
+    /// this pane's ring its own.
+    pub fn step(&mut self, now: Instant, seed: u64, seen: &Seen) -> Fx {
+        let epoch = *self.epoch.get_or_insert(now);
+        let dt = self
+            .last
+            .replace(now)
+            .map_or(Duration::ZERO, |t| now.saturating_duration_since(t))
+            .min(Duration::from_millis(100));
+        let t = now.saturating_duration_since(epoch).as_secs_f32();
+
+        let was = std::mem::replace(&mut self.phase, seen.phase.cloned());
+        if seen.phase != was.as_ref() {
+            if seen.phase == Some(&Phase::Done) && was == Some(Phase::Working) {
+                self.swept = Some(now);
+                self.sealed = Some(now);
+            }
+            self.waiting = matches!(seen.phase, Some(Phase::Waiting(_))).then_some(now);
+        }
+        let working = seen.phase == Some(&Phase::Working);
+        if let Some(heard) = self.cast.replace(seen.cast) {
+            if heard != seen.cast && working && seen.animate {
+                self.casts.push(now);
+            }
+        }
+
+        self.typing(now, seen);
+
+        if !seen.animate {
+            *self = Glass {
+                phase: self.phase.clone(),
+                cast: self.cast,
+                waiting: self.waiting,
+                caret: self.caret,
+                line: std::mem::take(&mut self.line),
+                ..Glass::default()
+            };
+            return Fx {
+                rim: self.rim(seen, now, false).map(|(r, _)| r),
+                ..Fx::default()
+            };
+        }
+
+        self.ring = motion::fade(self.ring, working as u8 as f32, dt, RING_FADE);
+        let summoning = seen.empty
+            && seen
+                .phase
+                .is_some_and(|p| !matches!(p, Phase::Ended | Phase::Paused));
+        let since = if summoning {
+            *self.summoned.get_or_insert(now)
+        } else {
+            self.summoned = None;
+            now
+        };
+        let summoning = summoning && now.saturating_duration_since(since) < SUMMON_FOR;
+        self.summon = motion::fade(self.summon, summoning as u8 as f32, dt, SUMMON_FADE);
+
+        let age = |s: &Instant| now.saturating_duration_since(*s);
+        self.casts.retain(|s| age(s) < CAST);
+        self.sealed = self.sealed.filter(|s| age(s) < SEAL);
+        let sweep = self.swept.and_then(|s| sweep(age(&s)));
+        if sweep.is_none() {
+            self.swept = None;
+        }
+        self.burns.retain(|(s, ..)| age(s) < BURN);
+        self.ashes.retain(|(s, ..)| age(s) < ASH);
+        let caret = self.glide.and_then(|(s, (from, to))| {
+            let elapsed = age(&s);
+            (elapsed < GLIDE).then(|| glide(from, to, elapsed))
+        });
+        if caret.is_none() {
+            self.glide = None;
+        }
+
+        let orbit = (self.ring > 0.0 || self.sealed.is_some()).then(|| Orbit {
+            t,
+            seed,
+            strength: motion::ease_in_out(self.ring),
+            casts: self.casts.iter().map(|s| age(s).as_secs_f32()).collect(),
+            seal: self.sealed.map(|s| age(&s).as_secs_f32()),
+        });
+        let rim = self.rim(seen, now, true);
+        Fx {
+            orbit,
+            summon: (self.summon > 0.0).then_some((t, motion::ease_in_out(self.summon))),
+            sweep,
+            burns: self
+                .burns
+                .iter()
+                .map(|&(s, row, col, ink)| Burn {
+                    row,
+                    col,
+                    ink,
+                    heat: 1.0 - motion::progress(age(&s), BURN),
+                })
+                .collect(),
+            ashes: self
+                .ashes
+                .iter()
+                .map(|&(s, row, col, ink, seed)| Ash {
+                    row,
+                    col,
+                    ink,
+                    t: motion::progress(age(&s), ASH),
+                    seed,
+                })
+                .collect(),
+            caret,
+            rim: rim.map(|(r, _)| r),
+            breathing: rim.is_some_and(|(_, b)| b),
+        }
+    }
+
+    /// Reads what a key just did to the cursor's row. Letters that appeared
+    /// as the cursor moved right were typed and burn in. Letters that went
+    /// as it moved left were deleted and fall to ash. An arrow key moves it
+    /// over letters that stay, and nothing happens to them.
+    fn typing(&mut self, now: Instant, seen: &Seen) {
+        let moved = std::mem::replace(&mut self.caret, seen.caret);
+        let old = std::mem::replace(&mut self.line, seen.line.clone());
+        let (Some(from), Some(to)) = (moved, seen.caret) else {
+            self.glide = None;
+            return;
+        };
+        if from == to {
+            return;
+        }
+        let typed = seen
+            .typed
+            .is_some_and(|k| now.saturating_duration_since(k) < TYPED);
+        let (w, h) = seen.cell;
+        let dip = |(row, col): (usize, usize)| (col as f32 * w, row as f32 * h);
+        let (a, b) = (dip(from), dip(to));
+        let far = ((b.0 - a.0).powi(2) + (b.1 - a.1).powi(2)).sqrt();
+        if !(typed && seen.animate && far < LEAP) {
+            self.glide = None;
+            return;
+        }
+        let at = self.glide.map_or(a, |(s, (p, q))| {
+            glide(p, q, now.saturating_duration_since(s))
+        });
+        self.glide = Some((now, (at, b)));
+
+        let (row, new) = (to.0, &seen.line);
+        if from.0 != row || old.len() != new.len() {
+            return;
+        }
+        let glyph = |l: &[Option<Ink>], c: usize| l.get(c).copied().flatten().map(|i| i.glyph);
+        if to.1 > from.1 && to.1 - from.1 <= PASTE {
+            for col in from.1..to.1 {
+                if let Some(ink) = new[col].filter(|_| glyph(new, col) != glyph(&old, col)) {
+                    self.burns.push((now, row, col, ink));
+                }
+            }
+        } else if to.1 < from.1 && from.1 - to.1 <= PASTE {
+            for col in to.1..from.1 {
+                if let Some(ink) = old[col].filter(|_| glyph(new, col) != glyph(&old, col)) {
+                    self.shed = self.shed.wrapping_add(1);
+                    self.ashes.push((now, row, col, ink, self.shed));
+                }
+            }
+        }
+    }
+
+    /// The glass glowing round its edge while the agent waits on you, and
+    /// whether it still breathes. Steady when things may not move, and
+    /// once it has breathed a while.
+    fn rim(&self, seen: &Seen, now: Instant, breathe: bool) -> Option<((Color, f32), bool)> {
+        let phase = seen.phase.filter(|p| matches!(p, Phase::Waiting(_)))?;
+        let since = self
+            .waiting
+            .map(|s| now.saturating_duration_since(s))
+            .filter(|&e| breathe && e < BREATHE_FOR);
+        let breath = since.map_or(0.5, |e| motion::breathe(e, motion::BREATH));
+        Some(((theme::phase_color(phase), breath), since.is_some()))
+    }
 }
 
 /// The sweep `elapsed` after a turn ended: how far down the glass its line
@@ -100,296 +778,348 @@ pub fn glide(from: (f32, f32), to: (f32, f32), elapsed: Duration) -> (f32, f32) 
     (from.0 + (to.0 - from.0) * t, from.1 + (to.1 - from.1) * t)
 }
 
-/// The sparks a cursor shed as it went from `from` to `to`, `elapsed`
-/// after it left. They are shed along the way, fly off up and out, and
-/// burn out over [`TRAIL`], the first shed going first. A cursor that did
-/// not move sheds nothing.
-pub fn trail(seed: u64, from: (f32, f32), to: (f32, f32), elapsed: Duration) -> Vec<Spark> {
-    let (dx, dy) = (to.0 - from.0, to.1 - from.1);
-    let dist = (dx * dx + dy * dy).sqrt();
-    if dist < 0.5 || elapsed >= TRAIL {
-        return Vec::new();
-    }
-    // A keystroke moves the cursor one cell, and three sparks off a
-    // cell read as dust: each one throws a handful.
-    let count = (dist / 4.0).clamp(7.0, 16.0) as u64;
-    let s = elapsed.as_secs_f32();
-    (0..count)
-        .filter_map(|i| {
-            let along = (i as f32 + 0.5) / count as f32;
-            let born = TRAIL.as_secs_f32() * 0.25 * along;
-            let life = TRAIL.as_secs_f32() - born;
-            let age = s - born;
-            if age < 0.0 {
-                return None;
-            }
-            let left = 1.0 - age / life;
-            if left <= 0.0 {
-                return None;
-            }
-            let angle = -PI / 2.0 + (unit(&[seed, i, 1]) - 0.5) * 2.4;
-            let speed = 40.0 + 80.0 * unit(&[seed, i, 2]);
-            // Falls back a little as it slows, as an ember does.
-            let fall = 30.0 * age * age;
-            Some(Spark {
-                x: from.0 + dx * along + angle.cos() * speed * age,
-                y: from.1 + dy * along + angle.sin() * speed * age + fall,
-                r: 1.0 + 1.4 * unit(&[seed, i, 3]),
-                light: left * left,
-            })
-        })
-        .collect()
-}
-
-/// The motes coming and going as work starts and stops.
-const MOTES_FADE: Duration = Duration::from_millis(500);
-/// The summoning cube giving way to the agent's first screen.
-const SUMMON_FADE: Duration = Duration::from_millis(450);
-/// A cursor glides only when a key moved it this recently. A program
-/// moving it about as it redraws would leave a smear behind every frame.
-const TYPED: Duration = Duration::from_millis(150);
-/// The cursor jumping further than this, in DIPs, lands at once: a new
-/// prompt, a cleared screen.
-const LEAP: f32 = 400.0;
-/// The rim breathes this long after the agent begins waiting, then holds
-/// still: a pane left waiting over lunch should not draw all lunch.
-const BREATHE_FOR: Duration = Duration::from_secs(20);
-/// The cube gives up after this long. An agent that hangs before drawing,
-/// or a grid that stays empty, should not turn it all day.
-const SUMMON_FOR: Duration = Duration::from_secs(30);
-
-/// What moves inside a pane's glass besides its text. Empty when nothing
-/// does, which is most of the time.
-#[derive(Debug, Default, Clone, PartialEq)]
-pub struct Fx {
-    /// The motes rising while the agent works, behind the text: the
-    /// pane's seed, the time, and how far they have faded in.
-    pub motes: Option<(u64, f32, f32)>,
-    /// The cube turning while the session is summoned, behind the text,
-    /// at this time and this strength.
-    pub summon: Option<(f32, f32)>,
-    /// The line running down the glass as a turn ends: how far, how bright.
-    pub sweep: Option<(f32, f32)>,
-    /// Shed by the cursor as it glides, over the text, from the grid's
-    /// top left.
-    pub trail: Vec<Spark>,
-    /// Where the gliding cursor is now, from the grid's top left, in place
-    /// of its cell.
-    pub caret: Option<(f32, f32)>,
-    /// The glass glowing in this colour while the agent waits on you, and
-    /// how far into a breath.
-    pub rim: Option<(Color, f32)>,
-    /// The rim still breathes, so it wants frames.
-    pub breathing: bool,
-}
-
-impl Fx {
-    /// How soon the next frame is wanted, None for no more. Anything that
-    /// flies takes every frame. Motes and the cube drift and take fewer,
-    /// and a breathing rim fewer still.
-    pub fn next_frame(&self) -> Option<Duration> {
-        if self.caret.is_some() || !self.trail.is_empty() || self.sweep.is_some() {
-            Some(motion::FRAME_FAST)
-        } else if self.motes.is_some() || self.summon.is_some() {
-            Some(FRAME_MOTES)
-        } else if self.breathing {
-            Some(motion::FRAME_BREATH)
-        } else {
-            None
-        }
-    }
-}
-
-/// What a pane is showing as it draws, for [`Glass::step`].
-pub struct Seen<'a> {
-    /// Its session's phase, None for a pane with no agent behind it.
-    pub phase: Option<&'a Phase>,
-    /// The cursor's cell, from the grid's top left in DIPs, while it is
-    /// shown in the pane with the keyboard.
-    pub caret: Option<(f32, f32)>,
-    /// When a key last went to the program.
-    pub typed: Option<Instant>,
-    /// Nothing on the grid yet: the agent is still being summoned.
-    pub empty: bool,
-    /// Windows lets things move. Off, the glass holds still.
-    pub animate: bool,
-}
-
-/// Where a cursor went from and to.
-type Path = ((f32, f32), (f32, f32));
-
-/// The light in one pane's glass, kept from frame to frame: when each
-/// burst began and how far each fade has got.
-#[derive(Default)]
-pub struct Glass {
-    epoch: Option<Instant>,
-    last: Option<Instant>,
-    motes: f32,
-    summon: f32,
-    summoned: Option<Instant>,
-    phase: Option<Phase>,
-    swept: Option<Instant>,
-    waiting: Option<Instant>,
-    caret: Option<(f32, f32)>,
-    glide: Option<(Instant, Path)>,
-    trails: Vec<(Instant, u64, Path)>,
-    shed: u64,
-}
-
-impl Glass {
-    /// Moves everything on to `now` and says what to draw. `seed` keeps
-    /// this pane's motes its own.
-    pub fn step(&mut self, now: Instant, seed: u64, seen: &Seen) -> Fx {
-        let epoch = *self.epoch.get_or_insert(now);
-        let dt = self
-            .last
-            .replace(now)
-            .map_or(Duration::ZERO, |t| now.saturating_duration_since(t))
-            .min(Duration::from_millis(100));
-        let t = now.saturating_duration_since(epoch).as_secs_f32();
-
-        let was = std::mem::replace(&mut self.phase, seen.phase.cloned());
-        if seen.phase != was.as_ref() {
-            if seen.phase == Some(&Phase::Done) && was == Some(Phase::Working) {
-                self.swept = Some(now);
-            }
-            self.waiting = matches!(seen.phase, Some(Phase::Waiting(_))).then_some(now);
-        }
-
-        let moved = std::mem::replace(&mut self.caret, seen.caret);
-        if let (Some(from), Some(to)) = (moved, seen.caret) {
-            let typed = seen
-                .typed
-                .is_some_and(|k| now.saturating_duration_since(k) < TYPED);
-            let far = ((to.0 - from.0).powi(2) + (to.1 - from.1).powi(2)).sqrt();
-            if from != to && typed && far < LEAP && seen.animate {
-                // A glide under way starts the next from where it is now.
-                let at = self.glide.map_or(from, |(s, (a, b))| {
-                    glide(a, b, now.saturating_duration_since(s))
-                });
-                self.glide = Some((now, (at, to)));
-                self.shed = self.shed.wrapping_add(1);
-                self.trails.push((now, seed ^ self.shed, (from, to)));
-            } else if from != to {
-                self.glide = None;
-            }
-        } else {
-            self.glide = None;
-        }
-
-        if !seen.animate {
-            self.motes = 0.0;
-            self.summon = 0.0;
-            self.swept = None;
-            self.trails.clear();
-            return Fx {
-                rim: self.rim(seen, now, false).map(|(r, _)| r),
-                ..Fx::default()
-            };
-        }
-
-        let working = seen.phase == Some(&Phase::Working);
-        self.motes = motion::fade(self.motes, working as u8 as f32, dt, MOTES_FADE);
-        let summoning = seen.empty
-            && seen
-                .phase
-                .is_some_and(|p| !matches!(p, Phase::Ended | Phase::Paused));
-        let since = if summoning {
-            *self.summoned.get_or_insert(now)
-        } else {
-            self.summoned = None;
-            now
-        };
-        let summoning = summoning && now.saturating_duration_since(since) < SUMMON_FOR;
-        self.summon = motion::fade(self.summon, summoning as u8 as f32, dt, SUMMON_FADE);
-
-        let sweep = self
-            .swept
-            .and_then(|s| sweep(now.saturating_duration_since(s)));
-        if sweep.is_none() {
-            self.swept = None;
-        }
-        self.trails
-            .retain(|(s, ..)| now.saturating_duration_since(*s) < TRAIL);
-        let trail = self
-            .trails
-            .iter()
-            .flat_map(|&(s, seed, (from, to))| {
-                trail(seed, from, to, now.saturating_duration_since(s))
-            })
-            .collect();
-        let caret = self.glide.and_then(|(s, (from, to))| {
-            let elapsed = now.saturating_duration_since(s);
-            (elapsed < GLIDE).then(|| glide(from, to, elapsed))
-        });
-        if caret.is_none() {
-            self.glide = None;
-        }
-        let rim = self.rim(seen, now, true);
-        Fx {
-            motes: (self.motes > 0.0).then_some((seed, t, motion::ease_in_out(self.motes))),
-            summon: (self.summon > 0.0).then_some((t, motion::ease_in_out(self.summon))),
-            sweep,
-            trail,
-            caret,
-            rim: rim.map(|(r, _)| r),
-            breathing: rim.is_some_and(|(_, b)| b),
-        }
-    }
-
-    /// The glass glowing round its edge while the agent waits on you, and
-    /// whether it still breathes. Steady when things may not move, and
-    /// once it has breathed a while.
-    fn rim(&self, seen: &Seen, now: Instant, breathe: bool) -> Option<((Color, f32), bool)> {
-        let phase = seen.phase.filter(|p| matches!(p, Phase::Waiting(_)))?;
-        let since = self
-            .waiting
-            .map(|s| now.saturating_duration_since(s))
-            .filter(|&e| breathe && e < BREATHE_FOR);
-        let breath = since.map_or(0.5, |e| motion::breathe(e, motion::BREATH));
-        Some(((theme::phase_color(phase), breath), since.is_some()))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::frame::Run;
 
     const MS: fn(u64) -> Duration = Duration::from_millis;
 
-    #[test]
-    fn the_same_moment_has_the_same_motes() {
-        assert_eq!(motes(3, 600.0, 400.0, 7.5), motes(3, 600.0, 400.0, 7.5));
-        assert_ne!(motes(3, 600.0, 400.0, 7.5), motes(4, 600.0, 400.0, 7.5));
+    fn ring() -> Ring {
+        Ring::new(0.0, 0.0, 400.0, 300.0, 8.0)
     }
 
     #[test]
-    fn motes_stay_in_the_glass_and_drift_upward() {
-        let a = motes(1, 600.0, 400.0, 2.0);
-        let b = motes(1, 600.0, 400.0, 2.05);
-        assert!(!a.is_empty());
-        for s in &a {
-            assert!((0.0..=600.0).contains(&s.x), "{s:?}");
-            assert!((0.0..=400.0).contains(&s.y), "{s:?}");
-            assert!((0.0..=1.0).contains(&s.light), "{s:?}");
+    fn a_ring_is_as_long_as_its_outline() {
+        let r = ring();
+        let want = 2.0 * (384.0 + 284.0) + 2.0 * PI * 8.0;
+        assert!((r.length() - want).abs() < 0.01);
+        let square = Ring::new(0.0, 0.0, 10.0, 10.0, 0.0);
+        assert_eq!(square.length(), 40.0);
+    }
+
+    #[test]
+    fn walking_a_ring_goes_clockwise_and_comes_back() {
+        let r = ring();
+        let ((x, y), n) = r.at(0.0);
+        assert_eq!((x, y, n), (8.0, 0.0, (0.0, -1.0)));
+        let ((x, y), n) = r.at(384.0 + 4.0 * PI + 100.0);
+        assert!(
+            (x - 400.0).abs() < 0.01 && (y - 108.0).abs() < 0.01,
+            "{x},{y}"
+        );
+        assert_eq!(n, (1.0, 0.0));
+        let (p, _) = r.at(r.length() + 5.0);
+        assert!((p.0 - 13.0).abs() < 0.01 && p.1.abs() < 0.01);
+        for i in 0..200 {
+            let ((x, y), _) = r.at(i as f32 * r.length() / 200.0);
+            assert!((-0.01..=400.01).contains(&x) && (-0.01..=300.01).contains(&y));
         }
-        let risen = a.iter().zip(&b).filter(|(a, b)| b.y < a.y).count();
-        assert!(risen > a.len() / 2, "{risen} of {}", a.len());
     }
 
     #[test]
-    fn motes_burn_out_before_the_top() {
-        for t in 0..200 {
-            for s in motes(9, 800.0, 300.0, t as f32 * 0.1) {
-                assert!(s.y >= 300.0 * 0.15, "{s:?}");
+    fn a_tiny_ring_does_not_break() {
+        let r = Ring::new(5.0, 5.0, 5.0, 5.0, 8.0);
+        assert_eq!(r.length(), 0.0);
+        assert_eq!(r.at(3.0).0, (5.0, 5.0));
+        assert!(r.runes(1).is_empty());
+    }
+
+    #[test]
+    fn runes_are_cut_along_the_sides_not_the_corners() {
+        let r = ring();
+        let cuts = r.runes(3);
+        assert_eq!(cuts.len(), 2 * (384 / 56) + 2 * (284 / 56));
+        for c in &cuts {
+            let (_, n) = r.at(c.d);
+            assert!(n.0 == 0.0 || n.1 == 0.0, "{c:?} on a corner");
+            assert!(c.rune < RUNES.len());
+        }
+        assert_ne!(r.runes(3), r.runes(4));
+    }
+
+    #[test]
+    fn every_rune_fits_its_box() {
+        for rune in RUNES {
+            for stroke in rune {
+                assert!(stroke.len() >= 2);
+                for &(x, y) in *stroke {
+                    assert!((-0.3..=0.3).contains(&x) && (0.0..=1.0).contains(&y));
+                }
             }
         }
     }
 
+    fn orbit(t: f32) -> Orbit {
+        Orbit {
+            t,
+            seed: 1,
+            strength: 1.0,
+            casts: Vec::new(),
+            seal: None,
+        }
+    }
+
     #[test]
-    fn no_glass_has_no_motes() {
-        assert!(motes(1, 0.0, 400.0, 1.0).is_empty());
-        assert!(motes(1, 400.0, 0.0, 1.0).is_empty());
+    fn the_comet_lights_the_runes_it_passed_and_they_cool() {
+        let r = ring();
+        let cuts = r.runes(1);
+        let light = orbit(10.0).light(&r, &cuts);
+        let head = light.comets[0].head;
+        let len = r.length();
+        let heat = |d: f32| {
+            light
+                .runes
+                .iter()
+                .find(|(c, ..)| (c.d - d).abs() < 0.01)
+                .unwrap()
+                .1
+        };
+        // The rune just behind the head burns hotter than one further back,
+        // and both hotter than one the comet has yet to reach.
+        let mut by_behind: Vec<(f32, f32)> = cuts
+            .iter()
+            .map(|c| (behind(head, c.d, len), heat(c.d)))
+            .collect();
+        by_behind.sort_by(|a, b| a.0.total_cmp(&b.0));
+        assert!(by_behind[0].1 > by_behind[3].1);
+        assert!(by_behind[0].1 > by_behind.last().unwrap().1);
+        for (_, h) in &by_behind {
+            assert!((RUNE_CUT - 0.001..=1.0).contains(h));
+        }
+    }
+
+    #[test]
+    fn the_comet_goes_round_once_a_lap() {
+        let r = ring();
+        let a = orbit(1.0).light(&r, &[]).comets[0].head;
+        let b = orbit(1.0 + LAP.as_secs_f32()).light(&r, &[]).comets[0].head;
+        assert!(((b - a) - r.length()).abs() < 0.5);
+    }
+
+    #[test]
+    fn a_cast_flares_gold_ahead_and_dies() {
+        let r = ring();
+        let cuts = r.runes(1);
+        let early = Orbit {
+            casts: vec![0.3],
+            ..orbit(5.0)
+        }
+        .light(&r, &cuts);
+        let flare = early.comets.iter().find(|c| c.lit == Lit::Cast).unwrap();
+        assert!(flare.light > 0.3 && flare.head > early.comets[0].head);
+        assert!(early
+            .runes
+            .iter()
+            .any(|(_, h, l)| *l == Lit::Cast && *h > 0.5));
+        let late = Orbit {
+            casts: vec![CAST.as_secs_f32()],
+            ..orbit(5.0)
+        }
+        .light(&r, &cuts);
+        assert!(late
+            .comets
+            .iter()
+            .all(|c| c.lit != Lit::Cast || c.light == 0.0));
+    }
+
+    #[test]
+    fn a_seal_lights_every_rune_then_cools() {
+        let r = ring();
+        let cuts = r.runes(1);
+        let sealed = |s: f32| {
+            Orbit {
+                strength: 0.0,
+                seal: Some(s),
+                ..orbit(5.0)
+            }
+            .light(&r, &cuts)
+        };
+        assert!(sealed(0.9)
+            .runes
+            .iter()
+            .all(|(_, h, l)| *h > 0.0 && *l == Lit::Seal));
+        assert!(sealed(0.9).comets.is_empty());
+        assert!(sealed(SEAL.as_secs_f32() + 1.0)
+            .runes
+            .iter()
+            .all(|(_, h, _)| *h == 0.0));
+    }
+
+    #[test]
+    fn heat_runs_from_white_to_ember_and_lets_go() {
+        let hot = heat_color(1.0);
+        let warm = heat_color(0.5);
+        let cold = heat_color(0.0);
+        assert!(hot.b > warm.b && warm.g > cold.g);
+        assert_eq!(hot.a, 1.0);
+        assert_eq!(cold.a, 0.0);
+    }
+
+    #[test]
+    fn ash_rises_scatters_and_is_gone() {
+        for s in 0..SHARDS {
+            assert_eq!(shard(4, s, 0.0), (0.0, 0.0, 1.0));
+            let (_, up, left) = shard(4, s, 1.0);
+            assert!(up < -0.4 && left < 1e-6);
+        }
+        let (_, _, top) = shard(4, 0, 0.3);
+        let (_, _, bottom) = shard(4, SHARDS - 1, 0.3);
+        assert!(top <= bottom);
+        assert!(ash_color(0.0).r > ash_color(1.0).r);
+    }
+
+    const RED: Rgb = Rgb { r: 200, g: 0, b: 0 };
+
+    fn frame(text: &str, row: usize) -> Frame {
+        Frame {
+            background: Rgb { r: 0, g: 0, b: 0 },
+            fills: Vec::new(),
+            runs: vec![Run {
+                row,
+                col: 2,
+                style: 0,
+                color: RED,
+                glyphs: text.chars().map(|c| c as u16).collect(),
+            }],
+            loose: Vec::new(),
+            strokes: Vec::new(),
+            caret: None,
+        }
+    }
+
+    fn row(text: &str) -> Vec<Option<Ink>> {
+        line(&frame(text, 1), 1, 12, |_| ' ' as u16)
+    }
+
+    #[test]
+    fn a_line_has_letters_where_ink_is() {
+        let l = row("a b");
+        assert_eq!(l.len(), 12);
+        assert_eq!(l[2].map(|i| i.glyph), Some('a' as u16));
+        assert_eq!(l[3], None);
+        assert_eq!(l[4].map(|i| (i.glyph, i.color)), Some(('b' as u16, RED)));
+        assert!(line(&frame("a", 0), 1, 12, |_| 32)
+            .iter()
+            .all(Option::is_none));
+    }
+
+    fn seen(phase: Option<&Phase>) -> Seen<'_> {
+        Seen {
+            phase,
+            cast: None,
+            caret: None,
+            line: Vec::new(),
+            cell: (10.0, 20.0),
+            typed: None,
+            empty: false,
+            animate: true,
+        }
+    }
+
+    fn typing<'a>(col: usize, text: &str, typed: Option<Instant>) -> Seen<'a> {
+        Seen {
+            caret: Some((1, col)),
+            line: row(text),
+            typed,
+            ..seen(None)
+        }
+    }
+
+    #[test]
+    fn a_typed_letter_burns_in_and_cools() {
+        let mut g = Glass::default();
+        let t0 = Instant::now();
+        g.step(t0, 1, &typing(4, "ab", None));
+        let fx = g.step(t0 + MS(20), 1, &typing(5, "abc", Some(t0)));
+        assert_eq!(fx.burns.len(), 1);
+        let b = fx.burns[0];
+        assert_eq!((b.row, b.col, b.ink.glyph), (1, 4, 'c' as u16));
+        assert!(b.heat > 0.9);
+        assert!(fx.caret.is_some() && fx.next_frame() == Some(motion::FRAME_FAST));
+        let fx = g.step(t0 + MS(20) + BURN, 1, &typing(5, "abc", Some(t0)));
+        assert_eq!(fx, Fx::default());
+    }
+
+    #[test]
+    fn a_deleted_letter_falls_to_ash() {
+        let mut g = Glass::default();
+        let t0 = Instant::now();
+        g.step(t0, 1, &typing(5, "abc", None));
+        let fx = g.step(t0 + MS(20), 1, &typing(4, "ab", Some(t0)));
+        assert!(fx.burns.is_empty());
+        assert_eq!(fx.ashes.len(), 1);
+        assert_eq!((fx.ashes[0].col, fx.ashes[0].ink.glyph), (4, 'c' as u16));
+    }
+
+    #[test]
+    fn arrows_over_letters_change_nothing() {
+        let mut g = Glass::default();
+        let t0 = Instant::now();
+        g.step(t0, 1, &typing(5, "abc", None));
+        let fx = g.step(t0 + MS(20), 1, &typing(3, "abc", Some(t0)));
+        assert!(fx.burns.is_empty() && fx.ashes.is_empty());
+        let fx = g.step(t0 + MS(40), 1, &typing(5, "abc", Some(t0 + MS(30))));
+        assert!(fx.burns.is_empty() && fx.ashes.is_empty());
+    }
+
+    #[test]
+    fn a_program_redrawing_burns_nothing() {
+        let mut g = Glass::default();
+        let t0 = Instant::now();
+        g.step(t0, 1, &typing(4, "ab", None));
+        let fx = g.step(t0 + MS(500), 1, &typing(9, "abcdefg", Some(t0)));
+        assert!(fx.burns.is_empty() && fx.caret.is_none());
+    }
+
+    #[test]
+    fn work_turns_the_ring_and_casts_flare_it() {
+        let mut g = Glass::default();
+        let t0 = Instant::now();
+        let at = |cast: Option<SystemTime>| Seen {
+            cast,
+            ..seen(Some(&Phase::Working))
+        };
+        let c0 = SystemTime::UNIX_EPOCH;
+        // What was cast before the pane first looked is old news.
+        let fx = g.step(t0, 1, &at(Some(c0)));
+        assert!(fx.orbit.as_ref().is_none_or(|o| o.casts.is_empty()));
+        let mut fx = Fx::default();
+        for i in 1..=50 {
+            fx = g.step(t0 + MS(i * 16), 1, &at(Some(c0)));
+        }
+        let o = fx.orbit.clone().unwrap();
+        assert_eq!(o.strength, 1.0);
+        assert_eq!(fx.next_frame(), Some(FRAME_RING));
+        let fx = g.step(t0 + MS(820), 1, &at(Some(c0 + Duration::from_secs(1))));
+        assert_eq!(fx.orbit.as_ref().unwrap().casts.len(), 1);
+        assert_eq!(fx.next_frame(), Some(motion::FRAME_FAST));
+    }
+
+    #[test]
+    fn a_finished_turn_sweeps_and_seals_once() {
+        let mut g = Glass::default();
+        let t0 = Instant::now();
+        g.step(t0, 1, &seen(Some(&Phase::Working)));
+        let fx = g.step(t0 + MS(300), 1, &seen(Some(&Phase::Done)));
+        assert!(fx.sweep.is_some());
+        assert!(fx.orbit.unwrap().seal.is_some());
+        let mut later = t0 + MS(300);
+        let mut fx = Fx::default();
+        for _ in 0..200 {
+            later += MS(16);
+            fx = g.step(later, 1, &seen(Some(&Phase::Done)));
+        }
+        assert_eq!(fx, Fx::default());
+    }
+
+    #[test]
+    fn done_without_work_does_not_sweep() {
+        let mut g = Glass::default();
+        let t0 = Instant::now();
+        g.step(t0, 1, &seen(Some(&Phase::Idle)));
+        let fx = g.step(t0 + MS(16), 1, &seen(Some(&Phase::Done)));
+        assert!(fx.sweep.is_none() && fx.orbit.is_none());
     }
 
     #[test]
@@ -399,8 +1129,6 @@ mod tests {
         assert!(b > a);
         assert_eq!(sweep(MS(0)).map(|s| s.1), Some(0.0));
         assert!(sweep(SWEEP).is_none());
-        let (_, mid) = sweep(MS(400)).unwrap();
-        assert!(mid > 0.5);
     }
 
     #[test]
@@ -409,32 +1137,6 @@ mod tests {
         assert_eq!(glide((0.0, 0.0), (10.0, 20.0), GLIDE), (10.0, 20.0));
         let (x, _) = glide((0.0, 0.0), (10.0, 0.0), GLIDE / 2);
         assert!(x > 5.0, "eases out, so past halfway at half time");
-    }
-
-    #[test]
-    fn a_trail_burns_out() {
-        let from = (100.0, 100.0);
-        let to = (160.0, 100.0);
-        assert!(!trail(1, from, to, MS(40)).is_empty());
-        assert!(trail(1, from, to, TRAIL).is_empty());
-        let early: f32 = trail(1, from, to, MS(60)).iter().map(|s| s.light).sum();
-        let late: f32 = trail(1, from, to, MS(400)).iter().map(|s| s.light).sum();
-        assert!(late < early);
-    }
-
-    #[test]
-    fn a_cursor_that_stays_sheds_nothing() {
-        assert!(trail(1, (5.0, 5.0), (5.0, 5.0), MS(10)).is_empty());
-    }
-
-    fn seen(phase: Option<&Phase>) -> Seen<'_> {
-        Seen {
-            phase,
-            caret: None,
-            typed: None,
-            empty: false,
-            animate: true,
-        }
     }
 
     #[test]
@@ -448,55 +1150,6 @@ mod tests {
     }
 
     #[test]
-    fn motes_fade_in_while_working_and_out_after() {
-        let mut g = Glass::default();
-        let t0 = Instant::now();
-        g.step(t0, 1, &seen(Some(&Phase::Working)));
-        let mut fx = Fx::default();
-        for i in 1..=40 {
-            fx = g.step(t0 + MS(i * 16), 1, &seen(Some(&Phase::Working)));
-        }
-        assert_eq!(fx.motes.map(|m| m.2), Some(1.0));
-        assert!(fx.next_frame().is_some());
-        let mut later = t0 + MS(640);
-        for _ in 0..60 {
-            later += MS(16);
-            fx = g.step(later, 1, &seen(Some(&Phase::Idle)));
-        }
-        assert!(fx.motes.is_none());
-    }
-
-    #[test]
-    fn a_finished_turn_sweeps_once() {
-        let mut g = Glass::default();
-        let t0 = Instant::now();
-        g.step(t0, 1, &seen(Some(&Phase::Working)));
-        assert!(g
-            .step(t0 + MS(300), 1, &seen(Some(&Phase::Done)))
-            .sweep
-            .is_some());
-        assert!(g
-            .step(t0 + MS(600), 1, &seen(Some(&Phase::Done)))
-            .sweep
-            .is_some());
-        assert!(g
-            .step(t0 + MS(300) + SWEEP, 1, &seen(Some(&Phase::Done)))
-            .sweep
-            .is_none());
-    }
-
-    #[test]
-    fn done_without_work_does_not_sweep() {
-        let mut g = Glass::default();
-        let t0 = Instant::now();
-        g.step(t0, 1, &seen(Some(&Phase::Idle)));
-        assert!(g
-            .step(t0 + MS(16), 1, &seen(Some(&Phase::Done)))
-            .sweep
-            .is_none());
-    }
-
-    #[test]
     fn waiting_breathes_a_while_then_holds() {
         let mut g = Glass::default();
         let t0 = Instant::now();
@@ -506,39 +1159,6 @@ mod tests {
         let fx = g.step(t0 + BREATHE_FOR, 1, &seen(Some(&w)));
         assert!(fx.rim.is_some() && !fx.breathing);
         assert_eq!(fx.next_frame(), None);
-    }
-
-    #[test]
-    fn a_typed_key_glides_the_cursor_and_sheds_sparks() {
-        let mut g = Glass::default();
-        let t0 = Instant::now();
-        let at = |x: f32, typed: Option<Instant>| Seen {
-            caret: Some((x, 10.0)),
-            typed,
-            ..seen(None)
-        };
-        g.step(t0, 1, &at(0.0, None));
-        let fx = g.step(t0 + MS(5), 1, &at(9.0, Some(t0)));
-        let (x, _) = fx.caret.unwrap();
-        assert!(x < 9.0);
-        assert!(fx.next_frame().is_some());
-        let fx = g.step(t0 + MS(40), 1, &at(9.0, Some(t0)));
-        assert!(!fx.trail.is_empty());
-        let fx = g.step(t0 + MS(5) + TRAIL, 1, &at(9.0, Some(t0)));
-        assert_eq!(fx, Fx::default());
-    }
-
-    #[test]
-    fn a_program_moving_the_cursor_does_not_glide_it() {
-        let mut g = Glass::default();
-        let t0 = Instant::now();
-        let at = |x: f32| Seen {
-            caret: Some((x, 10.0)),
-            ..seen(None)
-        };
-        g.step(t0, 1, &at(0.0));
-        let fx = g.step(t0 + MS(5), 1, &at(90.0));
-        assert!(fx.caret.is_none() && fx.trail.is_empty());
     }
 
     #[test]
@@ -600,12 +1220,5 @@ mod tests {
             },
         );
         assert!(fx.rim.is_some() && fx.next_frame().is_none());
-    }
-
-    #[test]
-    fn sparks_fly_up_first() {
-        let s = trail(2, (0.0, 100.0), (50.0, 100.0), MS(80));
-        let mean = s.iter().map(|s| s.y).sum::<f32>() / s.len() as f32;
-        assert!(mean < 100.0, "{mean}");
     }
 }

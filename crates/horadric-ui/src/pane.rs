@@ -23,7 +23,7 @@ use std::ffi::c_void;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use alacritty_terminal::event::EventListener;
 use alacritty_terminal::grid::{Dimensions, Scroll};
@@ -93,7 +93,7 @@ use crate::links::{self, Target};
 use crate::motion::{self, REVEAL, SPOTLIGHT};
 use crate::paste::{self, Source};
 use crate::sanctuary;
-use crate::sparks::{Fx, Glass, Seen};
+use crate::sparks::{self, Fx, Glass, Seen};
 use crate::suggest::{self, Suggest};
 use crate::terminal::WM_STAGE_LAYOUT;
 use crate::theme::{self, Color};
@@ -896,12 +896,16 @@ impl Pane {
         if let Some(key) = &self.console.sky {
             detail = sanctuary::detail(key);
         }
-        let session_phase = self
+        let (session_phase, cast) = self
             .shared
             .registry
             .lock()
             .ok()
-            .and_then(|r| r.get(&self.console.id).map(|s| s.phase.clone()));
+            .and_then(|r| {
+                r.get(&self.console.id)
+                    .map(|s| (Some(s.phase.clone()), s.activity.last().copied()))
+            })
+            .unwrap_or_default();
         let phase = session_phase
             .as_ref()
             .and_then(|p| (theme::edge_strength(p) > 0.0).then(|| theme::phase_color(p)));
@@ -1036,7 +1040,7 @@ impl Pane {
             }
         }
         let rain = self.rain();
-        let fx = self.fx(&frame, at, &cell, session_phase);
+        let fx = self.fx(&frame, at, &cell, session_phase, cast);
         // A browser pane's header has its tabs and address besides, and its
         // frame is empty and cheap, so it always draws, and so does a pane
         // the rain moves behind.
@@ -1112,6 +1116,7 @@ impl Pane {
         at: Option<(usize, usize)>,
         cell: &CellSize,
         phase: Option<Phase>,
+        cast: Option<SystemTime>,
     ) -> Fx {
         let session = self.is_session() && self.console.exit_code().is_none();
         // An agent not yet heard from is still being summoned.
@@ -1121,12 +1126,19 @@ impl Pane {
         };
         // Where the cursor is parked, drawn or not: agents hide it and draw
         // their own, and a blink would break the glide.
-        let caret = at
-            .filter(|_| self.focused.get() && session)
-            .map(|(row, col)| (col as f32 * cell.w, row as f32 * cell.h));
+        let caret = at.filter(|_| self.focused.get() && session);
+        let font = &self.shared.font;
+        let line = caret.map_or_else(Vec::new, |(row, _)| {
+            sparks::line(frame, row, self.console.size().cols.into(), |style| {
+                font.glyph(' ', style)
+            })
+        });
         let seen = Seen {
             phase: phase.as_ref(),
+            cast,
             caret,
+            line,
+            cell: (cell.w, cell.h),
             typed: self.keyed.get(),
             empty: frame.runs.is_empty() && frame.loose.is_empty(),
             animate: crate::backdrop::animations_on(),

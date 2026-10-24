@@ -40,7 +40,7 @@ use crate::favicon::{self, Favicon};
 use crate::frame::{Decoration, Frame, BOLD, ITALIC};
 use crate::render::{self, hwnd_target, Gpu};
 use crate::sky::SkyFrame;
-use crate::sparks::{self, Fx, Spark};
+use crate::sparks::{self, Ash, Burn, Fx, Ink, Lit, Orbit, Ring};
 use crate::theme::{self, Color};
 use crate::{rain, summon, viewport};
 use horadric_core::sanctuary::Kind;
@@ -918,18 +918,15 @@ impl GridTarget {
             if let Some((t, strength)) = fx.summon {
                 self.summon(font, cell, &inner, t, strength);
             }
-            if let Some((seed, t, strength)) = fx.motes {
-                let (w, h) = (inner.right - inner.left, inner.bottom - inner.top);
-                let motes = sparks::motes(seed, w, h, t);
-                let ink = theme::palette().working;
-                self.sparks(&motes, (inner.left, inner.top), ink, 0.85 * strength);
-            }
 
             for f in &frame.fills {
                 self.brush.SetColor(&color(f.color));
                 self.rt
                     .FillRectangle(&rect(f.row, f.col, f.cells), &self.brush);
             }
+            // The glow of a letter being burnt in sits on its background,
+            // under every letter, so it lights its neighbours too.
+            self.forge_glow(cell, &fx.burns);
 
             let faces = font.faces.borrow();
             let mut advances: Vec<f32> = Vec::new();
@@ -1042,12 +1039,12 @@ impl GridTarget {
                     }
                 }
             }
-            if !fx.trail.is_empty() {
-                let p = theme::palette();
-                // From the middle of the cells the cursor crossed, not
-                // their corners.
-                let mid = (ox + cell.w / 2.0, oy + cell.h / 2.0);
-                self.sparks(&fx.trail, mid, p.unique, 1.0);
+            for b in &fx.burns {
+                let hot = sparks::heat_color(b.heat);
+                self.letter(font, cell, &b.ink, x(b.col), y(b.row), hot);
+            }
+            for a in &fx.ashes {
+                self.ash(font, cell, a, x(a.col), y(a.row));
             }
             if let Some((at, light)) = fx.sweep {
                 self.sweep(&inner, at, light);
@@ -1063,6 +1060,9 @@ impl GridTarget {
                 self.rt.PopAxisAlignedClip();
             }
             self.glass(&screen, header);
+            if let Some(o) = &fx.orbit {
+                self.orbit(&screen, o);
+            }
             if let Some((ink, breath)) = fx.rim {
                 self.rim(&screen, ink, breath);
             }
@@ -1568,47 +1568,196 @@ impl GridTarget {
         );
     }
 
-    /// Points of light, each a hot core in a soft halo, from `(ox, oy)`.
-    unsafe fn sparks(&self, sparks: &[Spark], (ox, oy): (f32, f32), ink: Color, strength: f32) {
+    /// One letter of the grid's font, its cell's top left at `(x, y)`.
+    unsafe fn letter(&self, font: &Font, cell: &CellSize, ink: &Ink, x: f32, y: f32, c: Color) {
+        if c.a <= 0.0 {
+            return;
+        }
+        let faces = font.faces.borrow();
+        let advance = cell.w;
+        let run = DWRITE_GLYPH_RUN {
+            fontFace: ManuallyDrop::new(Some(faces.faces[ink.style as usize & 3].clone())),
+            fontEmSize: font.size.get(),
+            glyphCount: 1,
+            glyphIndices: &ink.glyph,
+            glyphAdvances: &advance,
+            glyphOffsets: std::ptr::null(),
+            isSideways: false.into(),
+            bidiLevel: 0,
+        };
+        self.brush.SetColor(&render::color(c));
+        self.rt.DrawGlyphRun(
+            Vector2 {
+                X: x,
+                Y: y + cell.baseline,
+            },
+            &run,
+            &self.brush,
+            DWRITE_MEASURING_MODE_NATURAL,
+        );
+        let mut run = run;
+        ManuallyDrop::drop(&mut run.fontFace);
+    }
+
+    /// The heat round letters being burnt in, wider than the letter, so a
+    /// word typed fast glows as one bar cooling from its newest end.
+    unsafe fn forge_glow(&self, cell: &CellSize, burns: &[Burn]) {
+        if burns.is_empty() {
+            return;
+        }
+        let (ox, oy) = grid_origin();
         self.rt.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-        for s in sparks {
-            let light = (s.light * strength).clamp(0.0, 1.0);
-            if light < 0.02 {
-                continue;
+        for b in burns {
+            let h = b.heat * b.heat;
+            let point = Vector2 {
+                X: ox + (b.col as f32 + 0.5) * cell.w,
+                Y: oy + (b.row as f32 + 0.55) * cell.h,
+            };
+            for (grow, alpha) in [(1.0, 0.10), (0.6, 0.18)] {
+                let c = sparks::heat_color(b.heat * 0.85);
+                self.brush.SetColor(&render::color(c.with_alpha(alpha * h)));
+                self.rt.FillEllipse(
+                    &D2D1_ELLIPSE {
+                        point,
+                        radiusX: cell.w * (0.9 + 1.4 * grow * b.heat),
+                        radiusY: cell.h * (0.45 + 0.5 * grow * b.heat),
+                    },
+                    &self.brush,
+                );
             }
-            let at = Vector2 {
-                X: ox + s.x,
-                Y: oy + s.y,
-            };
-            self.brush
-                .SetColor(&render::color(ink.with_alpha(0.22 * light)));
-            self.rt.FillEllipse(
-                &D2D1_ELLIPSE {
-                    point: at,
-                    radiusX: s.r * 3.0,
-                    radiusY: s.r * 3.0,
-                },
-                &self.brush,
-            );
-            // The core runs hotter than its colour, nearly white, as a
-            // spark does.
-            let hot = Color {
-                r: ink.r + (1.0 - ink.r) * 0.6,
-                g: ink.g + (1.0 - ink.g) * 0.6,
-                b: ink.b + (1.0 - ink.b) * 0.6,
-                a: light,
-            };
-            self.brush.SetColor(&render::color(hot));
-            self.rt.FillEllipse(
-                &D2D1_ELLIPSE {
-                    point: at,
-                    radiusX: s.r,
-                    radiusY: s.r,
-                },
-                &self.brush,
-            );
         }
         self.rt.SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
+    }
+
+    /// A deleted letter coming apart: cut into slices that lift away and
+    /// burn out top first, from an ember's glow to grey.
+    unsafe fn ash(&self, font: &Font, cell: &CellSize, a: &Ash, x: f32, y: f32) {
+        let band = cell.h / sparks::SHARDS as f32;
+        let ink = sparks::ash_color(a.t);
+        for s in 0..sparks::SHARDS {
+            let (dx, dy, left) = sparks::shard(a.seed, s, a.t);
+            if left <= 0.01 {
+                continue;
+            }
+            let (sx, sy) = (x + dx * cell.w, y + dy * cell.h);
+            let top = sy + s as f32 * band;
+            self.rt.PushAxisAlignedClip(
+                &D2D_RECT_F {
+                    left: sx - 1.0,
+                    top,
+                    right: sx + cell.w + 1.0,
+                    bottom: top + band,
+                },
+                D2D1_ANTIALIAS_MODE_ALIASED,
+            );
+            self.letter(font, cell, &a.ink, sx, sy, ink.with_alpha(left));
+            self.rt.PopAxisAlignedClip();
+        }
+    }
+
+    /// The ring of a working pane: runes cut just inside the glass's rim,
+    /// and the comets running round the rim itself, lighting them.
+    unsafe fn orbit(&self, screen: &D2D_RECT_F, o: &Orbit) {
+        const EDGE: f32 = 1.5;
+        const CUT: f32 = PAD / 2.0;
+        const RUNE_H: f32 = 11.0;
+        let inset = |by: f32| {
+            Ring::new(
+                screen.left + by,
+                screen.top + by,
+                screen.right - by,
+                screen.bottom - by,
+                (SCREEN_RADIUS - by).max(2.0),
+            )
+        };
+        let (edge, cut) = (inset(EDGE), inset(CUT));
+        let cuts = cut.runes(o.seed);
+        let light = o.light(&cut, &cuts);
+        let p = theme::palette();
+        let tint = |lit: Lit| match lit {
+            Lit::Work => p.working,
+            Lit::Cast => p.unique,
+            Lit::Seal => p.done,
+        };
+        let white = Color {
+            r: 1.0,
+            g: 1.0,
+            b: 1.0,
+            a: 1.0,
+        };
+        let line = |a: (f32, f32), b: (f32, f32), c: Color, w: f32| {
+            self.brush.SetColor(&render::color(c));
+            self.rt.DrawLine(
+                Vector2 { X: a.0, Y: a.1 },
+                Vector2 { X: b.0, Y: b.1 },
+                &self.brush,
+                w,
+                None,
+            );
+        };
+
+        for &(c, heat, lit) in &light.runes {
+            if heat <= 0.01 {
+                continue;
+            }
+            let ((cx, cy), (nx, ny)) = cut.at(c.d);
+            // Upright on the top side, and so on round: each rune stands
+            // with its head to the rim.
+            let (tx, ty) = (-ny, nx);
+            let place = |(u, v): (f32, f32)| {
+                let up = (0.5 - v) * RUNE_H;
+                let across = u * RUNE_H;
+                (cx + nx * up + tx * across, cy + ny * up + ty * across)
+            };
+            let ink = tint(lit).mix(white, ((heat - 0.6) / 0.4).clamp(0.0, 1.0) * 0.6);
+            for stroke in sparks::RUNES[c.rune] {
+                for seg in stroke.windows(2) {
+                    let (a, b) = (place(seg[0]), place(seg[1]));
+                    if heat > 0.2 {
+                        line(a, b, ink.with_alpha(0.30 * heat), 5.0);
+                    }
+                    line(a, b, ink.with_alpha(heat), 1.4);
+                }
+            }
+        }
+
+        let scale = edge.length() / cut.length().max(1.0);
+        for comet in &light.comets {
+            if comet.light <= 0.01 || comet.tail <= 0.0 {
+                continue;
+            }
+            const STEPS: usize = 40;
+            let ink = tint(comet.lit);
+            let at = |k: usize| {
+                let d = comet.head - comet.tail * k as f32 / STEPS as f32;
+                edge.at(d * scale).0
+            };
+            for k in 0..STEPS {
+                let f = 1.0 - k as f32 / STEPS as f32;
+                let fall = comet.light * f * f;
+                let (a, b) = (at(k), at(k + 1));
+                line(a, b, ink.with_alpha(0.16 * fall), 10.0);
+                let core = ink.mix(white, 0.55 * f.powi(4));
+                line(a, b, core.with_alpha(0.95 * fall), 0.8 + 2.6 * f);
+            }
+            let (hx, hy) = at(0);
+            let point = Vector2 { X: hx, Y: hy };
+            for (r, c) in [
+                (16.0, ink.with_alpha(0.14 * comet.light)),
+                (7.0, ink.with_alpha(0.30 * comet.light)),
+                (3.0, ink.mix(white, 0.75).with_alpha(comet.light)),
+            ] {
+                self.brush.SetColor(&render::color(c));
+                self.rt.FillEllipse(
+                    &D2D1_ELLIPSE {
+                        point,
+                        radiusX: r,
+                        radiusY: r,
+                    },
+                    &self.brush,
+                );
+            }
+        }
     }
 
     /// The line of light running down the glass as a turn ends, with a
