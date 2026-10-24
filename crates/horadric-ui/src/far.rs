@@ -83,6 +83,9 @@ pub(super) struct Far {
     /// Sessions to bring onto the stage once they run: started or resumed
     /// from here.
     showing: HashSet<String>,
+    /// Each brother's session's phase as last looked at, so a turn done
+    /// there chimes here without being journaled here.
+    pub(super) phases: HashMap<String, horadric_core::Phase>,
 }
 
 fn wake(notify: isize) {
@@ -122,6 +125,7 @@ impl Far {
             consoles: HashMap::new(),
             asks: Arc::default(),
             showing: HashSet::new(),
+            phases: HashMap::new(),
         }
     }
 }

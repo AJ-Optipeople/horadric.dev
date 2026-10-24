@@ -8148,6 +8148,13 @@ impl App {
         let mut dropped = false;
         if let Ok(r) = self.shared.registry.lock() {
             for s in r.all() {
+                if s.brother.is_some() {
+                    // Journaled where it runs: here it would count twice in
+                    // the history and the stats. A turn done still chimes.
+                    let before = self.far.phases.insert(s.id.clone(), s.phase.clone());
+                    dropped |= s.phase == Phase::Done && before.is_some_and(|b| b != s.phase);
+                    continue;
+                }
                 seen.insert(s.id.clone());
                 let (project, name) = (project_key(s), s.label().to_string());
                 let before = self.journaled.insert(
@@ -8186,6 +8193,9 @@ impl App {
                     what,
                 });
             }
+        }
+        if let Ok(r) = self.shared.registry.lock() {
+            self.far.phases.retain(|id, _| r.get(id).is_some());
         }
         let gone: Vec<String> = self
             .journaled
