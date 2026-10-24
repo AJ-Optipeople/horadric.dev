@@ -75,6 +75,9 @@ struct State {
     arriving: Arriving,
     /// The line each adopted session's next prompt starts with.
     first: HashMap<String, String>,
+    /// The roster's number of each session handed here, to say `took`
+    /// again to a sender whose link dropped before it heard it.
+    took: HashMap<String, u64>,
     /// The brother every session is leaving for.
     leaving: Option<String>,
     /// Sessions whose handoff failed while leaving, so they are not tried
@@ -457,6 +460,9 @@ impl App {
                 !l.record.interrupted,
             );
             let result = self.adopt_landed(&l.record, l.landed, first);
+            if let Ok(id) = &result {
+                with(|s| s.took.insert(id.clone(), l.record.n + 1));
+            }
             let _ = l.done.send(result);
         }
     }
@@ -464,7 +470,10 @@ impl App {
     /// The receiver runs the session: the tile goes, and its worktree with
     /// it, since the work is on the receiver now.
     fn let_go(&mut self, id: &str, to: &str, _n: u64) {
-        with(|s| s.out.remove(id));
+        with(|s| {
+            s.out.remove(id);
+            s.took.remove(id);
+        });
         let (tree, cwd, session) = match self.shared.registry.lock() {
             Ok(mut r) => match r.get_mut(id) {
                 Some(s) => (
@@ -506,7 +515,12 @@ impl App {
         let step = match t {
             "bases" => match handing::heard_bases(msg) {
                 (known, true) => o.heard_bases(known),
-                (_, false) => Do::Fail(format!("{name} has no checkout of this project")),
+                (_, false) if matches!(o.stage, handing::Stage::Bases(_)) => {
+                    Do::Fail(format!("{name} has no checkout of this project"))
+                }
+                // The ask again after a drop, from a receiver that does
+                // not run it (yet): the time limit decides.
+                (_, false) => Do::Wait,
             },
             "took" => o.heard_took(handing::heard_took(msg)),
             _ => Do::Fail(format!(
@@ -528,13 +542,23 @@ impl App {
     ) -> Option<Box<dyn FnOnce() -> Value + Send>> {
         let id = msg["id"].as_str().unwrap_or("").to_string();
         if msg["t"] == "bases" {
+            // A session handed here already: the sender asks again because
+            // its link dropped before it heard `took`.
+            let runs = self
+                .shared
+                .registry
+                .lock()
+                .is_ok_and(|r| r.get(&id).is_some_and(|s| s.brother.is_none()));
+            if let Some(n) = with(|s| s.took.get(&id).copied()).filter(|_| runs) {
+                return Some(Box::new(move || took_message(&id, n)));
+            }
             let repo: RepoId = serde_json::from_value(msg["repo"].clone()).unwrap_or_default();
             let checkout = self.checkout_of(&repo);
             return Some(Box::new(move || {
                 bases_answer(&id, checkout.map(|c| handoff::known_commits(&c)))
             }));
         }
-        let package = match with(|s| s.arriving.take(who, msg)) {
+        let package = match with(|s| s.arriving.take(who, msg, unix_now())) {
             Ok(None) => return None,
             Ok(Some(p)) => p,
             Err(e) => return Some(Box::new(move || refused(&id, &e))),

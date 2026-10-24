@@ -583,8 +583,25 @@ Each step is useful alone and each is verified before the next starts.
    worktree leaves its changes there as well, since removing a human's
    uncommitted work is not the handoff's to do; the tile does not keep
    its place, it moves to the brother's cluster; `handoff` asked by a
-   brother over the wire is served but no UI sends it yet; a brother
-   channel was not tried, only the phone door.
+   brother over the wire is served but no UI sends it yet.
+
+   Seen with a model turn on 2026-10-24, "Alpha" and "Beta" over their
+   linked brother channel, haiku in a scratch repository: turn 1 on
+   Alpha took the codeword TANGERINE, changed `app.py` and left
+   `notes.txt` untracked; handed from the tile between turns, Beta's
+   next turn named the codeword and both files and appended to
+   `notes.txt` in its worktree, the moved line in its prompt's context.
+   Handed back, then to Beta again with "Now" during a 60 second ping:
+   the turn was cut, and Beta's next turn named both codewords and
+   finished the edit left undone. One `claude.exe` ran throughout.
+   Alpha shows the moved tile in "repo-b · Beta" with Beta's mark. A
+   review found and fixed on the way: a link that drops after the parts
+   went no longer fails the handoff (only the 180 second limit does),
+   the sender asks `bases` again once back and a receiver that runs the
+   session answers `took`; a part's `of` is capped at 2048 and a brother
+   at 4 half sent bundles, quiet ones dropped after 10 minutes; a first
+   part starts its bundle over; a `prefix` that leads out of the
+   worktree lands at its top.
 11. **Handoff to and from a Linux node.** The same over `--stdio`, and the
     path rewrite between Windows and Linux. Verified against the VPS both
     ways.

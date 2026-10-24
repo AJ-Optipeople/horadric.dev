@@ -8,7 +8,9 @@
 //! of its own: before cutting the bundle the sender asks the receiver
 //! which commits it has, `{"t":"bases","id","repo"}`, answered with
 //! `{"t":"bases","id","commits","found"}`, so the bundle holds only what
-//! the receiver lacks.
+//! the receiver lacks. Asked again after the link dropped while the
+//! sender waited for `took`, a receiver that already runs the session
+//! answers with `took` instead.
 //!
 //! The sender keeps the session until the receiver says it runs. A
 //! handoff that fails on the way leaves it paused where it was, its work
@@ -94,6 +96,9 @@ pub struct Outgoing {
     /// Its last turn ended by itself rather than by an interrupt.
     pub clean: bool,
     pub stage: Stage,
+    /// The link dropped after the parts went, so the receiver's `took`
+    /// may have been lost with it and is asked for again once it is back.
+    pub lost: bool,
 }
 
 impl Outgoing {
@@ -104,6 +109,7 @@ impl Outgoing {
             now,
             clean: true,
             stage: Stage::Turn,
+            lost: false,
         }
     }
 
@@ -135,12 +141,23 @@ impl Outgoing {
                 self.stage = Stage::Bases(at);
                 Do::AskBases
             }
-            Stage::Bases(_) | Stage::Took(_) if !linked => self.fail("is out of reach"),
+            Stage::Bases(_) if !linked => self.fail("is out of reach"),
             Stage::Bases(since) if at.saturating_sub(since) >= BASES_SECS => {
                 self.fail("did not answer")
             }
             Stage::Took(since) if at.saturating_sub(since) >= TOOK_SECS => {
                 self.fail("did not say it runs the session")
+            }
+            // Once the parts are out the receiver may already run it, so a
+            // link that drops fails nothing: only the time limit does.
+            Stage::Sending | Stage::Took(_) if !linked => {
+                self.lost = true;
+                Do::Wait
+            }
+            // Asked again, a receiver that runs it answers `took` anew.
+            Stage::Took(_) if self.lost => {
+                self.lost = false;
+                Do::AskBases
             }
             _ => Do::Wait,
         }
@@ -169,10 +186,13 @@ impl Outgoing {
         }
     }
 
-    /// The receiver said it runs the session, as number `n`.
+    /// The receiver said it runs the session, as number `n`. Heard while
+    /// asking for commits too: a receiver that runs it from a handoff this
+    /// side gave up on answers the ask with `took`, and two copies must
+    /// not run.
     pub fn heard_took(&mut self, n: u64) -> Do {
         match self.stage {
-            Stage::Sending | Stage::Took(_) => Do::LetGo(n),
+            Stage::Bases(_) | Stage::Sending | Stage::Took(_) => Do::LetGo(n),
             _ => Do::Wait,
         }
     }
@@ -237,24 +257,52 @@ pub fn refused(id: &str, text: &str) -> Value {
     json!({"t": "error", "for": "bundle", "id": id, "text": text})
 }
 
-/// The bundles arriving from brothers, by who sends them and the session.
+/// How many bundles one brother may have half sent at once.
+pub const JOINERS_PER_BROTHER: usize = 4;
+/// How long a half sent bundle is kept with no part arriving, in seconds.
+pub const JOINER_SECS: u64 = 600;
+
+/// The bundles arriving from brothers, by who sends them and the session,
+/// with when each last heard a part.
 #[derive(Debug, Default)]
 pub struct Arriving {
-    joiners: HashMap<(String, String), Joiner>,
+    joiners: HashMap<(String, String), (Joiner, u64)>,
 }
 
 impl Arriving {
-    /// Takes one `bundle` message from `who`: the whole package once its
-    /// last part is in. A part that does not fit drops what came of that
-    /// session so far, so a sender that starts over is heard afresh.
-    pub fn take(&mut self, who: &str, msg: &Value) -> Result<Option<Package>, String> {
+    /// Takes one `bundle` message from `who` at time `at`, in seconds: the
+    /// whole package once its last part is in. A part that does not fit
+    /// drops what came of that session so far, and a first part starts
+    /// over, so a sender that tries again is heard afresh. Bundles quiet
+    /// for [`JOINER_SECS`] are dropped, and a brother past
+    /// [`JOINERS_PER_BROTHER`] loses its oldest.
+    pub fn take(&mut self, who: &str, msg: &Value, at: u64) -> Result<Option<Package>, String> {
         let part: Part =
             serde_json::from_value(msg.clone()).map_err(|_| "not a bundle part".to_string())?;
+        self.joiners
+            .retain(|_, (_, heard)| at.saturating_sub(*heard) < JOINER_SECS);
         let key = (who.to_string(), part.id.clone());
-        let joiner = self
+        if part.part == 0 {
+            self.joiners.remove(&key);
+        }
+        if !self.joiners.contains_key(&key) {
+            let mut theirs: Vec<(u64, String)> = self
+                .joiners
+                .iter()
+                .filter(|((w, _), _)| w == who)
+                .map(|((_, id), (_, heard))| (*heard, id.clone()))
+                .collect();
+            theirs.sort();
+            let over = (theirs.len() + 1).saturating_sub(JOINERS_PER_BROTHER);
+            for (_, id) in theirs.into_iter().take(over) {
+                self.joiners.remove(&(who.to_string(), id));
+            }
+        }
+        let (joiner, heard) = self
             .joiners
             .entry(key.clone())
-            .or_insert_with(|| Joiner::new(&part.id));
+            .or_insert_with(|| (Joiner::new(&part.id), at));
+        *heard = at;
         match joiner.add(&part) {
             Ok(None) => Ok(None),
             Ok(Some(bytes)) => {
@@ -338,6 +386,17 @@ fn scratch(what: &str) -> PathBuf {
     ))
 }
 
+/// The session's folder in the worktree `folder`: the subfolder `prefix`
+/// it ran in, or the top when the sender's prefix would lead out of the
+/// worktree, since that folder is trusted and resumed in.
+fn landed_cwd(folder: &str, prefix: &str) -> PathBuf {
+    if handoff::safe_relative(prefix) {
+        Path::new(folder).join(native(prefix))
+    } else {
+        PathBuf::from(folder)
+    }
+}
+
 /// A handed off session on the receiver, ready to resume.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Landed {
@@ -391,10 +450,7 @@ pub fn land(package: &Package, repo: &Path, projects: &Path) -> Result<Landed, S
     );
     let _ = std::fs::remove_file(&bundle);
     let commit = applied?;
-    let cwd = match r.prefix.as_str() {
-        "" => PathBuf::from(&folder),
-        prefix => Path::new(&folder).join(native(prefix)),
-    };
+    let cwd = landed_cwd(&folder, &r.prefix);
     let cwd_text = cwd.to_string_lossy().into_owned();
     let to_folder = projects.join(transcript_key(&cwd_text));
     file_transcript(
@@ -445,7 +501,6 @@ mod tests {
         assert!(!o.stopped());
         assert_eq!(o.tick(true, true, 2), Do::AskBases);
         assert!(o.stopped());
-        assert_eq!(o.heard_took(1), Do::Wait, "a took before the bundle is not");
         assert_eq!(
             o.heard_bases(vec!["c1".into()]),
             Do::Pack {
@@ -500,6 +555,26 @@ mod tests {
     }
 
     #[test]
+    fn a_link_that_drops_after_the_parts_went_asks_again_rather_than_failing() {
+        let mut o = Outgoing::new("s1", "Desktop", false);
+        o.tick(true, true, 0);
+        o.heard_bases(vec![]);
+        assert_eq!(o.tick(true, false, 1), Do::Wait, "dropped while sending");
+        o.sent(2);
+        assert_eq!(o.tick(true, false, 3), Do::Wait, "the receiver may run it");
+        assert_eq!(o.tick(true, true, 4), Do::AskBases, "asked again once back");
+        assert_eq!(o.tick(true, true, 5), Do::Wait, "asked once");
+        assert!(matches!(o.tick(true, false, 2 + TOOK_SECS), Do::Fail(_)));
+        let mut o = Outgoing::new("s1", "Desktop", false);
+        o.tick(true, true, 0);
+        assert_eq!(
+            o.heard_took(7),
+            Do::LetGo(7),
+            "a receiver that already runs it answers the ask with took"
+        );
+    }
+
+    #[test]
     fn the_wire_reads_back() {
         let repo = RepoId {
             remotes: vec!["github.com/a/b".into()],
@@ -535,14 +610,63 @@ mod tests {
         assert_eq!(parts.len(), 2);
         let msg = |i: usize| serde_json::to_value(&parts[i]).unwrap();
         let mut a = Arriving::default();
-        assert_eq!(a.take("Laptop", &msg(1)).unwrap(), None);
-        assert_eq!(a.take("Other", &msg(0)).unwrap(), None, "another sender's");
-        assert_eq!(a.take("Laptop", &msg(0)).unwrap(), Some(p.clone()));
+        assert_eq!(a.take("Laptop", &msg(0), 0).unwrap(), None);
+        assert_eq!(
+            a.take("Other", &msg(0), 0).unwrap(),
+            None,
+            "another sender's"
+        );
+        assert_eq!(a.take("Laptop", &msg(1), 0).unwrap(), Some(p.clone()));
         let mut bad = msg(1);
         bad["of"] = json!(5);
-        assert!(a.take("Other", &bad).is_err());
-        assert_eq!(a.take("Other", &msg(1)).unwrap(), None, "heard afresh");
-        assert!(a.take("Laptop", &json!({"t": "bundle"})).is_err());
+        assert!(a.take("Other", &bad, 0).is_err());
+        assert_eq!(a.take("Other", &msg(1), 0).unwrap(), None, "heard afresh");
+        assert!(a.take("Laptop", &json!({"t": "bundle"}), 0).is_err());
+
+        // A retry after a partial send starts over, though its bytes differ.
+        let mut p2 = p.clone();
+        p2.work[0] = 8;
+        let parts2 = split("s1", &pack(&p2));
+        let msg2 = |i: usize| serde_json::to_value(&parts2[i]).unwrap();
+        let mut a = Arriving::default();
+        assert_eq!(a.take("Laptop", &msg(0), 0).unwrap(), None);
+        assert_eq!(a.take("Laptop", &msg2(0), 1).unwrap(), None);
+        assert_eq!(a.take("Laptop", &msg2(1), 2).unwrap(), Some(p2));
+
+        // Quiet bundles go, and one brother holds only so many at once.
+        let mut a = Arriving::default();
+        let first = |id: &str| {
+            let mut m = msg(0);
+            m["id"] = json!(id);
+            m
+        };
+        a.take("Laptop", &first("old"), 0).unwrap();
+        assert_eq!(a.joiners.len(), 1);
+        a.take("Laptop", &first("new"), JOINER_SECS).unwrap();
+        assert_eq!(a.joiners.len(), 1, "the quiet one went");
+        for i in 0..JOINERS_PER_BROTHER + 2 {
+            a.take(
+                "Laptop",
+                &first(&format!("s{i}")),
+                JOINER_SECS + 1 + i as u64,
+            )
+            .unwrap();
+        }
+        a.take("Other", &first("x"), JOINER_SECS + 10).unwrap();
+        let laptop = a.joiners.keys().filter(|(w, _)| w == "Laptop").count();
+        assert_eq!(laptop, JOINERS_PER_BROTHER);
+        assert!(!a.joiners.contains_key(&("Laptop".into(), "new".into())));
+        assert!(a.joiners.contains_key(&("Other".into(), "x".into())));
+    }
+
+    #[test]
+    fn a_prefix_that_leads_out_of_the_worktree_lands_at_its_top() {
+        let top = PathBuf::from("w");
+        assert_eq!(landed_cwd("w", ""), top);
+        assert_eq!(landed_cwd("w", "../elsewhere"), top);
+        assert_eq!(landed_cwd("w", "C:/Windows"), top);
+        assert_eq!(landed_cwd("w", "a/../.."), top);
+        assert_eq!(landed_cwd("w", "src/app"), top.join(native("src/app")));
     }
 
     #[test]

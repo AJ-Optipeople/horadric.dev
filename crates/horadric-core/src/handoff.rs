@@ -27,6 +27,10 @@ pub const HANDOFF_REFS: &str = "refs/horadric/handoff/";
 /// which leaves room for the rest of the message.
 pub const PART_BYTES: usize = 512 * 1024;
 
+/// The most parts a bundle may claim to have, a gigabyte of them, so a
+/// brother's `of` cannot make a joiner set aside more than that.
+pub const MAX_PARTS: usize = 2048;
+
 /// The private ref for a session's handoff, None when the session id
 /// could not be a ref name or could climb out of the namespace.
 pub fn handoff_ref(session: &str) -> Option<String> {
@@ -895,7 +899,11 @@ impl Joiner {
         if p.t != "bundle" || p.id != self.id {
             return Err(PartError::Stranger);
         }
-        if p.of == 0 || p.part >= p.of || (!self.parts.is_empty() && self.parts.len() != p.of) {
+        if p.of == 0
+            || p.of > MAX_PARTS
+            || p.part >= p.of
+            || (!self.parts.is_empty() && self.parts.len() != p.of)
+        {
             return Err(PartError::OutOfRange);
         }
         if self.parts.is_empty() {
@@ -1305,6 +1313,13 @@ pub(crate) mod tests {
         assert_eq!(j.add(&parts[0]), Err(PartError::OutOfRange));
         let empty = split("s", b"");
         assert_eq!(Joiner::new("s").add(&empty[0]), Ok(Some(Vec::new())));
+        let mut huge = parts[0].clone();
+        huge.of = MAX_PARTS + 1;
+        assert_eq!(
+            Joiner::new("s").add(&huge),
+            Err(PartError::OutOfRange),
+            "a claimed size past the cap sets nothing aside"
+        );
     }
 
     #[test]
