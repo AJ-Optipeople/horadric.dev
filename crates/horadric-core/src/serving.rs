@@ -140,17 +140,17 @@ pub trait Serve {
     }
     /// Each project whose lore is shared, by its repository id, with this
     /// machine's `have` of it.
-    fn lore_projects(&mut self) -> Vec<(String, Value)> {
+    fn lore_projects(&mut self) -> Vec<(Value, Value)> {
         Vec::new()
     }
     /// The `entries` message with what `theirs` lacks of a project's lore,
     /// None when it lacks nothing. `theirs` then counts what was sent, so
     /// the same entries do not go twice.
-    fn lore_export(&mut self, _project: &str, _theirs: &mut Value) -> Option<Value> {
+    fn lore_export(&mut self, _project: &Value, _theirs: &mut Value) -> Option<Value> {
         None
     }
     /// Takes in the entries a brother sent, `b64` as `entries` carries it.
-    fn lore_import(&mut self, _project: &str, _b64: &str) {}
+    fn lore_import(&mut self, _project: &Value, _b64: &str) {}
 }
 
 /// What a server sends: messages now, and jobs whose answers go later.
@@ -192,7 +192,7 @@ struct Client {
     roster_sent: Option<u64>,
     /// What this brother holds of each shared project's lore, as it said
     /// and as was sent it since.
-    lore: HashMap<String, Value>,
+    lore: HashMap<String, (Value, Value)>,
 }
 
 impl Client {
@@ -249,7 +249,7 @@ struct Asked {
     /// A brother's `lore`: channel, project.
     lores: Vec<(u32, String)>,
     /// A brother's `entries`: project, b64.
-    entries: Vec<(String, String)>,
+    entries: Vec<(Value, String)>,
 }
 
 /// Every connection one machine serves, and what was sent them.
@@ -291,6 +291,11 @@ impl Server {
     /// How many connections said hello.
     pub fn greeted(&self) -> usize {
         self.clients.values().filter(|c| c.hello()).count()
+    }
+
+    /// Whether the connection on `ch` said hello.
+    pub fn greeted_on(&self, ch: u32) -> bool {
+        self.clients.get(&ch).is_some_and(Client::hello)
     }
 
     /// Whether any raw stream is attached, when the transport should tick
@@ -439,14 +444,17 @@ impl Server {
                 }
             }
             "lore" if c.kind == Kind::Brother => {
-                if let Some(project) = text("project") {
-                    c.lore.insert(project.clone(), msg["have"].clone());
-                    asked.lores.push((ch, project));
+                let project = &msg["project"];
+                if !project.is_null() {
+                    let key = project.to_string();
+                    c.lore
+                        .insert(key.clone(), (project.clone(), msg["have"].clone()));
+                    asked.lores.push((ch, key));
                 }
             }
             "entries" if c.kind == Kind::Brother => {
-                if let (Some(project), Some(b64)) = (text("project"), text("b64")) {
-                    asked.entries.push((project, b64));
+                if let (false, Some(b64)) = (msg["project"].is_null(), text("b64")) {
+                    asked.entries.push((msg["project"].clone(), b64));
                 }
             }
             _ => {}
@@ -532,14 +540,14 @@ impl Server {
         for (project, b64) in &asked.entries {
             serve.lore_import(project, b64);
         }
-        for (ch, project) in asked.lores {
+        for (ch, key) in asked.lores {
             let Some(c) = self.clients.get_mut(&ch) else {
                 continue;
             };
-            let Some(theirs) = c.lore.get_mut(&project) else {
+            let Some((project, theirs)) = c.lore.get_mut(&key) else {
                 continue;
             };
-            if let Some(entries) = serve.lore_export(&project, theirs) {
+            if let Some(entries) = serve.lore_export(project, theirs) {
                 out.send(ch, entries);
             }
         }
@@ -781,7 +789,7 @@ impl Server {
         }
         self.lore_looked = Some(Instant::now());
         for (&ch, c) in self.clients.iter_mut().filter(|(_, c)| c.brother()) {
-            for (project, theirs) in c.lore.iter_mut() {
+            for (project, theirs) in c.lore.values_mut() {
                 if let Some(entries) = serve.lore_export(project, theirs) {
                     out.send(ch, entries);
                 }
@@ -853,7 +861,7 @@ pub fn state_message(state: &str) -> Value {
 }
 
 /// The `lore` message: what this machine holds of a project's lore.
-pub fn lore_message(project: &str, have: &Value) -> Value {
+pub fn lore_message(project: &Value, have: &Value) -> Value {
     json!({"t": "lore", "project": project, "have": have})
 }
 
@@ -958,18 +966,18 @@ mod tests {
         fn roster(&self) -> Option<Value> {
             Some(json!({"t": "roster", "n": 1}))
         }
-        fn lore_projects(&mut self) -> Vec<(String, Value)> {
-            vec![("repo".into(), json!({"me": 3}))]
+        fn lore_projects(&mut self) -> Vec<(Value, Value)> {
+            vec![(json!("repo"), json!({"me": 3}))]
         }
-        fn lore_export(&mut self, project: &str, theirs: &mut Value) -> Option<Value> {
+        fn lore_export(&mut self, project: &Value, theirs: &mut Value) -> Option<Value> {
             let had = theirs["me"].as_u64().unwrap_or(0);
             (had < 3).then(|| {
                 *theirs = json!({"me": 3});
                 json!({"t": "entries", "project": project, "b64": "", "from": had})
             })
         }
-        fn lore_import(&mut self, project: &str, b64: &str) {
-            self.imported.push((project.into(), b64.into()));
+        fn lore_import(&mut self, project: &Value, b64: &str) {
+            self.imported.push((project.to_string(), b64.into()));
         }
         fn push(&mut self, id: &str, _waiting: usize) {
             self.pushed.push(id.into());
@@ -1322,7 +1330,7 @@ mod tests {
         assert_eq!(of(&msgs, "state")[0], &state_message("awake"));
         assert_eq!(
             of(&msgs, "lore")[0],
-            &lore_message("repo", &json!({"me": 3}))
+            &lore_message(&json!("repo"), &json!({"me": 3}))
         );
         // The same roster does not go again; a new state does at once.
         serve.state = "sleeping";
@@ -1356,7 +1364,10 @@ mod tests {
         assert!(of(&msgs, "entries").is_empty());
         let entries = json!({"t": "entries", "project": "repo", "b64": "eA"});
         say(&mut server, &mut serve, 2, entries, 0);
-        assert_eq!(serve.imported, vec![("repo".to_string(), "eA".to_string())]);
+        assert_eq!(
+            serve.imported,
+            vec![("\"repo\"".to_string(), "eA".to_string())]
+        );
     }
 
     #[test]
