@@ -1,6 +1,6 @@
-//! The light that moves inside a terminal's glass. While its agent works a
-//! comet runs round the rim, lighting the runes cut into it as it passes
-//! and flaring gold at every tool the agent casts. A typed letter is burnt
+//! The light that moves inside a terminal's glass. While its agent works
+//! the runes cut round the rim light one after another, going round, and
+//! a run of them flares gold at every tool the agent casts. A typed letter is burnt
 //! into the glass white hot and cools to its own colour, and a deleted one
 //! crumbles to ash. A turn ending sweeps the glass and seals the ring.
 //!
@@ -22,10 +22,13 @@ pub const SWEEP: Duration = Duration::from_millis(1100);
 /// The cursor sliding from one cell to the next. Short, so typing never
 /// feels behind the keys.
 pub const GLIDE: Duration = Duration::from_millis(70);
-/// One lap of the comet round the rim of a working pane.
+/// One lap of the light round the rim of a working pane.
 pub const LAP: Duration = Duration::from_millis(6500);
-/// A cast's gold flare racing ahead of the comet, and dying.
+/// A cast's gold flare racing ahead round the runes, and dying.
 pub const CAST: Duration = Duration::from_millis(1100);
+/// A rune warming before the light reaches it. Without it a rune snaps on
+/// from its cut to full at once.
+pub const RUNE_RISE: Duration = Duration::from_millis(400);
 /// A rune cooling back to its cut after the light passed over it.
 pub const RUNE_COOL: Duration = Duration::from_millis(2000);
 /// Every rune flaring as a turn ends, and cooling.
@@ -34,10 +37,10 @@ pub const SEAL: Duration = Duration::from_millis(1600);
 pub const BURN: Duration = Duration::from_millis(850);
 /// A deleted letter falling apart.
 pub const ASH: Duration = Duration::from_millis(700);
-/// Between frames while only the ring turns. The comet moves a few DIPs a
-/// frame at this beat and its tail hides the step, while every frame
-/// redraws the whole grid of each working pane.
-pub const FRAME_RING: Duration = Duration::from_millis(33);
+/// Between frames while only the ring turns. Runes only warm and cool, so
+/// this beat is smooth enough, and every frame redraws the whole grid of
+/// each working pane.
+pub const FRAME_RING: Duration = Duration::from_millis(50);
 /// Between frames while only the cube turns.
 pub const FRAME_DRIFT: Duration = Duration::from_millis(50);
 /// The slices a deleted letter breaks into.
@@ -260,10 +263,19 @@ pub fn cool(since: f32, over: Duration) -> f32 {
     (1.0 - since / over.as_secs_f32()).max(0.0).powi(2)
 }
 
+/// As [`cool`], but warming over [`RUNE_RISE`] before it is lit.
+fn glow(since: f32, over: Duration) -> f32 {
+    if since < 0.0 {
+        let k = (1.0 + since / RUNE_RISE.as_secs_f32()).max(0.0);
+        return k * k * (3.0 - 2.0 * k);
+    }
+    cool(since, over)
+}
+
 /// What lit a rune, for its colour.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Lit {
-    /// The comet, in the colour of work.
+    /// The light going round, in the colour of work.
     Work,
     /// A cast's flare, in gold.
     Cast,
@@ -271,19 +283,12 @@ pub enum Lit {
     Seal,
 }
 
-/// A light running round the rim: its head, how long its tail, how bright.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Comet {
-    pub head: f32,
-    pub tail: f32,
-    pub light: f32,
-    pub lit: Lit,
-}
-
 /// What the ring shows at one moment.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RingLight {
-    pub comets: Vec<Comet>,
+    /// How far round the light is. Nothing is drawn there; the runes it
+    /// passes light.
+    pub head: f32,
     /// Each cut with how hot it burns and what lit it.
     pub runes: Vec<(Cut, f32, Lit)>,
 }
@@ -291,7 +296,7 @@ pub struct RingLight {
 /// The ring of a working pane, as [`Glass::step`] leaves it for drawing.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Orbit {
-    /// Seconds the pane has had light, which places the comet.
+    /// Seconds the pane has had light, which places the head.
     pub t: f32,
     pub seed: u64,
     /// How far the ring has faded in.
@@ -303,24 +308,13 @@ pub struct Orbit {
 }
 
 impl Orbit {
-    /// Lays the ring onto `ring`, and onto `runes` cut a little inside it.
-    /// The two are walked at the same pace, so a rune lights as the comet
-    /// passes it.
+    /// Lights the `cuts` round `ring` as the head passes each one.
     pub fn light(&self, ring: &Ring, cuts: &[Cut]) -> RingLight {
         let len = ring.length();
         let speed = len / LAP.as_secs_f32();
         let head = self.t * speed + unit(&[self.seed, 9]) * len;
-        let mut comets = Vec::new();
-        if self.strength > 0.0 {
-            comets.push(Comet {
-                head,
-                tail: (len * 0.3).clamp(80.0, 560.0),
-                light: self.strength,
-                lit: Lit::Work,
-            });
-        }
-        // A flare leaves from wherever the comet was when the tool was
-        // cast, and races a third of the way round as it dies.
+        // A flare leaves from wherever the head was when the tool was
+        // cast, and races half the way round as it dies.
         let flares: Vec<(f32, f32, f32)> = self
             .casts
             .iter()
@@ -330,15 +324,6 @@ impl Orbit {
                 (from, from + len * 0.5 * motion::ease_out(k), e)
             })
             .collect();
-        for &(from, at, e) in &flares {
-            let k = e / CAST.as_secs_f32();
-            comets.push(Comet {
-                head: at,
-                tail: (at - from).clamp(0.0, 240.0),
-                light: (1.0 - k).max(0.0).powf(1.5),
-                lit: Lit::Cast,
-            });
-        }
         let runes = cuts
             .iter()
             .map(|&c| {
@@ -348,24 +333,34 @@ impl Orbit {
                         best = (heat, lit);
                     }
                 };
-                let since = behind(head, c.d, len) / speed;
-                take(self.strength * cool(since, RUNE_COOL), Lit::Work);
+                // Just ahead of the head counts as not yet lit, so the
+                // rune warms into it rather than lighting a lap late.
+                let mut since = behind(head, c.d, len) / speed;
+                if since > LAP.as_secs_f32() - RUNE_RISE.as_secs_f32() {
+                    since -= LAP.as_secs_f32();
+                }
+                take(self.strength * glow(since, RUNE_COOL), Lit::Work);
                 for &(from, at, e) in &flares {
                     let gone = behind(at, from, len);
                     let reached = behind(c.d, from, len);
                     if reached <= gone && gone > 0.0 {
-                        take(cool(e * (1.0 - reached / gone), RUNE_COOL), Lit::Cast);
+                        // When the flare reached it, undoing its ease out,
+                        // so the runes cool in the order they lit even
+                        // after the flare has stopped.
+                        let f = (reached / (len * 0.5)).min(1.0);
+                        let lit = (1.0 - (1.0 - f).cbrt()) * CAST.as_secs_f32();
+                        take(cool(e - lit, RUNE_COOL), Lit::Cast);
                     }
                 }
                 if let Some(s) = self.seal {
-                    // The seal runs round from the comet both ways at once.
+                    // The seal runs round from the head both ways at once.
                     let away = behind(head, c.d, len).min(behind(c.d, head, len));
                     take(cool(s - away / (len * 1.2), SEAL), Lit::Seal);
                 }
                 (c, best.0.min(1.0), best.1)
             })
             .collect();
-        RingLight { comets, runes }
+        RingLight { head, runes }
     }
 }
 
@@ -511,15 +506,10 @@ impl Fx {
     /// flies takes every frame, the ring and the cube fewer, and a
     /// breathing rim fewer still.
     pub fn next_frame(&self) -> Option<Duration> {
-        let flaring = self
-            .orbit
-            .as_ref()
-            .is_some_and(|o| !o.casts.is_empty() || o.seal.is_some());
         if self.caret.is_some()
             || !self.burns.is_empty()
             || !self.ashes.is_empty()
             || self.sweep.is_some()
-            || flaring
         {
             Some(motion::FRAME_FAST)
         } else if self.orbit.is_some() {
@@ -640,7 +630,7 @@ impl Glass {
         self.summon = motion::fade(self.summon, summoning as u8 as f32, dt, SUMMON_FADE);
 
         let age = |s: &Instant| now.saturating_duration_since(*s);
-        self.casts.retain(|s| age(s) < CAST);
+        self.casts.retain(|s| age(s) < CAST + RUNE_COOL);
         self.sealed = self.sealed.filter(|s| age(s) < SEAL);
         let sweep = self.swept.and_then(|s| sweep(age(&s)));
         if sweep.is_none() {
@@ -863,11 +853,11 @@ mod tests {
     }
 
     #[test]
-    fn the_comet_lights_the_runes_it_passed_and_they_cool() {
+    fn the_light_lights_the_runes_it_passed_and_they_cool() {
         let r = ring();
         let cuts = r.runes(1);
         let light = orbit(10.0).light(&r, &cuts);
-        let head = light.comets[0].head;
+        let head = light.head;
         let len = r.length();
         let heat = |d: f32| {
             light
@@ -878,24 +868,27 @@ mod tests {
                 .1
         };
         // The rune just behind the head burns hotter than one further back,
-        // and both hotter than one the comet has yet to reach.
+        // which burns hotter than one half a lap away. The one just ahead
+        // is warming, not yet at full.
         let mut by_behind: Vec<(f32, f32)> = cuts
             .iter()
             .map(|c| (behind(head, c.d, len), heat(c.d)))
             .collect();
         by_behind.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let half = by_behind.len() / 2;
         assert!(by_behind[0].1 > by_behind[3].1);
-        assert!(by_behind[0].1 > by_behind.last().unwrap().1);
+        assert!(by_behind[3].1 > by_behind[half].1);
+        assert!(by_behind.last().unwrap().1 < 1.0);
         for (_, h) in &by_behind {
             assert!((RUNE_CUT - 0.001..=1.0).contains(h));
         }
     }
 
     #[test]
-    fn the_comet_goes_round_once_a_lap() {
+    fn the_light_goes_round_once_a_lap() {
         let r = ring();
-        let a = orbit(1.0).light(&r, &[]).comets[0].head;
-        let b = orbit(1.0 + LAP.as_secs_f32()).light(&r, &[]).comets[0].head;
+        let a = orbit(1.0).light(&r, &[]).head;
+        let b = orbit(1.0 + LAP.as_secs_f32()).light(&r, &[]).head;
         assert!(((b - a) - r.length()).abs() < 0.5);
     }
 
@@ -908,21 +901,16 @@ mod tests {
             ..orbit(5.0)
         }
         .light(&r, &cuts);
-        let flare = early.comets.iter().find(|c| c.lit == Lit::Cast).unwrap();
-        assert!(flare.light > 0.3 && flare.head > early.comets[0].head);
         assert!(early
             .runes
             .iter()
             .any(|(_, h, l)| *l == Lit::Cast && *h > 0.5));
         let late = Orbit {
-            casts: vec![CAST.as_secs_f32()],
+            casts: vec![(CAST + RUNE_COOL).as_secs_f32()],
             ..orbit(5.0)
         }
         .light(&r, &cuts);
-        assert!(late
-            .comets
-            .iter()
-            .all(|c| c.lit != Lit::Cast || c.light == 0.0));
+        assert!(late.runes.iter().all(|(_, _, l)| *l != Lit::Cast));
     }
 
     #[test]
@@ -941,7 +929,6 @@ mod tests {
             .runes
             .iter()
             .all(|(_, h, l)| *h > 0.0 && *l == Lit::Seal));
-        assert!(sealed(0.9).comets.is_empty());
         assert!(sealed(SEAL.as_secs_f32() + 1.0)
             .runes
             .iter()
@@ -1096,7 +1083,7 @@ mod tests {
         assert_eq!(fx.next_frame(), Some(FRAME_RING));
         let fx = g.step(t0 + MS(820), 1, &at(Some(c0 + Duration::from_secs(1))));
         assert_eq!(fx.orbit.as_ref().unwrap().casts.len(), 1);
-        assert_eq!(fx.next_frame(), Some(motion::FRAME_FAST));
+        assert_eq!(fx.next_frame(), Some(FRAME_RING));
     }
 
     #[test]

@@ -1656,9 +1656,8 @@ impl GridTarget {
     }
 
     /// The ring of a working pane: runes cut just inside the glass's rim,
-    /// and the comets running round the rim itself, lighting them.
+    /// lighting one after another as the work goes round.
     unsafe fn orbit(&self, screen: &D2D_RECT_F, o: &Orbit) {
-        const EDGE: f32 = 1.5;
         const CUT: f32 = PAD / 2.0;
         const RUNE_H: f32 = 11.0;
         let inset = |by: f32| {
@@ -1670,7 +1669,7 @@ impl GridTarget {
                 (SCREEN_RADIUS - by).max(2.0),
             )
         };
-        let (edge, cut) = (inset(EDGE), inset(CUT));
+        let cut = inset(CUT);
         let cuts = cut.runes(o.seed);
         let light = o.light(&cut, &cuts);
         let p = theme::palette();
@@ -1718,44 +1717,6 @@ impl GridTarget {
                     }
                     line(a, b, ink.with_alpha(heat), 1.4);
                 }
-            }
-        }
-
-        let scale = edge.length() / cut.length().max(1.0);
-        for comet in &light.comets {
-            if comet.light <= 0.01 || comet.tail <= 0.0 {
-                continue;
-            }
-            const STEPS: usize = 40;
-            let ink = tint(comet.lit);
-            let at = |k: usize| {
-                let d = comet.head - comet.tail * k as f32 / STEPS as f32;
-                edge.at(d * scale).0
-            };
-            for k in 0..STEPS {
-                let f = 1.0 - k as f32 / STEPS as f32;
-                let fall = comet.light * f * f;
-                let (a, b) = (at(k), at(k + 1));
-                line(a, b, ink.with_alpha(0.16 * fall), 10.0);
-                let core = ink.mix(white, 0.55 * f.powi(4));
-                line(a, b, core.with_alpha(0.95 * fall), 0.8 + 2.6 * f);
-            }
-            let (hx, hy) = at(0);
-            let point = Vector2 { X: hx, Y: hy };
-            for (r, c) in [
-                (16.0, ink.with_alpha(0.14 * comet.light)),
-                (7.0, ink.with_alpha(0.30 * comet.light)),
-                (3.0, ink.mix(white, 0.75).with_alpha(comet.light)),
-            ] {
-                self.brush.SetColor(&render::color(c));
-                self.rt.FillEllipse(
-                    &D2D1_ELLIPSE {
-                        point,
-                        radiusX: r,
-                        radiusY: r,
-                    },
-                    &self.brush,
-                );
             }
         }
     }
