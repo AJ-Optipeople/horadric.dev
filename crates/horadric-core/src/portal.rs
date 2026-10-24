@@ -267,16 +267,6 @@ impl Kind {
     }
 }
 
-/// Whether a message needs a link that may control this PC: whatever
-/// types into a session, starts or moves one. A view only link sees
-/// tiles and screens and sends none of these.
-pub fn needs_control(t: &str) -> bool {
-    matches!(
-        t,
-        "input" | "start" | "resume" | "create" | "handoff" | "takeover"
-    )
-}
-
 /// One viewer of a session on another machine, for [`size_owner`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Viewer {
@@ -885,18 +875,6 @@ mod tests {
         assert_eq!(k(serde_json::json!({"kind":"phone"})), Kind::Phone);
         assert_eq!(k(serde_json::json!({"kind":"brother"})), Kind::Brother);
         assert_eq!(k(serde_json::json!({"kind":"toaster"})), Kind::Phone);
-    }
-
-    #[test]
-    fn only_what_acts_needs_control() {
-        for t in ["input", "start", "resume", "create", "handoff", "takeover"] {
-            assert!(needs_control(t), "{t}");
-        }
-        for t in [
-            "hello", "watch", "attach", "detach", "resize", "sessions", "reply",
-        ] {
-            assert!(!needs_control(t), "{t}");
-        }
     }
 
     #[test]

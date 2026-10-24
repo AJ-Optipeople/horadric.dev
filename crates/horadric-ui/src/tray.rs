@@ -99,6 +99,10 @@ pub enum Choice {
     Keeper(Option<String>),
     /// Whether that keeper takes over by itself after ten minutes.
     AutoTakeover(bool),
+    /// Whether this brother, by id, may control this PC or only watch.
+    Control(String, bool),
+    /// Cast this brother out, by id and name, after asking.
+    CastOut(String, String),
     /// Join a Linux node by its SSH destination.
     AddNode,
     /// Take this node off the list, by name.
@@ -375,13 +379,21 @@ pub fn menu(
     }
     let mut brothers = Vec::new();
     let keeping = crate::app::keeping_tray();
+    let standing = horadric_hooks::state_dir()
+        .map(|d| crate::standing::Standing::load(&d))
+        .unwrap_or_default();
+    let joined: Vec<(String, String, bool)> = keeping
+        .0
+        .iter()
+        .map(|(id, name)| (id.clone(), name.clone(), standing.controls(id)))
+        .collect();
     match crate::workos::user() {
         Some(user) => {
             items.push(Item::Disabled(format!("Signed in as {}", user.email)));
             let listed = crate::brothers::listed();
             items.push(Item::Submenu(
                 "Brothers".into(),
-                brother_items(listed.as_deref()),
+                brother_items(listed.as_deref(), &joined),
             ));
             brothers = listed.unwrap_or_default();
             items.extend(crate::app::leaving_menu());
@@ -426,6 +438,12 @@ pub fn menu(
         SIGN_OUT => Some(Choice::SignOut),
         NO_KEEPER => Some(Choice::Keeper(None)),
         AUTO_TAKEOVER => Some(Choice::AutoTakeover(!keeping.2)),
+        i if (CONTROL..CONTROL + RIGHTS).contains(&i) => joined
+            .get(i - CONTROL)
+            .map(|(id, _, on)| Choice::Control(id.clone(), !on)),
+        i if (CAST_OUT..CAST_OUT + RIGHTS).contains(&i) => joined
+            .get(i - CAST_OUT)
+            .map(|(id, name, _)| Choice::CastOut(id.clone(), name.clone())),
         i if (KEEPER..KEEPER + KEEPERS).contains(&i) => keeping
             .0
             .get(i - KEEPER)
@@ -469,25 +487,64 @@ pub fn menu(
     }
 }
 
+/// Where a joined brother's "Can control this PC" and "Cast out" ids
+/// start, one each per joined brother.
+const CONTROL: usize = 9600;
+const CAST_OUT: usize = 9700;
+const RIGHTS: usize = 80;
+
 /// The Brothers menu: the other PCs signed in as this human that the relay
-/// sees now, a joined one as a line and one not joined yet as a way to
-/// ask it in. `None` is a portal that is closed or not through yet.
-fn brother_items(listed: Option<&[joining::Listed]>) -> Vec<Item> {
-    let Some(listed) = listed else {
-        return vec![Item::Disabled("Open the Town Portal to find them".into())];
+/// sees now, one not joined yet as a way to ask it in, and each joined
+/// one, listed now or not, as a submenu of what it may do here.
+/// `None` is a portal that is closed or not through yet. `joined` is
+/// (id, name, whether it may control this PC).
+fn brother_items(
+    listed: Option<&[joining::Listed]>,
+    joined: &[(String, String, bool)],
+) -> Vec<Item> {
+    let joined = &joined[..joined.len().min(RIGHTS)];
+    let rights = |j: usize, label: String| {
+        let (_, name, on) = &joined[j];
+        Item::Submenu(
+            label,
+            vec![
+                Item::Action {
+                    id: CONTROL + j,
+                    label: "Can control this PC".into(),
+                    checked: *on,
+                },
+                Item::Separator,
+                Item::action(CAST_OUT + j, format!("Cast out {name}\u{2026}")),
+            ],
+        )
     };
-    if listed.is_empty() {
-        return vec![Item::Disabled("No other PC is signed in".into())];
-    }
-    listed
+    let at = |id: &str| joined.iter().position(|(j, _, _)| j == id);
+    let mut items: Vec<Item> = match listed {
+        None => vec![Item::Disabled("Open the Town Portal to find them".into())],
+        Some([]) => vec![Item::Disabled("No other PC is signed in".into())],
+        Some(listed) => listed
+            .iter()
+            .take(QUEST_LOG - BROTHER)
+            .enumerate()
+            .map(|(i, b)| match (at(&b.id), b.joined || b.linked) {
+                (Some(j), _) => rights(j, b.label()),
+                (None, true) => Item::Disabled(b.label()),
+                (None, false) => Item::action(BROTHER + i, b.label()),
+            })
+            .collect(),
+    };
+    let listed = listed.unwrap_or_default();
+    let away: Vec<Item> = joined
         .iter()
-        .take(QUEST_LOG - BROTHER)
         .enumerate()
-        .map(|(i, b)| match b.joined || b.linked {
-            true => Item::Disabled(b.label()),
-            false => Item::action(BROTHER + i, b.label()),
-        })
-        .collect()
+        .filter(|(_, (id, _, _))| !listed.iter().any(|b| &b.id == id))
+        .map(|(j, (_, name, _))| rights(j, format!("{name}\tjoined")))
+        .collect();
+    if !away.is_empty() {
+        items.push(Item::Separator);
+        items.extend(away);
+    }
+    items
 }
 
 /// Where the keeping lines' ids start, past the Leaving menu's.
@@ -683,6 +740,66 @@ mod tests {
             }
         ));
     }
+
+    #[test]
+    fn a_joined_brother_gets_its_control_switch_and_cast_out() {
+        let listed = [
+            joining::Listed {
+                id: "d".into(),
+                name: "Desktop".into(),
+                joined: true,
+                linked: true,
+            },
+            joining::Listed {
+                id: "n".into(),
+                name: "New".into(),
+                joined: false,
+                linked: false,
+            },
+        ];
+        let joined = vec![
+            ("d".to_string(), "Desktop".to_string(), false),
+            ("v".to_string(), "Vps".to_string(), true),
+        ];
+        let items = brother_items(Some(&listed), &joined);
+        let Item::Submenu(label, rights) = &items[0] else {
+            panic!("a joined brother is a submenu");
+        };
+        assert_eq!(label, "Desktop\tlinked");
+        assert!(matches!(
+            &rights[0],
+            Item::Action {
+                id: CONTROL,
+                checked: false,
+                ..
+            }
+        ));
+        assert!(
+            matches!(&rights[2], Item::Action { id: CAST_OUT, label, .. }
+            if label == "Cast out Desktop\u{2026}")
+        );
+        assert!(matches!(&items[1], Item::Action { id: BROTHER_1, .. }));
+        assert!(matches!(&items[2], Item::Separator));
+        // Joined but not on the relay now: still there to switch or cast out.
+        let Item::Submenu(label, rights) = &items[3] else {
+            panic!("an away brother is a submenu too");
+        };
+        assert_eq!(label, "Vps\tjoined");
+        assert!(matches!(
+            &rights[0],
+            Item::Action {
+                id: CONTROL_1,
+                checked: true,
+                ..
+            }
+        ));
+        let closed = brother_items(None, &joined);
+        assert_eq!(closed.len(), 4);
+        assert!(brother_items(Some(&[]), &[]).len() == 1);
+    }
+
+    const BROTHER_1: usize = BROTHER + 1;
+    const CONTROL_1: usize = CONTROL + 1;
 
     #[test]
     fn the_nodes_menu_lists_each_and_offers_join_and_forget() {

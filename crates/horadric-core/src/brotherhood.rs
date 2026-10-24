@@ -26,9 +26,23 @@ pub const VIEW_ONLY: &str = "view only";
 
 /// The messages that act on a brother rather than watch it. A view only
 /// link may send none of them: one stolen laptop must not type into every
-/// other machine's shells.
-pub const NEEDS_CONTROL: [&str; 7] = [
-    "input", "start", "resume", "create", "handoff", "bundle", "takeover",
+/// other machine's shells, end its sessions, fill its quest logs or its
+/// lore, or plant snapshots and owners. `attach` is one too when it
+/// carries a photo, since that writes a file; see [`needs_control`].
+pub const NEEDS_CONTROL: [&str; 13] = [
+    "input",
+    "start",
+    "resume",
+    "create",
+    "handoff",
+    "bundle",
+    "takeover",
+    "stop",
+    "rename",
+    "quest_add",
+    "keep",
+    "entries",
+    "push",
 ];
 
 /// How a brother is reached.
@@ -280,7 +294,9 @@ impl Roster {
     /// returns its new number. None for a session the roster lacks.
     pub fn move_session(&mut self, session: &str, to: &str, now: u64) -> Option<u64> {
         let o = self.sessions.get_mut(session)?;
-        o.n += 1;
+        // A number at its end cannot go up, so it cannot move: refused
+        // rather than wrapped round to fence its own owner out.
+        o.n = o.n.checked_add(1)?;
         o.brother = to.to_string();
         o.since = now;
         let n = o.n;
@@ -376,17 +392,31 @@ impl Roster {
         if !long_enough {
             return false;
         }
-        for k in b.keepers.iter().filter(|k| self.control(silent, k)) {
-            if k == me {
-                return true;
-            }
-            let gone = heard(k).is_none_or(|h| h.gone_for(now) >= after);
-            if !gone {
-                return false;
-            }
-        }
-        false
+        let keepers = b.keepers.iter().filter(|k| self.control(silent, k));
+        keepers_turn(keepers, me, heard, after, now)
     }
+}
+
+/// Whether it is `me`'s turn among `keepers`, first one first: `me` is
+/// the first, or every one before it has been out of reach `after`
+/// seconds. A keeper never heard of counts as out of reach. So two
+/// keepers never both take one session.
+pub fn keepers_turn<'a>(
+    keepers: impl IntoIterator<Item = &'a String>,
+    me: &str,
+    heard: impl Fn(&str) -> Option<Heard>,
+    after: u64,
+    now: u64,
+) -> bool {
+    for k in keepers {
+        if k == me {
+            return true;
+        }
+        if !heard(k).is_none_or(|h| h.gone_for(now) >= after) {
+            return false;
+        }
+    }
+    false
 }
 
 /// The branch a fenced session's work is kept on.
@@ -394,10 +424,21 @@ pub fn orphan_branch(session: &str) -> String {
     format!("horadric/orphaned/{session}")
 }
 
+/// Whether a message acts on this machine rather than watches it: one of
+/// [`NEEDS_CONTROL`], or an `attach` with `data`, a photo written to a
+/// file, where an `attach` without is only a stream to watch.
+pub fn needs_control(msg: &serde_json::Value) -> bool {
+    let t = msg
+        .get("t")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    NEEDS_CONTROL.contains(&t) || (t == "attach" && msg.get("data").is_some())
+}
+
 /// What a link may send: Err with the error to answer for what needs
 /// control on a view only link.
-pub fn gate(kind: &str, control: bool) -> Result<(), &'static str> {
-    if control || !NEEDS_CONTROL.contains(&kind) {
+pub fn gate(msg: &serde_json::Value, control: bool) -> Result<(), &'static str> {
+    if control || !needs_control(msg) {
         Ok(())
     } else {
         Err(VIEW_ONLY)
@@ -746,15 +787,49 @@ mod tests {
 
     #[test]
     fn a_view_only_link_watches_and_never_acts() {
+        let m = |t: &str| serde_json::json!({"t": t, "id": "s"});
         for kind in NEEDS_CONTROL {
-            assert_eq!(gate(kind, false), Err("view only"), "{kind}");
-            assert_eq!(gate(kind, true), Ok(()), "{kind}");
+            assert_eq!(gate(&m(kind), false), Err("view only"), "{kind}");
+            assert_eq!(gate(&m(kind), true), Ok(()), "{kind}");
+        }
+        for kind in ["stop", "rename", "quest_add", "keep", "entries", "push"] {
+            assert!(needs_control(&m(kind)), "{kind}");
         }
         for kind in [
-            "hello", "sessions", "attach", "detach", "resize", "roster", "state",
+            "hello", "sessions", "attach", "detach", "resize", "roster", "state", "watch",
         ] {
-            assert_eq!(gate(kind, false), Ok(()), "{kind}");
+            assert_eq!(gate(&m(kind), false), Ok(()), "{kind}");
         }
+        // A photo writes a file; a stream only shows.
+        let photo = serde_json::json!({"t": "attach", "id": "s", "data": "AAAA"});
+        assert_eq!(gate(&photo, false), Err("view only"));
+        assert_eq!(gate(&photo, true), Ok(()));
+        assert_eq!(gate(&serde_json::json!({"cols": 80}), false), Ok(()));
+    }
+
+    #[test]
+    fn a_session_at_the_last_number_never_moves() {
+        let mut r = three();
+        r.claim("s1", "laptop", T);
+        r.sessions.get_mut("s1").unwrap().n = u64::MAX;
+        assert_eq!(r.move_session("s1", "desktop", T), None);
+        assert_eq!(r.owner("s1").unwrap().brother, "laptop");
+    }
+
+    #[test]
+    fn a_keepers_turn_comes_in_order() {
+        let ks = ["desk".to_string(), "vps".to_string()];
+        let up = |_: &str| Some(heard(Said::Awake, T, true));
+        assert!(keepers_turn(&ks, "desk", up, 600, T));
+        assert!(!keepers_turn(&ks, "vps", up, 600, T));
+        assert!(!keepers_turn(&ks, "nas", up, 600, T));
+        let desk_gone = |id: &str| match id {
+            "desk" => Some(heard(Said::Awake, T - 700, false)),
+            _ => Some(heard(Said::Awake, T, true)),
+        };
+        assert!(keepers_turn(&ks, "vps", desk_gone, 600, T));
+        assert!(!keepers_turn(&ks, "vps", desk_gone, 900, T));
+        assert!(!keepers_turn(&[], "desk", up, 600, T));
     }
 
     #[test]

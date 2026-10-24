@@ -17,7 +17,9 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::brotherhood::{offers_takeover, Fence, Heard, Owner, Presence, Roster, SILENT_SECS};
+use crate::brotherhood::{
+    keepers_turn, offers_takeover, Fence, Heard, Owner, Presence, Roster, SILENT_SECS,
+};
 use crate::handoff::{self, git, handoff_ref, Package, Part, Record, TranscriptFile};
 use crate::keepers::{self, Meta, Store};
 
@@ -59,6 +61,11 @@ pub struct Book {
     /// the line their tiles read. Never resumed here.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub fenced: BTreeMap<String, String>,
+    /// The keeper's side: who each brother, by id, last said keeps it,
+    /// first one first. Only the brother itself is heard on this, so
+    /// one brother cannot name another's keeper.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub keepers_of: BTreeMap<String, Vec<String>>,
 }
 
 /// What a snapshot about to be taken is cut against.
@@ -160,18 +167,21 @@ impl Book {
         self.fenced.remove(session);
     }
 
-    /// Takes owners another brother told, higher numbers winning, and
+    /// Takes owners brother `who` told, higher numbers winning, and
     /// gives the sessions `me` had that were taken over meanwhile, each
     /// with the line its tile reads. `names` is a roster for the names.
+    /// Only what `who` says it owns itself is taken: a brother cannot
+    /// hand a session to another, nor fence one by naming a stranger.
     pub fn hear(
         &mut self,
         me: &str,
+        who: &str,
         theirs: &BTreeMap<String, Owner>,
         names: &Roster,
         offset: i64,
     ) -> Vec<(String, String)> {
         let mut out = Vec::new();
-        for (id, o) in theirs {
+        for (id, o) in theirs.iter().filter(|(_, o)| o.brother == who) {
             let had = self.owners.get(id).cloned();
             if had.as_ref().is_some_and(|h| h >= o) {
                 continue;
@@ -199,17 +209,63 @@ impl Book {
         self.fenced.get(session).map(String::as_str)
     }
 
+    /// The number `session` gets when taken over from an owner whose
+    /// number was `held`. None at the end of the numbers, where it cannot
+    /// go up and so cannot fence the old owner.
+    pub fn owner_after(&self, session: &str, held: u64) -> Option<u64> {
+        self.owners
+            .get(session)
+            .map_or(held, |o| o.n.max(held))
+            .checked_add(1)
+    }
+
     /// `me` takes `session` over from its owner, whose number was `held`,
-    /// and gives the new owner to tell every brother.
-    pub fn take_over(&mut self, session: &str, held: u64, me: &str, now: u64) -> Owner {
-        let n = self.owners.get(session).map_or(held, |o| o.n.max(held)) + 1;
+    /// and gives the new owner to tell every brother. None, changing
+    /// nothing, where [`Book::owner_after`] refuses.
+    pub fn take_over(&mut self, session: &str, held: u64, me: &str, now: u64) -> Option<Owner> {
         let o = Owner {
-            n,
+            n: self.owner_after(session, held)?,
             brother: me.to_string(),
             since: now,
         };
         self.owners.insert(session.to_string(), o.clone());
-        o
+        Some(o)
+    }
+
+    /// The owners `me` tells a brother whose link came up: its own only,
+    /// the only ones a brother takes from it.
+    pub fn mine(&self, me: &str) -> BTreeMap<String, Owner> {
+        self.owners
+            .iter()
+            .filter(|(_, o)| o.brother == me)
+            .map(|(id, o)| (id.clone(), o.clone()))
+            .collect()
+    }
+
+    /// Brother `of` said who keeps it. True when `me` is not its first
+    /// keeper (any more), so what `me` holds of it goes: an old keeper
+    /// must not keep offering a copy the new one also holds.
+    pub fn keepers_said(&mut self, of: &str, keepers: Vec<String>, me: &str) -> bool {
+        let drop = keepers.first().map(String::as_str) != Some(me);
+        self.keepers_of.insert(of.to_string(), keepers);
+        drop
+    }
+
+    /// Whether `me` may take brother `of`'s sessions over now: it is the
+    /// first keeper `of` last named, or the next once every one before
+    /// it has been out of reach `after` seconds. Never for a brother that
+    /// has not said who keeps it.
+    pub fn keeps_for(
+        &self,
+        of: &str,
+        me: &str,
+        heard: impl Fn(&str) -> Option<Heard>,
+        after: u64,
+        now: u64,
+    ) -> bool {
+        self.keepers_of
+            .get(of)
+            .is_some_and(|k| keepers_turn(k, me, heard, after, now))
     }
 
     /// The roster as served, with this brother's keepers and switch in
@@ -237,6 +293,9 @@ pub struct Holding {
     pub record: Record,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_takeover: Option<u64>,
+    /// Who the owner says keeps it, first one first, as of this snapshot.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keepers: Vec<String>,
 }
 
 const HOLDING_FILE: &str = "holding.json";
@@ -549,9 +608,12 @@ mod tests {
         lap.next("s", "desk", "lap", T - 600);
         lap.next("t", "desk", "lap", T - 600);
         let mut desk = Book::default();
-        let o = desk.take_over("s", 1, "desk", T);
+        let o = desk.take_over("s", 1, "desk", T).unwrap();
         assert_eq!((o.n, o.brother.as_str()), (2, "desk"));
-        let fenced = lap.hear("lap", &desk.owners, &names(), 0);
+        // Only desk itself is heard on what desk owns.
+        assert!(lap.hear("lap", "vps", &desk.owners, &names(), 0).is_empty());
+        assert_eq!(lap.owners["s"].brother, "lap");
+        let fenced = lap.hear("lap", "desk", &desk.owners, &names(), 0);
         assert_eq!(
             fenced,
             [(
@@ -562,7 +624,9 @@ mod tests {
         assert_eq!(lap.fenced("s"), Some("taken over by Desktop at 14:12"));
         assert_eq!(lap.fenced("t"), None);
         // Heard twice, it fences nothing more.
-        assert!(lap.hear("lap", &desk.owners, &names(), 0).is_empty());
+        assert!(lap
+            .hear("lap", "desk", &desk.owners, &names(), 0)
+            .is_empty());
         // An older word never wins back a session.
         let old = BTreeMap::from([(
             "s".to_string(),
@@ -572,8 +636,56 @@ mod tests {
                 since: 0,
             },
         )]);
-        lap.hear("lap", &old, &names(), 0);
+        lap.hear("lap", "lap", &old, &names(), 0);
         assert_eq!(lap.owners["s"].brother, "desk");
+    }
+
+    #[test]
+    fn a_takeover_at_the_last_number_is_refused_and_changes_nothing() {
+        let mut b = Book::default();
+        assert_eq!(b.owner_after("s", 4), Some(5));
+        assert_eq!(b.take_over("s", u64::MAX, "desk", T), None);
+        assert!(b.owners.is_empty());
+        b.owners.insert(
+            "t".into(),
+            Owner {
+                n: u64::MAX,
+                brother: "lap".into(),
+                since: 0,
+            },
+        );
+        assert_eq!(b.take_over("t", 1, "desk", T), None);
+        assert_eq!(b.owners["t"].brother, "lap");
+    }
+
+    #[test]
+    fn a_brother_is_told_only_the_owners_that_are_mine() {
+        let mut b = Book::default();
+        b.next("s", "desk", "lap", T);
+        b.take_over("t", 1, "desk", T).unwrap();
+        assert_eq!(b.mine("lap").keys().collect::<Vec<_>>(), ["s"]);
+        assert_eq!(b.mine("desk").keys().collect::<Vec<_>>(), ["t"]);
+    }
+
+    #[test]
+    fn only_the_keeper_named_first_keeps_and_an_old_one_lets_go() {
+        let up = |_: &str| {
+            Some(Heard {
+                said: crate::brotherhood::Said::Awake,
+                last: T,
+                linked: true,
+            })
+        };
+        let mut k1 = Book::default();
+        // Never heard who keeps lap: not this PC.
+        assert!(!k1.keeps_for("lap", "k1", up, SILENT_SECS, T));
+        assert!(!k1.keepers_said("lap", vec!["k1".into()], "k1"));
+        assert!(k1.keeps_for("lap", "k1", up, SILENT_SECS, T));
+        // The owner switched to k2: k1 lets go and no longer offers.
+        assert!(k1.keepers_said("lap", vec!["k2".into(), "k1".into()], "k1"));
+        assert!(!k1.keeps_for("lap", "k1", up, SILENT_SECS, T));
+        assert!(k1.keepers_said("lap", Vec::new(), "k1"));
+        assert!(!k1.keeps_for("lap", "k1", up, SILENT_SECS, T));
     }
 
     #[test]
@@ -739,6 +851,7 @@ mod tests {
                 ..Record::default()
             },
             auto_takeover: None,
+            keepers: vec!["desk".into()],
         };
         holding.save(&store).unwrap();
         let p = package(&store, &Holding::load(&store).unwrap(), "landing").unwrap();

@@ -362,7 +362,7 @@ impl Server {
             return Vec::new();
         }
         let t = msg["t"].as_str().unwrap_or_default();
-        if let Err(why) = gate(t, c.control) {
+        if let Err(why) = gate(msg, c.control) {
             return vec![json!({"t": "error", "text": why, "for": t})];
         }
         match t {
@@ -832,6 +832,10 @@ impl Server {
             for (&ch, c) in self.clients.iter_mut().filter(|(_, c)| c.brother()) {
                 if c.roster_sent != Some(print) {
                     c.roster_sent = Some(print);
+                    // The roster holds who may control this machine, so a
+                    // switch the human flipped bites on links already up
+                    // rather than at their next hello.
+                    c.control = serve.control(&c.who, c.kind);
                     out.send(ch, roster.clone());
                 }
             }
@@ -956,6 +960,8 @@ mod tests {
         handed: Vec<(String, String)>,
         handing: Vec<(String, Value)>,
         kept: Vec<(String, Value)>,
+        /// The human switched control off for every brother.
+        locked: bool,
     }
 
     impl Serve for Fake {
@@ -1016,7 +1022,7 @@ mod tests {
             self.held.insert(id.into(), size);
         }
         fn control(&self, who: &str, _kind: Kind) -> bool {
-            who != "viewer"
+            who != "viewer" && !self.locked
         }
         fn state(&self) -> &'static str {
             if self.state.is_empty() {
@@ -1026,7 +1032,7 @@ mod tests {
             }
         }
         fn roster(&self) -> Option<Value> {
-            Some(json!({"t": "roster", "n": 1}))
+            Some(json!({"t": "roster", "n": 1, "locked": self.locked}))
         }
         fn lore_projects(&mut self) -> Vec<(Value, Value)> {
             vec![(json!("repo"), json!({"me": 3}))]
@@ -1513,6 +1519,29 @@ mod tests {
         let msgs = say(&mut server, &mut serve, 1, takeover, 0);
         assert_eq!(of(&msgs, "error")[0]["text"], crate::brotherhood::VIEW_ONLY);
         assert!(serve.kept.is_empty());
+    }
+
+    #[test]
+    fn control_switched_off_bites_on_a_link_already_up() {
+        let mut serve = Fake::default();
+        let hello = json!({"t": "hello", "v": 3, "kind": "brother"});
+        let (mut server, _) = greeted(&mut serve, "Laptop", hello);
+        let input = json!({"t": "input", "id": "s1", "data": "a"});
+        say(&mut server, &mut serve, 1, input.clone(), 0);
+        assert_eq!(serve.typed.len(), 1);
+        serve.locked = true;
+        // The next round sends the changed roster and reads control again.
+        server.answer(&mut serve, 0);
+        let msgs = say(&mut server, &mut serve, 2, input, 0);
+        assert_eq!(of(&msgs, "error")[0]["text"], crate::brotherhood::VIEW_ONLY);
+        assert_eq!(serve.typed.len(), 1);
+        for (n, t) in [(3, "stop"), (4, "rename"), (5, "keep")] {
+            let msgs = say(&mut server, &mut serve, n, json!({"t": t, "id": "s1"}), 0);
+            assert_eq!(of(&msgs, "error")[0]["for"], t);
+        }
+        let photo = json!({"t": "attach", "id": "s1", "data": "AAAA", "name": "a.png"});
+        let msgs = say(&mut server, &mut serve, 6, photo, 0);
+        assert_eq!(of(&msgs, "error")[0]["for"], "attach");
     }
 
     #[test]

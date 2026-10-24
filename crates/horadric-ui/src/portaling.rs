@@ -602,6 +602,8 @@ impl Portal {
         let mut roster = portal::joined_roster(&me, &pc_name(), &store);
         // Who keeps this PC and its switch, and every owner it knows.
         horadric_core::keeping::Book::load(&self.dir).fold(&mut roster, &me);
+        // Who may control this PC and who was cast out, as the tray set.
+        crate::standing::Standing::load(&self.dir).apply(&mut roster, &me);
         Some(roster)
     }
 

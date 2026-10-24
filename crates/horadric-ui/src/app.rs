@@ -1524,6 +1524,12 @@ fn tray_menu(hwnd: HWND) {
         Some(Choice::SignOut) => crate::workos::sign_out(),
         Some(Choice::Keeper(keeper)) => set_keeper(keeper),
         Some(Choice::AutoTakeover(on)) => set_auto_takeover(on),
+        Some(Choice::Control(id, on)) => set_control(&id, on),
+        Some(Choice::CastOut(id, name)) => {
+            if confirm_cast_out(&name) {
+                cast_out(&id);
+            }
+        }
         Some(Choice::Leave(to)) => {
             with_app(|app| app.leave_for(to));
         }
@@ -3188,6 +3194,55 @@ fn recent_menu(dir: PathBuf) {
 
 /// Asks before ending running sessions. Paused ones cost nothing to lose:
 /// their conversations stay on disk for `claude --resume`.
+/// The tray's "Can control this PC" switch for a brother. The roster this
+/// PC serves reads it, and the links already up are told within a round.
+fn set_control(id: &str, on: bool) {
+    let Some(dir) = horadric_hooks::state_dir() else {
+        return;
+    };
+    let mut standing = crate::standing::Standing::load(&dir);
+    standing.set_control(id, on);
+    if let Err(e) = standing.save(&dir) {
+        eprintln!("horadric: cannot keep who controls this PC: {e}");
+    }
+}
+
+/// Casting out cannot be undone, so it is asked first, Cancel the default.
+fn confirm_cast_out(name: &str) -> bool {
+    let text = format!(
+        "{name} will be refused from now on: it can no longer see or control \
+         this PC, and asking to join again is refused without a prompt.\n\n\
+         This cannot be undone. Only a PC set up anew can join again."
+    );
+    let pressed = ask(&Dialog {
+        tone: Tone::Warning,
+        title: &format!("Cast out {name}"),
+        text: &text,
+        buttons: &["Cast out", "Cancel"],
+        default: 1,
+        check: None,
+    });
+    pressed == Some(0)
+}
+
+/// Writes the brother into the outcasts with the key it joined with,
+/// before its key goes, so a link that races the drop is refused too.
+fn cast_out(id: &str) {
+    let Some(dir) = horadric_hooks::state_dir() else {
+        return;
+    };
+    let key = crate::joining::Store::load(&dir)
+        .and_then(|s| s.get(id).map(|j| j.public.clone()))
+        .unwrap_or_default();
+    let mut standing = crate::standing::Standing::load(&dir);
+    standing.cast_out(id, &key);
+    if let Err(e) = standing.save(&dir) {
+        eprintln!("horadric: cannot keep who was cast out: {e}");
+        return;
+    }
+    crate::brothers::cast_out(id);
+}
+
 fn confirm_end(key: Option<&str>) -> bool {
     let (live, working) = with_app(|app| app.running_in(key)).unwrap_or((0, 0));
     let project = key.map(project_name);

@@ -21,7 +21,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use horadric_core::brotherhood::{clock, orphan_branch, Roster};
+use horadric_core::brotherhood::{clock, orphan_branch, Heard, Roster, SILENT_SECS};
 use horadric_core::handoff::{takeover_line, Joiner, Record};
 use horadric_core::keepers::{decode, Store};
 use horadric_core::keeping::{
@@ -169,6 +169,19 @@ fn joined() -> Vec<(String, String)> {
         .unwrap_or_default()
 }
 
+/// A joined brother's id by the name its link goes by.
+fn id_of(name: &str) -> Option<String> {
+    joined()
+        .into_iter()
+        .find(|(_, n)| n == name)
+        .map(|(i, _)| i)
+}
+
+/// A joined brother's name by its id.
+fn name_of(id: &str) -> Option<String> {
+    joined().into_iter().find(|(i, _)| i == id).map(|(_, n)| n)
+}
+
 fn names(me: &str) -> Roster {
     let store = horadric_hooks::state_dir()
         .and_then(|d| joining::Store::load(&d))
@@ -219,13 +232,39 @@ fn remote_of(app: &App, id: &str) -> Option<(String, String)> {
     Some((name, remote))
 }
 
-/// The keeper's store and holding of brother `name`'s session `remote`.
-fn held_of(name: &str, remote: &str) -> Option<(Store, Holding)> {
-    let root = keeping::root(&horadric_hooks::state_dir()?);
-    stores(&root).into_iter().find_map(|(_, session, store)| {
-        let h = Holding::load(&store)?;
-        (session == remote && h.from_name == name).then_some((store, h))
-    })
+/// The keeper's store and holding of brother `from`'s session `remote`,
+/// found by the folder its link filed it under, never by the name the
+/// holding claims. The holding comes back with that id and the name
+/// this PC knows the brother by.
+fn held_of(from: &str, remote: &str) -> Option<(Store, Holding)> {
+    let store = store_of(&keeping::root(&horadric_hooks::state_dir()?), from, remote)?;
+    let h = Holding::load(&store)?;
+    let from_name = name_of(from)?;
+    Some((
+        store,
+        Holding {
+            from: from.to_string(),
+            from_name,
+            ..h
+        },
+    ))
+}
+
+/// Drops everything this PC keeps of brother `from`, which named
+/// another keeper.
+fn let_go(from: &str) {
+    let Some(dir) = horadric_hooks::state_dir() else {
+        return;
+    };
+    for (_, session, store) in stores(&keeping::root(&dir))
+        .into_iter()
+        .filter(|(f, _, _)| f == from)
+    {
+        debug(&format!("{from} named another keeper, {session} goes"));
+        if let Err(e) = store.prune() {
+            eprintln!("horadric: cannot drop the snapshots of {session}: {e}");
+        }
+    }
 }
 
 impl App {
@@ -250,12 +289,33 @@ impl App {
     }
 
     /// What a brother's tile offers: "Take over on <this PC>" while its
-    /// brother is silent and this PC keeps the session.
+    /// brother is silent and this PC keeps the session and is its keeper.
     pub(super) fn keeping_offer(&self, id: &str) -> Option<String> {
         let (name, remote) = remote_of(self, id)?;
-        held_of(&name, &remote)?;
+        let from = id_of(&name)?;
+        held_of(&from, &remote)?;
         let (heard, _) = self.far_presence(&name)?;
+        if !self.keeping_turn_for(&from, SILENT_SECS) {
+            return None;
+        }
         keeping::offer(heard, &pc_name(), unix_now())
+    }
+
+    /// Whether this PC is the keeper of brother `from` that takes over:
+    /// its first, or the next once those before have been out of reach
+    /// `after` seconds. So an old keeper, or a second one, never races
+    /// the first for one session.
+    fn keeping_turn_for(&self, from: &str, after: u64) -> bool {
+        let heard: HashMap<String, Heard> = joined()
+            .into_iter()
+            .filter_map(|(id, name)| Some((id, self.far_presence(&name)?.0)))
+            .collect();
+        let now = unix_now();
+        with(|s| {
+            let me = s.me.clone();
+            s.book
+                .keeps_for(from, &me, |k| heard.get(k).copied(), after, now)
+        })
     }
 
     /// Takes brother's tile `id` over: lands what is kept on a thread,
@@ -264,13 +324,33 @@ impl App {
         let Some((name, remote)) = remote_of(self, id) else {
             return;
         };
+        let Some(from) = id_of(&name) else {
+            return;
+        };
+        if !self.keeping_turn_for(&from, SILENT_SECS) {
+            debug(&format!("not the keeper of {name} that takes {id}"));
+            return;
+        }
         if !with(|s| s.taking.insert(id.to_string())) {
             return;
         }
-        let Some((store, holding)) = held_of(&name, &remote) else {
+        let Some((store, holding)) = held_of(&from, &remote) else {
             with(|s| s.taking.remove(id));
             return;
         };
+        // Refused before landing, so nothing lands that cannot be owned.
+        if with(|s| s.book.owner_after(&remote, holding.record.n)).is_none() {
+            with(|s| s.taking.remove(id));
+            self.toasts.show(
+                Kind::Done,
+                "Not taken over",
+                &format!(
+                    "{name} gave {} a number that cannot go up.",
+                    holding.record.name
+                ),
+            );
+            return;
+        }
         let checkout = self.checkout_of(&holding.record.repo);
         let projects = horadric_hooks::transcript::projects();
         let notify = self.notify.0 as isize;
@@ -408,11 +488,14 @@ impl App {
         match cut {
             Err(e) => eprintln!("horadric: no snapshot of {id} for {}: {e}", keeper.1),
             Ok(c) => {
+                let (auto_takeover, keepers) =
+                    with(|s| (s.book.auto_takeover, s.book.keepers.clone()));
                 let holding = Holding {
                     from: String::new(),
                     from_name: pc_name(),
                     record: c.record,
-                    auto_takeover: with(|s| s.book.auto_takeover),
+                    auto_takeover,
+                    keepers,
                 };
                 let msgs = keep_messages(id, &holding, &c.payload);
                 debug(&format!(
@@ -437,8 +520,13 @@ impl App {
     }
 
     /// Hears what a brother answered about keeping: `kept`. False for
-    /// anything else.
+    /// anything else. Its roster is read on the way past, for who it
+    /// says keeps it, and still goes on to whatever else reads it.
     pub(super) fn keeping_heard(&mut self, name: &str, msg: &Value) -> bool {
+        if msg["t"] == "roster" {
+            self.keeping_roster(name, msg);
+            return false;
+        }
         let Some((id, n, ok)) = kept_of(msg) else {
             return false;
         };
@@ -450,6 +538,39 @@ impl App {
             });
         }
         true
+    }
+
+    /// Brother `name` served its roster. Only its own entry is taken, for
+    /// who keeps it; when that is no longer this PC first, what this PC
+    /// keeps of it goes.
+    fn keeping_roster(&mut self, name: &str, msg: &Value) {
+        let Some(from) = id_of(name) else {
+            return;
+        };
+        let Ok(roster) = serde_json::from_value::<Roster>(msg.clone()) else {
+            return;
+        };
+        let keepers = roster
+            .brother(&from)
+            .map(|b| b.keepers.clone())
+            .unwrap_or_default();
+        self.keeping_keepers(&from, keepers);
+    }
+
+    fn keeping_keepers(&mut self, from: &str, keepers: Vec<String>) {
+        let changed = with(|s| s.book.keepers_of.get(from) != Some(&keepers));
+        if !changed {
+            return;
+        }
+        let drop = with(|s| {
+            let me = s.me.clone();
+            let drop = s.book.keepers_said(from, keepers, &me);
+            save(&s.book);
+            drop
+        });
+        if drop {
+            let_go(from);
+        }
     }
 
     /// Serves a brother's `keep` part or `takeover` from `who`, its id: a
@@ -485,13 +606,25 @@ impl App {
             }
         });
         let (payload, holding) = whole?;
+        if let Some(keepers) = holding.as_ref().map(|h| h.keepers.clone()) {
+            if !keepers.is_empty() {
+                self.keeping_keepers(who, keepers);
+            }
+        }
         let store = store_of(&keeping::root(&horadric_hooks::state_dir()?), who, &id)?;
         let from = who.to_string();
+        // The name this PC knows the brother by, not the one it claims.
+        let from_name = name_of(who).unwrap_or_else(|| who.to_string());
         Some(Box::new(move || {
             let n = decode(&payload).map_or(0, |(m, _, _)| m.n);
             let _one = RECEIVING.lock();
             let taken = store.receive(&payload).and_then(|_| match holding {
-                Some(h) => Holding { from, ..h }.save(&store),
+                Some(h) => Holding {
+                    from,
+                    from_name,
+                    ..h
+                }
+                .save(&store),
                 None => Ok(()),
             });
             if let Err(e) = &taken {
@@ -513,7 +646,7 @@ impl App {
         let (fenced, release) = with(|s| {
             let roster = names(&s.me);
             let me = s.me.clone();
-            let fenced = s.book.hear(&me, owners, &roster, offset);
+            let fenced = s.book.hear(&me, who, owners, &roster, offset);
             save(&s.book);
             let release: Vec<String> = if s.book.keeper() == Some(who) {
                 s.held
@@ -587,7 +720,7 @@ impl App {
             for n in &due {
                 s.told.insert(n.clone());
             }
-            takeover_message(&s.book.owners)
+            takeover_message(&s.book.mine(&s.me))
         });
         for n in due {
             debug(&format!("telling {n} the owners"));
@@ -651,12 +784,12 @@ impl App {
                     .collect()
             })
             .unwrap_or_default();
-        for (_, session, store) in stores(&keeping::root(&dir)) {
-            let Some(h) = Holding::load(&store) else {
+        for (from, session, store) in stores(&keeping::root(&dir)) {
+            let Some(name) = name_of(&from) else {
                 continue;
             };
-            let key = (h.from_name.clone(), session.clone());
-            let ready = self.far_presence(&h.from_name).is_some_and(|(_, r)| r);
+            let key = (name.clone(), session.clone());
+            let ready = self.far_presence(&name).is_some_and(|(_, r)| r);
             let gone = with(|s| {
                 if listed.contains(&key) {
                     s.seen.insert(key.clone());
@@ -667,8 +800,7 @@ impl App {
             });
             if gone {
                 debug(&format!(
-                    "{} no longer lists {session}, its snapshots go",
-                    h.from_name
+                    "{name} no longer lists {session}, its snapshots go"
                 ));
                 if let Err(e) = store.prune() {
                     eprintln!("horadric: cannot drop the snapshots of {session}: {e}");
@@ -694,7 +826,7 @@ impl App {
     }
 
     /// Takes over by itself the sessions of a brother silent past its
-    /// switch, if this PC keeps them.
+    /// switch, if this PC keeps them and is the keeper whose turn it is.
     fn keeping_auto(&mut self) {
         let Some(dir) = horadric_hooks::state_dir() else {
             return;
@@ -702,11 +834,13 @@ impl App {
         let now = unix_now();
         let due: Vec<String> = stores(&keeping::root(&dir))
             .into_iter()
-            .filter_map(|(_, session, store)| {
+            .filter_map(|(from, session, store)| {
                 let h = Holding::load(&store)?;
-                let (heard, _) = self.far_presence(&h.from_name)?;
-                auto_due(heard, h.auto_takeover, now)
-                    .then(|| horadric_core::afar::local_id(&h.from_name, &session))
+                let name = name_of(&from)?;
+                let (heard, _) = self.far_presence(&name)?;
+                let after = h.auto_takeover?.max(SILENT_SECS);
+                (auto_due(heard, h.auto_takeover, now) && self.keeping_turn_for(&from, after))
+                    .then(|| horadric_core::afar::local_id(&name, &session))
             })
             .collect();
         for id in due {
@@ -768,6 +902,12 @@ impl App {
             save(&s.book);
             o
         });
+        // Checked before landing; only a number that rose meanwhile ends
+        // here, and then the old owner is not fenced.
+        let Some(owner) = owner else {
+            eprintln!("horadric: {id} has no number to take over with");
+            return;
+        };
         let msg = takeover_message(&BTreeMap::from([(id.clone(), owner)]));
         for (name, ready) in self.far_peer_names() {
             if ready {

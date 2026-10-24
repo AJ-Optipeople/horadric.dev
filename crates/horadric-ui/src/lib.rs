@@ -71,6 +71,7 @@ pub mod sharing;
 pub mod shell;
 pub mod sky;
 pub mod spectator;
+pub mod standing;
 pub mod symbols;
 pub mod theme;
 pub mod viewer;
