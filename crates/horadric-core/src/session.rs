@@ -203,6 +203,10 @@ pub struct Session {
     /// What the program last said with OSC 7501, and since when.
     #[serde(skip)]
     pub program: Option<Heard>,
+    /// The brother it runs on, for a session of another PC's. Never saved
+    /// and never served on: the brother itself serves it.
+    #[serde(skip)]
+    pub brother: Option<crate::afar::OnBrother>,
 }
 
 /// What a program says about itself in its terminal (OSC 7501), as a tile
@@ -264,6 +268,7 @@ impl Session {
             last_prompt: None,
             hooked: None,
             program: None,
+            brother: None,
         }
     }
 

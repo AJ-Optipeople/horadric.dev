@@ -1135,6 +1135,7 @@ impl Cluster {
             layout: &layout,
             name: &self.name,
             town: town::is(&self.key),
+            brother: horadric_core::afar::split_key(&self.key).map(|(b, _)| b),
             collapsed: self.collapsed,
             sessions: &refs,
             pages: &pages,

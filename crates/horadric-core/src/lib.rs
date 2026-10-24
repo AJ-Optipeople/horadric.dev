@@ -6,6 +6,7 @@
 //! without a terminal or a network.
 
 pub mod accounts;
+pub mod afar;
 pub mod agent;
 pub mod aim;
 pub mod ask;

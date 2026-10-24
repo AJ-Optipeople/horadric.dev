@@ -8,11 +8,15 @@ use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use horadric_core::Session;
+use horadric_core::{afar, Session};
 
-/// The project a session belongs to.
+/// The project a session belongs to. A brother's session is in that
+/// brother's project, never a local folder's.
 pub fn project_key(s: &Session) -> String {
-    folder_key(&s.cwd)
+    match &s.brother {
+        Some(b) => afar::key(&b.name, &b.project),
+        None => folder_key(&s.cwd),
+    }
 }
 
 /// The project key of the project in this folder: the folder itself,
@@ -77,6 +81,9 @@ pub fn project_name(key: &str) -> String {
     if crate::town::is(key) {
         return crate::town::NAME.to_string();
     }
+    if let Some((brother, project)) = afar::split_key(key) {
+        return afar::title(brother, project);
+    }
     key.rsplit('/')
         .next()
         .filter(|s| !s.is_empty())
@@ -135,6 +142,19 @@ fn main_tree_key(out: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_brothers_session_is_in_its_own_project() {
+        let mut s = Session::new("a@vps", "a", "");
+        s.brother = Some(afar::OnBrother {
+            name: "vps".into(),
+            project: "horadric.dev".into(),
+            reach: true,
+        });
+        let key = project_key(&s);
+        assert_eq!(key, afar::key("vps", "horadric.dev"));
+        assert_eq!(project_name(&key), "horadric.dev \u{b7} vps");
+    }
 
     #[test]
     fn a_missing_folder_is_asked_about_again_after_a_while() {

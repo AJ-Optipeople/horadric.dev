@@ -153,6 +153,9 @@ mod spectating;
 #[path = "portaling.rs"]
 mod portaling;
 
+#[path = "far.rs"]
+mod far;
+
 pub use runner::ssh_prompt;
 
 /// Hook events changed the registry. What they did waits in [`EVENTS`].
@@ -229,6 +232,8 @@ const WM_HORADRIC_SETTINGS_ASK: u32 = WM_APP + 36;
 const WM_HORADRIC_BACKUP: u32 = WM_APP + 42;
 /// Town Portal's link heard something from the relay.
 const WM_HORADRIC_PORTAL: u32 = WM_APP + 40;
+/// A brother's link heard something, or one of its panes asked.
+const WM_HORADRIC_FAR: u32 = WM_APP + 50;
 /// Town Portal's key on the stage clicked: open it, or offer what can be
 /// done with it, outside the app's borrow since a menu runs a loop of its
 /// own.
@@ -882,6 +887,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             consoles: HashMap::new(),
             portal: None,
             portal_checked: Default::default(),
+            far: far::Far::new(notify),
             views: HashMap::new(),
             webs: HashMap::new(),
             skies: HashMap::new(),
@@ -1359,6 +1365,7 @@ unsafe extern "system" fn app_proc(
             | WM_HORADRIC_DOWNLOADED
             | WM_HORADRIC_KEPT
             | WM_HORADRIC_PORTAL
+            | WM_HORADRIC_FAR
             | WM_HOTKEY
             | WM_TIMER
     );
@@ -3187,6 +3194,8 @@ struct App {
     /// Town Portal's link to the relay, while `portal.json` turns it on.
     portal: Option<portaling::Portal>,
     portal_checked: portaling::Checked,
+    /// The brothers this PC is a client of, and their panes.
+    far: far::Far,
     /// Files shown on the stage, at most one per project, by project key.
     /// A click on another file replaces it, like VS Code's preview tab, so
     /// browsing a project never piles up panes.
@@ -3562,6 +3571,7 @@ impl App {
                 self.portal_drain();
                 self.portal_show();
             }
+            WM_HORADRIC_FAR => self.far_drain(),
             WM_TIMER if wparam == BREATH_TIMER => {
                 self.tray.step();
                 self.breathe_stage();
@@ -3588,6 +3598,7 @@ impl App {
                 self.reload_when_ready();
                 self.portal_check();
                 self.portal_show();
+                self.far_check();
                 self.backup_tick();
                 if self
                     .last_check
@@ -3621,6 +3632,7 @@ impl App {
         self.consoles
             .values()
             .chain(self.views.values())
+            .chain(self.far.consoles.values())
             .find(|c| c.serial == serial)
     }
 
@@ -3631,6 +3643,7 @@ impl App {
             .or_else(|| self.views.values().find(|v| v.id == id))
             .or_else(|| self.webs.values().find(|v| v.id == id))
             .or_else(|| self.skies.values().find(|v| v.id == id))
+            .or_else(|| self.far.consoles.get(id))
     }
 
     /// The stage, when it shows this console.
@@ -6391,6 +6404,9 @@ impl App {
         if self.shared.parked.borrow_mut().remove(id) {
             self.refresh_parked();
         }
+        if self.far_reveal(id) {
+            return;
+        }
         let stashed = self.shared.registry.lock().is_ok_and(|r| r.is_stashed(id));
         if stashed {
             self.unstash(id, true);
@@ -6501,6 +6517,7 @@ impl App {
                 .map(|(id, c)| (c.serial, id.clone()))
                 .collect()
         };
+        live.extend(self.far_live_in(key));
         // New ones join in the order they started.
         live.sort();
         let live: Vec<String> = live.into_iter().map(|(_, id)| id).collect();
@@ -8155,7 +8172,8 @@ impl App {
                     post(self.notify.0 as isize, WM_HORADRIC_PICK, 0);
                 }
                 Input::Add(key) => {
-                    if let Some(dir) = self.project_dir(&key) {
+                    if self.far_start(&key) {
+                    } else if let Some(dir) = self.project_dir(&key) {
                         if let Err(e) = self.start(None, dir, Vec::new()) {
                             eprintln!("horadric: cannot start session: {e}");
                         }

@@ -206,7 +206,20 @@ pub struct Console {
     typed: Mutex<Option<SystemTime>>,
     /// What Town Portal streams raw and whose size wins.
     tap: Mutex<Tap>,
+    /// Where typing and the pane's size go, for a pane drawn from a
+    /// brother's stream: the session runs there, not in a host here.
+    far: Option<FarSink>,
 }
+
+/// What a pane drawn from a brother's stream asks of the brother.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FarAsk {
+    Input(Vec<u8>),
+    /// The size this pane would draw the session at.
+    Resize(GridSize),
+}
+
+pub type FarSink = Box<dyn Fn(FarAsk) + Send + Sync>;
 
 /// Output kept raw for viewers on another machine, who build their own
 /// grid from it. Less than the host keeps: it is the screen and some
@@ -635,19 +648,7 @@ impl Console {
             title: Arc::clone(&title),
             replaying: Arc::clone(&replaying),
         };
-        let config = Config {
-            scrolling_history: SCROLLBACK,
-            // Claude Code tells Shift+Enter from Enter this way, and the
-            // parser keeps the flags only when this is on.
-            kitty_keyboard: true,
-            // Blinking until a program asks for a steady cursor, as in
-            // Windows Terminal.
-            default_cursor_style: CursorStyle {
-                shape: CursorShape::Block,
-                blinking: true,
-            },
-            ..Config::default()
-        };
+        let config = grid_config();
         let console = Arc::new(Console {
             id: meta.id,
             serial: meta.serial,
@@ -671,6 +672,7 @@ impl Console {
             cwd: meta.cwd,
             typed: Mutex::new(None),
             tap: Mutex::new(Tap::default()),
+            far: None,
         });
         let notify = waker(notify);
         let reader = Arc::clone(&console);
@@ -813,6 +815,7 @@ impl Console {
             cwd,
             typed: Mutex::new(None),
             tap: Mutex::new(Tap::default()),
+            far: None,
         });
         console.load(waker(notify));
         console
@@ -835,6 +838,23 @@ impl Console {
     }
 
     fn blank(id: String, serial: usize, web: Option<String>, sky: Option<String>) -> Arc<Console> {
+        Console::blank_with(id, serial, web, sky, None)
+    }
+
+    /// A pane for a session that runs on a brother: its grid is drawn from
+    /// the raw output the brother streams, see [`Console::far_output`],
+    /// and what is typed or how big the pane is goes to `sink`.
+    pub fn far(id: String, serial: usize, sink: FarSink) -> Arc<Console> {
+        Console::blank_with(id, serial, None, None, Some(sink))
+    }
+
+    fn blank_with(
+        id: String,
+        serial: usize,
+        web: Option<String>,
+        sky: Option<String>,
+        far: Option<FarSink>,
+    ) -> Arc<Console> {
         let size = GridSize {
             cols: DEFAULT_COLS,
             rows: DEFAULT_ROWS,
@@ -845,6 +865,11 @@ impl Console {
             title: Arc::clone(&title),
             replaying: Arc::default(),
         };
+        let config = if far.is_some() {
+            grid_config()
+        } else {
+            Config::default()
+        };
         Arc::new(Console {
             id,
             serial,
@@ -853,7 +878,7 @@ impl Console {
             web,
             sky,
             screen: Mutex::new(Screen {
-                term: Term::new(Config::default(), &size, events),
+                term: Term::new(config, &size, events),
                 parser: Processor::new(),
             }),
             size: Mutex::new(size),
@@ -868,7 +893,51 @@ impl Console {
             cwd: None,
             typed: Mutex::new(None),
             tap: Mutex::new(Tap::default()),
+            far,
         })
+    }
+
+    /// Output a brother streamed, drawn as a host's would be. `reset`
+    /// starts a fresh terminal first, as a replay does. Its queries go
+    /// unanswered: the brother's own grid answers them.
+    pub fn far_output(&self, bytes: &[u8], reset: bool) {
+        if let Ok(mut s) = self.screen.lock() {
+            if reset {
+                let size = self.size();
+                let events = Events {
+                    remote: None,
+                    title: Arc::clone(&self.title),
+                    replaying: Arc::default(),
+                };
+                *s = Screen {
+                    term: Term::new(grid_config(), &size, events),
+                    parser: Processor::new(),
+                };
+            }
+            let Screen { term, parser } = &mut *s;
+            parser.advance(term, bytes);
+        }
+        self.dirty.store(true, Ordering::Release);
+    }
+
+    /// The size the brother's pseudo terminal has, which the grid takes
+    /// whatever size the pane is: clipped, or with a margin.
+    pub fn far_size(&self, size: GridSize) {
+        if size.cols == 0 || size.rows == 0 {
+            return;
+        }
+        if let Ok(mut current) = self.size.lock() {
+            *current = size;
+        }
+        if let Ok(mut s) = self.screen.lock() {
+            s.term.resize(size);
+        }
+        self.dirty.store(true, Ordering::Release);
+    }
+
+    /// The size the pane last asked for, for a brother's session.
+    pub fn far_asked(&self) -> Option<GridSize> {
+        self.tap.lock().ok().and_then(|t| t.stage)
     }
 
     /// The file a view shows.
@@ -1117,6 +1186,8 @@ impl Console {
     pub fn write(&self, bytes: impl Into<Vec<u8>>) {
         if let Some(remote) = &self.remote {
             remote.write(bytes);
+        } else if let Some(far) = &self.far {
+            far(FarAsk::Input(bytes.into()));
         }
     }
 
@@ -1187,6 +1258,13 @@ impl Console {
     /// another machine holds the size, and then once it lets go.
     pub fn resize(&self, size: GridSize) {
         if size.cols == 0 || size.rows == 0 {
+            return;
+        }
+        if let Some(far) = &self.far {
+            let asked = self.tap.lock().ok().and_then(|mut t| t.stage.replace(size));
+            if asked != Some(size) {
+                far(FarAsk::Resize(size));
+            }
             return;
         }
         let held = self.tap.lock().is_ok_and(|mut t| {
@@ -1277,6 +1355,23 @@ impl Console {
         } else {
             Some(deadline - now)
         }
+    }
+}
+
+/// How a session's grid is set up, here or drawn from a brother's stream.
+fn grid_config() -> Config {
+    Config {
+        scrolling_history: SCROLLBACK,
+        // Claude Code tells Shift+Enter from Enter this way, and the
+        // parser keeps the flags only when this is on.
+        kitty_keyboard: true,
+        // Blinking until a program asks for a steady cursor, as in
+        // Windows Terminal.
+        default_cursor_style: CursorStyle {
+            shape: CursorShape::Block,
+            blinking: true,
+        },
+        ..Config::default()
     }
 }
 

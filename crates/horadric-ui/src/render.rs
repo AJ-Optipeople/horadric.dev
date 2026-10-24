@@ -259,6 +259,10 @@ pub struct Scene<'a> {
     /// The cluster is Tristram's, drawn with the town's mark so it never
     /// reads as one more repository.
     pub town: bool,
+    /// The brother the project lives on, for a cluster of another PC's:
+    /// its mark goes on the frame, so a remote tile is never taken for a
+    /// local one.
+    pub brother: Option<&'a str>,
     pub collapsed: bool,
     pub sessions: &'a [&'a Session],
     /// The browser's tabs, a tile each below the sessions'. Only the
@@ -1104,6 +1108,11 @@ impl Target {
     }
 }
 
+/// A brother's colour, the same on every cluster of its.
+fn brother_ink(name: &str) -> Color {
+    theme::accent(&format!("brother {name}"))
+}
+
 /// Draws on the window or on its kept layer, which share their brushes.
 struct Painter<'a> {
     rt: &'a ID2D1RenderTarget,
@@ -1116,7 +1125,7 @@ impl Painter<'_> {
     unsafe fn still(&self, gpu: &Gpu, m: &Metrics, scene: &Scene) {
         self.plate(m, scene.layout.size);
         self.wash(scene);
-        if scene.on_stage {
+        if scene.on_stage || scene.brother.is_some() {
             self.frame(m, scene);
         }
 
@@ -2717,6 +2726,14 @@ impl Painter<'_> {
             );
             name_x += TOWN_MARK;
         }
+        if let Some(b) = scene.brother {
+            // The brother's mark: its initial on a chip in its own colour.
+            let chip = Rect::new(name_x - 2.0, cy - 8.0, 16.0, 16.0);
+            self.fill_rounded(&chip, 4.0, brother_ink(b).with_alpha(0.85));
+            let initial: String = b.chars().take(1).flat_map(char::to_uppercase).collect();
+            self.text(&gpu.small_centre, theme::surface(), &initial, chip);
+            name_x += TOWN_MARK;
+        }
         let name_w = self.measure(gpu, &gpu.display, name).min(h.w * 0.62);
         self.text(
             &gpu.display,
@@ -3285,7 +3302,13 @@ impl Painter<'_> {
         let r = Rect::new(inset, inset, w - 2.0 * inset, h - 2.0 * inset);
         // Inside the corner DWM rounds the window to.
         let radius = m.window_radius - inset;
-        self.stroke_rounded(&r, radius, scene.accent.with_alpha(0.55), 1.5);
+        match scene.brother {
+            Some(b) => {
+                let ink = brother_ink(b).with_alpha(if scene.on_stage { 0.9 } else { 0.6 });
+                self.stroke_rounded(&r, radius, ink, 2.0);
+            }
+            None => self.stroke_rounded(&r, radius, scene.accent.with_alpha(0.55), 1.5),
+        }
     }
 
     /// The `i`th browser tab's tile: a key like an idle session's, with
@@ -3408,7 +3431,14 @@ impl Painter<'_> {
             stance.from(look.was, look.settle)
         };
         let rest = stance.depth;
-        let presence = stance.presence * look.enter;
+        // A brother out of reach keeps its tiles with their last phase,
+        // dimmed, so a dropped link never looks like finished work.
+        let reach = if s.brother.as_ref().is_some_and(|b| !b.reach) {
+            0.45
+        } else {
+            1.0
+        };
+        let presence = stance.presence * look.enter * reach;
         let lift = match b {
             Button::Pressed => (0.15 - rest).min(0.0),
             _ if selected => 0.0,
@@ -3461,7 +3491,7 @@ impl Painter<'_> {
         let level = if breathing {
             0.0
         } else {
-            (stance.lamp + 0.3 * arrival) * look.enter
+            (stance.lamp + 0.3 * arrival) * look.enter * reach
         };
         // The lamp is a switch too, so it lights under the cursor, and a
         // parked session's sits in a ring: its pane is off the stage.

@@ -551,6 +551,40 @@ fn handle(raw: *mut c_void, what: &str) -> Result<Raw, String> {
     }
 }
 
+/// A WebSocket this PC dialled as a client, the way a phone reaches a
+/// PC: for a brother reached through a phone's pairing. One thread may
+/// receive while another sends, but sends must not overlap.
+#[derive(Clone)]
+pub struct Dialled(Arc<Socket>);
+
+impl Dialled {
+    pub fn dial(url: &str) -> Result<Dialled, String> {
+        connect(url).map(|s| Dialled(Arc::new(s)))
+    }
+
+    /// One whole message, (is text, bytes), or None once it closed.
+    pub fn receive(&self) -> Option<(bool, Vec<u8>)> {
+        receive(&self.0)
+    }
+
+    pub fn send(&self, text: bool, bytes: &[u8]) -> bool {
+        if self.0.closed.load(Ordering::SeqCst) {
+            return false;
+        }
+        let kind = if text {
+            WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE
+        } else {
+            WINHTTP_WEB_SOCKET_BINARY_MESSAGE_BUFFER_TYPE
+        };
+        unsafe { WinHttpWebSocketSend(self.0.ws, kind, Some(bytes)) == 0 }
+    }
+
+    /// Ends a receive blocked on it, from any thread.
+    pub fn close(&self) {
+        self.0.close();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
