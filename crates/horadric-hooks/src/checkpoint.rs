@@ -230,7 +230,17 @@ fn try_undo(session: &str, top: &Path) -> Result<Outcome, String> {
         &[],
         None,
     )?;
-    let top_text = top.to_string_lossy().replace('\\', "/");
+    // The record keys files as the tools named them and git names the top
+    // its own way, so one may be a short 8.3 or otherwise other spelling
+    // of the same folder: both are brought to the long form first.
+    let top_text = long_form(&top.to_string_lossy());
+    let record = Record {
+        files: record
+            .files
+            .into_iter()
+            .map(|(k, w)| (long_form(&k), w))
+            .collect(),
+    };
     let (mine, left) = attribute(parse_diff(&raw), &record, &top_text);
     if mine.is_empty() {
         return Ok(Outcome::NotOwned(left));
@@ -322,6 +332,38 @@ pub fn forget(session: &str, cwd: &str) {
     };
     let gone: Vec<String> = refs.iter().map(|r| format!("delete {r}")).collect();
     let _ = update_refs(&top, &gone);
+}
+
+/// `path` as the file system spells it in full, forward slashes and lower
+/// case like `overlap::key`: the deepest part that exists is resolved
+/// (8.3 short names, case) and the rest, a file since deleted, kept as is.
+fn long_form(path: &str) -> String {
+    let given = PathBuf::from(path);
+    let mut base = given.as_path();
+    let mut rest = Vec::new();
+    let resolved = loop {
+        if let Ok(full) = fs::canonicalize(base) {
+            break Some(full);
+        }
+        match (base.file_name(), base.parent()) {
+            (Some(name), Some(parent)) => {
+                rest.push(name.to_os_string());
+                base = parent;
+            }
+            _ => break None,
+        }
+    };
+    let Some(mut full) = resolved else {
+        return path.replace('\\', "/").to_lowercase();
+    };
+    for name in rest.into_iter().rev() {
+        full.push(name);
+    }
+    let text = full.to_string_lossy().replace('\\', "/");
+    text.strip_prefix("//?/")
+        .unwrap_or(&text)
+        .trim_end_matches('/')
+        .to_lowercase()
 }
 
 /// The top of the git tree `cwd` is in, remembered since it is asked on
@@ -823,6 +865,26 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         hear("x", &event("UserPromptSubmit", &dir));
         assert_eq!(undo("x", &dir.to_string_lossy()), Outcome::NoRepo);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn two_spellings_of_one_folder_come_to_one_long_form() {
+        let dir = std::env::temp_dir().join(format!("horadric-Long-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let real = long_form(&dir.to_string_lossy());
+        assert!(!real.starts_with("//?/"), "{real}");
+        if cfg!(windows) {
+            // Windows names are not case sensitive: another case is the
+            // same folder and must come out the same.
+            assert_eq!(long_form(&dir.to_string_lossy().to_uppercase()), real);
+        }
+        // A file that is gone keeps its name under the resolved folder.
+        let gone = dir.join("Gone.txt");
+        assert_eq!(
+            long_form(&gone.to_string_lossy()),
+            format!("{real}/gone.txt")
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 }
