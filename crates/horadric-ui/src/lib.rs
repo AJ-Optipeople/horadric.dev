@@ -61,6 +61,7 @@ pub mod motion;
 pub mod palette;
 pub mod paste;
 pub mod paths;
+pub mod pick;
 pub mod plist;
 pub mod portal;
 pub mod portal_key;

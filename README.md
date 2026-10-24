@@ -80,6 +80,10 @@ chat UI of its own in front of the agent. The terminal is the UI.
 - A browser pane for `localhost:3000` or anything else, that your agents
   can drive too.
 - Ctrl+click a path in a pane to open the file in VS Code at that line.
+- Hand an agent what you point at: an element picked in the browser pane
+  (right click its header), a terminal selection (Shift+right click) or
+  lines in the file viewer (right click). The prompt gets one short line,
+  and the whole of it waits in a file the agent reads.
 
 **Getting your attention**
 
@@ -223,6 +227,7 @@ Everything else is in **Settings...** in the tray menu.
 | Ctrl+Shift+F | Search the pane's history |
 | Ctrl+Plus, Ctrl+Minus, Ctrl+0 | Font size |
 | Ctrl+click | Open the link, file or folder under the mouse |
+| Shift+right click | Hand the selection to an agent on the stage |
 
 The global shortcuts can be changed in Settings, under Keys.
 

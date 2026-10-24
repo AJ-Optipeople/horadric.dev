@@ -1337,6 +1337,11 @@ impl Pane {
         self.paste_text(&text);
     }
 
+    /// Something picked elsewhere on the stage, pasted into this session.
+    pub fn hand(&self, text: &str) {
+        self.paste_text(text);
+    }
+
     fn paste_text(&self, text: &str) {
         if text.is_empty() {
             return;
@@ -3015,7 +3020,12 @@ impl Pane {
             WM_RBUTTONUP => {
                 // The console convention, unless the program took the press:
                 // right click copies a selection, otherwise pastes.
+                // A file view has no prompt to paste into, so its right
+                // click offers the selection to an agent, as Shift does in
+                // a session.
                 if self.report_release(Button::Right, lparam) {
+                } else if self.has_selection() && (self.console.is_view() || Self::mods().shift) {
+                    app::push(Input::PaneAsk(self.session().to_string(), PaneAsk::Hand));
                 } else if (!self.has_selection() || !self.copy()) && !self.console.is_view() {
                     self.paste();
                 }

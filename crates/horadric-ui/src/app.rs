@@ -118,6 +118,7 @@ use crate::keys::{self, FontStep};
 use crate::layout::{self, Metrics};
 use crate::loot::Loot;
 use crate::menu::{self, Item};
+use crate::pick;
 use crate::portal_key;
 use crate::questlog::{self, QuestLog};
 use crate::render::{Gpu, StashLook};
@@ -296,6 +297,8 @@ pub enum PaneAsk {
     End,
     /// Put the session in the stash.
     Stash,
+    /// The pane's selection right clicked: copy it or hand it to an agent.
+    Hand,
 }
 
 /// What is asked for a browser pane, outside the app's borrow.
@@ -427,6 +430,9 @@ pub(crate) enum Input {
     Page(String, usize),
     /// A tab key in a browser pane's page, or its page closing itself.
     WebTab(String, web::TabStep),
+    /// Something picked on the stage, as its reference: paste it into the
+    /// prompt of the session with this id.
+    Hand(String, String),
     /// A browser pane's header right clicked, or Ctrl+L in its page: what
     /// can be done with the page of the project with this key.
     WebAsk(String, WebAsk),
@@ -1936,8 +1942,119 @@ fn pane_ask(id: &str, what: PaneAsk) {
         PaneAsk::Stash if stash_has_room() && confirm_stash(id) => {
             with_app(|app| app.stash(id));
         }
+        PaneAsk::Hand => hand_menu(id),
         _ => {}
     }
+}
+
+/// The agents on the stage, when it shows the project `key`, or whatever
+/// project it shows for None.
+fn stage_agents(key: Option<&str>) -> Vec<(String, String)> {
+    with_app(|app| {
+        app.stage
+            .as_ref()
+            .filter(|s| key.is_none_or(|k| s.project() == k))
+            .map(|s| s.agents())
+    })
+    .flatten()
+    .unwrap_or_default()
+}
+
+/// A line per agent to hand a pick to, numbered from `base`, the one that
+/// last had the keyboard first.
+fn hand_items(agents: &[(String, String)], verb: &str, base: usize) -> Vec<Item> {
+    if agents.is_empty() {
+        return vec![Item::Disabled(format!(
+            "{verb} an agent: none on the stage"
+        ))];
+    }
+    agents
+        .iter()
+        .enumerate()
+        .map(|(i, (_, name))| Item::action(base + i, format!("{verb} {name}")))
+        .collect()
+}
+
+/// A pane's selection right clicked: copy it, or hand it to an agent's
+/// prompt as a reference to the whole of it.
+fn hand_menu(id: &str) {
+    const COPY: usize = 1;
+    const HAND: usize = 100;
+    let Some((console, name)) = with_app(|app| app.stage.as_ref()?.console_of(id)).flatten() else {
+        return;
+    };
+    let agents: Vec<_> = stage_agents(None)
+        .into_iter()
+        .filter(|(a, _)| a != id)
+        .collect();
+    let mut items = vec![Item::action(COPY, "Copy"), Item::Separator];
+    items.extend(hand_items(&agents, "Hand to", HAND));
+    let picked = menu::popup(&items);
+    let text = console.selection_text().unwrap_or_default();
+    match picked {
+        Some(COPY) if !text.is_empty() => crate::clipboard::set_text(&text),
+        Some(n) if n >= HAND && !text.is_empty() => {
+            let Some((to, _)) = agents.get(n - HAND) else {
+                return;
+            };
+            let pick = match (console.path(), console.selection_lines()) {
+                (Some(path), Some((first, last))) => pick::Pick::File { path, first, last },
+                _ => pick::Pick::Terminal { from: name, text },
+            };
+            match pick::save(&pick) {
+                Some(reference) => push(Input::Hand(to.clone(), reference)),
+                None => return,
+            }
+        }
+        _ => return,
+    }
+    if let Ok(mut s) = console.screen.lock() {
+        s.term.selection = None;
+    }
+    with_app(|app| app.stage.as_ref().map(|s| s.refresh(console.serial)));
+}
+
+/// Lets the human pick an element in the project's page, then hands it,
+/// with a picture of it, to the agent `to`.
+fn pick_in_page(key: &str, to: String) {
+    let Some(tab) = web::shown_tab(key) else {
+        return;
+    };
+    web::focus(key);
+    let params = serde_json::json!({
+        "expression": pick::SCRIPT,
+        "awaitPromise": true,
+        "returnByValue": true,
+    })
+    .to_string();
+    let owned = key.to_string();
+    web::devtools(key, tab, "Runtime.evaluate", &params, move |answer| {
+        // Given up, or the page went away under the pick.
+        let Some(mut element) = answer.ok().as_deref().and_then(pick::element_of) else {
+            web::forget_call(&owned, tab);
+            return;
+        };
+        let crop = pick::crop_params(element.rect);
+        let key = owned.clone();
+        web::devtools(&owned, tab, "Page.captureScreenshot", &crop, move |shot| {
+            web::forget_call(&key, tab);
+            element.crop = shot.ok().and_then(|s| save_crop(&s));
+            if let Some(reference) = pick::save(&pick::Pick::Element(element)) {
+                push(Input::Hand(to, reference));
+            }
+        });
+    });
+}
+
+/// Writes the picture in a `Page.captureScreenshot` answer to a pick's
+/// file.
+fn save_crop(answer: &str) -> Option<PathBuf> {
+    let v: serde_json::Value = serde_json::from_str(answer).ok()?;
+    let png = horadric_core::release::base64_decode(v.get("data")?.as_str()?)?;
+    std::fs::create_dir_all(pick::dir()).ok()?;
+    let path = pick::new_path("png");
+    std::fs::write(&path, png).ok()?;
+    Some(path)
 }
 
 /// Says so when the stash is full, as the tile menu's greyed Stash does.
@@ -2312,6 +2429,8 @@ fn web_menu(key: &str) {
     const FIND: usize = 9;
     const DOWNLOADS: usize = 10;
     const SIZE: usize = 100;
+    const PICK: usize = 200;
+    let agents = stage_agents(Some(key));
     let items = vec![
         Item::action(NEW_TAB, "New tab\tCtrl+T"),
         Item::action(CLOSE_TAB, "Close tab\tCtrl+W"),
@@ -2326,8 +2445,10 @@ fn web_menu(key: &str) {
         Item::Submenu("Size and place".into(), size_items(key, SIZE)),
         Item::action(OUTSIDE, "Open in your browser"),
         Item::Separator,
-        Item::action(CLOSE, "Close"),
     ];
+    let mut items = items;
+    items.extend(hand_items(&agents, "Pick an element for", PICK));
+    items.extend([Item::Separator, Item::action(CLOSE, "Close")]);
     match menu::popup(&items) {
         Some(ADDRESS) => go_to(key),
         Some(NEW_TAB) => web::tab(key, web::TabStep::New),
@@ -2344,6 +2465,11 @@ fn web_menu(key: &str) {
         }
         Some(CLOSE) => {
             with_app(|app| app.close_web(key));
+        }
+        Some(n) if n >= PICK => {
+            if let Some((to, _)) = agents.get(n - PICK) {
+                pick_in_page(key, to.clone());
+            }
         }
         Some(picked) => {
             pick_size(key, SIZE, picked);
@@ -8275,6 +8401,11 @@ impl App {
                 Input::Browser(id) => self.show_browsers(&id),
                 Input::View(key, dir, rel) => self.open_view(&key, &dir, &rel),
                 Input::CloseView(serial) => self.close_view(serial),
+                Input::Hand(id, text) => {
+                    if let Some(stage) = &self.stage {
+                        stage.hand(&id, &text);
+                    }
+                }
                 Input::PaneAsk(id, what) => {
                     self.pane_ask = Some((id, what));
                     post(self.notify.0 as isize, WM_HORADRIC_PANE, 0);
