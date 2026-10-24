@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::path::Path;
 
-use horadric_core::brotherhood::Roster;
+use crate::brotherhood::Roster;
 use serde::{Deserialize, Serialize};
 
 const FILE: &str = "standing.json";
@@ -96,7 +96,7 @@ impl Standing {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use horadric_core::brotherhood::{Brother, Link};
+    use crate::brotherhood::{Brother, Link};
 
     fn roster() -> Roster {
         Roster {
