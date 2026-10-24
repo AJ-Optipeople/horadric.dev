@@ -880,6 +880,28 @@ Each step is useful alone and each is verified before the next starts.
 16. **Lore on Linux.** `horadric-memory`, the code index and `horadric
     mcp` built for musl, CI's Linux job and the release building them,
     the node holding a lore and serving `lore_*`.
+
+    Done on 2026-10-25 (805d560, 19bb50b, 9cb988a). The memory's thread
+    and the sharing glue moved from horadric-ui into
+    `horadric-memory/src/service.rs` and `sharing.rs` (`Lores` answers
+    the three `lore_*` hooks), so the app and the node run one copy; the
+    app hands in WinHTTP, the node `horadric_link::http::get`. The node
+    keeps every session's transcript, answers recalls, starts `claude`
+    with `--mcp-config` (lore tools only; a stand-in from
+    `HORADRIC_AGENT` gets no flags) and lets its model go after ten idle
+    minutes. A node links to no one, so the Windows side answers the
+    node's `lore` with what it lacks (`App::far_lore`), Town Portal on
+    or off, and a server tells its lore again when its projects change,
+    so a project opened after the link came up shares at once. The musl
+    binary went from 2.7 MB to 16.5 MB; the node idles at 3.5 MB and
+    holds about 110 MB with the model (195 MB at the peak of a first
+    catch up). Seen on `exit1-eu` with a dev instance linked over SSH,
+    in a repository cloned on both sides: notes left on either were
+    recalled on the other by `horadric mcp`, while linked within
+    seconds and after the link was cut while they were written, in a
+    project opened after the link too; the model came over
+    horadric-link; Claude on the node answered from `lore_recall`.
+    Built locally with zig (RELEASING.md, step 8).
 17. **A node on the relay.** `horadric node signin` (device code), the
     node's secret, key pair and `brothers.json`, its relay link feeding
     relay channels into its one `Server`, the headless approval, and

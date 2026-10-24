@@ -141,6 +141,28 @@ and only reloads this machine.
    updated by copying the binary over `~/.local/bin/horadric` and
    running `systemctl --user restart horadric`; its sessions' hosts
    keep running through the restart and are attached again.
+
+   To build the node on this machine without a release (to try a change
+   on a server before tagging), cross build it with zig, since the node
+   carries C (onig for the memory's tokenizer, tree-sitter and its
+   grammars, ring for the link) that rust-lld alone cannot compile:
+
+   ```sh
+   pip install --user ziglang        # zig, which cargo-zigbuild finds by itself
+   cargo install cargo-zigbuild
+   rustup target add x86_64-unknown-linux-musl
+   cargo zigbuild --release -p horadric --bin horadric --target x86_64-unknown-linux-musl
+   ```
+
+   The binary is `target/x86_64-unknown-linux-musl/release/horadric`,
+   static like the release's. A separate `CARGO_TARGET_DIR` keeps it out
+   of the way of the Windows builds. To lint the Linux half the same
+   way, point `CC_x86_64_unknown_linux_musl` and
+   `AR_x86_64_unknown_linux_musl` at the `zigcc-x86_64-unknown-linux-musl-*.bat`
+   and `ar.exe` wrappers cargo-zigbuild leaves under
+   `%LOCALAPPDATA%\cargo-zigbuild\<version>\wrappers`, then run
+   `cargo clippy --target x86_64-unknown-linux-musl` with the crates
+   CI's Linux job names.
 9. Try the build before publishing. Download the two binaries from the
    draft, or use the ones in `target/release`, and run them as a dev
    instance (see CLAUDE.md). Tests prove it compiles and signs; they do
