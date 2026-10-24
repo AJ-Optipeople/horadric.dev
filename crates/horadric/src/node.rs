@@ -613,12 +613,17 @@ fn launch(id: &str, cwd: PathBuf, agent: Agent, args: Vec<String>) -> Result<Att
     let program =
         agent_program(agent).ok_or_else(|| format!("`{}` is not on PATH", agent.program()))?;
     let exe = exe()?;
-    // Its agent gets the lore tools, as the app's do.
-    let config = mcp_config(&exe);
-    let mut line = agent.mcp_args(
-        &exe.to_string_lossy(),
-        config.as_deref().and_then(Path::to_str),
-    );
+    // Its agent gets the lore tools, as the app's do; a shell put in its
+    // place with `HORADRIC_AGENT` would take the flags for a script.
+    let mut line = if wire::is_agent(&program, agent) {
+        let config = mcp_config(&exe);
+        agent.mcp_args(
+            &exe.to_string_lossy(),
+            config.as_deref().and_then(Path::to_str),
+        )
+    } else {
+        Vec::new()
+    };
     line.extend(args);
     let mut env_set = vec![
         (SESSION_ENV.to_string(), id.to_string()),
