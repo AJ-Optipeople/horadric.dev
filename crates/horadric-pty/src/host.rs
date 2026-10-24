@@ -324,7 +324,10 @@ impl Remote {
         let deadline = Instant::now() + START;
         loop {
             match Remote::attach(&spec.pipe, job) {
-                Ok(a) => return Ok(a),
+                Ok(a) => {
+                    reap(child);
+                    return Ok(a);
+                }
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {}
                 Err(e) => {
                     // Connected, then lost: the host failed to start its
@@ -336,6 +339,7 @@ impl Remote {
                         // run on with an agent nobody sees.
                         _ => {
                             let _ = child.kill();
+                            let _ = child.wait();
                             e
                         }
                     });
@@ -346,6 +350,7 @@ impl Remote {
             }
             if Instant::now() > deadline {
                 let _ = child.kill();
+                let _ = child.wait();
                 return Err(io::Error::new(
                     io::ErrorKind::TimedOut,
                     "the session host did not answer",
@@ -486,6 +491,23 @@ fn spawn_detached(command: impl Fn() -> std::process::Command) -> io::Result<std
     }
     c.spawn()
 }
+
+/// Waits for a host that ends while its starter runs on, so it does not
+/// stay a zombie: a Linux node lets sessions go for weeks without
+/// restarting. Its stderr goes now, as it went when the child was simply
+/// dropped, so a host that writes there later is never held up by a pipe
+/// nobody reads.
+#[cfg(unix)]
+fn reap(mut child: std::process::Child) {
+    drop(child.stderr.take());
+    thread::spawn(move || {
+        let _ = child.wait();
+    });
+}
+
+/// Windows keeps no zombies: closing the handles is all there is.
+#[cfg(windows)]
+fn reap(_child: std::process::Child) {}
 
 fn wait_for(child: &mut std::process::Child, limit: Duration) -> io::Result<()> {
     let deadline = Instant::now() + limit;
