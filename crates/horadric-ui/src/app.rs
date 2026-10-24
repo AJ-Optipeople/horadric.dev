@@ -1151,7 +1151,27 @@ unsafe extern "system" fn app_proc(
         // session still runs: once their processes are killed they would
         // look like crashes.
         WM_QUERYENDSESSION => {
+            with_app(|app| app.portal_power("leaving"));
             with_app(App::freeze);
+            return LRESULT(1);
+        }
+        // Brothers hear it before Windows sleeps or after a shutdown was
+        // called off, rather than waiting out the silence to know.
+        windows::Win32::UI::WindowsAndMessaging::WM_ENDSESSION if wparam.0 == 0 => {
+            with_app(|app| app.portal_power("awake"));
+            return LRESULT(0);
+        }
+        windows::Win32::UI::WindowsAndMessaging::WM_POWERBROADCAST => {
+            match wparam.0 as u32 {
+                windows::Win32::UI::WindowsAndMessaging::PBT_APMSUSPEND => {
+                    with_app(|app| app.portal_power("sleeping"))
+                }
+                windows::Win32::UI::WindowsAndMessaging::PBT_APMRESUMESUSPEND
+                | windows::Win32::UI::WindowsAndMessaging::PBT_APMRESUMEAUTOMATIC => {
+                    with_app(|app| app.portal_power("awake"))
+                }
+                _ => None,
+            };
             return LRESULT(1);
         }
         // A screen came or went, changed resolution or scale, or the

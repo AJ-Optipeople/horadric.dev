@@ -455,7 +455,6 @@ pub fn listen(f: Listener) {
 
 /// Who is woken when a brother asks something of this PC, to serve it
 /// with [`take_requests`].
-#[allow(dead_code, reason = "the serving side takes these up next")]
 pub fn on_requests(f: Wake) {
     *REQUEST_WAKE.lock().unwrap_or_else(|e| e.into_inner()) = Some(f);
 }
@@ -463,7 +462,6 @@ pub fn on_requests(f: Wake) {
 /// What brothers asked of this PC since the last call: the channel, the
 /// brother's id, and the message, opened. Served as a phone's would be,
 /// as protocol v3's `kind` brother, the answers going back by [`reply`].
-#[allow(dead_code, reason = "the serving side takes these up next")]
 pub fn take_requests() -> Vec<(u32, String, Value)> {
     std::mem::take(&mut *REQUESTS.lock().unwrap_or_else(|e| e.into_inner()))
 }

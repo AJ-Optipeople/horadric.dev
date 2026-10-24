@@ -18,10 +18,12 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use horadric_core::handoff::{self, RepoId};
 use horadric_core::portal::{b64url, unb64url, Config, Kind, Paired};
 use horadric_core::serving::{Job, Out, Running, Serve, Server};
 use horadric_core::webpush;
@@ -32,12 +34,16 @@ use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{KillTimer, PostMessageW, SetTimer};
 
 use super::{unix_now, App, PORTAL_TIMER, WM_HORADRIC_PORTAL};
+use crate::brothers;
 use crate::console::GridSize;
+use crate::joining;
 use crate::portal::{self, Sender};
 use crate::portal_crypto;
 use crate::portal_link::{Incoming, Link};
+use crate::portal_pair::pc_name;
 use crate::portal_push::{self, Subs};
 use crate::project::{folder_key, project_key, project_name};
+use crate::sharing;
 use crate::worktree;
 
 /// How often `portal.json` is read, so `horadric portal` takes hold soon.
@@ -69,7 +75,18 @@ pub(super) struct Portal {
     fast: bool,
     /// What every connection asked and was sent.
     server: Server,
+    /// The channels that are linked brothers rather than phones, with
+    /// the brother's id. Their frames are sealed by [`brothers`].
+    brothers: HashMap<u32, String>,
+    /// The projects whose lore is shared, by repository, as the last
+    /// brother hello found them.
+    lore: Vec<(RepoId, Arc<sharing::Project>)>,
 }
+
+/// What this PC tells its brothers it is doing, as Windows says: one of
+/// [`STATES`], set from the app's window by [`App::portal_power`].
+static POWER: AtomicU8 = AtomicU8::new(0);
+const STATES: [&str; 3] = ["awake", "sleeping", "leaving"];
 
 /// When `portal.json` was last read. Kept apart from the portal, which is
 /// absent while it is off.
@@ -133,7 +150,17 @@ impl App {
             dir,
             fast: false,
             server: Server::default(),
+            brothers: HashMap::new(),
+            lore: Vec::new(),
         });
+        brothers::on_requests(Box::new(move || unsafe {
+            let _ = PostMessageW(
+                Some(HWND(notify as *mut _)),
+                WM_HORADRIC_PORTAL,
+                WPARAM(0),
+                LPARAM(0),
+            );
+        }));
         unsafe {
             SetTimer(Some(self.notify), PORTAL_TIMER, PUSH_MS, None);
         }
@@ -170,6 +197,7 @@ impl App {
                     p.relay_up = up;
                     if !up {
                         p.phones.clear();
+                        p.brothers.clear();
                         p.server.clear();
                     }
                 }
@@ -179,6 +207,9 @@ impl App {
         for (ch, name, key) in pairs {
             p.pair(ch, &name, key, now);
         }
+        for (ch, brother, msg) in brothers::take_requests() {
+            p.heard_brother(ch, &brother, msg);
+        }
         self.portal_serve(|server, here| server.answer(here, now));
     }
 
@@ -186,6 +217,16 @@ impl App {
     /// every [`PUSH_MS`].
     pub(super) fn portal_push(&mut self) {
         self.portal_serve(|server, here| server.tick(here));
+    }
+
+    /// Tells the brothers at once what Windows is about to do, as it does
+    /// it: "sleeping" before a suspend, "leaving" before a shutdown,
+    /// "awake" after.
+    pub(super) fn portal_power(&mut self, state: &str) {
+        let i = STATES.iter().position(|s| *s == state).unwrap_or(0);
+        if POWER.swap(i as u8, Ordering::Relaxed) as usize != i {
+            self.portal_drain();
+        }
     }
 
     /// Runs the server with the app to answer through, then sends what it
@@ -200,7 +241,10 @@ impl App {
             return;
         };
         p.server = server;
-        p.deliver(out);
+        for ch in p.deliver(out) {
+            p.brothers.remove(&ch);
+            p.server.close(ch);
+        }
         let streaming = p.server.streaming();
         if streaming != p.fast {
             p.fast = streaming;
@@ -220,6 +264,7 @@ impl App {
             .lock()
             .map(|r| {
                 r.all()
+                    .filter(|s| portal::served(s))
                     .map(|s| {
                         let paused = self.paused.contains_key(&s.id);
                         portal::session_entry(s, &project_name(&project_key(s)), paused)
@@ -256,7 +301,7 @@ impl App {
             .lock()
             .ok()
             .and_then(|r| {
-                let s = r.all().find(|s| s.id == id)?;
+                let s = r.all().filter(|s| portal::served(s)).find(|s| s.id == id)?;
                 let project = project_name(&project_key(s));
                 Some(webpush::payload(&pc, s, &project, waiting).to_string())
             })
@@ -316,7 +361,7 @@ impl App {
     fn portal_reply(&self, id: &str) -> Option<String> {
         let (heard, cwd, claude) = {
             let r = self.shared.registry.lock().ok()?;
-            let s = r.get(id)?;
+            let s = r.get(id).filter(|s| portal::served(s))?;
             let claude = s.claude_session_id.clone().filter(|_| !s.shell);
             (s.last_turn.clone(), s.cwd.clone(), claude)
         };
@@ -330,6 +375,7 @@ impl App {
             .lock()
             .map(|r| {
                 r.all()
+                    .filter(|s| portal::served(s))
                     .filter(|s| matches!(s.phase, Phase::Waiting(_)))
                     .map(|s| s.id.clone())
                     .collect()
@@ -373,7 +419,12 @@ impl App {
             .collect();
         projects.extend(self.recent.iter().cloned());
         if let Ok(r) = self.shared.registry.lock() {
-            projects.extend(r.all().filter(|s| !s.cwd.is_empty()).map(|s| s.cwd.clone()));
+            projects.extend(
+                r.all()
+                    .filter(|s| portal::served(s))
+                    .filter(|s| !s.cwd.is_empty())
+                    .map(|s| s.cwd.clone()),
+            );
         }
         // Scratch folders and app data are not where the human keeps projects.
         let mut skip = vec![std::env::temp_dir().to_string_lossy().into_owned()];
@@ -399,7 +450,7 @@ impl App {
             .shared
             .registry
             .lock()
-            .map(|r| r.all().any(|s| s.id == id))
+            .map(|r| r.all().filter(|s| portal::served(s)).any(|s| s.id == id))
             .unwrap_or(false);
         let folder = portal::attach_folder(id).filter(|_| known);
         let (Some(folder), Some(p)) = (folder, &self.portal) else {
@@ -452,29 +503,79 @@ impl Portal {
         (self.relay_up, phones)
     }
 
-    /// Seals `msg` with the key of the phone on `ch` and sends it. A
-    /// channel no key has opened yet gets nothing.
-    fn send(&self, ch: u32, msg: &Value) {
+    /// Seals `msg` with the key of the phone or brother on `ch` and sends
+    /// it. A channel no key has opened yet gets nothing. False when it is
+    /// a brother's whose link is gone.
+    fn send(&self, ch: u32, msg: &Value) -> bool {
+        if self.brothers.contains_key(&ch) {
+            return brothers::reply(ch, msg);
+        }
         if let Some(Some((_, key))) = self.phones.get(&ch) {
             self.link.send(ch, key, msg);
         }
+        true
     }
 
     /// Sends what the server said: its messages now, and each job's
     /// answer from a thread of its own, since git can take a while in a
-    /// big tree.
-    fn deliver(&self, out: Out) {
+    /// big tree. Answers the brother channels found gone, which hear of
+    /// their link going down only this way.
+    fn deliver(&self, out: Out) -> Vec<u32> {
+        let mut gone: Vec<u32> = Vec::new();
         for (ch, msg) in &out.msgs {
-            self.send(*ch, msg);
+            if !gone.contains(ch) && !self.send(*ch, msg) {
+                gone.push(*ch);
+            }
         }
         for (ch, job) in out.later {
+            if self.brothers.contains_key(&ch) {
+                std::thread::spawn(move || {
+                    for msg in answers(job()) {
+                        brothers::reply(ch, &msg);
+                    }
+                });
+                continue;
+            }
             let Some(Some((_, key))) = self.phones.get(&ch) else {
                 continue;
             };
             let key = *key;
             let outbox = self.link.outbox();
-            std::thread::spawn(move || outbox.send(ch, &key, &job()));
+            std::thread::spawn(move || {
+                for msg in answers(job()) {
+                    outbox.send(ch, &key, &msg);
+                }
+            });
         }
+        gone
+    }
+
+    /// Takes one request from a linked brother, opened and checked by
+    /// [`brothers`]: served as a v3 client of kind brother, whatever its
+    /// hello said, since only a brother's key opens that channel.
+    fn heard_brother(&mut self, ch: u32, brother: &str, mut msg: Value) {
+        if self.brothers.get(&ch).map(String::as_str) != Some(brother) {
+            self.brothers.insert(ch, brother.to_string());
+            self.server.open(ch);
+        }
+        if msg["t"] == "hello" {
+            msg["kind"] = json!("brother");
+        }
+        let now = micros(SystemTime::now());
+        for reply in self.server.heard(ch, brother, &msg, now, fresh_s) {
+            brothers::reply(ch, &reply);
+        }
+    }
+
+    /// The roster this PC serves its brothers: from the brothers it
+    /// joined, None before it joined any.
+    fn roster(&self) -> Option<horadric_core::brotherhood::Roster> {
+        let store = joining::Store::load(&self.dir)?;
+        if store.brothers.is_empty() {
+            return None;
+        }
+        let me = horadric_core::portal::id(&self.config.secret);
+        Some(portal::joined_roster(&me, &pc_name(), &store))
     }
 
     /// Cuts off every connection from a phone no longer in the config,
@@ -526,9 +627,34 @@ impl Portal {
     }
 }
 
+impl Here<'_> {
+    /// Whether `id` is a brother's session shown here, which this PC
+    /// never serves on: it is the brother's to serve.
+    fn foreign(&self, id: &str) -> bool {
+        self.0
+            .shared
+            .registry
+            .lock()
+            .is_ok_and(|r| r.get(id).is_some_and(|s| !portal::served(s)))
+    }
+
+    /// This PC's project with the repository a brother names.
+    fn shared_lore(&self, project: &Value) -> Option<Arc<sharing::Project>> {
+        let wanted: RepoId = serde_json::from_value(project.clone()).ok()?;
+        let lore = &self.0.portal.as_ref()?.lore;
+        let mine: Vec<(String, RepoId)> = lore
+            .iter()
+            .enumerate()
+            .map(|(i, (repo, _))| (i.to_string(), repo.clone()))
+            .collect();
+        let i: usize = handoff::find_project(&wanted, &mine)?.parse().ok()?;
+        Some(lore[i].1.clone())
+    }
+}
+
 impl Serve for Here<'_> {
     fn name(&self) -> String {
-        std::env::var("COMPUTERNAME").unwrap_or_else(|_| "PC".to_string())
+        pc_name()
     }
 
     fn sessions(&self) -> Value {
@@ -560,6 +686,9 @@ impl Serve for Here<'_> {
     }
 
     fn running(&self, id: &str) -> Running {
+        if self.foreign(id) {
+            return Running::Elsewhere;
+        }
         if let Some(c) = self.0.consoles.get(id) {
             Running::Here(Arc::as_ptr(c) as usize as u64)
         } else if self.0.paused.contains_key(id) {
@@ -620,10 +749,82 @@ impl Serve for Here<'_> {
         }
     }
 
-    fn control(&self, _who: &str, _kind: Kind) -> bool {
-        // Nothing makes a link view only yet: that switch comes with
-        // joining brothers, and a phone the human paired may always act.
-        true
+    /// A phone the human paired may always act. A brother may when the
+    /// roster says so, which is on unless the human switched it off.
+    fn control(&self, who: &str, _kind: Kind) -> bool {
+        let Some(p) = &self.0.portal else {
+            return false;
+        };
+        if !p.brothers.values().any(|b| b == who) {
+            return true;
+        }
+        let me = horadric_core::portal::id(&p.config.secret);
+        p.roster().is_some_and(|r| r.control(&me, who))
+    }
+
+    fn roster(&self) -> Option<Value> {
+        let roster = self.0.portal.as_ref()?.roster()?;
+        Some(portal::roster_message(&roster))
+    }
+
+    fn state(&self) -> &'static str {
+        STATES[POWER.load(Ordering::Relaxed) as usize % STATES.len()]
+    }
+
+    /// The tiles' projects in git, found by repository. Asked at a
+    /// brother's hello, so a project opened since is shared from the next.
+    fn lore_projects(&mut self) -> Vec<(Value, Value)> {
+        let dirs: Vec<PathBuf> = self
+            .0
+            .clusters
+            .iter()
+            .filter_map(|c| self.0.project_dir(&c.key))
+            .collect();
+        let mut shared: Vec<(RepoId, Arc<sharing::Project>)> = Vec::new();
+        for dir in dirs {
+            let (Some(repo), Some(project)) = (handoff::repo_id(&dir), sharing::Project::of(&dir))
+            else {
+                continue;
+            };
+            if !shared.iter().any(|(r, _)| r == &repo) {
+                shared.push((repo, Arc::new(project)));
+            }
+        }
+        let told = shared
+            .iter()
+            .map(|(repo, p)| (json!(repo), json!(p.have())))
+            .collect();
+        if let Some(p) = self.0.portal.as_mut() {
+            p.lore = shared;
+        }
+        told
+    }
+
+    fn lore_export(&mut self, project: &Value, theirs: &mut Value) -> Option<Job> {
+        let ours = self.shared_lore(project)?;
+        let mut t = sharing::Theirs::of(theirs);
+        t.learn(ours.sent(&t.token));
+        let due = t.due(&ours.mark());
+        *theirs = t.to_json();
+        if !due {
+            return None;
+        }
+        let project = project.clone();
+        Some(Box::new(move || ours.export(&project, &t.have, &t.token)))
+    }
+
+    fn lore_import(&mut self, project: &Value, b64: &str) {
+        let Some(ours) = self.shared_lore(project) else {
+            return;
+        };
+        let b64 = b64.to_string();
+        std::thread::spawn(move || {
+            if let Err(e) = ours.import(&b64, unix_now()) {
+                if std::env::var_os("HORADRIC_DEBUG").is_some() {
+                    eprintln!("horadric: a brother's lore did not go in: {e}");
+                }
+            }
+        });
     }
 
     fn hello(&self, answer: &mut Value) {
@@ -646,7 +847,7 @@ impl Serve for Here<'_> {
             .shared
             .registry
             .lock()
-            .is_ok_and(|r| r.get(id).is_some());
+            .is_ok_and(|r| r.get(id).filter(|s| portal::served(s)).is_some());
         if !known {
             return Err("That session is gone.".to_string());
         }
@@ -655,6 +856,9 @@ impl Serve for Here<'_> {
     }
 
     fn stop(&mut self, id: &str) -> Result<(), String> {
+        if self.foreign(id) {
+            return Err("That session is gone.".to_string());
+        }
         let app = &mut *self.0;
         let known = app.consoles.contains_key(id)
             || app.paused.contains_key(id)
@@ -662,7 +866,7 @@ impl Serve for Here<'_> {
                 .shared
                 .registry
                 .lock()
-                .is_ok_and(|r| r.get(id).is_some());
+                .is_ok_and(|r| r.get(id).filter(|s| portal::served(s)).is_some());
         if !known {
             return Err("That session is gone.".to_string());
         }
@@ -681,6 +885,7 @@ impl Serve for Here<'_> {
     fn changes(&self, id: &str, path: Option<&str>) -> Job {
         let session = self.0.shared.registry.lock().ok().and_then(|r| {
             r.get(id)
+                .filter(|s| portal::served(s))
                 .map(|s| (PathBuf::from(&s.cwd), s.worktree.clone()))
         });
         let id = id.to_string();
@@ -719,6 +924,22 @@ impl Serve for Here<'_> {
             portal_push::send_all(&p.dir, &p.config, payload);
         }
     }
+}
+
+/// What a job's answer sends: nothing for null, each item of an array.
+fn answers(v: Value) -> Vec<Value> {
+    match v {
+        Value::Null => Vec::new(),
+        Value::Array(list) => list,
+        one => vec![one],
+    }
+}
+
+/// A new connection's `s`.
+fn fresh_s() -> String {
+    let mut s = [0u8; 16];
+    portal_crypto::random(&mut s);
+    b64url(&s)
 }
 
 /// A time in microseconds since 1970, the unit `size_owner` compares.
@@ -783,14 +1004,9 @@ fn heard_from(
     if msg["t"] == "hello" {
         seen(&p.dir, &mut p.config, &id, now);
     }
-    let fresh = || {
-        let mut s = [0u8; 16];
-        portal_crypto::random(&mut s);
-        b64url(&s)
-    };
     for reply in p
         .server
-        .heard(ch, &id, &msg, micros(SystemTime::now()), fresh)
+        .heard(ch, &id, &msg, micros(SystemTime::now()), fresh_s)
     {
         p.link.send(ch, &key, &reply);
     }

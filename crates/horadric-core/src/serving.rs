@@ -20,7 +20,9 @@ use crate::portal::{
 };
 
 /// Work that would hold the server up, such as git over a big tree: run
-/// it off the serving thread and send what it answers to the channel.
+/// it off the serving thread and send what it answers to the channel. A
+/// job that answers null sends nothing, and one that answers an array
+/// sends each of its items in turn.
 pub type Job = Box<dyn FnOnce() -> Value + Send>;
 
 /// How often the lists and watched screens are looked at, while the raw
@@ -143,10 +145,12 @@ pub trait Serve {
     fn lore_projects(&mut self) -> Vec<(Value, Value)> {
         Vec::new()
     }
-    /// The `entries` message with what `theirs` lacks of a project's lore,
-    /// None when it lacks nothing. `theirs` then counts what was sent, so
-    /// the same entries do not go twice.
-    fn lore_export(&mut self, _project: &Value, _theirs: &mut Value) -> Option<Value> {
+    /// A job answering the `entries` message with what `theirs` lacks of a
+    /// project's lore, or null when it lacks nothing; None when there is
+    /// surely nothing to send. `theirs` then counts what is sent, so the
+    /// same entries do not go twice; it is the implementor's to shape,
+    /// starting as the `have` the brother's `lore` carried.
+    fn lore_export(&mut self, _project: &Value, _theirs: &mut Value) -> Option<Job> {
         None
     }
     /// Takes in the entries a brother sent, `b64` as `entries` carries it.
@@ -547,8 +551,8 @@ impl Server {
             let Some((project, theirs)) = c.lore.get_mut(&key) else {
                 continue;
             };
-            if let Some(entries) = serve.lore_export(project, theirs) {
-                out.send(ch, entries);
+            if let Some(job) = serve.lore_export(project, theirs) {
+                out.later.push((ch, job));
             }
         }
         if !asked.hellos.is_empty() {
@@ -631,6 +635,11 @@ impl Server {
         }
         self.sent = Some(fingerprint(&list));
         self.projects_sent = Some(fingerprint(&projects));
+        // A brother just heard the state, so the heartbeat counts from
+        // now; a change the others have not heard still goes to them.
+        if brothers && self.told.is_none_or(|(was, _)| was == state) {
+            self.told = Some((state, Instant::now()));
+        }
     }
 
     /// Sends what raw streams have not had yet: the size first whenever it
@@ -790,8 +799,8 @@ impl Server {
         self.lore_looked = Some(Instant::now());
         for (&ch, c) in self.clients.iter_mut().filter(|(_, c)| c.brother()) {
             for (project, theirs) in c.lore.values_mut() {
-                if let Some(entries) = serve.lore_export(project, theirs) {
-                    out.send(ch, entries);
+                if let Some(job) = serve.lore_export(project, theirs) {
+                    out.later.push((ch, job));
                 }
             }
         }
@@ -969,11 +978,15 @@ mod tests {
         fn lore_projects(&mut self) -> Vec<(Value, Value)> {
             vec![(json!("repo"), json!({"me": 3}))]
         }
-        fn lore_export(&mut self, project: &Value, theirs: &mut Value) -> Option<Value> {
+        fn lore_export(&mut self, project: &Value, theirs: &mut Value) -> Option<Job> {
             let had = theirs["me"].as_u64().unwrap_or(0);
+            let project = project.clone();
             (had < 3).then(|| {
                 *theirs = json!({"me": 3});
-                json!({"t": "entries", "project": project, "b64": "", "from": had})
+                let job: Job = Box::new(
+                    move || json!({"t": "entries", "project": project, "b64": "", "from": had}),
+                );
+                job
             })
         }
         fn lore_import(&mut self, project: &Value, b64: &str) {
@@ -1001,8 +1014,20 @@ mod tests {
         msg["s"] = json!("S");
         msg["n"] = json!(n);
         let mut now = server.heard(1, "phone", &msg, at, || unreachable!());
-        now.extend(server.answer(serve, 0).msgs.into_iter().map(|(_, m)| m));
+        now.extend(sent(server.answer(serve, 0)));
         now
+    }
+
+    /// What goes out, the jobs' answers too, as a transport sends it.
+    fn sent(out: Out) -> Vec<Value> {
+        let mut msgs: Vec<Value> = out.msgs.into_iter().map(|(_, m)| m).collect();
+        msgs.extend(
+            out.later
+                .into_iter()
+                .map(|(_, job)| job())
+                .filter(|m| !m.is_null()),
+        );
+        msgs
     }
 
     fn of<'a>(msgs: &'a [Value], t: &str) -> Vec<&'a Value> {
@@ -1327,7 +1352,7 @@ mod tests {
         let hello = json!({"t": "hello", "v": 3, "kind": "brother"});
         let (mut server, msgs) = greeted(&mut serve, "b", hello);
         assert_eq!(of(&msgs, "roster")[0]["n"], 1);
-        assert_eq!(of(&msgs, "state")[0], &state_message("awake"));
+        assert_eq!(of(&msgs, "state"), [&state_message("awake")]);
         assert_eq!(
             of(&msgs, "lore")[0],
             &lore_message(&json!("repo"), &json!({"me": 3}))
@@ -1355,12 +1380,7 @@ mod tests {
         assert_eq!(of(&msgs, "entries")[0]["from"], 1);
         server.looked = None;
         server.lore_looked = None;
-        let msgs: Vec<Value> = server
-            .tick(&mut serve)
-            .msgs
-            .into_iter()
-            .map(|(_, m)| m)
-            .collect();
+        let msgs = sent(server.tick(&mut serve));
         assert!(of(&msgs, "entries").is_empty());
         let entries = json!({"t": "entries", "project": "repo", "b64": "eA"});
         say(&mut server, &mut serve, 2, entries, 0);

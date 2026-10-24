@@ -66,6 +66,7 @@ pub mod portal;
 pub mod portal_key;
 pub mod rain;
 pub mod screens;
+pub mod sharing;
 pub mod shell;
 pub mod sky;
 pub mod spectator;

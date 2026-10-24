@@ -9,11 +9,13 @@ use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::Term;
 use alacritty_terminal::vte::ansi::{NamedColor, Rgb};
+use horadric_core::brotherhood::{Brother, Link, Roster};
 use horadric_core::diff::FileDiff;
 // The frame crypto is Windows CNG, so the Mac build has no portal yet.
 #[cfg(windows)]
 use horadric_core::portal::{key32, Config};
 use horadric_core::tasks::{Mark, Mode, Ready, Task};
+use horadric_core::Session;
 use serde_json::{json, Value};
 
 // The messages a headless node builds too live in core.
@@ -460,6 +462,41 @@ pub fn attach_stale(modified: u64, now: u64) -> bool {
     now.saturating_sub(modified) >= ATTACH_KEEP_SECS
 }
 
+/// Whether this PC serves a session to its phones and brothers: its own,
+/// never one a brother runs and this PC only shows.
+pub fn served(s: &Session) -> bool {
+    s.brother.is_none()
+}
+
+/// The roster as joining knows it, until the mesh keeps one of its own:
+/// this PC and each brother it joined, control on for all. Its number is
+/// the latest join, so every join raises it and two PCs that joined each
+/// other agree on it.
+pub fn joined_roster(me: &str, name: &str, store: &crate::joining::Store) -> Roster {
+    let key = store.me.as_ref().map_or("", |m| m.public.as_str());
+    let n = store.brothers.iter().map(|b| b.joined).max().unwrap_or(0);
+    let mut brothers = vec![Brother {
+        n,
+        ..Brother::new(me, name, key, Link::Relay)
+    }];
+    brothers.extend(store.brothers.iter().map(|b| Brother {
+        n: b.joined,
+        ..Brother::new(&b.id, &b.name, &b.public, Link::Relay)
+    }));
+    Roster {
+        n,
+        brothers,
+        ..Roster::default()
+    }
+}
+
+/// The `roster` message: the roster's own fields beside `t`.
+pub fn roster_message(roster: &Roster) -> Value {
+    let mut msg = serde_json::to_value(roster).unwrap_or_else(|_| json!({}));
+    msg["t"] = json!("roster");
+    msg
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -792,5 +829,45 @@ mod tests {
         assert!(!attach_stale(100, 100 + ATTACH_KEEP_SECS - 1));
         assert!(attach_stale(100, 100 + ATTACH_KEEP_SECS));
         assert!(!attach_stale(200, 100));
+    }
+
+    #[test]
+    fn the_joined_roster_is_this_pc_and_its_brothers_numbered_by_the_last_join() {
+        let joined = |id: &str, at: u64| crate::joining::Joined {
+            id: id.into(),
+            name: id.to_uppercase(),
+            public: format!("{id}-key"),
+            key: "k".into(),
+            joined: at,
+            seen: at,
+        };
+        let store = crate::joining::Store {
+            me: None,
+            brothers: vec![joined("b", 10), joined("c", 30)],
+        };
+        let r = joined_roster("a", "Desk", &store);
+        assert_eq!(r.n, 30);
+        let ids: Vec<&str> = r.brothers.iter().map(|b| b.id.as_str()).collect();
+        assert_eq!(ids, ["a", "b", "c"]);
+        assert_eq!(r.brothers[1].key, "b-key");
+        assert!(r.control("a", "b") && r.control("a", "c"));
+        assert!(!r.control("a", "stranger"));
+        let msg = roster_message(&r);
+        assert_eq!(msg["t"], "roster");
+        assert_eq!(msg["n"], 30);
+        assert_eq!(msg["brothers"][0]["name"], "Desk");
+        assert_eq!(joined_roster("a", "Desk", &Default::default()).n, 0);
+    }
+
+    #[test]
+    fn a_brothers_session_is_never_served_on() {
+        let mut s = Session::new("a1", "fix", "C:/p/x");
+        assert!(served(&s));
+        s.brother = Some(horadric_core::afar::OnBrother {
+            name: "Laptop".into(),
+            project: "x".into(),
+            reach: true,
+        });
+        assert!(!served(&s));
     }
 }
