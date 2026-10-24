@@ -100,7 +100,7 @@ pub fn connected(generation: u64, up: bool) {
     with(generation, |b| {
         for (ch, h) in &b.chans {
             if h.linked() {
-                tell_link(Link::Down { ch: *ch });
+                down(*ch);
             }
         }
         b.up = up;
@@ -177,7 +177,7 @@ impl Brothers {
         if let Some(h) = self.chans.remove(&ch) {
             self.tried.remove(h.peer());
             if h.linked() {
-                tell_link(Link::Down { ch });
+                down(ch);
             }
         }
         self.relay(json!({"close": ch}));
@@ -240,7 +240,7 @@ impl Brothers {
             if let Some(h) = self.chans.remove(&ch) {
                 self.tried.remove(h.peer());
                 if h.linked() {
-                    tell_link(Link::Down { ch });
+                    down(ch);
                 }
                 return true;
             }
@@ -447,6 +447,7 @@ type Wake = Box<dyn Fn() + Send>;
 static LISTENER: Mutex<Option<Listener>> = Mutex::new(None);
 static REQUESTS: Mutex<Vec<(u32, String, Value)>> = Mutex::new(Vec::new());
 static REQUEST_WAKE: Mutex<Option<Wake>> = Mutex::new(None);
+static DOWNS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
 
 /// Who hears what linked channels do. One listener, the app's client.
 pub fn listen(f: Listener) {
@@ -487,6 +488,31 @@ pub fn reply(ch: u32, msg: &Value) -> bool {
     true
 }
 
+/// The linked channels gone since the last call, so the serving side
+/// drops what it streams there at once rather than at its next reply.
+pub fn take_downs() -> Vec<u32> {
+    std::mem::take(&mut *DOWNS.lock().unwrap_or_else(|e| e.into_inner()))
+}
+
+/// A linked channel went: the client hears it, and the serving side is
+/// woken to close it.
+fn down(ch: u32) {
+    debug(&format!("channel {ch} is down"));
+    tell_link(Link::Down { ch });
+    DOWNS.lock().unwrap_or_else(|e| e.into_inner()).push(ch);
+    wake_requests();
+}
+
+fn wake_requests() {
+    if let Some(f) = REQUEST_WAKE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+    {
+        f();
+    }
+}
+
 fn tell_link(l: Link) {
     if let Some(f) = LISTENER.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
         f(l);
@@ -494,10 +520,12 @@ fn tell_link(l: Link) {
 }
 
 /// Both brothers ask and answer on one channel. What a client sends is
-/// told by the phones' rule: every message after hello carries `n`, and
-/// hello itself says what `kind` asks. Everything else is an answer.
+/// told by the phones' rule: every message after hello carries the
+/// session's `s` and a rising `n`, and hello itself says what `kind`
+/// asks. Everything else is an answer, the roster too, whose `n` is its
+/// own number.
 fn asks(msg: &Value) -> bool {
-    msg.get("n").is_some()
+    (msg.get("n").is_some() && msg.get("s").is_some())
         || (msg.get("t").and_then(Value::as_str) == Some("hello") && msg.get("kind").is_some())
 }
 
@@ -507,13 +535,7 @@ fn route(ch: u32, peer: String, msg: Value) {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push((ch, peer, msg));
-        if let Some(f) = REQUEST_WAKE
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_ref()
-        {
-            f();
-        }
+        wake_requests();
     } else {
         tell_link(Link::Heard { ch, msg });
     }
@@ -533,5 +555,8 @@ mod tests {
         ));
         assert!(!asks(&json!({"t": "folders", "list": []})));
         assert!(!asks(&json!({"t": "out", "id": "a", "seq": 0, "b64": ""})));
+        assert!(!asks(
+            &json!({"t": "roster", "n": 1760000000, "brothers": [], "sessions": {}})
+        ));
     }
 }

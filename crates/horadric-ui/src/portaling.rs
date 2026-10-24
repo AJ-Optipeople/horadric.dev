@@ -207,6 +207,14 @@ impl App {
         for (ch, name, key) in pairs {
             p.pair(ch, &name, key, now);
         }
+        for ch in brothers::take_downs() {
+            if let Some(brother) = p.brothers.remove(&ch) {
+                p.server.close(ch);
+                if std::env::var_os("HORADRIC_DEBUG").is_some() {
+                    eprintln!("portal: {brother}'s channel {ch} closed, served no more");
+                }
+            }
+        }
         for (ch, brother, msg) in brothers::take_requests() {
             p.heard_brother(ch, &brother, msg);
         }
