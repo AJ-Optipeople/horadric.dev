@@ -9,6 +9,7 @@
 - A [/] quest whose session a dev instance started (state in %APPDATA%\Horadric-dev) died with it: no tell reaches it, hand it to the human with "restart it" at once (lore #51).
 
 ## Lately
+- 2026-10-24 Round (hourly, main at fb9a7b4, only my memory since the c0ffda6 ship): uncommitted brethren.rs, store.rs, heavy.rs, performance.md still a live session's. Log empty, no aim. Nothing to do.
 - 2026-10-24 Round (hourly, main at d61190b, only my memory since the c0ffda6 ship): uncommitted brethren.rs, store.rs, heavy.rs, performance.md still a live session's. Log empty, no aim. Nothing to do.
 - 2026-10-24 Round (hourly, main at 3f34c35, only my memory since the c0ffda6 ship): uncommitted brethren.rs, store.rs, heavy.rs, performance.md are a live session's. Log empty, no aim. Nothing to do.
 - 2026-10-24 Round (human left, main at 27c81b2, only my memory since c0ffda6): the c0ffda6 Ship Local reloaded fine at 05:47. Uncommitted brethren.rs, store.rs, heavy.rs are a live session's. Log empty, no aim. Nothing to do.
