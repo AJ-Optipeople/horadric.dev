@@ -1,8 +1,8 @@
 //! The light that moves inside a terminal's glass. While its agent works
 //! the runes cut round the rim light one after another, going round, and
-//! a run of them flares gold at every tool the agent casts. A typed letter is burnt
-//! into the glass white hot and cools to its own colour, and a deleted one
-//! crumbles to ash. A turn ending sweeps the glass and seals the ring.
+//! a run of them flares gold at every tool the agent casts. A typed letter
+//! is burnt into the glass white hot and cools to its own colour, and a
+//! deleted one crumbles to ash. A turn ending sweeps the glass and seals the ring.
 //!
 //! Like the rain, all of it is a function of the time alone, so a pane
 //! keeps no particles between frames, only when each burst began.

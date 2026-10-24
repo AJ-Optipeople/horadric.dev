@@ -40,7 +40,7 @@ use crate::favicon::{self, Favicon};
 use crate::frame::{Decoration, Frame, BOLD, ITALIC};
 use crate::render::{self, hwnd_target, Gpu};
 use crate::sky::SkyFrame;
-use crate::sparks::{self, Ash, Burn, Fx, Ink, Lit, Orbit, Ring};
+use crate::sparks::{self, Ash, Fx, Ink, Lit, Orbit, Ring};
 use crate::theme::{self, Color};
 use crate::{rain, summon, viewport};
 use horadric_core::sanctuary::Kind;
@@ -924,10 +924,6 @@ impl GridTarget {
                 self.rt
                     .FillRectangle(&rect(f.row, f.col, f.cells), &self.brush);
             }
-            // The glow of a letter being burnt in sits on its background,
-            // under every letter, so it lights its neighbours too.
-            self.forge_glow(cell, &fx.burns);
-
             let faces = font.faces.borrow();
             let mut advances: Vec<f32> = Vec::new();
             for r in &frame.runs {
@@ -1597,36 +1593,6 @@ impl GridTarget {
         );
         let mut run = run;
         ManuallyDrop::drop(&mut run.fontFace);
-    }
-
-    /// The heat round letters being burnt in, wider than the letter, so a
-    /// word typed fast glows as one bar cooling from its newest end.
-    unsafe fn forge_glow(&self, cell: &CellSize, burns: &[Burn]) {
-        if burns.is_empty() {
-            return;
-        }
-        let (ox, oy) = grid_origin();
-        self.rt.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-        for b in burns {
-            let h = b.heat * b.heat;
-            let point = Vector2 {
-                X: ox + (b.col as f32 + 0.5) * cell.w,
-                Y: oy + (b.row as f32 + 0.55) * cell.h,
-            };
-            for (grow, alpha) in [(1.0, 0.10), (0.6, 0.18)] {
-                let c = sparks::heat_color(b.heat * 0.85);
-                self.brush.SetColor(&render::color(c.with_alpha(alpha * h)));
-                self.rt.FillEllipse(
-                    &D2D1_ELLIPSE {
-                        point,
-                        radiusX: cell.w * (0.9 + 1.4 * grow * b.heat),
-                        radiusY: cell.h * (0.45 + 0.5 * grow * b.heat),
-                    },
-                    &self.brush,
-                );
-            }
-        }
-        self.rt.SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
     }
 
     /// A deleted letter coming apart: cut into slices that lift away and
