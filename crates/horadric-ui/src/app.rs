@@ -158,7 +158,11 @@ mod far;
 
 #[path = "handing.rs"]
 mod handing;
+
+#[path = "keeping.rs"]
+mod keeping;
 pub(crate) use handing::{leaving_menu, leaving_pick};
+pub(crate) use keeping::{set_auto as set_auto_takeover, set_keeper, tray_state as keeping_tray};
 
 pub use runner::ssh_prompt;
 
@@ -752,6 +756,13 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
                 .unwrap_or(false);
             // Woken by the post below whether or not it lit anything.
             crate::glows::hear(&feed_registry, &target, &t.event);
+            // A turn's end is when its keeper is sent the snapshot.
+            if t.agent == Agent::Claude
+                && t.event.hook_event_name == "Stop"
+                && t.event.agent_id.is_none()
+            {
+                keeping::turn_ended(&target, &t.event.transcript_path);
+            }
             post_event(notify_id, changed);
         }
     });
@@ -1499,6 +1510,8 @@ fn tray_menu(hwnd: HWND) {
         }
         Some(Choice::SignIn) => crate::workos::sign_in_in_background(),
         Some(Choice::SignOut) => crate::workos::sign_out(),
+        Some(Choice::Keeper(keeper)) => set_keeper(keeper),
+        Some(Choice::AutoTakeover(on)) => set_auto_takeover(on),
         Some(Choice::Leave(to)) => {
             with_app(|app| app.leave_for(to));
         }
@@ -1674,6 +1687,7 @@ fn tile_menu(id: &str) {
     const PICK: usize = 5;
     const STOP_RUNEWORD: usize = 6;
     const FOUND: usize = 7;
+    const TAKE_OVER: usize = 8;
     let Some((kind, shell)) = with_app(|app| app.tile_kind(id)).flatten() else {
         return;
     };
@@ -1761,7 +1775,15 @@ fn tile_menu(id: &str) {
     ) {
         items.insert(at, hand);
     }
+    if let Some(label) = with_app(|app| app.keeping_offer(id)).flatten() {
+        items.insert(0, Item::action(TAKE_OVER, label));
+        items.insert(1, Item::Separator);
+    }
     let picked = menu::popup(&items);
+    if picked == Some(TAKE_OVER) {
+        with_app(|app| app.keeping_take_over(id));
+        return;
+    }
     if let Some(i) = picked {
         if with_app(|app| app.handoff_picked(id, i)) == Some(true) {
             return;
@@ -3644,6 +3666,7 @@ impl App {
                 self.portal_show();
                 self.far_check();
                 self.handing_tick();
+                self.keeping_tick();
                 self.backup_tick();
                 if self
                     .last_check
@@ -3832,6 +3855,11 @@ impl App {
                 .map(|r| r.get(id).is_some_and(|s| s.phase != Phase::Paused))
                 .unwrap_or(true);
             if heard {
+                continue;
+            }
+            // Its keeper may have taken it over meanwhile: it waits to
+            // hear.
+            if self.keeping_holds(id) {
                 continue;
             }
             if let Err(e) = self.resume(id, false) {
@@ -4482,6 +4510,9 @@ impl App {
         // Out of `paused` before launching, not after: launching opens the
         // window through `expand`, and a session still marked paused there
         // resumes again, and again, one `claude` each time.
+        if let Some(line) = self.keeping_fenced(id) {
+            return Err(line);
+        }
         let Some(saved) = self.paused.remove(id) else {
             return Ok(());
         };

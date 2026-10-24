@@ -599,7 +599,10 @@ impl Portal {
             return None;
         }
         let me = horadric_core::portal::id(&self.config.secret);
-        Some(portal::joined_roster(&me, &pc_name(), &store))
+        let mut roster = portal::joined_roster(&me, &pc_name(), &store);
+        // Who keeps this PC and its switch, and every owner it knows.
+        horadric_core::keeping::Book::load(&self.dir).fold(&mut roster, &me);
+        Some(roster)
     }
 
     /// Cuts off every connection from a phone no longer in the config,
@@ -857,6 +860,10 @@ impl Serve for Here<'_> {
 
     fn handing(&mut self, who: &str, msg: &Value) -> Option<Job> {
         self.0.handing_serve(who, msg)
+    }
+
+    fn keeping(&mut self, who: &str, msg: &Value) -> Option<Job> {
+        self.0.keeping_serve(who, msg)
     }
 
     fn hello(&self, answer: &mut Value) {

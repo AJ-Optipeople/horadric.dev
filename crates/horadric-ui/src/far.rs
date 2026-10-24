@@ -462,6 +462,9 @@ impl App {
         if self.handing_heard(&name, msg) {
             return false;
         }
+        if self.keeping_heard(&name, msg) {
+            return false;
+        }
         match afar::hear(msg) {
             Heard::Hello { control, v, .. } => {
                 if v < afar::VERSION {
@@ -661,6 +664,22 @@ impl App {
     /// Sends `msg` to the brother `name`, for a handoff.
     pub(super) fn far_tell(&mut self, name: &str, msg: Value) {
         self.far_send(name, msg);
+    }
+
+    /// What was last heard from brother `name`, and whether it answers
+    /// asks now, for keeping and takeover.
+    pub(super) fn far_presence(&self, name: &str) -> Option<(brotherhood::Heard, bool)> {
+        let p = self.far.peers.get(name)?;
+        Some((p.heard, p.via.is_some() && p.client.ready()))
+    }
+
+    /// Every brother known, and whether each answers asks now.
+    pub(super) fn far_peer_names(&self) -> Vec<(String, bool)> {
+        self.far
+            .peers
+            .iter()
+            .map(|(name, p)| (name.clone(), p.via.is_some() && p.client.ready()))
+            .collect()
     }
 
     fn far_brother_of(&self, id: &str) -> Option<String> {

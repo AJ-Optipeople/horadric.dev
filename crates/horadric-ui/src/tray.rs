@@ -95,6 +95,10 @@ pub enum Choice {
     SignOut,
     /// Hand every session to this brother, or with None stop doing so.
     Leave(Option<String>),
+    /// Who keeps this PC's sessions if it falls silent, by id, or no one.
+    Keeper(Option<String>),
+    /// Whether that keeper takes over by itself after ten minutes.
+    AutoTakeover(bool),
     /// Join a Linux node by its SSH destination.
     AddNode,
     /// Take this node off the list, by name.
@@ -370,6 +374,7 @@ pub fn menu(
         items.push(Item::Submenu("Account".into(), account_items(logins)));
     }
     let mut brothers = Vec::new();
+    let keeping = crate::app::keeping_tray();
     match crate::workos::user() {
         Some(user) => {
             items.push(Item::Disabled(format!("Signed in as {}", user.email)));
@@ -380,6 +385,7 @@ pub fn menu(
             ));
             brothers = listed.unwrap_or_default();
             items.extend(crate::app::leaving_menu());
+            items.extend(keeping_items(&keeping));
             items.push(Item::action(SIGN_OUT, "Sign out"));
         }
         None => items.push(Item::action(SIGN_IN, "Sign in\u{2026}")),
@@ -418,6 +424,12 @@ pub fn menu(
         STOP => Some(Choice::StopWarriv),
         SIGN_IN => Some(Choice::SignIn),
         SIGN_OUT => Some(Choice::SignOut),
+        NO_KEEPER => Some(Choice::Keeper(None)),
+        AUTO_TAKEOVER => Some(Choice::AutoTakeover(!keeping.2)),
+        i if (KEEPER..KEEPER + KEEPERS).contains(&i) => keeping
+            .0
+            .get(i - KEEPER)
+            .map(|(id, _)| Choice::Keeper(Some(id.clone()))),
         i if crate::app::leaving_pick(i).is_some() => {
             crate::app::leaving_pick(i).map(Choice::Leave)
         }
@@ -476,6 +488,48 @@ fn brother_items(listed: Option<&[joining::Listed]>) -> Vec<Item> {
             false => Item::action(BROTHER + i, b.label()),
         })
         .collect()
+}
+
+/// Where the keeping lines' ids start, past the Leaving menu's.
+const NO_KEEPER: usize = 9500;
+const AUTO_TAKEOVER: usize = 9501;
+const KEEPER: usize = 9510;
+const KEEPERS: usize = 80;
+
+/// "Keeps my sessions", a joined brother to pick (or no one), and the
+/// switch for taking over by itself. `keeping` is (brothers as (id,
+/// name), the first keeper, whether the switch is on). Nothing until a
+/// brother has joined.
+fn keeping_items(keeping: &(Vec<(String, String)>, Option<String>, bool)) -> Vec<Item> {
+    let (brothers, keeper, auto) = keeping;
+    if brothers.is_empty() {
+        return Vec::new();
+    }
+    let mut picks: Vec<Item> = brothers
+        .iter()
+        .take(KEEPERS)
+        .enumerate()
+        .map(|(i, (id, name))| Item::Action {
+            id: KEEPER + i,
+            label: name.clone(),
+            checked: keeper.as_deref() == Some(id.as_str()),
+        })
+        .collect();
+    picks.push(Item::Separator);
+    picks.push(Item::Action {
+        id: NO_KEEPER,
+        label: "No one".into(),
+        checked: keeper.is_none(),
+    });
+    let mut items = vec![Item::Submenu("Keeps my sessions".into(), picks)];
+    if keeper.is_some() {
+        items.push(Item::Action {
+            id: AUTO_TAKEOVER,
+            label: "Take over by itself after 10 minutes".into(),
+            checked: *auto,
+        });
+    }
+    items
 }
 
 /// The Linux nodes menu: each node joined, with how its link stands, the
@@ -588,6 +642,47 @@ fn dim(rgb: u32, k: f32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_keeper_is_ticked_and_the_switch_shows_only_with_one() {
+        assert!(keeping_items(&(Vec::new(), None, false)).is_empty());
+        let brothers = vec![("d".to_string(), "Desktop".to_string())];
+        let items = keeping_items(&(brothers.clone(), None, false));
+        assert_eq!(items.len(), 1);
+        let Item::Submenu(label, picks) = &items[0] else {
+            panic!("a submenu first");
+        };
+        assert_eq!(label, "Keeps my sessions");
+        assert!(matches!(
+            &picks[0],
+            Item::Action {
+                id: KEEPER,
+                checked: false,
+                ..
+            }
+        ));
+        assert!(matches!(
+            &picks[2],
+            Item::Action {
+                id: NO_KEEPER,
+                checked: true,
+                ..
+            }
+        ));
+        let items = keeping_items(&(brothers, Some("d".into()), true));
+        let Item::Submenu(_, picks) = &items[0] else {
+            panic!("a submenu first");
+        };
+        assert!(matches!(&picks[0], Item::Action { checked: true, .. }));
+        assert!(matches!(
+            &items[1],
+            Item::Action {
+                id: AUTO_TAKEOVER,
+                checked: true,
+                ..
+            }
+        ));
+    }
 
     #[test]
     fn the_nodes_menu_lists_each_and_offers_join_and_forget() {
