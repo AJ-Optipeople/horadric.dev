@@ -152,6 +152,8 @@ mod glyphs;
 pub mod google;
 #[cfg(windows)]
 pub mod google_drive;
+#[cfg(all(windows, test))]
+mod link_interop;
 // The memory's thread, shared with the Linux node.
 #[cfg(windows)]
 pub use horadric_memory::service as memory;

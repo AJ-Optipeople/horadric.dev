@@ -819,6 +819,35 @@ Each step is useful alone and each is verified before the next starts.
 14. **The portable link.** `horadric-link`: ECDH, AES-GCM, random, the
     TLS WebSocket and HTTPS client, and a Windows test that CNG and it
     agree on keys, codes and sealed frames both ways.
+
+    Done on 2026-10-24 (`crates/horadric-link`). `ecdh` keeps keys as
+    CNG does (`04||x||y` public, `x||y||d` private) on `p256`, `crypto`
+    seals as `portal_crypto` does on `ring`, `http` is `net.rs`'s
+    `request` and `get` plus `post_form` and a `download` that streams to
+    a `.part` file, following a GET's redirects across hosts without its
+    `Authorization`. `ws::Socket` is `portal_link`'s `Dialled`: one thread
+    blocks in `receive`, others `send`, `ping` or `close`, and
+    `close_code` gives the relay's 4401 or 4503. TLS cannot be read and
+    written at once, so the reader waits on a peek of the bare TCP socket
+    holding no lock and reads under the lock with a 5 ms timeout, which
+    is the most a send waits. `horadric-ui/src/link_interop.rs` runs CNG
+    on one side and the link on the other, both ways: stored keys load,
+    agreement, `joining::agree`'s code and key, sealed frames with and
+    without data, a tampered or misbound frame refused. The pure half of
+    WorkOS's device code flow is in `horadric-core/src/workos.rs`; both
+    client ids hand out device codes with no dashboard change. Seen live,
+    from Windows and from the static musl test binary run on `exit1-eu`:
+    the relay as a v2 PC with no token answering `{"ping":1}` with a
+    pong, a Hugging Face file through its relative redirect, the weights'
+    redirect to the CDN with a `Range`, and a device code from WorkOS
+    whose first poll says `authorization_pending`. The live tests are
+    `#[ignore]`d: `cargo test -p horadric-link -- --ignored`.
+
+    Cross building for musl now needs a C compiler, for ring. On Windows:
+    `winget install zig.zig` and `cargo install cargo-zigbuild`, then
+    `cargo zigbuild -p horadric-link --target x86_64-unknown-linux-musl`
+    (zig compiles the C and links). CI's Linux job and the release use
+    gcc and `musl-tools`.
 15. **The join logic in core.** `joining.rs` and the state machine of
     `brothers.rs` behind `Crypto` and `Human`, the Windows UI unchanged
     to its human. Verified by step 2's run again with two dev instances.

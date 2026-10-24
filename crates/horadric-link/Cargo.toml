@@ -1,0 +1,22 @@
+[package]
+name = "horadric-link"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "What a Linux node lacks that Windows has built in: ECDH, AES-GCM, randomness, TLS, a WebSocket and HTTPS"
+
+[dependencies]
+horadric-core = { path = "../horadric-core" }
+# AES-GCM and the system's random generator. It cannot load a stored
+# ECDH private key, which is why p256 is here too.
+ring = "0.17"
+p256 = { version = "0.14", default-features = false, features = ["ecdh"] }
+# TLS on ring, never aws-lc: no cmake or NASM in the musl build.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+# Mozilla's roots compiled in, so a bare server needs no certificate store.
+webpki-roots = "1"
+# Only the handshake: the TLS under it is ours, the same as HTTPS uses.
+tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
+
+[dev-dependencies]
+serde_json = { workspace = true }

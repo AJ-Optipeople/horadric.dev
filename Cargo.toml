@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/horadric-core", "crates/horadric-memory", "crates/horadric-hooks", "crates/horadric-pty", "crates/horadric-ui", "crates/horadric"]
+members = ["crates/horadric-core", "crates/horadric-link", "crates/horadric-memory", "crates/horadric-hooks", "crates/horadric-pty", "crates/horadric-ui", "crates/horadric"]
 
 [workspace.package]
 version = "0.32.0"

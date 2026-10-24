@@ -54,6 +54,10 @@ windows = { version = "0.62", features = [
 ] }
 windows-numerics = "0.3"
 
+# Only for the test that CNG and the Linux node's crypto agree.
+[target.'cfg(windows)'.dev-dependencies]
+horadric-link = { path = "../horadric-link" }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 horadric-pty = { path = "../horadric-pty" }
 block2 = "0.6"

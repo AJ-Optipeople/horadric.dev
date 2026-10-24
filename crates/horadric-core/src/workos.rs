@@ -1,7 +1,8 @@
 //! The pure half of signing in to the brotherhood with WorkOS AuthKit:
 //! the authorize URL with PKCE, the answer the browser brings back to the
-//! loopback listener, the authenticate requests and replies, and when an
-//! access token runs out. The socket, browser and Credential Manager half
+//! loopback listener, the device code flow a Linux node signs in with,
+//! the authenticate requests and replies, and when an access token runs
+//! out. The socket, browser and Credential Manager half
 //! is in `horadric-ui/src/workos.rs`.
 //!
 //! The client is public: PKCE stands in for a secret, so there is no API
@@ -137,11 +138,7 @@ pub fn parse_auth(body: &[u8]) -> Result<Auth, String> {
         |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_str()).map(str::to_string);
     let (Some(access), Some(refresh)) = (text(&v, "access_token"), text(&v, "refresh_token"))
     else {
-        let why = text(&v, "error_description")
-            .or_else(|| text(&v, "message"))
-            .or_else(|| text(&v, "error"))
-            .unwrap_or_else(|| "no tokens".into());
-        return Err(why);
+        return Err(refusal(&v).unwrap_or_else(|| "no tokens".into()));
     };
     let user = v.get("user").and_then(|u| {
         Some(User {
@@ -154,6 +151,131 @@ pub fn parse_auth(body: &[u8]) -> Result<Auth, String> {
         refresh,
         user,
     })
+}
+
+/// Where a machine with no browser of its own, a Linux node, starts
+/// signing in: WorkOS's device code flow (RFC 8628). The human opens the
+/// link it gets on any device and confirms the code.
+pub const DEVICE_URL: &str = "https://api.workos.com/user_management/authorize/device";
+
+/// The grant a device code is polled with, at [`AUTHENTICATE_URL`].
+pub const DEVICE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
+
+/// The form that asks for a device code. Like PKCE's, it carries no
+/// secret.
+pub fn device_body(client_id: &str) -> String {
+    form(&[("client_id", client_id)])
+}
+
+/// What WorkOS answers a device authorization with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Device {
+    /// What the poll sends, never shown.
+    pub device_code: String,
+    /// The short code the human confirms, `BCDF-GHJK`.
+    pub user_code: String,
+    /// The page to type the code into.
+    pub verification_uri: String,
+    /// The same page with the code filled in, the link to print.
+    pub verification_uri_complete: Option<String>,
+    /// Seconds until the codes run out.
+    pub expires_in: u64,
+    /// Seconds to wait between polls.
+    pub interval: u64,
+}
+
+impl Device {
+    /// The link to give the human: the one with the code in it when
+    /// WorkOS sent one.
+    pub fn link(&self) -> &str {
+        self.verification_uri_complete
+            .as_deref()
+            .unwrap_or(&self.verification_uri)
+    }
+}
+
+/// Reads a device authorization, or says why WorkOS refused. A missing
+/// `expires_in` or `interval` is RFC 8628's default, 300 and 5 seconds.
+pub fn parse_device(body: &[u8]) -> Result<Device, String> {
+    let v: serde_json::Value =
+        serde_json::from_slice(body).map_err(|_| "WorkOS's answer is not JSON".to_string())?;
+    let text = |k: &str| v.get(k).and_then(|x| x.as_str()).map(str::to_string);
+    let (Some(device_code), Some(user_code), Some(verification_uri)) = (
+        text("device_code"),
+        text("user_code"),
+        text("verification_uri"),
+    ) else {
+        return Err(refusal(&v).unwrap_or_else(|| "no device code".into()));
+    };
+    let secs = |k: &str, default| v.get(k).and_then(|x| x.as_u64()).unwrap_or(default);
+    Ok(Device {
+        device_code,
+        user_code,
+        verification_uri,
+        verification_uri_complete: text("verification_uri_complete"),
+        expires_in: secs("expires_in", 300),
+        // At least a second, so a zero never makes a busy loop.
+        interval: secs("interval", 5).max(1),
+    })
+}
+
+/// The form a device code is polled with.
+pub fn poll_body(client_id: &str, device_code: &str) -> String {
+    form(&[
+        ("grant_type", DEVICE_GRANT),
+        ("device_code", device_code),
+        ("client_id", client_id),
+    ])
+}
+
+/// What one poll of a device code says.
+#[derive(Debug, PartialEq)]
+pub enum Poll {
+    /// The human confirmed: signed in.
+    Signed(Auth),
+    /// Not yet: poll again after the interval.
+    Pending,
+    /// Polling too often: poll again after a longer interval, see
+    /// [`slower`].
+    SlowDown,
+    /// The human said no. Stop.
+    Denied,
+    /// The codes ran out before the human confirmed. Stop, or start over.
+    Expired,
+    /// Anything else, in WorkOS's words. Stop.
+    Failed(String),
+}
+
+/// Reads a poll's answer. Success reads as [`parse_auth`] does; the
+/// OAuth errors RFC 8628 names are told apart, any other is a failure.
+pub fn parse_poll(body: &[u8]) -> Poll {
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return Poll::Failed("WorkOS's answer is not JSON".into());
+    };
+    match v.get("error").and_then(|e| e.as_str()) {
+        Some("authorization_pending") => Poll::Pending,
+        Some("slow_down") => Poll::SlowDown,
+        Some("access_denied") => Poll::Denied,
+        Some("expired_token") => Poll::Expired,
+        _ => match parse_auth(body) {
+            Ok(auth) => Poll::Signed(auth),
+            Err(why) => Poll::Failed(why),
+        },
+    }
+}
+
+/// The interval after a [`Poll::SlowDown`]: five seconds more, as RFC
+/// 8628 says and WorkOS's reference repeats.
+pub fn slower(interval: u64) -> u64 {
+    interval + 5
+}
+
+/// Why WorkOS refused, in its words.
+fn refusal(v: &serde_json::Value) -> Option<String> {
+    let text = |k: &str| v.get(k).and_then(|x| x.as_str()).map(str::to_string);
+    text("error_description")
+        .or_else(|| text("message"))
+        .or_else(|| text("error"))
 }
 
 /// When an access token runs out, in seconds since 1970, from its `exp`
@@ -301,6 +423,110 @@ mod tests {
             Err("no tokens".into())
         );
         assert!(parse_auth(b"<html>").is_err());
+    }
+
+    /// What WorkOS's staging environment answered on 2026-10-24.
+    const DEVICE: &[u8] = br#"{"device_code":"zEPhued6w9U8oh5CKa8jU0cCrA52KqmRgqSjihlwzjrqJhcQwgJgRulYnywNsvQP","user_code":"DBZB-DVPJ","verification_uri":"https://knowledgeable-sun-39-staging.authkit.app/device","verification_uri_complete":"https://knowledgeable-sun-39-staging.authkit.app/device?user_code=DBZB-DVPJ","expires_in":300,"interval":5}"#;
+
+    #[test]
+    fn a_device_code_is_asked_for_with_the_client_alone() {
+        assert_eq!(device_body("client_01"), "client_id=client_01");
+        assert_eq!(
+            DEVICE_URL,
+            "https://api.workos.com/user_management/authorize/device"
+        );
+    }
+
+    #[test]
+    fn a_device_authorization_reads() {
+        let d = parse_device(DEVICE).unwrap();
+        assert_eq!(d.user_code, "DBZB-DVPJ");
+        assert_eq!(d.device_code.len(), 64);
+        assert_eq!(
+            d.verification_uri,
+            "https://knowledgeable-sun-39-staging.authkit.app/device"
+        );
+        assert_eq!((d.expires_in, d.interval), (300, 5));
+        assert_eq!(
+            d.link(),
+            "https://knowledgeable-sun-39-staging.authkit.app/device?user_code=DBZB-DVPJ"
+        );
+        let bare = parse_device(
+            br#"{"device_code":"d","user_code":"u","verification_uri":"https://v","interval":0}"#,
+        )
+        .unwrap();
+        assert_eq!(bare.verification_uri_complete, None);
+        assert_eq!(bare.link(), "https://v");
+        assert_eq!((bare.expires_in, bare.interval), (300, 1));
+    }
+
+    #[test]
+    fn a_refused_device_authorization_says_why() {
+        assert_eq!(
+            parse_device(br#"{"error":"invalid_client","error_description":"Invalid client ID."}"#),
+            Err("Invalid client ID.".into())
+        );
+        assert_eq!(
+            parse_device(br#"{"device_code":"d"}"#),
+            Err("no device code".into())
+        );
+        assert!(parse_device(b"<html>").is_err());
+    }
+
+    #[test]
+    fn a_poll_carries_the_grant_the_code_and_the_client() {
+        assert_eq!(
+            poll_body("client_01", "a/b"),
+            "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Adevice_code&\
+             device_code=a%2Fb&client_id=client_01"
+        );
+    }
+
+    #[test]
+    fn a_poll_tells_waiting_from_stopping() {
+        let err = |e: &str| format!(r#"{{"error":"{e}","error_description":"words"}}"#);
+        assert_eq!(
+            parse_poll(err("authorization_pending").as_bytes()),
+            Poll::Pending
+        );
+        assert_eq!(parse_poll(err("slow_down").as_bytes()), Poll::SlowDown);
+        assert_eq!(parse_poll(err("access_denied").as_bytes()), Poll::Denied);
+        assert_eq!(parse_poll(err("expired_token").as_bytes()), Poll::Expired);
+        assert_eq!(
+            parse_poll(
+                br#"{"error":"invalid_grant","error_description":"The device code provided is invalid, expired, or has already been used."}"#
+            ),
+            Poll::Failed("The device code provided is invalid, expired, or has already been used.".into())
+        );
+        assert_eq!(
+            parse_poll(br#"{"error":"invalid_client"}"#),
+            Poll::Failed("invalid_client".into())
+        );
+        assert!(matches!(parse_poll(b"<html>"), Poll::Failed(_)));
+    }
+
+    #[test]
+    fn a_confirmed_poll_signs_in() {
+        let body = br#"{"user":{"object":"user","id":"user_01","email":"a@b.dk"},
+            "organization_id":null,"authkit_authorization_code":"authkit_authz_code_abc123",
+            "access_token":"h.p.s","refresh_token":"r2","authentication_method":"GoogleOAuth"}"#;
+        assert_eq!(
+            parse_poll(body),
+            Poll::Signed(Auth {
+                access: "h.p.s".into(),
+                refresh: "r2".into(),
+                user: Some(User {
+                    id: "user_01".into(),
+                    email: "a@b.dk".into()
+                }),
+            })
+        );
+    }
+
+    #[test]
+    fn slowing_down_waits_five_seconds_more() {
+        assert_eq!(slower(5), 10);
+        assert_eq!(slower(10), 15);
     }
 
     #[test]

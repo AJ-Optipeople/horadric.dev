@@ -35,7 +35,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      CRATES: -p horadric-core -p horadric-hooks -p horadric-memory -p horadric-pty -p horadric
+      CRATES: -p horadric-core -p horadric-hooks -p horadric-link -p horadric-memory -p horadric-pty -p horadric
     steps:
       - uses: actions/checkout@v4
       - run: rustup toolchain install
