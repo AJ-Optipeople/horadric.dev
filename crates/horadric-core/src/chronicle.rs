@@ -156,10 +156,22 @@ pub enum Happened {
         #[serde(default, skip_serializing_if = "String::is_empty")]
         why: String,
     },
+    /// The quest's session was started, or resumed, on `model` (one of
+    /// the quest models, or [`crate::escalate::DEFAULT`]), which an
+    /// escalation chose when `escalated`. Its run's outcome names it.
+    Launched {
+        model: String,
+        #[serde(default, skip_serializing_if = "is_false")]
+        escalated: bool,
+    },
     /// A session, or Warriv, made a choice that can be changed later and
     /// wrote it under the quest `title` as an `Assumed:` line, which is
     /// `text` without that word. It names no quest holder.
     Assumed { text: String },
+}
+
+fn is_false(b: &bool) -> bool {
+    !b
 }
 
 /// An event that woke Warriv: its kind and the quest it is about, empty
@@ -330,6 +342,69 @@ pub fn spent_since_taken(records: &[Record], project: &str, id: &str) -> bool {
         }
     }
     spent
+}
+
+/// What the quest `id` of `project` spent in tokens in its run now, the
+/// one since it was last taken: its last report in that run less the last
+/// report before it, since each report counts all its conversations
+/// again. None when nothing was reported in this run, as for a quest
+/// blocked or done by someone other than its own session.
+pub fn run_tokens(records: &[Record], project: &str, id: &str) -> Option<u64> {
+    let quest = quest_of(id);
+    let (mut before, mut now) = (None, None);
+    for r in records {
+        if r.project != project || quest_of(&r.quest) != quest {
+            continue;
+        }
+        match &r.what {
+            Happened::Accepted { .. } => before = now.take().or(before),
+            Happened::Spent { sittings } => now = Some(spend::total(sittings).tokens.total()),
+            _ => {}
+        }
+    }
+    Some(now?.saturating_sub(before.unwrap_or(0)))
+}
+
+/// The model the quest `id` of `project` was last launched on, and
+/// whether an escalation chose it. From before launches were kept, the
+/// model its notes named when it was taken. None for a quest never taken.
+pub fn launched(records: &[Record], project: &str, id: &str) -> Option<(String, bool)> {
+    let quest = quest_of(id);
+    let ours = |r: &&Record| r.project == project && quest_of(&r.quest) == quest;
+    let launch = records
+        .iter()
+        .rev()
+        .filter(ours)
+        .find_map(|r| match &r.what {
+            Happened::Launched { model, escalated } => Some((model.clone(), *escalated)),
+            _ => None,
+        });
+    launch.or_else(|| {
+        records
+            .iter()
+            .rev()
+            .filter(ours)
+            .find_map(|r| match &r.what {
+                Happened::Accepted { notes } => Some((
+                    crate::tasks::model_of(notes)
+                        .unwrap_or(crate::escalate::DEFAULT)
+                        .to_string(),
+                    crate::escalate::chosen_by_escalation(notes),
+                )),
+                _ => None,
+            })
+    })
+}
+
+/// When the quest `id` of `project` was last taken.
+pub fn taken_at(records: &[Record], project: &str, id: &str) -> Option<u64> {
+    let quest = quest_of(id);
+    records.iter().rev().find_map(|r| match &r.what {
+        Happened::Accepted { .. } if r.project == project && quest_of(&r.quest) == quest => {
+            Some(r.at)
+        }
+        _ => None,
+    })
 }
 
 /// The records for what changed between two reads of a project's list:
@@ -932,7 +1007,10 @@ pub fn quests(
             }
             Happened::Packed { files } => q.packed = Some(files.clone()),
             Happened::Merged { branch, .. } => q.merged = Some(branch.clone()),
-            Happened::Shipped | Happened::Assumed { .. } | Happened::NotMerged { .. } => {}
+            Happened::Shipped
+            | Happened::Assumed { .. }
+            | Happened::NotMerged { .. }
+            | Happened::Launched { .. } => {}
         }
     }
     for t in list {
@@ -1661,6 +1739,90 @@ mod tests {
         assert_eq!(q[1].spend, None);
         let line = records[2].line();
         assert_eq!(parse(&line), vec![records[2].clone()]);
+    }
+
+    #[test]
+    fn a_quests_tokens_and_when_it_was_taken_are_its_last_records() {
+        let spent = |output| Happened::Spent {
+            sittings: vec![Sitting {
+                conversation: "c1".into(),
+                spend: Spend {
+                    tokens: spend::Tokens {
+                        output,
+                        ..Default::default()
+                    },
+                    ..Spend::default()
+                },
+            }],
+        };
+        let records = [
+            accepted(1, "a-1", "A"),
+            rec(2, "a-1", "", spent(10)),
+            accepted(3, "a-1", "A"),
+            rec(4, "a-1", "", spent(25)),
+            accepted(5, "b-1", "B"),
+        ];
+        // Only what this run added to the last report before it.
+        assert_eq!(run_tokens(&records, "p", "a-1"), Some(15));
+        assert_eq!(run_tokens(&records[..2], "p", "a-1"), Some(10));
+        assert_eq!(run_tokens(&records, "p", "b-1"), None);
+        assert_eq!(run_tokens(&records, "other", "a-1"), None);
+        // Taken again with nothing reported since: not known for this run.
+        let mut again = records.to_vec();
+        again.push(accepted(6, "a-1", "A"));
+        assert_eq!(run_tokens(&again, "p", "a-1"), None);
+        assert_eq!(taken_at(&records, "p", "a-1"), Some(3));
+        assert_eq!(taken_at(&records, "p", "c-1"), None);
+    }
+
+    #[test]
+    fn a_run_names_the_model_it_was_launched_on() {
+        let taken = |at, notes: &[&str]| {
+            rec(
+                at,
+                "a-1",
+                "A",
+                Happened::Accepted {
+                    notes: notes.iter().map(|n| n.to_string()).collect(),
+                },
+            )
+        };
+        let launch = |at, model: &str, escalated| {
+            rec(
+                at,
+                "a-1",
+                "",
+                Happened::Launched {
+                    model: model.into(),
+                    escalated,
+                },
+            )
+        };
+        assert_eq!(launched(&[], "p", "a-1"), None);
+        let old = [taken(1, &["Warriv: Model: haiku"])];
+        assert_eq!(launched(&old, "p", "a-1"), Some(("haiku".into(), false)));
+        assert_eq!(
+            launched(&[taken(1, &[])], "p", "a-1"),
+            Some(("default".into(), false))
+        );
+        // The notes say sonnet by now, but the session runs on haiku.
+        let records = [
+            taken(1, &["Warriv: Model: haiku"]),
+            launch(2, "haiku", false),
+            taken(
+                3,
+                &["Warriv: Model: haiku", "Escalated: sonnet, from haiku: x"],
+            ),
+        ];
+        assert_eq!(
+            launched(&records, "p", "a-1"),
+            Some(("haiku".into(), false))
+        );
+        let line = records[1].line();
+        assert_eq!(parse(&line), vec![records[1].clone()]);
+        assert!(!line.contains("escalated"));
+        let up = launch(4, "sonnet", true);
+        assert_eq!(parse(&up.line()), vec![up]);
     }
 
     #[test]

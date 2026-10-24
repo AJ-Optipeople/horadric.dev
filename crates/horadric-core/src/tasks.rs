@@ -124,16 +124,11 @@ impl Task {
     }
 
     /// The model its `Model:` notes line names. A human's line wins over
-    /// Warriv's, since Warriv never changes a human's choice; of Warriv's
-    /// own, the last is the one it settled on.
+    /// Warriv's and over an `Escalated:` line, since neither ever changes a
+    /// human's choice; of those two, the last written is the one that
+    /// stands, so Warriv can still overrule an escalation it has seen.
     pub fn model(&self) -> Option<&'static str> {
-        let human = self.notes.iter().find_map(|n| model_line(n));
-        let warriv = self
-            .notes
-            .iter()
-            .rev()
-            .find_map(|n| model_line(n.strip_prefix(crate::warriv::NOTE)?));
-        human.or(warriv)
+        model_of(&self.notes)
     }
 
     /// What its session is started with for its `Model:` line, Claude
@@ -188,6 +183,17 @@ pub fn model_line(note: &str) -> Option<&'static str> {
         return None;
     }
     MODELS.into_iter().find(|m| m.eq_ignore_ascii_case(name))
+}
+
+/// The model a quest with `notes` starts on, as [`Task::model`] tells it.
+pub fn model_of(notes: &[String]) -> Option<&'static str> {
+    let human = notes.iter().find_map(|n| model_line(n));
+    let machine = notes.iter().rev().find_map(|n| {
+        n.strip_prefix(crate::warriv::NOTE)
+            .and_then(model_line)
+            .or_else(|| crate::escalate::escalated_line(n))
+    });
+    human.or(machine)
 }
 
 /// What a `Part: <what>, in <files>` notes line names: one piece of a
@@ -1435,12 +1441,16 @@ pub fn split(task: &Task) -> String {
 }
 
 /// What memory is asked of a quest as it starts: its title and its
-/// notes, without the `After:` and `Model:` lines, which say how it is
-/// run and not what it is about.
+/// notes, without the `After:`, `Model:`, `Escalated:` and `Outcome:`
+/// lines, which say how it is run and not what it is about.
 pub fn recall_query(task: &Task) -> String {
     let mut out = task.title.clone();
     for n in &task.notes {
-        if after_line(n).is_none() && model_line(n).is_none() {
+        if after_line(n).is_none()
+            && model_line(n).is_none()
+            && crate::escalate::escalated_line(n).is_none()
+            && crate::escalate::Run::read(n).is_none()
+        {
             out.push('\n');
             out.push_str(n);
         }

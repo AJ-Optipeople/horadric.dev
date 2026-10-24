@@ -721,7 +721,13 @@ pub fn system_prompt(horadric: &str, file: &str) -> String {
          `{horadric} quest note \"<title>\" \"Model: <name>\"` on one there already. \
          `haiku` for small, plain work (a rename, a string, a test for code already \
          there), `sonnet` for most, `opus` for design, hard bugs and anything that spans \
-         the code. Never change a `Model:` line you did not write: that one is the human's.\n\
+         the code. Never change a `Model:` line you did not write: that one is the human's. \
+         Horadric writes an `Outcome:` line under a quest as each run ends, with the model it \
+         ran on. A quest whose run blocked or was sent back gets an `Escalated:` line one \
+         model up when it is put back to start over, and the fix-up quest filed for one that \
+         landed red, or was sent back after its session ended, starts one model above it; a \
+         model you write later wins over that line. When you are told how past runs went by \
+         model, pick from that rather than from habit.\n\
          - Hand a quest to the human when only the human can settle it: `{horadric} quest \
          blocked \"<question>\" --quest \"<title>\"`. Word the question so it can be \
          answered in one line, and say what you tried in a note first.\n\

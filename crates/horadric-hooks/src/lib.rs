@@ -10,6 +10,7 @@
 //! No script runs, no process is spawned per event. Connection refused when
 //! Horadric is not running costs Claude Code a few microseconds.
 
+pub mod checkpoint;
 pub mod client;
 pub mod codex;
 pub mod given;
