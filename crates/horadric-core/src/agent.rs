@@ -628,12 +628,32 @@ fn sets_config(args: &[String], key: &str) -> bool {
     })
 }
 
+/// The MCP config Horadric hands each `claude` it starts with
+/// `--mcp-config` (see [`Agent::mcp_args`]): `horadric mcp`, run from
+/// `exe`, which finds its session by the environment it inherits.
+pub fn mcp_config(exe: &str) -> Value {
+    serde_json::json!({
+        "mcpServers": {
+            "horadric": { "type": "stdio", "command": exe, "args": ["mcp"] }
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn args(line: &str) -> Vec<String> {
         line.split_whitespace().map(str::to_string).collect()
+    }
+
+    #[test]
+    fn the_mcp_config_runs_horadric_mcp_from_the_exe() {
+        let c = mcp_config("/home/a/.local/bin/horadric");
+        let h = &c["mcpServers"]["horadric"];
+        assert_eq!(h["type"], "stdio");
+        assert_eq!(h["command"], "/home/a/.local/bin/horadric");
+        assert_eq!(h["args"], serde_json::json!(["mcp"]));
     }
 
     #[test]

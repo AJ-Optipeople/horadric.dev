@@ -183,10 +183,27 @@ pub fn fresh_s(nanos: u128, ch: u32) -> String {
     format!("{:032x}", nanos ^ ((ch as u128) << 96))
 }
 
+/// This program's path as `current_exe` gave it, less the ` (deleted)`
+/// Linux adds once the file was replaced under the running node, as an
+/// update or a reinstall does: the new build is at the same path, and
+/// what a session starts must be that one.
+pub fn live_exe(exe: &str) -> &str {
+    exe.strip_suffix(" (deleted)").unwrap_or(exe)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use horadric_core::Phase;
+
+    #[test]
+    fn a_replaced_program_is_started_from_its_path() {
+        assert_eq!(
+            live_exe("/h/.local/bin/horadric (deleted)"),
+            "/h/.local/bin/horadric"
+        );
+        assert_eq!(live_exe("/h/.local/bin/horadric"), "/h/.local/bin/horadric");
+    }
 
     #[test]
     fn a_project_is_named_by_its_folder() {

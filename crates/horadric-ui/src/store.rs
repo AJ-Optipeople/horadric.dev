@@ -92,11 +92,7 @@ pub fn write_mcp_config(exe: &Path) -> Option<PathBuf> {
     let dir = dir()?;
     fs::create_dir_all(&dir).ok()?;
     let path = dir.join("claude-mcp.json");
-    let body = serde_json::json!({
-        "mcpServers": {
-            "horadric": { "type": "stdio", "command": exe, "args": ["mcp"] }
-        }
-    });
+    let body = horadric_core::agent::mcp_config(&exe.to_string_lossy());
     fs::write(&path, body.to_string()).ok()?;
     Some(path)
 }

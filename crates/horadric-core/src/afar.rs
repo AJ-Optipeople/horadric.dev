@@ -176,6 +176,13 @@ pub enum Heard {
         project: Value,
         b64: String,
     },
+    /// What it holds of the lore of `project`, its repository, by
+    /// writing brother: said after hello by a node, which links to no one
+    /// itself, so this PC sends it what it lacks.
+    Lore {
+        project: Value,
+        have: Value,
+    },
     /// It forgot this PC: the key opens nothing any more.
     Unpaired,
     Other,
@@ -246,6 +253,13 @@ pub fn hear(msg: &Value) -> Heard {
             (Some(project), Some(b64)) if !project.is_null() && !b64.is_empty() => Heard::Entries {
                 project: project.clone(),
                 b64,
+            },
+            _ => Heard::Other,
+        },
+        Some("lore") => match msg.get("project") {
+            Some(project) if !project.is_null() => Heard::Lore {
+                project: project.clone(),
+                have: msg.get("have").cloned().unwrap_or(Value::Null),
             },
             _ => Heard::Other,
         },
@@ -793,6 +807,14 @@ mod tests {
             hear(&json!({"t":"entries","project":repo,"b64":""})),
             Heard::Other
         );
+        assert_eq!(
+            hear(&json!({"t":"lore","project":repo,"have":{"a":3}})),
+            Heard::Lore {
+                project: repo.clone(),
+                have: json!({"a": 3})
+            }
+        );
+        assert_eq!(hear(&json!({"t":"lore","have":{}})), Heard::Other);
         assert_eq!(
             hear(&json!({"t":"projects","list":[{"path":"C:/p","name":"p"}]})),
             Heard::Projects(vec![("C:/p".into(), "p".into())])

@@ -14,6 +14,12 @@
 //! (`node_state`), so a restart attaches the hosts that outlived it under
 //! their names and brings the rest back paused, for `resume`. Sessions are
 //! handed to and from a Windows PC over the same link (`handing`).
+//!
+//! It holds a lore as a Windows PC does (see the plan's "Lore on a
+//! node"): the same memory thread keeps its sessions' transcripts and
+//! answers their `lore_recall`, its agents get `horadric mcp`, and the
+//! lore of each project is shared with a linked brother by repository,
+//! whatever carries the link.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{self, Read, Write};
@@ -28,6 +34,8 @@ use horadric_core::serving::{Job, Out, Running, Serve, Server, LOOK_EVERY};
 use horadric_core::{session_id, Agent, Phase, Registry, Session};
 use horadric_hooks::listener::{self, Command as Asked, NewSession, Tagged};
 use horadric_hooks::{OWNER_ENV, SESSION_ENV};
+use horadric_memory::service as memory;
+use horadric_memory::sharing::Lores;
 use horadric_pty::host::{Attached, Remote, Spec};
 use horadric_pty::pipe::Pipe;
 use horadric_pty::wire::{job_name, pipe_name, pipe_prefix, Message, Ring};
@@ -121,6 +129,9 @@ struct Machine {
     /// name a session handed between them says it moved from or to.
     called: HashMap<u32, String>,
     hand: handing::Handing,
+    /// The projects whose lore is shared, by repository, as the last
+    /// brother's hello found them.
+    lore: Lores,
 }
 
 impl Serve for Machine {
@@ -290,27 +301,46 @@ impl Serve for Machine {
         self.serve_handing(who, msg)
     }
 
+    /// The projects sessions here worked in that are in git, found by
+    /// repository. Asked at a brother's hello, so a project worked in
+    /// since is shared from the next.
+    fn lore_projects(&mut self) -> Vec<(Value, Value)> {
+        self.lore = Lores::of(project_dirs(&self.node).into_iter().map(PathBuf::from));
+        self.lore.told()
+    }
+
+    fn lore_export(&mut self, project: &Value, theirs: &mut Value) -> Option<Job> {
+        self.lore.export(project, theirs)
+    }
+
+    fn lore_import(&mut self, project: &Value, b64: &str) {
+        self.lore.import(project, b64, horadric_hooks::lore::now());
+    }
+
     fn handing_answer(&mut self, who: &str, msg: &Value) {
         self.heard_answer(who, msg);
     }
 }
 
+/// The folders sessions here work and worked in, a worktree's as its
+/// main checkout.
+fn project_dirs(node: &Shared) -> Vec<String> {
+    let n = lock(node);
+    n.registry
+        .all()
+        .map(|s| {
+            s.worktree
+                .as_ref()
+                .map_or_else(|| s.cwd.clone(), |w| w.main.clone())
+        })
+        .chain(n.recent.iter().cloned())
+        .collect()
+}
+
 /// Where a session may start or a project be made: home and the parents
 /// of the folders sessions work in.
 fn folder_roots(node: &Shared) -> Vec<String> {
-    let projects: Vec<String> = {
-        let n = lock(node);
-        n.registry
-            .all()
-            .map(|s| {
-                s.worktree
-                    .as_ref()
-                    .map_or_else(|| s.cwd.clone(), |w| w.main.clone())
-            })
-            .chain(n.recent.iter().cloned())
-            .collect()
-    };
-    wire::roots(&projects, horadric_hooks::home().as_deref())
+    wire::roots(&project_dirs(node), horadric_hooks::home().as_deref())
 }
 
 /// The folders in `root`, for `folders`.
@@ -398,6 +428,8 @@ fn save(node: &Shared) {
 
 fn serve() -> Result<(), String> {
     let port = horadric_hooks::port();
+    memory::set_code_source(crate::lore::code_files);
+    memory::set_piece_source(crate::code::pieces);
     // Bound before the port, so whoever sees the port up can connect a
     // viewer at once.
     let first = Pipe::serve(&socket_name(), true)
@@ -461,6 +493,7 @@ fn serve() -> Result<(), String> {
             names: HashMap::new(),
             called: HashMap::new(),
             hand: handing::Handing::default(),
+            lore: Lores::default(),
         };
         thread::spawn(move || serving(machine, heard, events));
     }
@@ -474,8 +507,8 @@ fn serve() -> Result<(), String> {
     {
         let node = Arc::clone(&node);
         thread::spawn(move || {
-            // The browser and the lore are the app's; a node starts
-            // sessions, and tells one handed here that it moved.
+            // The browser is the app's; a node starts sessions, answers
+            // recalls, and tells one handed here that it moved.
             for asked in asked_rx {
                 match asked {
                     Asked::New(asked) => {
@@ -488,9 +521,9 @@ fn serve() -> Result<(), String> {
                         let line = (call.body["prompt"] == json!(true))
                             .then(|| lock(&node).first.remove(session))
                             .flatten();
-                        // Dropped unanswered, the hook goes on with nothing.
-                        if let Some(line) = line {
-                            call.reply.send(json!({ "text": line }));
+                        match line {
+                            Some(line) => call.reply.send(json!({ "text": line })),
+                            None => memory::ask(call),
                         }
                     }
                     _ => {}
@@ -503,6 +536,14 @@ fn serve() -> Result<(), String> {
         socket_name()
     );
     for t in rx {
+        // What a lore tool showed lights the app's sanctuary, which a node
+        // has none of, and is no news of the session itself.
+        if t.event.hook_event_name == horadric_core::HookEvent::GLOW {
+            continue;
+        }
+        // Any session's dialogue is kept, Horadric's or not, as the app
+        // keeps it.
+        memory::keep_hooked(&t);
         // Nobody's conversation, as for `horadric serve`.
         if t.horadric_id.is_empty() {
             continue;
@@ -564,6 +605,14 @@ fn launch(id: &str, cwd: PathBuf, agent: Agent, args: Vec<String>) -> Result<Att
     }
     let program =
         agent_program(agent).ok_or_else(|| format!("`{}` is not on PATH", agent.program()))?;
+    let exe = exe()?;
+    // Its agent gets the lore tools, as the app's do.
+    let config = mcp_config(&exe);
+    let mut line = agent.mcp_args(
+        &exe.to_string_lossy(),
+        config.as_deref().and_then(Path::to_str),
+    );
+    line.extend(args);
     let mut env_set = vec![
         (SESSION_ENV.to_string(), id.to_string()),
         (OWNER_ENV.to_string(), horadric_hooks::port().to_string()),
@@ -573,7 +622,7 @@ fn launch(id: &str, cwd: PathBuf, agent: Agent, args: Vec<String>) -> Result<Att
         pipe: pipe_name(&instance, id),
         command: horadric_pty::Command {
             program,
-            args,
+            args: line,
             cwd,
             env_set,
             env_remove: Vec::new(),
@@ -582,9 +631,26 @@ fn launch(id: &str, cwd: PathBuf, agent: Agent, args: Vec<String>) -> Result<Att
             job_name: None,
         },
     };
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     Remote::start(&exe, &spec, &job_name(&instance, id))
         .map_err(|e| format!("could not start {id}: {e}"))
+}
+
+/// This program, where a reinstall left the new build.
+fn exe() -> Result<PathBuf, String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    Ok(PathBuf::from(wire::live_exe(&exe.to_string_lossy())))
+}
+
+/// Writes the MCP config `claude` is started with, in the state folder,
+/// and answers where. Written at every start, since `exe` moves with an
+/// install, as the app writes its own.
+fn mcp_config(exe: &Path) -> Option<PathBuf> {
+    let dir = horadric_hooks::state_dir()?;
+    std::fs::create_dir_all(&dir).ok()?;
+    let path = dir.join("claude-mcp.json");
+    let body = horadric_core::agent::mcp_config(&exe.to_string_lossy());
+    std::fs::write(&path, body.to_string()).ok()?;
+    Some(path)
 }
 
 /// Carries a paused session on in its folder: its conversation resumed,

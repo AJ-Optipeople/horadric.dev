@@ -68,7 +68,8 @@ pub mod portal;
 pub mod portal_key;
 pub mod rain;
 pub mod screens;
-pub mod sharing;
+// How brothers share the lore, shared with the Linux node.
+pub use horadric_memory::sharing;
 pub mod shell;
 pub mod sky;
 pub mod sparks;
@@ -151,8 +152,9 @@ mod glyphs;
 pub mod google;
 #[cfg(windows)]
 pub mod google_drive;
+// The memory's thread, shared with the Linux node.
 #[cfg(windows)]
-pub mod memory;
+pub use horadric_memory::service as memory;
 #[cfg(windows)]
 mod menu;
 #[cfg(windows)]

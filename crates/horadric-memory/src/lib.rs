@@ -15,7 +15,9 @@ pub mod keeper;
 pub mod models;
 pub mod parts;
 pub mod recall;
+pub mod service;
 pub mod share;
+pub mod sharing;
 pub mod store;
 pub mod transcripts;
 

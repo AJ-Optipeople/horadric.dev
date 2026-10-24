@@ -660,6 +660,8 @@ fn definitions<'a>(files: &'a Files) -> HashMap<&'a str, Vec<Def<'a>>> {
 /// defines, for the Arcane Sanctuary's lines. Only calls that resolve to
 /// one file count: a call on a value or one that could go to several
 /// files is a guess, and guesses would tie every file to every other.
+/// The sanctuary is drawn on Windows only; a node keeps it for the tests.
+#[cfg_attr(target_os = "linux", allow(dead_code))]
 pub fn links(files: &Files) -> Vec<(String, String, u32)> {
     let defined = definitions(files);
     let mut count: HashMap<(&str, &str), u32> = HashMap::new();

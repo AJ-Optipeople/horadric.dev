@@ -27,14 +27,15 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       # One at a time, so a test that hangs is the last one named.
       - run: cargo test --workspace --no-fail-fast -- --test-threads=1
-  # Linux is a headless node (`horadric node`), without the tiles or the
-  # memory, so only its crates are built. The smoke run is its "verified
-  # on screen": a node, a session through it, read over --stdio.
+  # Linux is a headless node (`horadric node`), without the tiles, so
+  # only its crates are built: the memory and the lore tools are among
+  # them. The smoke run is its "verified on screen": a node, a session
+  # through it, read over --stdio.
   linux:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      CRATES: -p horadric-core -p horadric-hooks -p horadric-pty -p horadric
+      CRATES: -p horadric-core -p horadric-hooks -p horadric-memory -p horadric-pty -p horadric
     steps:
       - uses: actions/checkout@v4
       - run: rustup toolchain install

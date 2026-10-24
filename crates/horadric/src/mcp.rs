@@ -55,7 +55,8 @@ pub fn run() -> Result<(), String> {
     // folder does not change.
     let top: OnceCell<Option<PathBuf>> = OnceCell::new();
     let mut server = Server {
-        browser: session.is_some(),
+        // A Linux node has no stage, so no browser pane: only the lore.
+        browser: cfg!(windows) && session.is_some(),
         app: move |body: Value| ask_app(owner, session.as_deref(), &body),
         settle: Duration::from_millis(400),
         lore: crate::lore::tool,
@@ -716,7 +717,8 @@ fn char_key(key: &str, shift: bool) -> Option<(String, String, u32, String)> {
 }
 
 /// Every tool the server lists to a Horadric session, for `horadric
-/// quest start` to weigh.
+/// quest start` to weigh, which a node has no quests for.
+#[cfg_attr(target_os = "linux", allow(dead_code))]
 pub(crate) fn tool_list() -> Value {
     json!(tools().into_iter().chain(lore_tools()).collect::<Vec<_>>())
 }

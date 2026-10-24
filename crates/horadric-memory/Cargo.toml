@@ -10,6 +10,7 @@ candle-core = "0.11"
 candle-nn = "0.11"
 candle-transformers = "0.11"
 horadric-core = { path = "../horadric-core" }
+horadric-hooks = { path = "../horadric-hooks" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokenizers = { version = "0.22", default-features = false, features = ["onig"] }

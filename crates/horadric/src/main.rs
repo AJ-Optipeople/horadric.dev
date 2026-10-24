@@ -15,7 +15,7 @@
 mod backup;
 #[cfg(windows)]
 mod bench;
-#[cfg(windows)]
+#[cfg(not(target_os = "macos"))]
 mod code;
 mod console;
 #[cfg(windows)]
@@ -29,9 +29,9 @@ mod install;
 #[cfg(target_os = "macos")]
 #[path = "install_mac.rs"]
 mod install;
-#[cfg(windows)]
+#[cfg(not(target_os = "macos"))]
 mod lore;
-#[cfg(windows)]
+#[cfg(not(target_os = "macos"))]
 mod mcp;
 #[cfg(target_os = "linux")]
 mod node;
@@ -245,7 +245,7 @@ fn main() -> ExitCode {
         Some("release") => release::run(&args[1..]),
         Some("status") => status::run(),
         Some("hook") => hook::run(&args[1..]),
-        #[cfg(windows)]
+        #[cfg(not(target_os = "macos"))]
         Some("mcp") => mcp::run(),
         #[cfg(windows)]
         Some("portal") => portal::run(&args[1..]),

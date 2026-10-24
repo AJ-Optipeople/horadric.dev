@@ -769,6 +769,7 @@ dependencies = [
  "candle-nn",
  "candle-transformers",
  "horadric-core",
+ "horadric-hooks",
  "serde",
  "serde_json",
  "tokenizers",

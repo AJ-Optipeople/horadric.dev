@@ -12,6 +12,11 @@
 //! A brother's sessions are in the registry, so they light, chime and
 //! count as local ones do, but never in `consoles`: nothing here may stop,
 //! save or resume them as if they ran on this PC.
+//!
+//! A Linux node links to no one, so this side does for it what a PC's
+//! own server does for a brother's client: it takes the `lore` the node
+//! says after hello and sends it the entries it lacks, then those written
+//! after ([`App::far_lore`]). The Town Portal need not be on for that.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -32,6 +37,7 @@ use crate::far_node::{self, NodeLink};
 use crate::far_phone::{self, PhoneLink, Said};
 use crate::menu::Item;
 use crate::project::project_key;
+use crate::sharing::Lores;
 
 /// How often the phone and node lists are read and out of reach tiles are aged.
 const CHECK_EVERY: Duration = Duration::from_secs(2);
@@ -54,6 +60,8 @@ enum Event {
     Heard(Via, Value),
     Down(Via),
     Keyed(usize, String),
+    /// Made on a thread for the brother keyed so: lore it lacks.
+    Send(String, Value),
 }
 
 /// One brother, kept while its link is down so its tiles stay.
@@ -70,6 +78,10 @@ struct Peer {
     /// Its sessions as last listed, so tiles dimmed while it slept get
     /// their own lines back when it wakes without relinking.
     list: Vec<afar::Entry>,
+    /// A node's projects whose lore it shares, by the project's JSON:
+    /// the project and what this PC knows it holds, as `Lores::export`
+    /// keeps it.
+    lore: HashMap<String, (Value, Value)>,
 }
 
 pub(super) struct Far {
@@ -99,6 +111,9 @@ pub(super) struct Far {
     /// Brothers' tiles new a moment ago, by their session's own id: their
     /// id here and when, for a tile elsewhere going just after.
     arrived: HashMap<String, (String, SystemTime)>,
+    /// The tiles' projects shared with the nodes, as the last node's hello
+    /// found them.
+    lore: Lores,
 }
 
 fn wake(notify: isize) {
@@ -141,6 +156,7 @@ impl Far {
             phases: HashMap::new(),
             left: HashMap::new(),
             arrived: HashMap::new(),
+            lore: Lores::default(),
         }
     }
 }
@@ -172,6 +188,7 @@ impl App {
                 self.far_nodes(list);
             }
         }
+        self.far_lore(None);
         if self.far_lines() {
             self.reconcile(true);
         }
@@ -293,6 +310,10 @@ impl App {
                     self.far_keyed(i, key);
                     false
                 }
+                Event::Send(key, msg) => {
+                    self.far_send(&key, msg);
+                    false
+                }
             };
         }
         // Handoffs move on with what was heard, and with what their
@@ -334,6 +355,47 @@ impl App {
                 eprintln!("horadric: cannot keep the brother's key: {e}");
             }
         }
+    }
+
+    /// Sends each linked node, or only the one keyed `only`, the lore it
+    /// lacks of the projects it said, when anything changed since the last
+    /// send: read on a thread, sent from the next drain.
+    fn far_lore(&mut self, only: Option<&str>) {
+        let mut jobs = Vec::new();
+        for (key, p) in self.far.peers.iter_mut() {
+            if !matches!(p.via, Some(Via::Node(_))) || only.is_some_and(|o| o != key) {
+                continue;
+            }
+            for (project, theirs) in p.lore.values_mut() {
+                if let Some(job) = self.far.lore.export(project, theirs) {
+                    jobs.push((key.clone(), job));
+                }
+            }
+        }
+        let notify = self.notify.0 as isize;
+        for (key, job) in jobs {
+            let tx = self.far.tx.clone();
+            std::thread::spawn(move || {
+                let Value::Array(msgs) = job() else {
+                    return;
+                };
+                for msg in msgs {
+                    if tx.send(Event::Send(key.clone(), msg)).is_err() {
+                        return;
+                    }
+                }
+                wake(notify);
+            });
+        }
+    }
+
+    /// The folders of the tiles' projects, as the Town Portal shares the
+    /// lore of.
+    pub(super) fn tile_dirs(&self) -> Vec<std::path::PathBuf> {
+        self.clusters
+            .iter()
+            .filter_map(|c| self.project_dir(&c.key))
+            .collect()
     }
 
     /// Sends `msg` to the brother keyed `key`, stamped as every message
@@ -405,6 +467,7 @@ impl App {
                 linked: false,
             },
             list: Vec::new(),
+            lore: HashMap::new(),
         });
         p.name = name;
         p.via = Some(via);
@@ -433,6 +496,7 @@ impl App {
         p.heard.linked = false;
         p.client = Client::default();
         p.streams.clear();
+        p.lore.clear();
         self.far_lines()
     }
 
@@ -541,7 +605,13 @@ impl App {
                 }
                 // What this PC holds of each shared lore, so the brother
                 // sends what it lacks and then what is written after.
-                for (project, have) in self.portal_lore() {
+                let told = if matches!(via, Via::Node(_)) {
+                    self.far.lore = Lores::of(self.tile_dirs());
+                    self.far.lore.told()
+                } else {
+                    self.portal_lore()
+                };
+                for (project, have) in told {
                     self.far_send(
                         &name,
                         json!({"t": "lore", "project": project, "have": have}),
@@ -609,7 +679,23 @@ impl App {
                 false
             }
             Heard::Entries { project, b64 } => {
-                self.portal_lore_take(&project, &b64);
+                if matches!(via, Via::Node(_)) {
+                    self.far.lore.import(&project, &b64, unix_now());
+                } else {
+                    self.portal_lore_take(&project, &b64);
+                }
+                false
+            }
+            Heard::Lore { project, have } => {
+                // A brother PC's own server sends it this PC's lore; a
+                // node has no link of its own to send it on.
+                if !matches!(via, Via::Node(_)) {
+                    return false;
+                }
+                if let Some(p) = self.far.peers.get_mut(&name) {
+                    p.lore.insert(project.to_string(), (project, have));
+                }
+                self.far_lore(Some(&name));
                 false
             }
             Heard::State(said) => {
@@ -875,6 +961,7 @@ impl App {
                 control: false,
                 heard,
                 list: list.clone(),
+                lore: HashMap::new(),
             },
         );
         let listed = self.far_sessions(key, &list);

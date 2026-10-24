@@ -1,14 +1,17 @@
-//! The app's memory: one keeper and one model for every session's
-//! `lore_recall`, on a thread of its own, so embedding never holds up a
-//! window and ten sessions do not load ten models.
+//! The memory as a running Horadric holds it: one keeper and one model
+//! for every session's `lore_recall`, on a thread of its own, so embedding
+//! never holds up a window and ten sessions do not load ten models. The
+//! Windows app and a Linux node (`horadric node`) run the same.
 //!
 //! Started by the first recall or the first transcript to keep. The model
-//! is fetched from Hugging Face by the first recall only, so an app
+//! is fetched from Hugging Face by the first recall only, so a Horadric
 //! nobody recalls in keeps its dialogue (part 4) without the download or
 //! the memory it takes. Until the model is loaded the keeper answers by
 //! words. A quest's recall is asked for ahead ([`prepare`]) and taken when
 //! ready, so no window waits on it, and the model is loaded at the app's
-//! start when its files are already on disk ([`warm`]).
+//! start when its files are already on disk ([`warm`]). How the model is
+//! fetched is the caller's ([`set_fetch`]): WinHTTP on Windows, the
+//! portable link on Linux.
 //!
 //! The code index lives in the `horadric` binary, so it hands over what
 //! the memory keeps of it with [`set_code_source`]. A recall owes the
@@ -26,14 +29,16 @@ use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use horadric_hooks::listener::{RecallCall, Reply};
+use horadric_core::Agent;
+use horadric_hooks::listener::{RecallCall, Reply, Tagged};
 use horadric_hooks::lore::{now, Place};
-use horadric_memory::keeper::{Answer, CodeFile, Keeper, Theirs, Unasked};
-use horadric_memory::parts::{self, PieceSource, Tree};
-use horadric_memory::recall::{self, Ask};
-use horadric_memory::transcripts::Format;
-use horadric_memory::{models, Embedder, Kind};
 use serde_json::{json, Value};
+
+use crate::keeper::{Answer, CodeFile, Keeper, Theirs, Unasked};
+use crate::parts::{self, PieceSource, Tree};
+use crate::recall::{self, Ask};
+use crate::transcripts::Format;
+use crate::{models, Embedder, Kind};
 
 /// The model memory runs on, chosen on the yardstick.
 const MODEL: Kind = Kind::MiniLm;
@@ -72,6 +77,18 @@ static CODE: OnceLock<CodeSource> = OnceLock::new();
 /// Without it the memory finds notes and passages but no code.
 pub fn set_code_source(f: CodeSource) {
     let _ = CODE.set(f);
+}
+
+/// How the model's files are fetched: `fetch(url, limit)` answers the
+/// body of `url`, at most `limit` bytes.
+pub type Fetch = fn(&str, usize) -> Result<Vec<u8>, String>;
+
+static FETCH: OnceLock<Fetch> = OnceLock::new();
+
+/// Gives the memory its way to the web for the model. Without it a model
+/// already on disk still loads, and one that is not is never fetched.
+pub fn set_fetch(f: Fetch) {
+    let _ = FETCH.set(f);
 }
 
 static PIECES: OnceLock<PieceSource> = OnceLock::new();
@@ -266,6 +283,40 @@ pub fn keep(job: Keep) {
     let _ = sender().send(Msg::Keep(job));
 }
 
+/// Hands a session's transcript to the memory when a hook says it is a
+/// good moment (see [`keep_of`]).
+pub fn keep_hooked(t: &Tagged) {
+    if let Some(job) = keep_of(t) {
+        keep(job);
+    }
+}
+
+/// What a hook event asks the memory to keep: the session's transcript
+/// when its turn ended, its context is about to be compacted, or it is
+/// over. A subagent's hooks are its own, not the session's, and Grok's
+/// transcripts are not read.
+pub fn keep_of(t: &Tagged) -> Option<Keep> {
+    let e = &t.event;
+    if !matches!(
+        e.hook_event_name.as_str(),
+        "Stop" | "PreCompact" | "SessionEnd"
+    ) || e.transcript_path.is_empty()
+        || e.agent_id.is_some()
+    {
+        return None;
+    }
+    let format = match t.agent {
+        Agent::Claude => Format::Claude,
+        Agent::Codex => Format::Codex,
+        Agent::Grok => return None,
+    };
+    Some(Keep {
+        path: e.transcript_path.clone().into(),
+        cwd: e.cwd.clone(),
+        format,
+    })
+}
+
 fn start() -> Sender<Msg> {
     let (tx, rx) = mpsc::channel();
     let Some(state) = horadric_hooks::state_dir() else {
@@ -306,7 +357,11 @@ impl Projects {
 }
 
 fn load(models: &Path) -> Result<Embedder, String> {
-    let dir = models::ensure(MODEL, models, crate::net::get)?;
+    let fetch = |url: &str, limit: usize| match FETCH.get() {
+        Some(f) => f(url, limit),
+        None => Err(format!("no way to fetch {url} on this build")),
+    };
+    let dir = models::ensure(MODEL, models, fetch)?;
     Embedder::load(MODEL, &dir)
 }
 
@@ -554,4 +609,47 @@ fn answer(
         &known,
         None,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use horadric_core::HookEvent;
+
+    fn tagged(hook: &str, agent: Agent, subagent: bool) -> Tagged {
+        Tagged {
+            horadric_id: "s".into(),
+            event: HookEvent {
+                hook_event_name: hook.into(),
+                transcript_path: "/t/a.jsonl".into(),
+                cwd: "/p".into(),
+                agent_id: subagent.then(|| "sub".into()),
+                ..Default::default()
+            },
+            agent,
+            limits: None,
+        }
+    }
+
+    #[test]
+    fn a_turns_end_compaction_or_end_keeps_the_transcript() {
+        for hook in ["Stop", "PreCompact", "SessionEnd"] {
+            let k = keep_of(&tagged(hook, Agent::Claude, false)).expect(hook);
+            assert_eq!(k.path, PathBuf::from("/t/a.jsonl"));
+            assert_eq!(k.cwd, "/p");
+            assert_eq!(k.format, Format::Claude);
+        }
+        let codex = keep_of(&tagged("Stop", Agent::Codex, false)).unwrap();
+        assert_eq!(codex.format, Format::Codex);
+    }
+
+    #[test]
+    fn other_hooks_subagents_grok_and_no_transcript_keep_nothing() {
+        assert!(keep_of(&tagged("UserPromptSubmit", Agent::Claude, false)).is_none());
+        assert!(keep_of(&tagged("Stop", Agent::Claude, true)).is_none());
+        assert!(keep_of(&tagged("Stop", Agent::Grok, false)).is_none());
+        let mut none = tagged("Stop", Agent::Claude, false);
+        none.event.transcript_path.clear();
+        assert!(keep_of(&none).is_none());
+    }
 }

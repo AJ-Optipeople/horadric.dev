@@ -24,7 +24,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use horadric_core::brotherhood::Counted;
-use horadric_core::handoff::{self, RepoId};
 use horadric_core::portal::{b64url, unb64url, Config, Kind, Paired};
 use horadric_core::serving::{Job, Out, Running, Serve, Server};
 use horadric_core::webpush;
@@ -86,7 +85,7 @@ pub(super) struct Portal {
     brothers: HashMap<u32, String>,
     /// The projects whose lore is shared, by repository, as the last
     /// brother hello found them.
-    lore: Vec<(RepoId, Arc<sharing::Project>)>,
+    lore: sharing::Lores,
 }
 
 /// What this PC tells its brothers it is doing, as Windows says: one of
@@ -157,7 +156,7 @@ impl App {
             fast: false,
             server: Server::default(),
             brothers: HashMap::new(),
-            lore: Vec::new(),
+            lore: sharing::Lores::default(),
         });
         brothers::on_requests(Box::new(move || unsafe {
             let _ = PostMessageW(
@@ -688,19 +687,6 @@ impl Here<'_> {
             .lock()
             .is_ok_and(|r| r.get(id).is_some_and(|s| !portal::served(s)))
     }
-
-    /// This PC's project with the repository a brother names.
-    fn shared_lore(&self, project: &Value) -> Option<Arc<sharing::Project>> {
-        let wanted: RepoId = serde_json::from_value(project.clone()).ok()?;
-        let lore = &self.0.portal.as_ref()?.lore;
-        let mine: Vec<(String, RepoId)> = lore
-            .iter()
-            .enumerate()
-            .map(|(i, (repo, _))| (i.to_string(), repo.clone()))
-            .collect();
-        let i: usize = handoff::find_project(&wanted, &mine)?.parse().ok()?;
-        Some(lore[i].1.clone())
-    }
 }
 
 impl Serve for Here<'_> {
@@ -825,57 +811,22 @@ impl Serve for Here<'_> {
     /// The tiles' projects in git, found by repository. Asked at a
     /// brother's hello, so a project opened since is shared from the next.
     fn lore_projects(&mut self) -> Vec<(Value, Value)> {
-        let dirs: Vec<PathBuf> = self
-            .0
-            .clusters
-            .iter()
-            .filter_map(|c| self.0.project_dir(&c.key))
-            .collect();
-        let mut shared: Vec<(RepoId, Arc<sharing::Project>)> = Vec::new();
-        for dir in dirs {
-            let (Some(repo), Some(project)) = (handoff::repo_id(&dir), sharing::Project::of(&dir))
-            else {
-                continue;
-            };
-            if !shared.iter().any(|(r, _)| r == &repo) {
-                shared.push((repo, Arc::new(project)));
-            }
-        }
-        let told = shared
-            .iter()
-            .map(|(repo, p)| (json!(repo), json!(p.have())))
-            .collect();
+        let lores = sharing::Lores::of(self.0.tile_dirs());
+        let told = lores.told();
         if let Some(p) = self.0.portal.as_mut() {
-            p.lore = shared;
+            p.lore = lores;
         }
         told
     }
 
     fn lore_export(&mut self, project: &Value, theirs: &mut Value) -> Option<Job> {
-        let ours = self.shared_lore(project)?;
-        let mut t = sharing::Theirs::of(theirs);
-        t.learn(ours.sent(&t.token));
-        let due = t.due(&ours.mark());
-        *theirs = t.to_json();
-        if !due {
-            return None;
-        }
-        let project = project.clone();
-        Some(Box::new(move || ours.export(&project, &t.have, &t.token)))
+        self.0.portal.as_ref()?.lore.export(project, theirs)
     }
 
     fn lore_import(&mut self, project: &Value, b64: &str) {
-        let Some(ours) = self.shared_lore(project) else {
-            return;
-        };
-        let b64 = b64.to_string();
-        std::thread::spawn(move || {
-            if let Err(e) = ours.import(&b64, unix_now()) {
-                if std::env::var_os("HORADRIC_DEBUG").is_some() {
-                    eprintln!("horadric: a brother's lore did not go in: {e}");
-                }
-            }
-        });
+        if let Some(p) = self.0.portal.as_ref() {
+            p.lore.import(project, b64, unix_now());
+        }
     }
 
     fn handoff(&mut self, id: &str, to: &str) -> Result<(), String> {

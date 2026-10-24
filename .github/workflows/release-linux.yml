@@ -25,6 +25,8 @@ jobs:
           ref: ${{ github.event.inputs.tag || github.ref }}
       - run: rustup toolchain install
       - run: rustup target add "$TARGET"
+      # musl-gcc for the C the node carries: onig (the memory's tokenizer)
+      # and tree-sitter with its grammars (the lore's code index).
       - run: sudo apt-get update && sudo apt-get install -y musl-tools
       - run: cargo build --release -p horadric --bin horadric --target "$TARGET"
       - name: Check and pack

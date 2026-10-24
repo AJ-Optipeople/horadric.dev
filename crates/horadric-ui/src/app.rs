@@ -580,26 +580,7 @@ pub(crate) fn push(input: Input) {
 /// good moment: the turn ended, the context is about to be compacted, or
 /// the session is over. A subagent's hooks are its own, not the session's.
 fn keep_transcript(t: &Tagged) {
-    use horadric_memory::transcripts::Format;
-    let e = &t.event;
-    if !matches!(
-        e.hook_event_name.as_str(),
-        "Stop" | "PreCompact" | "SessionEnd"
-    ) || e.transcript_path.is_empty()
-        || e.agent_id.is_some()
-    {
-        return;
-    }
-    let format = match t.agent {
-        Agent::Claude => Format::Claude,
-        Agent::Codex => Format::Codex,
-        Agent::Grok => return,
-    };
-    crate::memory::keep(crate::memory::Keep {
-        path: e.transcript_path.clone().into(),
-        cwd: e.cwd.clone(),
-        format,
-    });
+    crate::memory::keep_hooked(t);
 }
 
 fn post_event(window: isize, phase: bool) {
@@ -799,6 +780,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
     // the installed copy decides: a dev instance or a build run from target
     // would point it at a build about to be replaced, and a fake install
     // with its own APPDATA has a first run of its own but shares the value.
+    crate::memory::set_fetch(crate::net::get);
     crate::memory::set_across(saved.recall_across);
     crate::memory::warm();
     let mut autostart_offered = saved.autostart_offered;

@@ -1,7 +1,8 @@
 //! The lore shared with linked brothers, as the serving side does it: the
 //! `have` a hello tells, the `entries` that answer a brother's, and the
 //! entries a brother sends taken in. The log and how it meets the lore and
-//! the store are `horadric_memory::share`; this is when to use it.
+//! the store are [`crate::share`]; this is when to use it. The Windows
+//! app and a Linux node both serve with it, so they share alike.
 //!
 //! Exporting reads the store's text, which is tens of MB, so it runs on a
 //! thread, and only when something it reads changed since the last time
@@ -11,13 +12,16 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
+use horadric_core::handoff::{self, RepoId};
+use horadric_core::serving::Job;
 use horadric_hooks::lore::Place;
-use horadric_memory::brethren::{self, Entry, Have};
-use horadric_memory::share::{self, Shared};
-use horadric_memory::store::Store;
 use serde_json::{json, Value};
+
+use crate::brethren::{self, Entry, Have};
+use crate::share::{self, Shared};
+use crate::store::Store;
 
 /// The most packed bytes one `entries` message carries, so a first catch
 /// up of a long lore goes as several, each well under the relay's 1 MB a
@@ -145,6 +149,95 @@ impl Project {
         })?;
         Ok(())
     }
+}
+
+/// The projects a brother shares lore for, each with its repository, as
+/// its serving side found them at the last brother's hello: what the
+/// `Serve` hooks `lore_projects`, `lore_export` and `lore_import` answer
+/// from.
+#[derive(Default)]
+pub struct Lores(Vec<(RepoId, Arc<Project>)>);
+
+impl Lores {
+    /// The projects of `dirs` that are in git, one per repository: two
+    /// checkouts of one repository share one lore.
+    pub fn of(dirs: impl IntoIterator<Item = PathBuf>) -> Lores {
+        let found = dirs.into_iter().filter_map(|dir| {
+            let repo = handoff::repo_id(&dir)?;
+            Some((repo, dir))
+        });
+        Lores(
+            one_each(found)
+                .into_iter()
+                .filter_map(|(repo, dir)| Some((repo, Arc::new(Project::of(&dir)?))))
+                .collect(),
+        )
+    }
+
+    /// What a hello tells of each: its repository and what this copy
+    /// holds.
+    pub fn told(&self) -> Vec<(Value, Value)> {
+        self.0
+            .iter()
+            .map(|(repo, p)| (json!(repo), json!(p.have())))
+            .collect()
+    }
+
+    /// This brother's project with the repository a brother names.
+    pub fn find(&self, project: &Value) -> Option<Arc<Project>> {
+        let wanted: RepoId = serde_json::from_value(project.clone()).ok()?;
+        let mine: Vec<(String, RepoId)> = self
+            .0
+            .iter()
+            .enumerate()
+            .map(|(i, (repo, _))| (i.to_string(), repo.clone()))
+            .collect();
+        let i: usize = handoff::find_project(&wanted, &mine)?.parse().ok()?;
+        Some(self.0[i].1.clone())
+    }
+
+    /// What `lore_export` answers: the job that sends a brother holding
+    /// `theirs` what it lacks, when anything changed since the last one.
+    /// `theirs` is kept by the server and updated here.
+    pub fn export(&self, project: &Value, theirs: &mut Value) -> Option<Job> {
+        let ours = self.find(project)?;
+        let mut t = Theirs::of(theirs);
+        t.learn(ours.sent(&t.token));
+        let due = t.due(&ours.mark());
+        *theirs = t.to_json();
+        if !due {
+            return None;
+        }
+        let project = project.clone();
+        Some(Box::new(move || ours.export(&project, &t.have, &t.token)))
+    }
+
+    /// What `lore_import` does: takes in what a brother sent, on a thread,
+    /// since it reads and writes the store.
+    pub fn import(&self, project: &Value, b64: &str, now: u64) {
+        let Some(ours) = self.find(project) else {
+            return;
+        };
+        let b64 = b64.to_string();
+        std::thread::spawn(move || {
+            if let Err(e) = ours.import(&b64, now) {
+                if std::env::var_os("HORADRIC_DEBUG").is_some() {
+                    eprintln!("horadric: a brother's lore did not go in: {e}");
+                }
+            }
+        });
+    }
+}
+
+/// The first of each key, in order.
+fn one_each<K: PartialEq, T>(all: impl IntoIterator<Item = (K, T)>) -> Vec<(K, T)> {
+    let mut out: Vec<(K, T)> = Vec::new();
+    for (k, t) in all {
+        if !out.iter().any(|(seen, _)| seen == &k) {
+            out.push((k, t));
+        }
+    }
+    out
 }
 
 /// What a brother holding `have` holds once it has `entries` too: each
@@ -284,6 +377,23 @@ mod tests {
         assert!(!t.due("m2"));
         t.learn(None);
         assert!(t.due("m3"));
+    }
+
+    #[test]
+    fn two_checkouts_of_one_repository_share_the_first() {
+        let all = [("a", 1), ("b", 2), ("a", 3), ("c", 4), ("b", 5)];
+        assert_eq!(one_each(all), [("a", 1), ("b", 2), ("c", 4)]);
+        assert!(one_each(Vec::<(u8, u8)>::new()).is_empty());
+    }
+
+    #[test]
+    fn a_project_no_lore_holds_is_found_nowhere() {
+        let lores = Lores::default();
+        assert!(lores.told().is_empty());
+        assert!(lores
+            .find(&json!({"remotes": ["x"], "roots": []}))
+            .is_none());
+        assert!(lores.export(&json!("not a repo"), &mut json!({})).is_none());
     }
 
     #[test]
