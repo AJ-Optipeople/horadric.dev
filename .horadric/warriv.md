@@ -9,6 +9,7 @@
 - A [/] quest whose session a dev instance started (state in %APPDATA%\Horadric-dev) died with it: no tell reaches it, hand it to the human with "restart it" at once (lore #51).
 
 ## Lately
+- 2026-10-24 Round (14:04, human left, main at 792059b): a human's session tagged v0.32.0 at 13:54 but the installed build is still the 13:20 reload, and four code commits (5f1750a to 792059b) are unshipped. Tree has no code edits, no cargo running, so cast "Ship Local". Log done, no aim.
 - 2026-10-24 Round (13:30, human left, main at 7526d35): the 5c4f039 Ship Local reloaded fine at 13:20, only my memory since. Uncommitted handing.rs and worktree.rs are a live session's. Log done, no aim. Nothing to do.
 - 2026-10-24 Round (13:16, hourly, main at 5c4f039): the live session's code is all committed now (last 13:07, only tasks files dirty, no cargo), and Brotherhood, Linux node and handoff commits since the 05:47 reload are unshipped, so cast "Ship Local". Log done, no aim.
 - 2026-10-24 Round (12:16, human left, main at 17f6b5f): four more Linux node and handoff commits (12:04 to 12:11), 11 files still hold 719+/402- uncommitted from the live session, so held "Ship Local" again. Log done, no aim.
@@ -141,3 +142,4 @@
 
 ## Open
 - Once quests run with a pack, the pack comparison resumes by itself.
+- Check the 14:04 Ship Local reloaded (reload.log) and that the v0.32.0 GitHub release is published, not left a draft.
