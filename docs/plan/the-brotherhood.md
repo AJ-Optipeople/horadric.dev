@@ -380,6 +380,24 @@ Each step is useful alone and each is verified before the next starts.
    both through the real relay: a tile on each for the other's sessions,
    a session started from one running on the other, the link cut and the
    tiles dimming, then coming back.
+
+   The client side landed on 2026-10-24 (`horadric-ui/src/far.rs`, its
+   pure parts in `horadric-core/src/afar.rs`). A brother's session is in
+   the registry as `<id>@<brother>` with `brother` set and no folder, in
+   the cluster `brother:<brother>/<project>`, and never in `consoles`, so
+   nothing saves, stops or resumes it here. Its pane is a console with no
+   host, fed by `out` and sending `input` and `resize`. The client does
+   not care how the brother is reached: over a linked brother channel
+   (asks told from answers by `n` and hello's `kind`, see
+   `brothers.rs`), or through the phone door with a phone's key traded
+   for a pairing ticket listed in `brother-phones.json`. Seen on screen
+   with "Alpha" and "Beta" through `wss://portal.horadric.dev` by the
+   phone door: Beta's "demo · Alpha" cluster with Alpha's mark, Alpha's
+   cmd in Beta's pane taking typing, a session started from Beta running
+   on Alpha and shown on Beta's stage, a waiting session lit with a toast
+   on Beta, Alpha stopped and its tiles dimmed "Alpha out of reach",
+   then back with the pane streaming again. Over a brother channel it
+   waits for the serving side to answer there.
 4. **The serving pulled out of the UI.** What `app/portal.rs` does for a
    phone (sessions, projects, folders, start, resume, create, screens,
    streams) moves behind a trait the Windows UI implements, so a headless
