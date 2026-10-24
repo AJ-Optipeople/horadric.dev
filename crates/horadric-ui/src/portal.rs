@@ -9,7 +9,9 @@ use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::Term;
 use alacritty_terminal::vte::ansi::{NamedColor, Rgb};
-use horadric_core::brotherhood::{Brother, Link, Roster};
+use horadric_core::brotherhood::Roster;
+#[cfg(windows)]
+use horadric_core::brotherhood::{Brother, Link};
 use horadric_core::diff::FileDiff;
 // The frame crypto is Windows CNG, so the Mac build has no portal yet.
 #[cfg(windows)]

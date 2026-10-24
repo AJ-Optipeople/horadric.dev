@@ -23,7 +23,9 @@ pub fn project_key(s: &Session) -> String {
 /// key is an id, which no one wants to read.
 static BROTHERS: Mutex<BTreeMap<String, String>> = Mutex::new(BTreeMap::new());
 
-/// Names the brother keyed `key`, as its link says.
+/// Names the brother keyed `key`, as its link says. Brothers link on
+/// Windows only for now, so the Mac build never calls it.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub fn name_brother(key: &str, name: &str) {
     if let Ok(mut b) = BROTHERS.lock() {
         b.insert(key.to_string(), name.to_string());
