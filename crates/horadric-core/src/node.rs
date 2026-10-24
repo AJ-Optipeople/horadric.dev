@@ -58,6 +58,12 @@ impl Decoder {
         }
     }
 
+    /// Whether the preamble has gone by: the node answered, whatever a
+    /// login shell printed first.
+    pub fn started(&self) -> bool {
+        self.started
+    }
+
     pub fn push(&mut self, bytes: &[u8]) {
         self.buf.extend(bytes);
     }
@@ -199,6 +205,7 @@ mod tests {
         for size in [1, 2, 7, stream.len()] {
             let mut d = Decoder::client();
             let mut got = Vec::new();
+            assert!(!d.started());
             for piece in stream.chunks(size) {
                 d.push(piece);
                 while let Some(f) = d.next_frame().unwrap() {
@@ -206,6 +213,7 @@ mod tests {
                 }
             }
             assert_eq!(got, [b"{}".to_vec()], "pieces of {size}");
+            assert!(d.started());
         }
         let mut d = Decoder::client();
         d.push(&encode(b"{}"));

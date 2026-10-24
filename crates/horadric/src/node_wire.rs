@@ -22,11 +22,13 @@ pub fn project_name(cwd: &str) -> &str {
 
 /// The `sessions` message. `hosted` says whether this node holds the
 /// session's console, which an attach needs; one posting hooks from a
-/// terminal of its own is listed but cannot be attached.
+/// terminal of its own is listed but cannot be attached. The project is
+/// named as in `projects`, as a Windows PC names it, since a client
+/// titles its cluster with it and finds the folder to start in by it.
 pub fn sessions<'a>(all: impl Iterator<Item = (&'a Session, bool)>) -> Value {
     let list: Vec<Value> = all
         .map(|(s, hosted)| {
-            let mut e = session_entry(s, &s.cwd, false);
+            let mut e = session_entry(s, project_name(&s.cwd), false);
             e["hosted"] = json!(hosted);
             e
         })
@@ -76,7 +78,7 @@ mod tests {
         assert_eq!(m["t"], "sessions");
         assert_eq!(m["list"][0]["id"], "a1");
         assert_eq!(m["list"][0]["phase"], "working");
-        assert_eq!(m["list"][0]["project"], "/srv/app");
+        assert_eq!(m["list"][0]["project"], "app");
         assert_eq!(m["list"][0]["hosted"], true);
         assert_eq!(m["list"][1]["hosted"], false);
     }

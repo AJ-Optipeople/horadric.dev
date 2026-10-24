@@ -93,6 +93,10 @@ pub enum Choice {
     /// Sign in to WorkOS, so this PC finds its brothers.
     SignIn,
     SignOut,
+    /// Join a Linux node by its SSH destination.
+    AddNode,
+    /// Take this node off the list, by name.
+    ForgetNode(String),
     /// End every session in every project, after asking.
     EndAll,
     Quit,
@@ -204,6 +208,8 @@ impl Drop for Tray {
     }
 }
 
+/// Where the Linux nodes menu's Forget ids start, one per node.
+const NODE: usize = 800;
 /// Where the Brothers menu's ids start, one per brother the relay lists.
 const BROTHER: usize = 900;
 /// Where the Quest log menu's ids start, one per recent project.
@@ -267,6 +273,7 @@ pub fn menu(
     const STOP: usize = 15;
     const SIGN_IN: usize = 16;
     const SIGN_OUT: usize = 17;
+    const ADD_NODE: usize = 18;
     const RECENT: usize = 100;
     let mut items = Vec::new();
     if let Some(xp) = xp {
@@ -374,6 +381,17 @@ pub fn menu(
         }
         None => items.push(Item::action(SIGN_IN, "Sign in\u{2026}")),
     }
+    let nodes = horadric_hooks::state_dir()
+        .map(|d| crate::far_node::load(&d))
+        .unwrap_or_default();
+    let lines: Vec<(String, String)> = nodes
+        .iter()
+        .map(|n| (n.name.clone(), crate::far_node::status(&n.name)))
+        .collect();
+    items.push(Item::Submenu(
+        "Linux nodes".into(),
+        node_items(&lines, ADD_NODE),
+    ));
     items.push(Item::action(SETTINGS, "Settings\u{2026}"));
     if let Some(version) = update {
         items.push(Item::action(UPDATE, format!("Update to {version}\u{2026}")));
@@ -397,6 +415,10 @@ pub fn menu(
         STOP => Some(Choice::StopWarriv),
         SIGN_IN => Some(Choice::SignIn),
         SIGN_OUT => Some(Choice::SignOut),
+        ADD_NODE => Some(Choice::AddNode),
+        i if (NODE..BROTHER).contains(&i) => nodes
+            .get(i - NODE)
+            .map(|n| Choice::ForgetNode(n.name.clone())),
         i if (ACCOUNT..ACCOUNT + 100 * Agent::ALL.len()).contains(&i) => {
             let agent = Agent::ALL[(i - ACCOUNT) / 100];
             match (i - ACCOUNT) % 100 {
@@ -448,6 +470,30 @@ fn brother_items(listed: Option<&[joining::Listed]>) -> Vec<Item> {
             false => Item::action(BROTHER + i, b.label()),
         })
         .collect()
+}
+
+/// The Linux nodes menu: each node joined, with how its link stands, the
+/// way to join another, and the way to forget one. `lines` are (name,
+/// status).
+fn node_items(lines: &[(String, String)], add: usize) -> Vec<Item> {
+    let mut items: Vec<Item> = lines
+        .iter()
+        .map(|(name, status)| Item::Disabled(format!("{name}\t{status}")))
+        .collect();
+    if !items.is_empty() {
+        items.push(Item::Separator);
+    }
+    items.push(Item::action(add, "Join a Linux node\u{2026}"));
+    if !lines.is_empty() {
+        let forget = lines
+            .iter()
+            .take(BROTHER - NODE)
+            .enumerate()
+            .map(|(i, (name, _))| Item::action(NODE + i, name.clone()))
+            .collect();
+        items.push(Item::Submenu("Forget".into(), forget));
+    }
+    items
 }
 
 /// The Account menu: each agent's accounts with what each has left, a
@@ -536,6 +582,26 @@ fn dim(rgb: u32, k: f32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_nodes_menu_lists_each_and_offers_join_and_forget() {
+        let only = node_items(&[], 18);
+        assert_eq!(only.len(), 1);
+        assert!(matches!(&only[0], Item::Action { id: 18, .. }));
+        let lines = vec![
+            ("vps".to_string(), "linked".to_string()),
+            ("box".to_string(), "Permission denied".to_string()),
+        ];
+        let items = node_items(&lines, 18);
+        assert!(matches!(&items[0], Item::Disabled(l) if l == "vps\tlinked"));
+        assert!(matches!(&items[2], Item::Separator));
+        let Some(Item::Submenu(_, forget)) = items.last() else {
+            panic!("no Forget");
+        };
+        assert!(
+            matches!(&forget[1], Item::Action { id, label, .. } if *id == NODE + 1 && label == "box")
+        );
+    }
 
     #[test]
     fn a_breath_starts_bright_dips_halfway_and_comes_back() {

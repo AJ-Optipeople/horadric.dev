@@ -33,6 +33,7 @@ pub mod lookback;
 pub mod lore;
 pub mod merge;
 pub mod node;
+pub mod nodes;
 pub mod overlap;
 pub mod pack;
 pub mod portal;

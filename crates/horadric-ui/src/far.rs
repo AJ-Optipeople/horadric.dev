@@ -3,10 +3,11 @@
 //! output each brother streams (protocol v3, `docs/PORTAL.md`). What the
 //! messages mean is `horadric_core::afar`; this is the glue.
 //!
-//! A brother is reached one of two ways, and nothing past this file tells
-//! them apart: over its brother channel once two joined PCs linked (see
-//! [`crate::brothers`]), sealed with their link key, or through the
-//! relay's phone door with a phone's key ([`crate::far_phone`]).
+//! A brother is reached one of three ways, and nothing past this file
+//! tells them apart: over its brother channel once two joined PCs linked
+//! (see [`crate::brothers`]), sealed with their link key, through the
+//! relay's phone door with a phone's key ([`crate::far_phone`]), or, for a
+//! Linux node, as frames over `ssh` ([`crate::far_node`]).
 //!
 //! A brother's sessions are in the registry, so they light, chime and
 //! count as local ones do, but never in `consoles`: nothing here may stop,
@@ -26,10 +27,11 @@ use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
 use super::{unix_now, App, WM_HORADRIC_FAR};
 use crate::brothers::{self, Link};
 use crate::console::{Console, FarAsk, GridSize};
+use crate::far_node::{self, NodeLink};
 use crate::far_phone::{self, PhoneLink, Said};
 use crate::project::project_key;
 
-/// How often the phone list is read and out of reach tiles are aged.
+/// How often the phone and node lists are read and out of reach tiles are aged.
 const CHECK_EVERY: Duration = Duration::from_secs(2);
 
 /// How a brother is reached.
@@ -39,6 +41,8 @@ enum Via {
     Channel(u32),
     /// The `n`th link through the phone door.
     Phone(usize),
+    /// The `n`th Linux node, over `ssh`.
+    Node(usize),
 }
 
 /// What a link did, as the UI thread drains it.
@@ -64,6 +68,7 @@ pub(super) struct Far {
     tx: Sender<Event>,
     rx: Receiver<Event>,
     phones: Vec<(far_phone::Entry, PhoneLink)>,
+    nodes: Vec<(horadric_core::nodes::Node, NodeLink)>,
     checked: Option<Instant>,
     peers: HashMap<String, Peer>,
     /// Which brother each link is to, by name.
@@ -107,6 +112,7 @@ impl Far {
             tx,
             rx,
             phones: Vec::new(),
+            nodes: Vec::new(),
             checked: None,
             peers: HashMap::new(),
             names: HashMap::new(),
@@ -139,6 +145,10 @@ impl App {
             if !same {
                 self.far_phones(list);
             }
+            let list = far_node::load(&dir);
+            if !list.iter().eq(self.far.nodes.iter().map(|(n, _)| n)) {
+                self.far_nodes(list);
+            }
         }
         if self.far_lines() {
             self.reconcile(true);
@@ -167,6 +177,76 @@ impl App {
                 self.far.phones.push((entry, link));
             }
         }
+    }
+
+    /// Dials every node listed, anew: a link to one no longer listed ends
+    /// with its `ssh`, and its tiles go with the peer.
+    fn far_nodes(&mut self, list: Vec<horadric_core::nodes::Node>) {
+        let names: HashSet<&str> = list.iter().map(|n| n.name.as_str()).collect();
+        let gone: Vec<String> = self
+            .far
+            .nodes
+            .iter()
+            .map(|(n, _)| n.name.clone())
+            .filter(|n| !names.contains(n.as_str()))
+            .collect();
+        let mut changed = false;
+        for i in 0..self.far.nodes.len() {
+            changed |= self.far_down(Via::Node(i));
+        }
+        self.far.nodes.clear();
+        for name in gone {
+            changed |= self.far_forget(&name);
+        }
+        let Some(ssh) = crate::console::ssh_program() else {
+            if !list.is_empty() {
+                eprintln!("horadric: no ssh found for the Linux nodes (install OpenSSH Client)");
+            }
+            return;
+        };
+        let notify = self.notify.0 as isize;
+        for (i, node) in list.into_iter().enumerate() {
+            let tx = Mutex::new(self.far.tx.clone());
+            let heard = Box::new(move |said: far_node::Said| {
+                let via = Via::Node(i);
+                let e = match said {
+                    far_node::Said::Up => Event::Up(via, String::new()),
+                    far_node::Said::Heard(m) => Event::Heard(via, m),
+                    far_node::Said::Down => Event::Down(via),
+                };
+                if tx.lock().is_ok_and(|t| t.send(e).is_ok()) {
+                    wake(notify);
+                }
+            });
+            if let Some(link) = NodeLink::start(&node, &ssh, heard) {
+                self.far.nodes.push((node, link));
+            }
+        }
+        if changed {
+            self.reconcile(true);
+        }
+    }
+
+    /// Drops brother `name` and its tiles and panes, for a node taken off
+    /// the list. True when any tile went.
+    fn far_forget(&mut self, name: &str) -> bool {
+        self.far.peers.remove(name);
+        self.far.names.retain(|_, n| n != name);
+        self.far
+            .consoles
+            .retain(|id, _| afar::remote_id(id, name).is_none());
+        let Ok(mut r) = self.shared.registry.lock() else {
+            return false;
+        };
+        let ids: Vec<String> = r
+            .all()
+            .filter(|s| s.brother.as_ref().is_some_and(|b| b.name == name))
+            .map(|s| s.id.clone())
+            .collect();
+        for id in &ids {
+            r.remove(id);
+        }
+        !ids.is_empty()
     }
 
     /// Takes what the links heard and what the panes asked.
@@ -244,6 +324,11 @@ impl App {
                     link.send(msg);
                 }
             }
+            Via::Node(i) => {
+                if let Some((_, link)) = self.far.nodes.get(i) {
+                    link.send(msg);
+                }
+            }
         }
     }
 
@@ -254,6 +339,12 @@ impl App {
                 .phones
                 .get(i)
                 .map(|(e, _)| e.name.clone())
+                .unwrap_or(name),
+            Via::Node(i) => self
+                .far
+                .nodes
+                .get(i)
+                .map(|(n, _)| n.name.clone())
                 .unwrap_or(name),
             Via::Channel(_) => name,
         };
@@ -623,5 +714,76 @@ impl App {
             .filter(|(id, _)| r.get(id).is_some_and(|s| project_key(s) == key))
             .map(|(id, c)| (c.serial, id.clone()))
             .collect()
+    }
+}
+
+/// "Join a Linux node...": its SSH destination, picked from
+/// `~/.ssh/config` with the Fleets picker or typed. No login and no code:
+/// the trust is the SSH key. The link is dialled at the next check.
+pub(super) fn ask_node() {
+    let Some(dir) = horadric_hooks::state_dir() else {
+        return;
+    };
+    let list = far_node::load(&dir);
+    let mut offer = horadric_hooks::tasks::ssh_config_hosts();
+    offer.retain(|h| !list.iter().any(|n| &n.ssh == h));
+    let names = horadric_core::fleet::with_hosts(&offer, Vec::new());
+    let suggest = |text: &str| {
+        horadric_core::fleet::find(&names, text, crate::ask::LIST_ROWS)
+            .into_iter()
+            .map(|d| crate::ask::Suggestion {
+                label: d.name.clone(),
+                detail: String::new(),
+                value: d.name.clone(),
+            })
+            .collect()
+    };
+    let check = |text: &str| horadric_core::ssh::refusal(text, false);
+    let pick = crate::ask::Pick {
+        suggest: &suggest,
+        check: &check,
+        browse: false,
+        glyph: crate::theme::SSH_ICON,
+        paths: false,
+    };
+    let question = crate::ask::Ask {
+        title: "Join a Linux node",
+        prompt: "Its ssh destination: an alias from ~/.ssh/config, or user@address. \
+                 It needs `horadric node install` run there, and a key ssh can use \
+                 without asking.",
+        initial: "",
+        placeholder: "user@address",
+        verb: "join it",
+        notes: false,
+        secret: false,
+        pick: (!offer.is_empty()).then_some(&pick),
+    };
+    let Some(a) = super::ask_beside(None, &question) else {
+        return;
+    };
+    let list = far_node::load(&dir);
+    match horadric_core::nodes::with_node(&list, a.text.trim()) {
+        Some(list) => {
+            if let Err(e) = far_node::save(&dir, &list) {
+                eprintln!("horadric: cannot keep the node list: {e}");
+            }
+        }
+        None => eprintln!(
+            "horadric: {} is joined already or not one ssh destination",
+            a.text
+        ),
+    }
+}
+
+/// "Forget": node `name` off the list. Its link and tiles go at the next
+/// check; nothing on the node changes.
+pub(super) fn forget_node(name: &str) {
+    let Some(dir) = horadric_hooks::state_dir() else {
+        return;
+    };
+    let mut list = far_node::load(&dir);
+    list.retain(|n| n.name != name);
+    if let Err(e) = far_node::save(&dir, &list) {
+        eprintln!("horadric: cannot keep the node list: {e}");
     }
 }

@@ -135,6 +135,8 @@ mod brothers;
 #[cfg(windows)]
 mod dropdown;
 #[cfg(windows)]
+mod far_node;
+#[cfg(windows)]
 mod far_phone;
 #[cfg(windows)]
 mod glows;

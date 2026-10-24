@@ -1495,6 +1495,8 @@ fn tray_menu(hwnd: HWND) {
         }
         Some(Choice::SignIn) => crate::workos::sign_in_in_background(),
         Some(Choice::SignOut) => crate::workos::sign_out(),
+        Some(Choice::AddNode) => far::ask_node(),
+        Some(Choice::ForgetNode(name)) => far::forget_node(&name),
         Some(Choice::EndAll) => {
             if confirm_end(None) {
                 with_app(|app| app.end_all(None));
