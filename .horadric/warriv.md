@@ -9,6 +9,7 @@
 - A [/] quest whose session a dev instance started (state in %APPDATA%\Horadric-dev) died with it: no tell reaches it, hand it to the human with "restart it" at once (lore #51).
 
 ## Lately
+- 2026-10-24 Round (hourly, main at de22ce2, only my memory since the 14:06 ship): log done, no aim. Nothing to do.
 - 2026-10-24 Round (16:22, hourly, main at 2e0bbf7, only my memory since the 14:06 ship): log done, no aim. Nothing to do.
 - 2026-10-24 Round (15:22, hourly, main at 837d6f0, only my memory since the 14:22 round): v0.32.0 out, log done, no aim. Nothing to do.
 - 2026-10-24 Round (14:22, human left, main at 2f47853): v0.32.0 was published at 14:20, so that Open line is settled. 2f47853 only gates Mac code, nothing for the Windows build to ship. Log done, no aim. Nothing to do.
