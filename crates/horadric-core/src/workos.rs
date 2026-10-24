@@ -10,8 +10,19 @@
 use crate::google::{self, form, query_value, Answer};
 use crate::portal::unb64url;
 
-/// The Horadric application in the WorkOS staging environment.
-pub const CLIENT_ID: &str = "client_01M5NBZGDSBPJMPR5BSJQ9ASEA";
+/// The Horadric application in WorkOS's production environment, with our
+/// own Google and GitHub apps behind it, and in staging, which a dev
+/// instance signs in with so tests never touch real accounts' users.
+pub const CLIENT_ID: &str = "client_01M5NBZGRP0NVJ69V5TP9S6PH3";
+pub const DEV_CLIENT_ID: &str = "client_01M5NBZGDSBPJMPR5BSJQ9ASEA";
+
+pub fn client_id(dev: bool) -> &'static str {
+    if dev {
+        DEV_CLIENT_ID
+    } else {
+        CLIENT_ID
+    }
+}
 
 pub const AUTHORIZE_URL: &str = "https://api.workos.com/user_management/authorize";
 pub const AUTHENTICATE_URL: &str = "https://api.workos.com/user_management/authenticate";
@@ -184,6 +195,13 @@ mod tests {
     use crate::portal::b64url;
 
     #[test]
+    fn dev_signs_in_with_staging_and_the_installed_with_production() {
+        assert_eq!(client_id(true), DEV_CLIENT_ID);
+        assert_eq!(client_id(false), CLIENT_ID);
+        assert_ne!(CLIENT_ID, DEV_CLIENT_ID);
+    }
+
+    #[test]
     fn dev_and_installed_come_back_to_their_own_port() {
         assert_eq!(redirect_uri(false), "http://127.0.0.1:43127/callback");
         assert_eq!(redirect_uri(true), "http://127.0.0.1:43128/callback");
@@ -196,7 +214,7 @@ mod tests {
         assert_eq!(
             url,
             "https://api.workos.com/user_management/authorize?\
-             client_id=client_01M5NBZGDSBPJMPR5BSJQ9ASEA&\
+             client_id=client_01M5NBZGRP0NVJ69V5TP9S6PH3&\
              redirect_uri=http%3A%2F%2F127.0.0.1%3A43127%2Fcallback&response_type=code&\
              provider=authkit&code_challenge=ch&code_challenge_method=S256&state=st"
         );

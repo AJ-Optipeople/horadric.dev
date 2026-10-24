@@ -84,13 +84,17 @@ pub fn sign_in() -> Result<User, String> {
     let verifier = b64url(&random::<32>());
     let state = b64url(&random::<16>());
     open_browser(&workos::authorize_url(
-        workos::CLIENT_ID,
+        workos::client_id(dev),
         &workos::redirect_uri(dev),
         &workos::challenge(&verifier),
         &state,
     ));
     let code = wait_for_code(&listener, &state)?;
-    let auth = authenticate(&workos::code_body(workos::CLIENT_ID, &code, &verifier))?;
+    let auth = authenticate(&workos::code_body(
+        workos::client_id(horadric_hooks::dev()),
+        &code,
+        &verifier,
+    ))?;
     let user = auth.user.ok_or("WorkOS did not say who signed in")?;
     credential::write(
         &target(),
@@ -120,7 +124,10 @@ pub fn access_token() -> Result<String, String> {
     }
     let (email, blob) = credential::read(&target()).ok_or("not signed in")?;
     let (refresh, id) = workos::read_stored(&blob).ok_or("not signed in")?;
-    let auth = authenticate(&workos::refresh_body(workos::CLIENT_ID, &refresh))?;
+    let auth = authenticate(&workos::refresh_body(
+        workos::client_id(horadric_hooks::dev()),
+        &refresh,
+    ))?;
     let user = auth.user.unwrap_or(User { id, email });
     credential::write(
         &target(),
