@@ -278,11 +278,12 @@ pub struct RepoId {
 /// `dir`'s repository's identity, None when it is not in one.
 pub fn repo_id(dir: &Path) -> Option<RepoId> {
     git(dir, &["rev-parse", "--git-dir"], &[]).ok()?;
-    let remotes = git(dir, &["remote"], &[])
-        .unwrap_or_default()
-        .lines()
-        .filter_map(|r| git(dir, &["remote", "get-url", r.trim()], &[]).ok())
-        .map(|u| normalize_remote(&u))
+    // The URLs as written, like remote_urls: an insteadOf rewrite is this
+    // machine's alone, so the same repository must match on a brother
+    // without it.
+    let remotes = remote_urls(dir)
+        .into_iter()
+        .map(|(_, u)| normalize_remote(&u))
         .filter(|u| !u.is_empty())
         .collect();
     let mut roots: Vec<String> = git(dir, &["rev-list", "--max-parents=0", "HEAD"], &[])
@@ -1281,6 +1282,19 @@ pub(crate) mod tests {
                 "https://github.com/A/b.git".to_string()
             )]
         );
+    }
+
+    #[test]
+    fn a_repository_is_known_by_its_url_as_written() {
+        let r = Repo::new("insteadof-id");
+        r.git(&["remote", "add", "origin", "https://github.com/A/b.git"]);
+        r.git(&[
+            "config",
+            "url.https://mirror.example/.insteadOf",
+            "https://github.com/",
+        ]);
+        let id = repo_id(&r.0).unwrap();
+        assert_eq!(id.remotes, [normalize_remote("https://github.com/A/b.git")]);
     }
 
     #[test]
