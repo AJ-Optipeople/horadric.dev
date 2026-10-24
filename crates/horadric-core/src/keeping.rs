@@ -17,11 +17,14 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use crate::afar::Entry;
+use crate::agent::Agent;
 use crate::brotherhood::{
-    keepers_turn, offers_takeover, Fence, Heard, Owner, Presence, Roster, SILENT_SECS,
+    keepers_turn, offers_takeover, Fence, Heard, Owner, Presence, Roster, Said, SILENT_SECS,
 };
 use crate::handoff::{self, git, handoff_ref, Package, Part, Record, TranscriptFile};
 use crate::keepers::{self, Meta, Side, SideFolder, Store};
+use crate::Phase;
 
 /// What "Take over by itself after 10 minutes" sets.
 pub const AUTO_AFTER: u64 = 600;
@@ -386,6 +389,115 @@ pub struct Holding {
     /// Who the owner says keeps it, first one first, as of this snapshot.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub keepers: Vec<String>,
+    /// What the keeper itself last heard of the owner and this session,
+    /// so a keeper that restarts while the owner is dead still shows its
+    /// tile and offers to take it over. Never on the wire.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seen: Option<Seen>,
+}
+
+/// The keeper's own word of an owner's session, as its tile last was.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Seen {
+    /// When the owner was last heard from, unix seconds.
+    pub heard: u64,
+    pub said: Said,
+    pub name: String,
+    /// The project's name as its owner serves it, which its cluster
+    /// goes by.
+    #[serde(default)]
+    pub project: String,
+    pub phase: Phase,
+}
+
+/// How far a keeper's word of when it last heard an owner may lag, so
+/// it is not written at every message.
+pub const SEEN_EVERY: u64 = 60;
+
+/// Whether `now` says more than what is kept, `was`: another name, phase
+/// or word, or the owner heard [`SEEN_EVERY`] seconds later.
+pub fn seen_due(was: Option<&Seen>, now: &Seen) -> bool {
+    match was {
+        None => true,
+        Some(w) => {
+            w.said != now.said
+                || w.name != now.name
+                || w.project != now.project
+                || w.phase != now.phase
+                || now.heard >= w.heard + SEEN_EVERY
+        }
+    }
+}
+
+/// The tile a keeper shows of `session` at start, before its owner lists
+/// its own: as the keeper last saw it, else as of its snapshot.
+pub fn kept_entry(session: &str, h: &Holding, snapshot_at: u64) -> Entry {
+    let (name, project, phase) = match &h.seen {
+        Some(s) if !s.project.is_empty() => (s.name.clone(), s.project.clone(), s.phase.clone()),
+        Some(s) => (
+            s.name.clone(),
+            folder_name(&h.record.project),
+            s.phase.clone(),
+        ),
+        None => (
+            h.record.name.clone(),
+            folder_name(&h.record.project),
+            Phase::Idle,
+        ),
+    };
+    Entry {
+        id: session.to_string(),
+        name,
+        project,
+        phase,
+        line: String::new(),
+        paused: false,
+        since: Some(last_heard(h, snapshot_at)),
+        agent: Some(Agent::Claude),
+        talked: true,
+    }
+}
+
+/// A project's name from its folder, as an owner names one it serves:
+/// the last part, in lower case.
+fn folder_name(path: &str) -> String {
+    let path = path.replace('\\', "/").to_ascii_lowercase();
+    let path = path.trim_end_matches('/');
+    path.rsplit('/').next().unwrap_or(path).to_string()
+}
+
+/// When the owner of a kept session was last heard of: the newer of the
+/// keeper's word and the snapshot, which came from the owner too.
+pub fn last_heard(h: &Holding, snapshot_at: u64) -> u64 {
+    h.seen.as_ref().map_or(0, |s| s.heard).max(snapshot_at)
+}
+
+/// What a keeper starting afresh takes as last heard of an owner, from
+/// what it keeps of each session (holding, snapshot time): out of reach
+/// since the newest of them, and whether it last said it sleeps.
+pub fn restored_heard<'a>(kept: impl IntoIterator<Item = (&'a Holding, u64)>) -> Heard {
+    let mut heard = Heard {
+        said: Said::Awake,
+        last: 0,
+        linked: false,
+    };
+    let mut said_at = 0;
+    for (h, at) in kept {
+        heard.last = heard.last.max(last_heard(h, at));
+        if let Some(s) = h.seen.as_ref().filter(|s| s.heard >= said_at) {
+            said_at = s.heard;
+            heard.said = s.said;
+        }
+    }
+    heard
+}
+
+/// Whether an owner last heard at `last` has had its chance to speak to
+/// a keeper started at `started`. One not heard since must stay silent
+/// [`SILENT_SECS`] after the start too, so a keeper that restarts never
+/// takes over before the owner's link could come up.
+pub fn waited(last: u64, started: u64, now: u64) -> bool {
+    last >= started || now.saturating_sub(started) >= SILENT_SECS
 }
 
 const HOLDING_FILE: &str = "holding.json";
@@ -1055,6 +1167,7 @@ mod tests {
             },
             auto_takeover: None,
             keepers: vec!["desk".into()],
+            seen: None,
         };
         holding.save(&store).unwrap();
         let p = package(&store, &Holding::load(&store).unwrap(), "landing").unwrap();
@@ -1098,5 +1211,112 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&folder);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn seen(heard: u64, said: Said) -> Seen {
+        Seen {
+            heard,
+            said,
+            name: "fix it".into(),
+            project: "web".into(),
+            phase: Phase::Done,
+        }
+    }
+
+    fn kept(seen: Option<Seen>) -> Holding {
+        Holding {
+            from: "lap".into(),
+            from_name: "Laptop".into(),
+            record: Record {
+                name: "first name".into(),
+                project: "C:\\Work\\Shop\\".into(),
+                ..Record::default()
+            },
+            seen,
+            ..Holding::default()
+        }
+    }
+
+    #[test]
+    fn the_keepers_word_is_written_when_it_changes_or_a_minute_on() {
+        let was = seen(T, Said::Awake);
+        assert!(seen_due(None, &was));
+        assert!(!seen_due(
+            Some(&was),
+            &seen(T + SEEN_EVERY - 1, Said::Awake)
+        ));
+        assert!(seen_due(Some(&was), &seen(T + SEEN_EVERY, Said::Awake)));
+        assert!(seen_due(Some(&was), &seen(T, Said::Sleeping)));
+        let renamed = Seen {
+            name: "other".into(),
+            ..was.clone()
+        };
+        assert!(seen_due(Some(&was), &renamed));
+        let moved = Seen {
+            project: "api".into(),
+            ..was.clone()
+        };
+        assert!(seen_due(Some(&was), &moved));
+        let working = Seen {
+            phase: Phase::Working,
+            ..was.clone()
+        };
+        assert!(seen_due(Some(&was), &working));
+    }
+
+    #[test]
+    fn a_kept_session_shows_as_last_seen_else_as_its_snapshot() {
+        let e = kept_entry("s1", &kept(Some(seen(T, Said::Awake))), T - 50);
+        assert_eq!(e.id, "s1");
+        assert_eq!(e.name, "fix it");
+        assert_eq!(e.phase, Phase::Done);
+        assert_eq!(e.project, "web");
+        assert_eq!(e.since, Some(T));
+        assert_eq!(e.agent, Some(Agent::Claude));
+        assert!(e.talked && !e.paused);
+        let bare = kept_entry("s1", &kept(None), T - 50);
+        assert_eq!(bare.name, "first name");
+        assert_eq!(bare.phase, Phase::Idle);
+        assert_eq!(bare.project, "shop");
+        let unnamed = Seen {
+            project: String::new(),
+            ..seen(T, Said::Awake)
+        };
+        assert_eq!(kept_entry("s1", &kept(Some(unnamed)), T).project, "shop");
+        assert_eq!(bare.since, Some(T - 50));
+    }
+
+    #[test]
+    fn a_restarted_keeper_takes_the_owner_as_last_heard_of_anywhere() {
+        assert_eq!(last_heard(&kept(None), T), T);
+        assert_eq!(last_heard(&kept(Some(seen(T + 5, Said::Awake))), T), T + 5);
+        assert_eq!(last_heard(&kept(Some(seen(T - 5, Said::Awake))), T), T);
+        let a = kept(Some(seen(T, Said::Sleeping)));
+        let b = kept(Some(seen(T + 30, Said::Awake)));
+        let c = kept(None);
+        let h = restored_heard([(&a, T - 10), (&b, T), (&c, T + 40)]);
+        assert_eq!(h.last, T + 40);
+        assert_eq!(h.said, Said::Awake);
+        assert!(!h.linked);
+        // Its last word was that it sleeps: taken at it, as before.
+        let h = restored_heard([(&b, T), (&kept(Some(seen(T + 60, Said::Sleeping))), T)]);
+        assert_eq!(h.said, Said::Sleeping);
+        assert!(offer(h, "Desk", T + 3600).is_none());
+        // Nothing kept: never heard.
+        assert_eq!(restored_heard([]).last, 0);
+    }
+
+    #[test]
+    fn an_owner_not_heard_since_the_keeper_started_gets_two_minutes() {
+        let started = T + 3600;
+        assert!(!waited(T, started, started));
+        assert!(!waited(T, started, started + SILENT_SECS - 1));
+        assert!(waited(T, started, started + SILENT_SECS));
+        // Heard this run: the old rules alone.
+        assert!(waited(started + 1, started, started + 2));
+        // Restored as silent since its last snapshot, offered once waited.
+        let h = restored_heard([(&kept(None), T)]);
+        assert!(offer(h, "Desk", started).is_some());
+        assert!(auto_due(h, Some(AUTO_AFTER), started));
     }
 }

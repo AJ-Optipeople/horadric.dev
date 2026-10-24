@@ -16,6 +16,10 @@
 //! and a brother that hears one of its sessions went keeps it paused, its
 //! work on `horadric/orphaned/<session>`.
 //!
+//! A keeper that starts while an owner is dead still has its stores, so
+//! it shows them as that owner's tiles, silent since it last heard of
+//! it, and offers takeover once the owner has had two minutes to link.
+//!
 //! Everything but cutting, landing and committing runs on the UI thread.
 
 use std::cell::RefCell;
@@ -27,8 +31,9 @@ use horadric_core::brotherhood::{clock, orphan_branch, Heard, Presence, Roster, 
 use horadric_core::handoff::{takeover_line, Joiner, Record};
 use horadric_core::keepers::{decode, over_cap, too_old, unlisted_gone, Shelf, Store, FULL};
 use horadric_core::keeping::{
-    self, auto_due, full_message, keep_messages, keep_part, kept_full, kept_message, kept_of,
-    owners_of, store_of, stores, takeover_message, Book, Holding, Next,
+    self, auto_due, full_message, keep_messages, keep_part, kept_entry, kept_full, kept_message,
+    kept_of, owners_of, restored_heard, seen_due, store_of, stores, takeover_message, waited, Book,
+    Holding, Next, Seen,
 };
 use horadric_core::serving::Job;
 use horadric_core::Phase;
@@ -99,6 +104,13 @@ struct State {
     aged: u64,
     /// Takeovers under way, by the brother's tile id.
     taking: HashSet<String>,
+    /// When this run began, so an owner not heard from since gets its
+    /// chance to link before anything is taken over.
+    started: u64,
+    /// Whether the kept sessions were shown as tiles at start.
+    restored: bool,
+    /// When the keeper's word of its owners was last written.
+    noted: u64,
 }
 
 thread_local! {
@@ -108,6 +120,9 @@ thread_local! {
 fn with<R>(f: impl FnOnce(&mut State) -> R) -> R {
     STATE.with(|s| {
         let mut s = s.borrow_mut();
+        if s.started == 0 {
+            s.started = unix_now();
+        }
         if !s.loaded {
             s.loaded = true;
             if let Some(dir) = horadric_hooks::state_dir() {
@@ -379,10 +394,14 @@ impl App {
             .filter_map(|(id, _)| Some((id.clone(), self.far_presence(&id)?.0)))
             .collect();
         let now = unix_now();
+        let Some(last) = heard.get(from).map(|h| h.last) else {
+            return false;
+        };
         with(|s| {
             let me = s.me.clone();
-            s.book
-                .keeps_for(from, &me, |k| heard.get(k).copied(), after, now)
+            waited(last, s.started, now)
+                && s.book
+                    .keeps_for(from, &me, |k| heard.get(k).copied(), after, now)
         })
     }
 
@@ -462,10 +481,108 @@ impl App {
                 } => self.keeping_landed(Store(store), holding, landed),
             }
         }
+        self.keeping_restore();
+        self.keeping_note();
         self.keeping_tell();
         self.keeping_lines();
         self.keeping_prune();
         self.keeping_auto();
+    }
+
+    /// Once at start: the sessions this PC keeps, of brothers not heard
+    /// from yet, as their tiles, so they can be taken over while their
+    /// owner stays dead.
+    fn keeping_restore(&mut self) {
+        if with(|s| std::mem::replace(&mut s.restored, true)) {
+            return;
+        }
+        let Some(dir) = horadric_hooks::state_dir() else {
+            return;
+        };
+        let mut by: BTreeMap<String, Vec<(String, Holding, u64)>> = BTreeMap::new();
+        for (from, session, store) in stores(&keeping::root(&dir)) {
+            if store.full() {
+                continue;
+            }
+            let Some(h) = Holding::load(&store) else {
+                continue;
+            };
+            by.entry(from)
+                .or_default()
+                .push((session, h, store.shelf().1));
+        }
+        for (from, kept) in by {
+            let Some(name) = name_of(&from) else {
+                continue;
+            };
+            let heard = restored_heard(kept.iter().map(|(_, h, at)| (h, *at)));
+            let list = kept
+                .iter()
+                .map(|(session, h, at)| kept_entry(session, h, *at))
+                .collect();
+            debug(&format!("showing {} kept sessions of {name}", kept.len()));
+            self.far_restore(&from, &name, heard, list);
+        }
+    }
+
+    /// Writes beside each kept session what this keeper last heard of it
+    /// and its owner, now and then, for [`App::keeping_restore`].
+    fn keeping_note(&mut self) {
+        let now = unix_now();
+        if with(|s| {
+            let early = now.saturating_sub(s.noted) < 10;
+            if !early {
+                s.noted = now;
+            }
+            early
+        }) {
+            return;
+        }
+        let Some(dir) = horadric_hooks::state_dir() else {
+            return;
+        };
+        let tiles: HashMap<String, (String, String, Phase)> = match self.shared.registry.lock() {
+            Ok(r) => r
+                .all()
+                .filter_map(|s| {
+                    let project = s.brother.as_ref()?.project.clone();
+                    Some((s.id.clone(), (s.name.clone(), project, s.phase.clone())))
+                })
+                .collect(),
+            Err(_) => return,
+        };
+        for (from, session, store) in stores(&keeping::root(&dir)) {
+            let Some((heard, _)) = self.far_presence(&from) else {
+                continue;
+            };
+            let Some((name, project, phase)) =
+                tiles.get(&horadric_core::afar::local_id(&from, &session))
+            else {
+                continue;
+            };
+            let Some(mut h) = Holding::load(&store) else {
+                continue;
+            };
+            let seen = Seen {
+                heard: heard.last,
+                said: heard.said,
+                name: name.clone(),
+                project: project.clone(),
+                phase: phase.clone(),
+            };
+            if !seen_due(h.seen.as_ref(), &seen) {
+                continue;
+            }
+            // A snapshot being filed writes the holding too; this waits
+            // for the next round rather than block the UI thread.
+            let Ok(_one) = RECEIVING.try_lock() else {
+                continue;
+            };
+            h.seen = Some(seen);
+            if let Err(e) = h.save(&store) {
+                eprintln!("horadric: cannot note what was heard of {session}: {e}");
+            }
+        }
     }
 
     /// A turn ended: a snapshot for the first keeper, cut on a thread.
@@ -565,6 +682,7 @@ impl App {
                     record: c.record,
                     auto_takeover,
                     keepers,
+                    seen: None,
                 };
                 let msgs = keep_messages(id, &holding, &c.payload);
                 debug(&format!(
@@ -704,6 +822,8 @@ impl App {
                 Some(h) => Holding {
                     from,
                     from_name,
+                    // The keeper's own word, which the owner never sends.
+                    seen: Holding::load(&store).and_then(|was| was.seen),
                     ..h
                 }
                 .save(&store),
@@ -913,7 +1033,11 @@ impl App {
                     let ready = self.far_presence(&from).is_some_and(|(_, r)| r);
                     with(|s| {
                         if listed.contains(&key) {
-                            s.seen.insert(key.clone());
+                            // A tile shown from the store at start is not
+                            // the brother's word that it lists it.
+                            if ready {
+                                s.seen.insert(key.clone());
+                            }
                             s.unlisted.remove(&key);
                             None
                         } else if !ready {

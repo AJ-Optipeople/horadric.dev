@@ -849,6 +849,40 @@ impl App {
         Some((p.heard, p.via.is_some() && p.client.ready()))
     }
 
+    /// Shows the sessions this PC keeps of brother `key`, not heard from
+    /// yet this run, as its tiles, last heard as `heard` says. A keeper
+    /// that restarted while the owner is dead can then still take them
+    /// over; the list the brother serves once it links replaces them.
+    pub(super) fn far_restore(
+        &mut self,
+        key: &str,
+        name: &str,
+        heard: brotherhood::Heard,
+        list: Vec<afar::Entry>,
+    ) {
+        if self.far.peers.contains_key(key) {
+            return;
+        }
+        crate::project::name_brother(key, name);
+        self.far.peers.insert(
+            key.to_string(),
+            Peer {
+                name: name.to_string(),
+                via: None,
+                client: Client::default(),
+                streams: Streams::default(),
+                projects: Vec::new(),
+                control: false,
+                heard,
+                list: list.clone(),
+            },
+        );
+        let listed = self.far_sessions(key, &list);
+        if self.far_lines() || listed {
+            self.reconcile(true);
+        }
+    }
+
     /// Every brother known by key, and whether each answers asks now.
     pub(super) fn far_peer_names(&self) -> Vec<(String, bool)> {
         self.far
