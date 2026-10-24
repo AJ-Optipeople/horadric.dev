@@ -418,6 +418,26 @@ Each step is useful alone and each is verified before the next starts.
    `System32\OpenSSH\ssh.exe`, as SSH terminals do, and reconnects when
    it drops. Verified against a real VPS: a session started from the
    stage running there, its hooks lighting the tile here.
+
+   Done on 2026-10-24 (`horadric-ui/src/far_node.rs`, its pure parts in
+   `horadric-core/src/nodes.rs`). The nodes are in `nodes.json` in the
+   state folder (name and ssh destination), joined from the tray's
+   "Linux nodes" menu with the Fleets picker over `~/.ssh/config`, and
+   forgotten there. Each runs `ssh.exe -T -o BatchMode=yes` with
+   keepalives and `PATH=$HOME/.local/bin:$PATH exec horadric node
+   --stdio`, since a command over `ssh` gets no login shell; an entry's
+   `command` overrides that. The link is up once the preamble arrives;
+   it is dialled again after 1, 2, 4 up to 30 seconds, from 1 again once
+   a link lasted 10. The node now names a session's project by its
+   folder's name, as a Windows PC does. Seen on screen against
+   `exit1-eu`, the node installed for `agent` with a static musl build
+   (cross built on Windows with `rust-lld` as the linker) and a drop-in
+   setting `HORADRIC_AGENT=/bin/bash`: "horadric-demo · vps" with its
+   mark, a session started from its "+" running bash on the VPS in the
+   stage, typing echoed, fake hooks posted from that shell lighting the
+   tile working and then "needs permission", the `ssh.exe` killed and
+   the tiles dimmed "vps out of reach", then back with the pane replayed
+   and taking typing again. The tray read "vps, linked".
 7. **The spike: does a moved transcript resume?** By hand, before any
    code: copy a finished session's transcript from this PC to the VPS,
    file it under the VPS's path, `claude --resume` it there, and see what
