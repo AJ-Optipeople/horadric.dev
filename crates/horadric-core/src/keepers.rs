@@ -247,6 +247,9 @@ impl Store {
         if !repo.join("HEAD").is_file() {
             let path = repo.to_string_lossy();
             git(&self.0, &["init", "-q", "--bare", &path], &[])?;
+            // A keeper's folder sits deep in the state folder, and a pack's
+            // name is long: past 260 characters Windows refuses the write.
+            git(&repo, &["config", "core.longpaths", "true"], &[])?;
         }
         let refname = keep_ref(&meta.session).ok_or("not a session id")?;
         let file = self.0.join(format!("{}.bundle", meta.n));

@@ -371,18 +371,22 @@ pub fn package(store: &Store, holding: &Holding, session: &str) -> Result<Packag
         .commit(session)
         .ok_or("nothing kept of this session")?;
     let repo = store.repo();
-    // Landing fetches the ref by Claude's id, as a handoff's is.
+    let kept = keepers::keep_ref(session).ok_or("not a session id")?;
+    // Landing fetches the ref by Claude's id, as a handoff's is. Named so
+    // in the bundle's header rather than by a ref in the keeper's
+    // repository, whose path can pass what Windows allows.
     let refname = handoff_ref(&holding.record.session).ok_or("the session had no conversation")?;
-    git(&repo, &["update-ref", &refname, &commit], &[])?;
     let file = std::env::temp_dir().join(format!(
         "horadric-takeover-{}-{session}.bundle",
         std::process::id()
     ));
-    let made = handoff::bundle_against(&repo, &refname, None, &file);
+    let made = handoff::bundle_against(&repo, &kept, None, &file);
     let work = std::fs::read(&file);
     let _ = std::fs::remove_file(&file);
     made?;
-    let work = work.map_err(|e| format!("cannot read the bundle: {e}"))?;
+    let work = work
+        .map_err(|e| format!("cannot read the bundle: {e}"))
+        .and_then(|w| rename_bundle_ref(&w, &kept, &refname).ok_or("not a bundle".into()))?;
     let transcript = std::fs::read(store.transcript()).map_err(|e| e.to_string())?;
     let claude = &holding.record.session;
     let record = Record {
@@ -397,6 +401,32 @@ pub fn package(store: &Store, holding: &Holding, session: &str) -> Result<Packag
         }],
         work,
     })
+}
+
+/// A `git bundle` with its ref `from` named `to` instead. The refs are
+/// lines of the header, before the blank line the pack follows, and no
+/// checksum covers them. None when it is not a bundle.
+pub fn rename_bundle_ref(bundle: &[u8], from: &str, to: &str) -> Option<Vec<u8>> {
+    let end = bundle.windows(2).position(|w| w == b"\n\n")? + 1;
+    let header = std::str::from_utf8(&bundle[..end]).ok()?;
+    if !header.starts_with("# v2 git bundle") && !header.starts_with("# v3 git bundle") {
+        return None;
+    }
+    let mut out = String::new();
+    for line in header.lines() {
+        match line.split_once(' ') {
+            Some((oid, name)) if name == from && !line.starts_with(['#', '-', '@']) => {
+                out.push_str(&format!("{oid} {to}\n"));
+            }
+            _ => {
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+    }
+    let mut bytes = out.into_bytes();
+    bytes.extend(&bundle[end..]);
+    Some(bytes)
 }
 
 /// The snapshot payload for one turn end on the owner, the session's
@@ -669,6 +699,15 @@ mod tests {
 "
         );
         assert_eq!(repo.git(&["status", "--porcelain"]).trim(), "M sub/a.txt");
+    }
+
+    #[test]
+    fn a_bundles_ref_is_renamed_in_its_header_only() {
+        let b = b"# v2 git bundle\n-abc base\n0123 refs/horadric/keep/s\n\nPACK\n\nx";
+        let r = rename_bundle_ref(b, "refs/horadric/keep/s", "refs/horadric/handoff/c").unwrap();
+        let want = b"# v2 git bundle\n-abc base\n0123 refs/horadric/handoff/c\n\nPACK\n\nx";
+        assert_eq!(r, want);
+        assert!(rename_bundle_ref(b"PACK\n\n", "a", "b").is_none());
     }
 
     #[test]
