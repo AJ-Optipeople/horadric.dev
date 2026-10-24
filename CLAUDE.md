@@ -44,7 +44,12 @@ Do not reopen these without asking. They were argued through and chosen.
   feature only) to run the embedding model that finds memory by meaning:
   Hugging Face's pure Rust ML crates, no DLL to ship and no service that
   must be running, and the tokenizer is the one the models were trained
-  with (writing either is not the project).
+  with (writing either is not the project), and in `horadric-link`, for
+  a Linux node on the relay, `ring`, `p256`, `rustls`, `webpki-roots`
+  and `tungstenite`: the AES-GCM, ECDH, TLS and WebSocket that Windows
+  has built in and Linux does not (writing crypto is not the project
+  either). Windows keeps CNG and WinHTTP; the crate is used there only
+  by a test that holds the two to the same bytes.
   Not a crate but vendored: `conpty.dll` and `OpenConsole.exe` from
   Microsoft's ConPTY package, the pseudo console that passes `CSI c`
   through so OSC 7501 works (see

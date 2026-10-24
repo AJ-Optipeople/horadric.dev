@@ -102,14 +102,21 @@ screen. What it lacks:
   other's sessions, hold each other's snapshots and can take over from
   each other. A phone stays paired with one PC and sees that PC's
   sessions, as today.
-- **Joining once joins everyone.** A Windows PC joins by signing in and
-  an approval click on a brother. A Linux node is added by its SSH
-  destination, picked with the Fleets picker from `~/.ssh/config`, where
-  the trust is the SSH key and no login is needed, since it speaks over
-  `ssh` and not the relay. The brother that let it in passes on the
-  roster, so the newcomer links to every other brother directly, and
-  every brother learns of it. Each pair still has a key of its own, so
-  one brother can be cast out alone.
+- **Joining once joins everyone.** Any machine, Windows PC or Linux
+  node, joins by signing in and an approval on one brother. The brother
+  that let it in introduces it to every other (see "Introductions"
+  below), so the newcomer links to each directly with no further code,
+  and every brother learns of it. Each pair still has a key of its own,
+  so one brother can be cast out alone. Adding a Linux node by its SSH
+  destination stays, as the way in for a machine that cannot sign in.
+- **Introductions.** When A lets N in, A sends N, over their sealed
+  link, every brother's id, name and public key, and sends each brother
+  B N's in the same way. N and B then derive their link key from the
+  ECDH of their long term keys, both public keys and both ids, and link
+  with the usual sealed hello. No code is asked: each public key came
+  over a link the human already vouched for, so the relay cannot slip
+  its own in. An introduction is part of the roster and so carries its
+  number; a brother that was away hears it when it relinks.
 - **The roster.** Every brother keeps the same list: each brother's
   name, key and link, and each session's owner. Changes carry a number
   that only goes up, and the highest wins, so two brothers that were
@@ -162,14 +169,62 @@ screen. What it lacks:
 - **A brother serves only the sessions it owns.** Streams and input go
   straight to the owner, never through a third brother. The mesh is
   direct links, so nothing is relayed twice and no loop can form.
-- **Two transports, one protocol.** Between Windows PCs, the relay, as
-  phones use it today. To a Linux node, `ssh <host> horadric node
-  --stdio`, the same messages framed on stdin and stdout. `ssh` does the
-  encryption and the keys, and the Linux build needs no TLS, no AES and
-  no WebSocket, so no new dependency. Horadric does not speak SSH, it
-  runs `ssh.exe`, as SSH hosts do. A Linux node on the relay too (for a
-  machine behind NAT with no way in) is a later step and a dependency
-  decision of its own (`ring` or `aes-gcm`, and a WebSocket with TLS).
+- **Two transports, one protocol.** Between brothers, the relay, as
+  phones use it, Linux nodes included. To a Linux node joined by its
+  SSH destination, `ssh <host> horadric node --stdio`, the same messages
+  framed on stdin and stdout, with `ssh` doing the encryption. Horadric
+  does not speak SSH, it runs `ssh.exe`, as SSH hosts do. A node that is
+  both (joined by SSH, then signed in) is one brother: the relay link
+  wins and its SSH entry is folded into it, never shown twice.
+
+### Linux nodes on the relay
+
+Decided 2026-10-24 by the human: a node must join by signing in, out of
+the box, like a PC. Rejected: keeping nodes SSH only, which needs an SSH
+key set up from every PC and cannot reach a home server behind a router.
+
+- **The node speaks the PC's protocol to the relay.** Same `/pc`
+  endpoint, same secret and id, same join handshake and sealed frames,
+  so a Windows PC cannot tell a node from a PC except by the `kind` it
+  says in hello. The relay changes nothing.
+- **A crate of its own, `horadric-link`,** holds what Linux lacks that
+  Windows has built in: ECDH P-256 (`p256`, since `ring` cannot load a
+  stored private key), AES-256-GCM and random bytes (`ring`), TLS
+  (`rustls` on `ring`, with `webpki-roots` so a minimal server needs no
+  certificate store), the WebSocket (`tungstenite`, blocking, like the
+  rest of Horadric's threads), and a small HTTPS client for WorkOS and
+  model downloads. Windows keeps CNG and WinHTTP. A test on Windows
+  runs both implementations over the same keys and frames, so the two
+  can never drift apart.
+- **The join logic leaves the UI.** The handshake, the sealed hello,
+  the frame numbers, `brothers.json` and the relay glue move into
+  `horadric-core` behind a small `Crypto` trait (random, ECDH, seal,
+  open) and a `Human` trait (confirm a code, let one in), so the PC and
+  the node run the same code.
+- **Signing in a node: AuthKit's device code flow.** `horadric node
+  signin` prints a short code and a link, polls WorkOS until the human
+  confirms it in any browser, and keeps the refresh token in
+  `workos.json` in the state folder, mode 0600 (no Credential Manager
+  on a server). `install.sh` ends by running it when a terminal is
+  attached.
+- **A headless approval.** Signing in on a node then asks a brother at
+  once: it lists the signed in brothers the relay shows, picks the one
+  the human names or the only one, and shows the six digit code in the
+  terminal. The human answers there, y or N, and on the PC, as a PC
+  joining does. A node never lets anyone in by itself: approving a
+  newcomer is a click on a PC, or `horadric node let-in` in a terminal
+  on the node.
+- **The node is a full brother.** It serves the roster, control,
+  `state`, keeping and the lore like a PC, and can be a keeper.
+
+### Lore on a node
+
+- **The node holds a whole copy, vectors included,** and its agents get
+  the lore tools (`horadric mcp`) as on Windows. Recall by meaning on a
+  server is worth the build cost. So `horadric-memory`, the code index
+  and the MCP server build for Linux, and the musl build carries their
+  C (onig, tree-sitter's grammars), compiled with `musl-gcc` in CI.
+  Models download over `horadric-link`'s HTTPS.
 - **This reopens one thing in SSH hosts, by the human's ask.** There,
   running `claude` on the server was ruled out because its hooks post to
   the server's localhost. A node is a Horadric on that server, with its
@@ -761,10 +816,29 @@ Each step is useful alone and each is verified before the next starts.
     too once its brother has been linked ten minutes without listing the
     session (one the keeper never saw listed included), and any store a
     month old. What a keeper spends on disk is capped (below).
-14. **Later, each its own decision.** Teams: a WorkOS organization as a
+14. **The portable link.** `horadric-link`: ECDH, AES-GCM, random, the
+    TLS WebSocket and HTTPS client, and a Windows test that CNG and it
+    agree on keys, codes and sealed frames both ways.
+15. **The join logic in core.** `joining.rs` and the state machine of
+    `brothers.rs` behind `Crypto` and `Human`, the Windows UI unchanged
+    to its human. Verified by step 2's run again with two dev instances.
+16. **Lore on Linux.** `horadric-memory`, the code index and `horadric
+    mcp` built for musl, CI's Linux job and the release building them,
+    the node holding a lore and serving `lore_*`.
+17. **A node on the relay.** `horadric node signin` (device code), the
+    node's secret, key pair and `brothers.json`, its relay link feeding
+    relay channels into its one `Server`, the headless approval, and
+    `roster`, `control`, `state` and keeping served. Verified against
+    `exit1-eu` with no SSH entry: sign in on the VPS, approve on this
+    PC, a session started from the stage running there.
+18. **The mesh.** Introductions, received rosters merged, cast out and
+    owners carried by the roster, an SSH node that signs in folded into
+    its relay brother. Verified with two dev instances and the VPS: the
+    VPS let in by Alpha links to Beta with no code, cast out on Beta
+    drops it on Alpha too.
+19. **Later, each its own decision.** Teams: a WorkOS organization as a
     brotherhood of several people, each seeing the others' sessions view
-    only by default, and the lore shared or not per project; Linux nodes
-    on the relay, signing in with AuthKit's device code flow; catching
+    only by default, and the lore shared or not per project; catching
     the lore up from Drive; the Mac as a brother (its portal has no
     crypto yet either); remote files and the git glance over the same
     protocol, read only first; Codex and Grok Build handoff; a quest
@@ -782,9 +856,6 @@ brother given its `have`, matching a project by repository.
 
 ## Open questions
 
-- Does a Linux node on the relay matter soon enough to take the crypto
-  dependencies now, rather than SSH only? It does if a home server sits
-  behind a router with no way in.
 - Should a phone see the whole brotherhood through the PC it is paired
   with? The old answer was no: one stolen phone would reach every
   machine. A brotherhood makes the ask stronger. A per brother switch,
