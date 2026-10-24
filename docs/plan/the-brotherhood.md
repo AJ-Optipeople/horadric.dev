@@ -396,8 +396,20 @@ Each step is useful alone and each is verified before the next starts.
    cmd in Beta's pane taking typing, a session started from Beta running
    on Alpha and shown on Beta's stage, a waiting session lit with a toast
    on Beta, Alpha stopped and its tiles dimmed "Alpha out of reach",
-   then back with the pane streaming again. Over a brother channel it
-   waits for the serving side to answer there.
+   then back with the pane streaming again.
+
+   Seen over the linked brother channel on 2026-10-24, joined by step 2
+   and relinked after restarts: each of "Alpha" and "Beta" showed the
+   other's cluster, a pane on each drew the other's cmd and took typing,
+   "+" on Beta started a session on Alpha, a permission wait lit with a
+   toast. A script phone on Alpha was served only Alpha's sessions, and
+   its attach, watch, input and stop of Beta's session were refused.
+   Alpha stopped: Beta's tiles dimmed "Alpha out of reach" and Beta's
+   server closed Alpha's channel at once. Alpha told of a suspend: "Alpha
+   asleep", then lit again on resume. Three things needed fixing for it:
+   the roster carries `n`, so it was taken for a request (asks carry `s`
+   too); the client dropped `state`; a channel down reached the server
+   only at its next failed reply.
 4. **The serving pulled out of the UI.** What `app/portal.rs` does for a
    phone (sessions, projects, folders, start, resume, create, screens,
    streams) moves behind a trait the Windows UI implements, so a headless
@@ -514,6 +526,15 @@ Each step is useful alone and each is verified before the next starts.
    removal is not undone by a brother that was away. Verified with two
    dev instances: a note left on one is recalled on the other, also
    after the link was cut while it was written.
+
+   Seen on 2026-10-24 with "Alpha" and "Beta" over their brother
+   channel, each in a clone of one bare repository: a note left on
+   either was recalled on the other within seconds, by meaning (the
+   arrived note had its vector), and one left on Alpha while Beta was
+   stopped arrived when they relinked. It needed the client side to say
+   its own `lore` after hello and to take in the `entries` it hears;
+   until then only the serving half existed. Not seen: dialogue passages
+   crossing, since cmd.exe sessions leave no transcripts.
 10. **Handoff between Windows PCs.** The bundle (transcript, record, work
    as a private ref and a `git bundle`), finding or cloning the project,
    a worktree for the session, the transcript filed under the new path,
