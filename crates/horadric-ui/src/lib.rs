@@ -51,8 +51,8 @@ pub mod hotkey;
 pub mod icns;
 pub mod icon;
 pub mod inbox;
-#[cfg(windows)]
-pub mod joining;
+// Joining a brother and where each stands, shared with the Linux node.
+pub use horadric_core::joining;
 pub mod keys;
 pub mod layout;
 pub mod links;
@@ -74,7 +74,7 @@ pub mod shell;
 pub mod sky;
 pub mod sparks;
 pub mod spectator;
-pub mod standing;
+pub use horadric_core::standing;
 pub mod summon;
 pub mod symbols;
 pub mod theme;
