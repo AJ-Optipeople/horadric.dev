@@ -18,7 +18,7 @@ use horadric_core::warriv::{
     self, Brief, Desk, Dried, Drive, Event, Heard, Kind, Looked, Picture, Review, Reviews, Said,
     Wake, Why,
 };
-use horadric_core::{lookback, lore, runeword, ship, tombs, Agent, Phase};
+use horadric_core::{escalate, lookback, lore, runeword, ship, tombs, Agent, Phase};
 use horadric_hooks::tasks as file;
 use horadric_memory::distill;
 use horadric_memory::store::ChunkId;
@@ -840,6 +840,16 @@ impl App {
             prompt.push_str(&warriv::driven_prompt(&horadric));
             tools.extend(warriv::cast_tools(&horadric));
         }
+        // Read at every start, so the next wake sees the runs since.
+        let main = self
+            .project_dir(&key)
+            .unwrap_or_else(|| PathBuf::from(&key));
+        let mut quests = file::read_done(&main);
+        quests.extend(tasks::parse(&file::read(&main)));
+        if let Some(runs) = escalate::summary(&quests) {
+            prompt.push_str("\n\n");
+            prompt.push_str(&runs);
+        }
         prompt.push_str("\n\n");
         prompt.push_str(&memory_prompt(cwd));
         (tools, prompt)
@@ -1241,7 +1251,22 @@ impl App {
             return;
         };
         let into = crate::worktree::checked_out(&main).unwrap_or_else(|| "main".into());
-        let fix = warriv::fix_up(&t.title, self.branch_of(&main, t).as_deref(), &into, what);
+        let mut fix = warriv::fix_up(&t.title, self.branch_of(&main, t).as_deref(), &into, what);
+        // Its session is gone, so the fix-up is the fresh start the
+        // escalation waits for.
+        let holder = t.holder.clone().unwrap_or_default();
+        let run = super::run_of(
+            &store::chronicle_all(),
+            key,
+            &holder,
+            escalate::Ending::SentBack,
+            unix_now(),
+        );
+        if let Some(up) = escalate::carried(t, &run.model, &escalate::Struggle::SentBack) {
+            fix.notes.push('\n');
+            fix.notes.push_str(&up);
+        }
+        super::write_run(&main, &t.title, Some(&run));
         if let Err(e) = file::update(&main, |text| warriv::send_back(text, &t.title, &fix).ok()) {
             eprintln!("horadric: cannot add \"{}\": {e}", fix.title);
             return;

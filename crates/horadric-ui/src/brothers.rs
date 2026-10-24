@@ -98,6 +98,11 @@ pub fn stop(generation: u64) {
 /// is gone: the relay closes them on a reconnect.
 pub fn connected(generation: u64, up: bool) {
     with(generation, |b| {
+        for (ch, h) in &b.chans {
+            if h.linked() {
+                tell_link(Link::Down { ch: *ch });
+            }
+        }
         b.up = up;
         b.listed.clear();
         b.chans.clear();
@@ -171,6 +176,9 @@ impl Brothers {
     fn close(&mut self, ch: u32) {
         if let Some(h) = self.chans.remove(&ch) {
             self.tried.remove(h.peer());
+            if h.linked() {
+                tell_link(Link::Down { ch });
+            }
         }
         self.relay(json!({"close": ch}));
     }
@@ -231,6 +239,9 @@ impl Brothers {
             let ch = ch as u32;
             if let Some(h) = self.chans.remove(&ch) {
                 self.tried.remove(h.peer());
+                if h.linked() {
+                    tell_link(Link::Down { ch });
+                }
                 return true;
             }
         }
@@ -306,7 +317,12 @@ impl Brothers {
         let sealed = key
             .and_then(|k| open(&k, payload))
             .and_then(|plain| serde_json::from_slice::<Value>(&plain).ok());
-        let out = if let Some(msg) = sealed {
+        let linked = self.chans.get(&ch).is_some_and(Handshake::linked);
+        let out = if let (true, Some(msg)) = (linked, &sealed) {
+            let peer = self.chans.get(&ch).map(|h| h.peer().to_string());
+            route(ch, peer.unwrap_or_default(), msg.clone());
+            Vec::new()
+        } else if let Some(msg) = sealed {
             self.chans
                 .get_mut(&ch)
                 .map(|h| h.opened(&msg, now()))
@@ -367,6 +383,7 @@ impl Brothers {
                         self.save();
                     }
                     debug(&format!("linked to {name} on channel {ch}"));
+                    tell_link(Link::Up { ch, id, name });
                 }
                 Out::Failed(why) => {
                     tell(&why);
@@ -411,5 +428,130 @@ fn show(text: &str, style: MESSAGEBOX_STYLE) -> i32 {
             style | MB_SETFOREGROUND | MB_TOPMOST,
         )
         .0
+    }
+}
+
+/// What a linked brother channel does, for the client of that brother
+/// (`afar`): up once the hellos under the link key are through, then the
+/// brother's answers as they come, then down.
+#[derive(Debug, Clone)]
+#[allow(
+    dead_code,
+    reason = "the serving side and the brother client take these up next"
+)]
+pub enum Link {
+    Up { ch: u32, id: String, name: String },
+    Heard { ch: u32, msg: Value },
+    Down { ch: u32 },
+}
+
+type Listener = Box<dyn Fn(Link) + Send>;
+type Wake = Box<dyn Fn() + Send>;
+
+static LISTENER: Mutex<Option<Listener>> = Mutex::new(None);
+static REQUESTS: Mutex<Vec<(u32, String, Value)>> = Mutex::new(Vec::new());
+static REQUEST_WAKE: Mutex<Option<Wake>> = Mutex::new(None);
+
+/// Who hears what linked channels do. One listener, the app's client.
+#[allow(
+    dead_code,
+    reason = "the serving side and the brother client take these up next"
+)]
+pub fn listen(f: Listener) {
+    *LISTENER.lock().unwrap_or_else(|e| e.into_inner()) = Some(f);
+}
+
+/// Who is woken when a brother asks something of this PC, to serve it
+/// with [`take_requests`].
+#[allow(
+    dead_code,
+    reason = "the serving side and the brother client take these up next"
+)]
+pub fn on_requests(f: Wake) {
+    *REQUEST_WAKE.lock().unwrap_or_else(|e| e.into_inner()) = Some(f);
+}
+
+/// What brothers asked of this PC since the last call: the channel, the
+/// brother's id, and the message, opened. Served as a phone's would be,
+/// as protocol v3's `kind` brother, the answers going back by [`reply`].
+#[allow(
+    dead_code,
+    reason = "the serving side and the brother client take these up next"
+)]
+pub fn take_requests() -> Vec<(u32, String, Value)> {
+    std::mem::take(&mut *REQUESTS.lock().unwrap_or_else(|e| e.into_inner()))
+}
+
+/// Sends `msg` to the brother on channel `ch`, sealed with their link key.
+/// For this PC's answers to what the brother asked and for what this PC
+/// asks of it alike. False when the channel is not linked.
+#[allow(
+    dead_code,
+    reason = "the serving side and the brother client take these up next"
+)]
+pub fn reply(ch: u32, msg: &Value) -> bool {
+    let held = STATE.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(b) = held.as_ref() else {
+        return false;
+    };
+    let Some(key) = b
+        .chans
+        .get(&ch)
+        .filter(|h| h.linked())
+        .and_then(Handshake::key)
+    else {
+        return false;
+    };
+    let sealed = seal(&key, msg.to_string().as_bytes());
+    (b.send)(false, frame(ch, &sealed));
+    true
+}
+
+fn tell_link(l: Link) {
+    if let Some(f) = LISTENER.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+        f(l);
+    }
+}
+
+/// Both brothers ask and answer on one channel. What a client sends is
+/// told by the phones' rule: every message after hello carries `n`, and
+/// hello itself says what `kind` asks. Everything else is an answer.
+fn asks(msg: &Value) -> bool {
+    msg.get("n").is_some()
+        || (msg.get("t").and_then(Value::as_str) == Some("hello") && msg.get("kind").is_some())
+}
+
+fn route(ch: u32, peer: String, msg: Value) {
+    if asks(&msg) {
+        REQUESTS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push((ch, peer, msg));
+        if let Some(f) = REQUEST_WAKE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
+            f();
+        }
+    } else {
+        tell_link(Link::Heard { ch, msg });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_brothers_asks_are_told_from_its_answers() {
+        assert!(asks(&json!({"t": "hello", "v": 3, "kind": "brother"})));
+        assert!(asks(&json!({"t": "attach", "id": "a", "s": "S", "n": 1})));
+        assert!(asks(&json!({"t": "folders", "s": "S", "n": 4})));
+        assert!(!asks(
+            &json!({"t": "hello", "v": 3, "brother": "A", "s": "S"})
+        ));
+        assert!(!asks(&json!({"t": "folders", "list": []})));
+        assert!(!asks(&json!({"t": "out", "id": "a", "seq": 0, "b64": ""})));
     }
 }

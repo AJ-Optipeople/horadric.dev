@@ -9,6 +9,9 @@
 - A [/] quest whose session a dev instance started (state in %APPDATA%\Horadric-dev) died with it: no tell reaches it, hand it to the human with "restart it" at once (lore #51).
 
 ## Lately
+- 2026-10-24 Stall wake (01:55, main at 8464211): only "Land the picked thing branch" open, waiting on its own condition (app.rs, console.rs, lib.rs clean). The far/Brotherhood session is live (edits and a commit at 01:50), so noted, no tell, no hand on.
+- 2026-10-24 "Hand a picked thing to the agent" finished but its fast-forward (89d8570..3004c17) was refused: another live session's uncommitted app.rs, console.rs and lib.rs. No session held the quest, so filed "Land the picked thing branch" (sonnet) to merge once those files are committed.
+- 2026-10-24 Round (human left, main at c45a8de): still unshipped commits since the 10-23 reload, but 19 files plus new afar.rs, far.rs and far_phone.rs sit uncommitted (live Brotherhood and far work), so held "Ship Local" again. "Hand a picked thing to the agent" under way. Nothing else to do.
 - 2026-10-24 Round (hourly, 01:00, main at f830202): the task notification quest landed (ee29dd2) and 16 more commits after the 23:55 reload, but 16 files hold uncommitted code (229+/299-, plus new brothers.rs and joining.rs, Brotherhood work from a live session committing every few minutes), so held "Ship Local": it builds from the shared tree. Gave "Hand a picked thing to the agent" Model: opus.
 - 2026-10-23 Round (quest landed, main at 07e1476): "Browser pane draws pages offset" landed after the last reload (10-21), tree has no code edits (only the human's Brotherhood plan doc), so cast "Ship Local". Task notification quest still with the human. Look back (1 done, 1 merged, 0 Warriv sessions): the day was clean, nothing happened twice. The day gave 1 note (#431 Brotherhood joining: login finds devices, approval click trusts them, provider open between Google and WorkOS).
 - 2026-10-21 Eleven hourly rounds (main 8b733f7 to 148d108, only my memory since v0.31.0): nothing landed, uncommitted code in the tree is another session's, task notification quest still with the human. Nothing to do.
@@ -122,3 +125,4 @@
 ## Open
 - Once quests run with a pack, the pack comparison resumes by itself.
 - 17 commits on main since the 2026-10-23 23:55 reload (task notification quest, Brotherhood, Linux node). Cast "Ship Local" once the tree holds no uncommitted code.
+- "Land the picked thing branch" must land before the picked thing ships; check it did not merge over the other session's uncommitted files.
