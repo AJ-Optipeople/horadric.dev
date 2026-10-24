@@ -3,6 +3,7 @@
 //! pixel themselves, so no material goes behind them.
 
 use std::ffi::c_void;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use windows::core::BOOL;
 use windows::Win32::Foundation::{COLORREF, HWND};
@@ -36,9 +37,21 @@ unsafe fn set<T>(hwnd: HWND, attribute: i32, value: &T) -> windows::core::Result
     )
 }
 
-/// Whether Windows wants things to move: Settings, Accessibility, Visual
-/// effects, Animation effects. Off, the light holds still.
+/// Horadric's own Animations switch is off.
+static STILL: AtomicBool = AtomicBool::new(false);
+
+/// Turns Horadric's own animations off, or back on as Windows has them.
+pub fn set_still(still: bool) {
+    STILL.store(still, Ordering::Relaxed);
+}
+
+/// Whether things may move: Horadric's Animations switch is on, and so is
+/// Windows' (Settings, Accessibility, Visual effects, Animation effects).
+/// Off, the light holds still.
 pub fn animations_on() -> bool {
+    if STILL.load(Ordering::Relaxed) {
+        return false;
+    }
     let mut on = BOOL(1);
     unsafe {
         let _ = SystemParametersInfoW(

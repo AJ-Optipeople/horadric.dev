@@ -848,6 +848,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
     let status_settings = store::write_status_settings(&console::host_program());
     let mcp_config = store::write_mcp_config(&console::host_program());
     town::make();
+    crate::backdrop::set_still(saved.still);
     let usage_window = match UsageWindow::create(
         Rc::clone(&shared),
         saved.usage_window.as_ref().is_some_and(|p| p.collapsed),
@@ -956,6 +957,7 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
             quiet: saved.quiet,
             sounds: saved.sounds,
             town_hidden: saved.town_hidden,
+            still: saved.still,
             switch_accounts: saved.switch_accounts,
             out_seen: HashMap::new(),
             all_out_told: false,
@@ -3624,6 +3626,8 @@ struct App {
     sounds: bool,
     /// Tristram's tile is hidden while no session runs in the town.
     town_hidden: bool,
+    /// Horadric's own animations are off, from the Settings window.
+    still: bool,
     /// A usage limit switches Claude Code to the account with the most
     /// left, from the Settings window.
     switch_accounts: bool,
@@ -5640,6 +5644,7 @@ impl App {
             notify: !self.quiet,
             sounds: self.sounds,
             town: !self.town_hidden,
+            animations: !self.still,
             switch_accounts: self.switch_accounts,
             agent: self.settings_agent,
             defaults: self.shared.defaults_of(self.settings_agent),
@@ -6233,6 +6238,12 @@ impl App {
                 self.save();
             }
             Field::Town => self.hide_town(!self.town_hidden),
+            Field::Animations => {
+                self.still = !self.still;
+                crate::backdrop::set_still(self.still);
+                repaint_all();
+                self.save();
+            }
             Field::SwitchAccounts => {
                 self.switch_accounts = !self.switch_accounts;
                 self.save();
@@ -7880,6 +7891,7 @@ impl App {
             quiet: self.quiet,
             sounds: self.sounds,
             town_hidden: self.town_hidden,
+            still: self.still,
             switch_accounts: self.switch_accounts,
             discord: self.discord,
             recall_across: self.recall_across,

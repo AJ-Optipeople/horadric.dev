@@ -127,6 +127,11 @@ pub struct SavedState {
     /// window. It shows again while a session runs in the town.
     #[serde(default)]
     pub town_hidden: bool,
+    /// Nothing moves inside Horadric: no ring round a working pane, no
+    /// letters burning in, no gliding. Windows turning animations off does
+    /// the same without this.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub still: bool,
     /// When a usage limit stops a session, switch to the account with the
     /// most left and go on. Off until turned on in the Settings window.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -790,6 +795,7 @@ mod tests {
             quiet: true,
             sounds: true,
             town_hidden: true,
+            still: true,
             switch_accounts: true,
             discord: Discord::Named,
             recall_across: true,
@@ -831,6 +837,7 @@ mod tests {
         assert!(back.quiet);
         assert!(back.sounds);
         assert!(back.town_hidden);
+        assert!(back.still);
         assert!(back.switch_accounts);
         assert_eq!(back.discord, Discord::Named);
         assert_eq!(back.run, state.run);

@@ -33,7 +33,7 @@ pub const SEAL: Duration = Duration::from_millis(1600);
 /// A typed letter cooling from white hot to its own colour.
 pub const BURN: Duration = Duration::from_millis(850);
 /// A deleted letter falling apart.
-pub const ASH: Duration = Duration::from_millis(900);
+pub const ASH: Duration = Duration::from_millis(700);
 /// Between frames while only the ring turns. The comet moves a few DIPs a
 /// frame at this beat and its tail hides the step, while every frame
 /// redraws the whole grid of each working pane.
@@ -404,12 +404,14 @@ pub fn heat_color(heat: f32) -> Color {
 /// and how much is left of it. Slice 0 is the top.
 pub fn shard(seed: u64, slice: usize, t: f32) -> (f32, f32, f32) {
     let i = slice as u64;
-    // The top goes first, as a page burns from where the flame licks.
-    let start = 0.35 * slice as f32 / SHARDS as f32 + 0.1 * unit(&[seed, i, 1]);
+    // The top goes first, as a page burns from where the flame licks,
+    // but only just: a letter left whole in its cell for a moment reads
+    // as a key that did not take.
+    let start = 0.12 * slice as f32 / SHARDS as f32 + 0.04 * unit(&[seed, i, 1]);
     let k = ((t - start) / (1.0 - start)).clamp(0.0, 1.0);
-    let rise = (0.5 + 0.7 * unit(&[seed, i, 2])) * motion::ease_out(k);
+    let rise = 0.15 + (0.5 + 0.7 * unit(&[seed, i, 2])) * motion::ease_out(k);
     let drift = (unit(&[seed, i, 3]) - 0.5) * 0.9 * k;
-    let left = 1.0 - motion::ease_in_out(k);
+    let left = 0.7 * (1.0 - motion::ease_in_out(k));
     (drift, -rise, left)
 }
 
@@ -959,7 +961,8 @@ mod tests {
     #[test]
     fn ash_rises_scatters_and_is_gone() {
         for s in 0..SHARDS {
-            assert_eq!(shard(4, s, 0.0), (0.0, 0.0, 1.0));
+            let (_, up, left) = shard(4, s, 0.0);
+            assert!(up < 0.0 && left < 1.0, "it leaves its cell at once");
             let (_, up, left) = shard(4, s, 1.0);
             assert!(up < -0.4 && left < 1e-6);
         }
