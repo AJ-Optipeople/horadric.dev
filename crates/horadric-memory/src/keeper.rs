@@ -462,7 +462,18 @@ impl<E: Embed> Keeper<E> {
     ) -> Result<usize, String> {
         let key = path.to_string_lossy().to_lowercase();
         let from = self.cursors.get(&key).copied().unwrap_or(0);
-        let scan = transcripts::scan(path, format, from).map_err(|e| e.to_string())?;
+        let mut scan = transcripts::scan(path, format, from).map_err(|e| e.to_string())?;
+        // A path read for the first time may hold a conversation already
+        // kept from another path: a handed off session's moved transcript.
+        if let (0, Some(session)) = (from, scan.session.as_deref()) {
+            let held = self
+                .store
+                .chunks()
+                .filter(|(_, c)| c.kind == Kind::Dialogue && c.session.as_deref() == Some(session))
+                .map(|(_, c)| c.time)
+                .max();
+            scan.turns = transcripts::after_held(std::mem::take(&mut scan.turns), held);
+        }
         let mut kept = 0;
         let project = scan
             .cwd
@@ -1250,6 +1261,41 @@ mod tests {
         fs::remove_dir_all(&dir).unwrap();
         fs::remove_file(&file).unwrap();
         fs::remove_file(&other).unwrap();
+    }
+
+    #[test]
+    fn a_moved_transcript_is_kept_once_under_the_project_it_was_said_in() {
+        let dir = temp("moved");
+        let line = |cwd: &str, at: &str, text: &str| {
+            format!(
+                "{}\n",
+                serde_json::json!({"type": "user", "cwd": cwd, "sessionId": "s1",
+                    "timestamp": at, "message": {"content": text}})
+            )
+        };
+        let old = line(r"C:\a", "2026-10-23T10:00:00Z", "the codeword is HELIX");
+        let a = dir.with_extension("a.jsonl");
+        fs::write(&a, &old).unwrap();
+        let mut k: Keeper<Topics> = Keeper::open(&dir).unwrap();
+        let project = |cwd: &str| Some(cwd.to_lowercase());
+        assert_eq!(k.ingest(&a, Format::Claude, None, project, NOW).unwrap(), 1);
+        // Filed under a new folder with its cwd moved, then a turn there.
+        let b = dir.with_extension("b.jsonl");
+        let moved = line(r"C:\b", "2026-10-23T10:00:00Z", "the codeword is HELIX");
+        fs::write(
+            &b,
+            moved + &line(r"C:\b", "2026-10-23T11:00:00Z", "what was it?"),
+        )
+        .unwrap();
+        assert_eq!(k.ingest(&b, Format::Claude, None, project, NOW).unwrap(), 1);
+        let kept: Vec<&Chunk> = k.store.chunks().map(|(_, c)| c).collect();
+        assert_eq!(kept.len(), 2);
+        assert_eq!(kept[0].project, r"c:\a");
+        assert_eq!(kept[1].project, r"c:\b");
+        assert_eq!(kept[1].text, "You: what was it?");
+        fs::remove_dir_all(&dir).unwrap();
+        fs::remove_file(&a).unwrap();
+        fs::remove_file(&b).unwrap();
     }
 
     #[test]

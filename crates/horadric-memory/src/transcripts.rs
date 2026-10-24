@@ -287,6 +287,20 @@ fn iso(s: &str) -> Option<u64> {
     horadric_core::tasks::parse_utc(&head)
 }
 
+/// The turns of a transcript read from its start that are new to the
+/// store, given `held`, the time of the newest dialogue it keeps of the
+/// same conversation. A session handed to this folder from another (or
+/// from a brother whose dialogue came with the shared lore) is the same
+/// conversation under a new path, so its old turns are kept once, under
+/// the project they were said in. A turn with no time is new only when
+/// nothing is held.
+pub fn after_held(turns: Vec<Turn>, held: Option<u64>) -> Vec<Turn> {
+    match held {
+        None => turns,
+        Some(held) => turns.into_iter().filter(|t| t.time > held).collect(),
+    }
+}
+
 /// Turns as chunks of about [`CHUNK`] characters, in order, each saying
 /// who spoke, secrets left out. `fallback` stands in for a turn with no
 /// time.
@@ -688,6 +702,20 @@ mod tests {
         let c = chunks(&[tool], "p", "", 77);
         assert_eq!(c[0].text, "Agent: used Edit: a.rs, b.rs");
         assert_eq!((c[0].time, c[0].session.clone()), (77, None));
+    }
+
+    #[test]
+    fn a_moved_transcript_keeps_only_the_turns_after_those_held() {
+        let turn = |time: u64, text: &str| Turn {
+            time,
+            who: Who::You,
+            text: text.into(),
+            files: Vec::new(),
+        };
+        let turns = vec![turn(10, "old"), turn(0, "untimed"), turn(20, "new")];
+        assert_eq!(after_held(turns.clone(), None), turns);
+        assert_eq!(after_held(turns.clone(), Some(10)), vec![turn(20, "new")]);
+        assert!(after_held(turns, Some(20)).is_empty());
     }
 
     #[test]
