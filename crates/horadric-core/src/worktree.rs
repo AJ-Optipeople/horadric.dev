@@ -601,33 +601,12 @@ mod tests {
 
     #[test]
     fn the_main_top_is_found_from_a_linked_worktree_too() {
-        let main = "C:/Code/app/.git
-C:/Code/app/.git
-C:/Code/app
-";
+        let main = "C:/Code/app/.git\nC:/Code/app/.git\nC:/Code/app\n";
         assert_eq!(main_top(main).as_deref(), Some("C:/Code/app"));
-        let linked = "C:/Code/app/.git/worktrees/fix
-C:/Code/app/.git
-C:/Code/app.fix
-";
+        let linked = "C:/Code/app/.git/worktrees/fix\nC:/Code/app/.git\nC:/Code/app.fix\n";
         assert_eq!(main_top(linked).as_deref(), Some("C:/Code/app"));
-        assert_eq!(
-            main_top(
-                "C:/Code/app.git
-C:/Code/app.git
-"
-            ),
-            None
-        );
-        assert_eq!(
-            main_top(
-                "x/.git/worktrees/a
-x/.git
-
-"
-            ),
-            None
-        );
+        assert_eq!(main_top("C:/Code/app.git\nC:/Code/app.git\n"), None);
+        assert_eq!(main_top("x/.git/worktrees/a\nx/.git\n\n"), None);
         assert_eq!(main_top(""), None);
     }
 
