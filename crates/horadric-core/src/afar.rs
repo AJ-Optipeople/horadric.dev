@@ -9,7 +9,7 @@
 //! way the link is sealed the same and speaks the same messages.
 
 use std::collections::HashMap;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use serde_json::{json, Value};
 
@@ -116,6 +116,9 @@ pub struct Entry {
     pub phase: Phase,
     pub line: String,
     pub paused: bool,
+    /// When it took its phase there, Unix seconds. None from a brother
+    /// older than the field.
+    pub since: Option<u64>,
 }
 
 /// What one message from a brother says.
@@ -262,6 +265,7 @@ fn entry(v: &Value) -> Option<Entry> {
         phase,
         line: text("line"),
         paused,
+        since: v.get("since").and_then(Value::as_u64).filter(|s| *s > 0),
     })
 }
 
@@ -280,10 +284,16 @@ pub struct OnBrother {
 /// The session a brother's entry is, here. `was` is the tile as it stood,
 /// so a phase that did not change keeps its age and its unread mark.
 pub fn session(brother: &str, e: &Entry, was: Option<&Session>, now: SystemTime) -> Session {
+    // The brother's clock says when, so a tile keeps its age when this
+    // client starts again. Never later than now: the clocks may differ.
+    let since = e
+        .since
+        .map(|secs| (SystemTime::UNIX_EPOCH + Duration::from_secs(secs)).min(now))
+        .unwrap_or(now);
     let mut s = was.cloned().unwrap_or_else(|| {
         let mut s = Session::new(local_id(brother, &e.id), e.name.clone(), "");
-        s.since = now;
-        s.created = now;
+        s.since = since;
+        s.created = since;
         s
     });
     s.name = e.name.clone();
@@ -298,7 +308,9 @@ pub fn session(brother: &str, e: &Entry, was: Option<&Session>, now: SystemTime)
         } else {
             e.phase.clone()
         };
-        s.since = now;
+        s.since = since;
+    } else if e.since.is_some() {
+        s.since = since;
     }
     s.last_line = e.line.clone();
     s.brother = Some(OnBrother {
@@ -471,6 +483,12 @@ mod tests {
         assert_eq!(l[0].phase, Phase::Working);
         assert_eq!(l[1].phase, Phase::Waiting(WaitReason::Permission));
         assert_eq!(l[2].phase, Phase::Paused);
+        assert_eq!(l[0].since, None);
+        let timed = json!({"t":"sessions","list":[{"id":"a","since":1700000000}]});
+        let Heard::Sessions(l) = hear(&timed) else {
+            panic!("not sessions");
+        };
+        assert_eq!(l[0].since, Some(1_700_000_000));
         let out = json!({"t":"out","id":"a","seq":5,"b64":"aGk","reset":true});
         assert_eq!(
             hear(&out),
@@ -562,6 +580,7 @@ mod tests {
             phase: Phase::Working,
             line: "Bash".into(),
             paused: false,
+            since: None,
         };
         let s = session("vps", &e, None, t0);
         assert_eq!(s.id, "a@vps");
@@ -585,6 +604,39 @@ mod tests {
         let later = t1 + std::time::Duration::from_secs(5);
         let still = session("vps", &idle, Some(&done), later);
         assert_eq!((still.phase, still.since), (Phase::Done, t1));
+    }
+
+    #[test]
+    fn a_tile_takes_its_age_from_the_brother() {
+        let t0 = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000);
+        let e = Entry {
+            id: "a".into(),
+            name: "A".into(),
+            project: "p".into(),
+            phase: Phase::Working,
+            line: String::new(),
+            paused: false,
+            since: Some(400),
+        };
+        // A client that just started still shows when the phase began.
+        let s = session("vps", &e, None, t0);
+        let at = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(400);
+        assert_eq!((s.since, s.created), (at, at));
+        // A brother clock ahead of this one is held to now.
+        let ahead = Entry {
+            since: Some(5_000),
+            ..e.clone()
+        };
+        assert_eq!(session("vps", &ahead, None, t0).since, t0);
+        // A phase that changed there takes the brother's time too.
+        let idle = Entry {
+            phase: Phase::Idle,
+            since: Some(900),
+            ..e.clone()
+        };
+        let done = session("vps", &idle, Some(&s), t0);
+        let at = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(900);
+        assert_eq!((done.phase, done.since), (Phase::Done, at));
     }
 
     #[test]

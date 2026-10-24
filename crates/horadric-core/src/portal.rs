@@ -581,6 +581,9 @@ pub fn session_entry(s: &Session, project: &str, paused: bool) -> Value {
         "phase": phase_word(&s.phase),
         "line": line,
         "paused": paused,
+        // When it took its phase, Unix seconds, so a brother's tile keeps
+        // its age when that brother's client starts again.
+        "since": unix_secs(s.since),
     });
     if !paused && s.phase.asks() {
         let ask = s
@@ -590,6 +593,12 @@ pub fn session_entry(s: &Session, project: &str, paused: bool) -> Value {
         entry["ask"] = ask.to_json();
     }
     entry
+}
+
+/// `t` as Unix seconds, 0 before 1970.
+pub fn unix_secs(t: std::time::SystemTime) -> u64 {
+    t.duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
 }
 
 /// The projects message: each as (path, name), in the tiles' order.
@@ -1030,6 +1039,14 @@ mod tests {
     }
 
     #[test]
+    fn unix_secs_counts_from_1970() {
+        let t = std::time::UNIX_EPOCH + std::time::Duration::from_millis(5_900);
+        assert_eq!(unix_secs(t), 5);
+        let before = std::time::UNIX_EPOCH - std::time::Duration::from_secs(1);
+        assert_eq!(unix_secs(before), 0);
+    }
+
+    #[test]
     fn a_paused_session_says_so() {
         let mut s = Session::new("a1", "fix", "C:/p/x");
         s.phase = Phase::Paused;
@@ -1038,6 +1055,7 @@ mod tests {
         assert_eq!(e["paused"], true);
         assert_eq!(e["phase"], "idle");
         assert_eq!(e["project"], "x");
+        assert_eq!(e["since"], unix_secs(s.since));
     }
 
     #[test]

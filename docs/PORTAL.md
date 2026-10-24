@@ -425,6 +425,10 @@ exactly as before.
   input never move the size. Once the viewer that held the size
   detaches, or the stage types, the session goes back to the stage's
   size.
+- `sessions` entries gain `"since"`: when the session took its phase,
+  Unix seconds by the serving PC's clock. A brother's tile shows its age
+  from it, so the age survives the client starting again. A client takes
+  a time later than its own clock as now.
 
 ## Protocol v3: joining a brother
 
