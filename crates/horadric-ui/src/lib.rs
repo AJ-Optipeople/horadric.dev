@@ -51,6 +51,7 @@ pub mod hotkey;
 pub mod icns;
 pub mod icon;
 pub mod inbox;
+#[cfg(windows)]
 pub mod joining;
 pub mod keys;
 pub mod layout;

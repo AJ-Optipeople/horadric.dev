@@ -472,6 +472,8 @@ pub fn served(s: &Session) -> bool {
 /// this PC and each brother it joined, control on for all. Its number
 /// starts at the latest join, so two PCs that joined each other agree on
 /// it; the served roster's `count` raises it with every change after.
+/// Windows only, like joining: its link crypto is CNG.
+#[cfg(windows)]
 pub fn joined_roster(me: &str, name: &str, store: &crate::joining::Store) -> Roster {
     let key = store.me.as_ref().map_or("", |m| m.public.as_str());
     let n = store.brothers.iter().map(|b| b.joined).max().unwrap_or(0);
@@ -831,6 +833,7 @@ mod tests {
         assert!(!attach_stale(200, 100));
     }
 
+    #[cfg(windows)]
     #[test]
     fn the_joined_roster_is_this_pc_and_its_brothers_numbered_by_the_last_join() {
         let joined = |id: &str, at: u64| crate::joining::Joined {
