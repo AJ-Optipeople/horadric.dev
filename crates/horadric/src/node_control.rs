@@ -283,19 +283,17 @@ fn status() -> Value {
     })
 }
 
-/// Casts brother `id` out: refused from now on, its key gone, its links
-/// closed. Works with no node running too, from the files alone.
+/// Casts brother `id` out: refused from now on here and, by the roster,
+/// on every brother; its key gone, its links closed. Works with no relay
+/// link up too, from the files alone.
 fn cast_out(id: &str) -> Result<(), String> {
     let dir = horadric_hooks::state_dir().ok_or("cannot find the state folder")?;
     let store = Store::load(&dir).unwrap_or_default();
-    let key = store.get(id).map(|b| b.public.clone()).unwrap_or_default();
-    let mut standing = Standing::load(&dir);
-    standing.cast_out(id, &key);
-    standing
-        .save(&dir)
-        .map_err(|e| format!("cannot keep the cast out: {e}"))?;
+    if store.get(id).is_none() {
+        return Err(format!("{id} is no brother of this node"));
+    }
     if relay::with(|b| b.cast_out(id)).is_none() {
-        horadric_core::brothers::forget(&dir, id).map_err(|e| e.to_string())?;
+        horadric_core::brothers::cast_out_offline(&dir, id).map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -617,8 +615,8 @@ pub(super) fn cast_out_command(args: &[String]) -> Result<(), String> {
     let name = args.first().ok_or("usage: horadric node cast-out <name>")?;
     let (id, name) = by_name(name, &joined_pairs())?;
     if !yes(&format!(
-        "Cast {name} out? It loses its key here and is refused from now on. \
-         Only joining again undoes it."
+        "Cast {name} out? It loses its key here, and this node and every brother \
+         refuse it from now on. Only a brother asking it to join again undoes it."
     )) {
         return Ok(());
     }

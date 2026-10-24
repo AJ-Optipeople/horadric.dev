@@ -71,6 +71,11 @@ pub struct Store {
     pub me: Option<Identity>,
     #[serde(default)]
     pub brothers: Vec<Joined>,
+    /// Brothers cast out, with the link key each had, kept only so one
+    /// that comes back under it can be told, sealed, that it was cast out,
+    /// and never linked again.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cast: Vec<Joined>,
 }
 
 /// An ECDH P-256 key pair, b64url: the public point uncompressed
@@ -155,6 +160,33 @@ impl Store {
         self.brothers.len() != before
     }
 
+    /// Casts brother `id` out: it goes from the brothers, and its link key
+    /// is kept apart for the farewell (see [`Store::cast`]). True when it
+    /// was here.
+    pub fn cast_out(&mut self, id: &str) -> bool {
+        let Some(at) = self.brothers.iter().position(|b| b.id == id) else {
+            return false;
+        };
+        let b = self.brothers.remove(at);
+        self.cast.retain(|c| c.id != id);
+        self.cast.push(b);
+        true
+    }
+
+    /// The link key brother `id` had when it was cast out.
+    pub fn cast_key(&self, id: &str) -> Option<[u8; 32]> {
+        let b = self.cast.iter().find(|b| b.id == id)?;
+        unb64url(&b.key)?.try_into().ok()
+    }
+
+    /// The brothers held, id to public key, as the roster names them.
+    pub fn held(&self) -> std::collections::BTreeMap<String, String> {
+        self.brothers
+            .iter()
+            .map(|b| (b.id.clone(), b.public.clone()))
+            .collect()
+    }
+
     /// Notes that a link to this brother came up, and under what name.
     /// True when anything changed.
     pub fn seen(&mut self, id: &str, name: &str, now: u64) -> bool {
@@ -207,6 +239,23 @@ pub fn agree(shared: &[u8; 32], asker: (&[u8], &[u8]), giver: (&[u8], &[u8])) ->
         key,
         code: code_of(&c),
     }
+}
+
+/// The link key of two brothers introduced by a third, from the ECDH
+/// secret of their long term keys and both public keys and ids, the lower
+/// id's first so both sides work out the same. No code is asked: each
+/// public key came over a sealed link from a brother the human vouched
+/// for, so the relay never had the chance to put its own in.
+pub fn introduced_key(shared: &[u8; 32], a: (&str, &[u8]), b: (&str, &[u8])) -> [u8; 32] {
+    let (lo, hi) = if links_first(a.0, b.0) {
+        (a, b)
+    } else {
+        (b, a)
+    };
+    derive(
+        "horadric introduced key v1",
+        &[shared, lo.1, hi.1, lo.0.as_bytes(), hi.0.as_bytes()],
+    )
 }
 
 /// Six digits from a digest, in two groups of three.
@@ -499,6 +548,33 @@ impl Handshake {
     /// Whether the human is being asked about this one.
     pub fn asking(&self) -> bool {
         matches!(self.state, State::Confirming { yes: false, .. })
+    }
+
+    /// The other side's public key, once it is known by a join's reveal.
+    pub fn peer_key(&self) -> Option<&[u8]> {
+        match &self.state {
+            State::Confirming { public, .. } => Some(public),
+            _ => None,
+        }
+    }
+
+    /// The giving side, waiting with no key for the brother asking, now
+    /// holds one: an introduction came in while its hello was on the way.
+    /// True when it was waiting so, and so the hello can be heard again.
+    pub fn know(&mut self, key: [u8; 32]) -> bool {
+        match &mut self.state {
+            State::Waiting { known, .. } if known.is_none() => {
+                *known = Some(key);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether this is the giving side waiting with no key, where a sealed
+    /// hello cannot open yet.
+    pub fn keyless(&self) -> bool {
+        matches!(self.state, State::Waiting { known: None, .. })
     }
 
     fn joined(&self, public: &[u8], key: &[u8; 32], now: u64) -> Joined {
@@ -1349,6 +1425,18 @@ mod tests {
         assert_eq!(frame_aad(Way::FromGiver, 5), aad);
         assert_eq!(hello_aad(Way::FromAsker, &[]), b"horadric link hello v1a");
         assert_eq!(hello_aad(Way::FromGiver, b"N"), b"horadric link hello v1gN");
+        // Two brothers introduced: the lower id's key first, whichever
+        // side works it out.
+        let shared = [7; 32];
+        let one = introduced_key(&shared, ("0b", &asker), ("0a", &giver));
+        assert_eq!(b64url(&one), "gKq4oKB5vrwwpjbtLgPm6ccWA_N6XjKvMDWJHZePAvc");
+        assert_eq!(introduced_key(&shared, ("0a", &giver), ("0b", &asker)), one);
+        assert_ne!(introduced_key(&shared, ("0a", &asker), ("0b", &giver)), one);
+        assert_ne!(
+            introduced_key(&[8; 32], ("0b", &asker), ("0a", &giver)),
+            one
+        );
+        assert_ne!(introduced_key(&shared, ("0b", &asker), ("0c", &giver)), one);
     }
 
     /// A `brothers.json` as an older build wrote it reads, and writes
@@ -1413,8 +1501,40 @@ mod tests {
             private: "priv".into(),
         });
         s.save(&dir).unwrap();
+        assert_eq!(Store::load(&dir), Some(s.clone()));
+        assert_eq!(s.held().get("d").map(String::as_str), Some("p"));
+        // Cast out: gone from the brothers, its link key kept apart.
+        assert!(s.cast_out("d"));
+        assert!(!s.cast_out("d"));
+        assert_eq!(s.key("d"), None);
+        assert_eq!(s.cast_key("d"), Some([2; 32]));
+        assert!(s.held().is_empty());
+        s.save(&dir).unwrap();
         assert_eq!(Store::load(&dir), Some(s));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_giver_without_a_key_hears_the_hello_once_it_has_one() {
+        let (a, g) = (key_of(1), key_of(2));
+        let link = [7; 32];
+        let (mut asker, hello) = Handshake::link(&F, ("A", &a), ("g", "G"), link, [3; 16]);
+        let mut giver = Handshake::give(("G", &g), ("a", "A"), None, [4; 16]);
+        assert!(giver.keyless());
+        let sealed = sealed_bytes(&hello).remove(0);
+        // Unknown yet: the hello does not open and nothing moves.
+        assert_eq!(giver.sealed(&F, &sealed, 0), (None, vec![]));
+        assert!(giver.know(link));
+        assert!(!giver.know(link));
+        assert!(!giver.keyless());
+        let (_, answer) = giver.sealed(&F, &sealed, 0);
+        let (_, ready) = asker.sealed(&F, &sealed_bytes(&answer)[0], 0);
+        assert!(asker.linked());
+        let ready = sealed_bytes(&ready).remove(0);
+        let (_, up) = giver.sealed(&F, &ready, 0);
+        assert!(giver.linked());
+        assert_eq!(up, vec![Out::Linked("a".into())]);
+        assert_eq!(giver.peer_key(), None);
     }
 
     #[test]

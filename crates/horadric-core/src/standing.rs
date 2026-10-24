@@ -79,16 +79,32 @@ impl Standing {
 
     /// Writes these switches into the roster `me` serves: each brother
     /// switched to view only as such in `me`'s own entry, and each key
-    /// cast out refused.
+    /// cast out refused. By key, never by id: a brother cast out may join
+    /// again under its old id with a new key.
     pub fn apply(&self, roster: &mut Roster, me: &str) {
         if let Some(b) = roster.brothers.iter_mut().find(|b| b.id == me) {
             b.view_only.extend(self.view_only.iter().cloned());
         }
         roster.outcast.extend(self.keys().map(str::to_string));
         for b in &mut roster.brothers {
-            if self.outcast.contains_key(&b.id) || roster.outcast.contains(&b.key) {
+            if roster.outcast.contains(&b.key) {
                 b.cast_out = true;
             }
+        }
+    }
+
+    /// Brother `id` joined again, with a new key: the switches the human
+    /// set for its old one no longer stand in its way. Its old key stays
+    /// refused.
+    pub fn joined_again(&mut self, id: &str) -> bool {
+        match self.outcast.remove(id) {
+            Some(key) if !key.is_empty() => {
+                // Kept under a name no brother goes by, for its key alone.
+                self.outcast.insert(format!("{id}:{key}"), key);
+                true
+            }
+            Some(_) => true,
+            None => false,
         }
     }
 }
@@ -153,6 +169,23 @@ mod tests {
         assert!(r.admits("k-lap").is_none());
         assert!(!r.control("me", "lap"));
         assert!(r.control("me", "vps"));
+    }
+
+    #[test]
+    fn a_brother_joined_again_stands_by_its_new_key() {
+        let mut s = Standing::default();
+        s.cast_out("lap", "k-lap");
+        assert!(s.refuses("lap", None));
+        assert!(s.joined_again("lap"));
+        assert!(!s.refuses("lap", None));
+        assert!(s.controls("lap"));
+        assert!(s.refuses("lap", Some("k-lap")));
+        let mut r = roster();
+        r.brothers[1].key = "k-lap-2".into();
+        s.apply(&mut r, "me");
+        assert!(!r.brother("lap").unwrap().cast_out);
+        assert!(r.refuses("k-lap"));
+        assert!(!s.joined_again("vps"));
     }
 
     #[test]

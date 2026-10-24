@@ -75,6 +75,13 @@ impl Machine {
         self.names.values().any(|n| n == to)
     }
 
+    /// Who session `id` is being handed to while its handoff is under way:
+    /// the receiver owns it a moment before its `took` comes, and that is
+    /// the handoff, not a takeover to fence.
+    pub(super) fn handing_out_to(&self, id: &str) -> Option<String> {
+        self.hand.out.get(id).map(|o| o.to.clone())
+    }
+
     /// Whether `who` names this node: its relay id or its name.
     fn is_me(&self, who: &str) -> bool {
         who == machine_name() || relay::me().is_some_and(|me| me == who)

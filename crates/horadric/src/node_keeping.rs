@@ -23,7 +23,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
-use horadric_core::brotherhood::{clock, orphan_branch, Heard, Presence, Roster, SILENT_SECS};
+use horadric_core::brotherhood::{
+    clock, orphan_branch, Heard, Owner, Owners, Presence, Roster, SILENT_SECS,
+};
 use horadric_core::handoff::{takeover_line, Record};
 use horadric_core::keeper::{self, Cut, Joins, Pruning};
 use horadric_core::keepers::{too_old, Store};
@@ -32,7 +34,7 @@ use horadric_core::keeping::{
     takeover_message, waited, Book, Holding,
 };
 use horadric_core::serving::Job;
-use horadric_core::{Agent, Phase};
+use horadric_core::{mesh, rostering, Agent, Phase};
 use serde_json::Value;
 
 use super::{lock, machine_name, relay, Machine};
@@ -118,6 +120,21 @@ pub(super) fn landed(id: &str, n: u64) {
         .push((id.to_string(), n));
 }
 
+/// Every session's owner, as the roster holds them.
+fn owners() -> Owners {
+    horadric_hooks::state_dir()
+        .map(|d| mesh::owners(&d))
+        .unwrap_or_default()
+}
+
+/// Changes the owners the roster holds.
+fn owning<R: Default>(f: impl FnOnce(&mut Owners) -> R) -> R {
+    match horadric_hooks::state_dir() {
+        Some(d) => mesh::update(&d, |r| f(&mut r.sessions)),
+        None => R::default(),
+    }
+}
+
 /// The book was written by a terminal: read it again at the next round.
 pub(super) fn reload() {
     RELOAD.store(true, Ordering::SeqCst);
@@ -134,7 +151,7 @@ impl Machine {
 
     /// The roster number session `id` is handed off under.
     pub(super) fn keeping_number(&self, id: &str) -> u64 {
-        self.keep.book.number(id)
+        mesh::number(&owners(), id)
     }
 
     /// A handoff moved session `id` to brother `to` (None for this node)
@@ -151,10 +168,9 @@ impl Machine {
         };
         if to != me {
             self.keep.book.forget(id);
-        }
-        if self.keep.book.handed(id, &to, n, relay::now()) {
             self.save_book();
         }
+        owning(|o| mesh::handed(o, id, &to, n, relay::now()));
     }
 
     /// Why session `id` may not run here, when it was taken over
@@ -251,7 +267,8 @@ impl Machine {
             return;
         };
         self.keep.cutting.insert(id.to_string());
-        let next = self.keep.book.next(id, &keeper, &me, relay::now());
+        let owner_n = owning(|o| mesh::claim(o, id, &me, relay::now()));
+        let next = self.keep.book.next(id, &keeper, owner_n);
         self.save_book();
         let id = id.to_string();
         let transcript = PathBuf::from(transcript);
@@ -398,20 +415,40 @@ impl Machine {
             .collect()
     }
 
-    /// Owners brother `who` told: sessions of this node taken over
-    /// meanwhile stop and keep their work on a branch.
-    fn keeping_owners(
-        &mut self,
-        who: &str,
-        owners: &BTreeMap<String, horadric_core::brotherhood::Owner>,
-    ) {
+    /// Owners brother `who` told with `takeover`: sessions of this node
+    /// taken over meanwhile stop and keep their work on a branch.
+    fn keeping_owners(&mut self, who: &str, told: &Owners) {
         let Some(me) = relay::me() else {
             return;
         };
-        let names = horadric_core::rostering::joined_roster(&me, &machine_name(), &relay::store());
+        let moved = owning(|o| mesh::told(o, &me, who, told));
+        self.keeping_moved(moved);
+    }
+
+    /// Sessions of this node another owns now, as the roster or a
+    /// brother's `takeover` said: each stops and keeps its work on a
+    /// branch. One being handed to that very brother is the handoff's own
+    /// doing, which its `took` finishes.
+    pub(super) fn keeping_moved(&mut self, moved: Vec<(String, Owner)>) {
+        let (Some(me), Some(dir)) = (relay::me(), horadric_hooks::state_dir()) else {
+            return;
+        };
+        let moved: Vec<(String, Owner)> = moved
+            .into_iter()
+            .filter(|(id, o)| {
+                let to = self
+                    .handing_out_to(id)
+                    .map(|to| self.kin.id_of(&to).unwrap_or(to));
+                to.as_deref() != Some(o.brother.as_str())
+            })
+            .collect();
+        if moved.is_empty() {
+            return;
+        }
+        let names = rostering::known(&dir, &me, &machine_name());
         // A server's clock is UTC more often than not; the line says so
         // rather than guess its human's zone.
-        let fenced = self.keep.book.hear(&me, who, owners, &names, 0);
+        let fenced = self.keep.book.fence(&moved, &names, 0);
         self.save_book();
         for (id, line) in fenced {
             eprintln!("horadric node: {id} was {line}");
@@ -460,7 +497,7 @@ impl Machine {
         let Some(me) = relay::me() else {
             return;
         };
-        let msg = takeover_message(&self.keep.book.mine(&me));
+        let msg = takeover_message(&mesh::mine(&owners(), &me));
         for id in due {
             self.keep.told.insert(id.clone());
             self.kin.tell(&id, msg.clone());
@@ -631,12 +668,7 @@ impl Machine {
         let root = root().ok_or("no state folder")?;
         let (store, holding) = keeper::held_of(&root, &relay::store(), from, session)
             .ok_or("nothing is kept of that session here")?;
-        if self
-            .keep
-            .book
-            .owner_after(session, holding.record.n)
-            .is_none()
-        {
+        if mesh::owner_after(&owners(), session, holding.record.n).is_none() {
             return Err(format!(
                 "{} gave {} a number that cannot go up",
                 holding.from_name, holding.record.name
@@ -700,8 +732,7 @@ impl Machine {
         let Some(me) = relay::me() else {
             return;
         };
-        let owner = self.keep.book.take_over(&id, record.n, &me, relay::now());
-        self.save_book();
+        let owner = owning(|o| mesh::take_over(o, &id, record.n, &me, relay::now()));
         let Some(owner) = owner else {
             eprintln!("horadric node: {id} has no number to take over with");
             return;

@@ -393,7 +393,7 @@ pub fn menu(
             let listed = crate::brothers::listed();
             items.push(Item::Submenu(
                 "Brothers".into(),
-                brother_items(listed.as_deref(), &joined),
+                brother_items(listed.as_deref(), &joined, &crate::far_node::folded_ids()),
             ));
             brothers = listed.unwrap_or_default();
             items.extend(crate::app::leaving_menu());
@@ -405,9 +405,13 @@ pub fn menu(
     let nodes = horadric_hooks::state_dir()
         .map(|d| crate::far_node::load(&d))
         .unwrap_or_default();
-    let lines: Vec<(String, String)> = nodes
+    let lines: Vec<(String, String, Option<String>)> = nodes
         .iter()
-        .map(|n| (n.name.clone(), crate::far_node::status(&n.name)))
+        .map(|n| {
+            let brother =
+                crate::far_node::folded(&n.name).map(|id| crate::project::brother_name(&id));
+            (n.name.clone(), crate::far_node::status(&n.name), brother)
+        })
         .collect();
     items.push(Item::Submenu(
         "Linux nodes".into(),
@@ -497,10 +501,13 @@ const RIGHTS: usize = 80;
 /// sees now, one not joined yet as a way to ask it in, and each joined
 /// one, listed now or not, as a submenu of what it may do here.
 /// `None` is a portal that is closed or not through yet. `joined` is
-/// (id, name, whether it may control this PC).
+/// (id, name, whether it may control this PC). `ssh` are the brothers
+/// that are a Linux node reached over `ssh` too: one machine, one line,
+/// which says the `ssh` link waits behind the relay one.
 fn brother_items(
     listed: Option<&[joining::Listed]>,
     joined: &[(String, String, bool)],
+    ssh: &[String],
 ) -> Vec<Item> {
     let joined = &joined[..joined.len().min(RIGHTS)];
     let rights = |j: usize, label: String| {
@@ -526,10 +533,17 @@ fn brother_items(
             .iter()
             .take(QUEST_LOG - BROTHER)
             .enumerate()
-            .map(|(i, b)| match (at(&b.id), b.joined || b.linked) {
-                (Some(j), _) => rights(j, b.label()),
-                (None, true) => Item::Disabled(b.label()),
-                (None, false) => Item::action(BROTHER + i, b.label()),
+            .map(|(i, b)| {
+                let label = if ssh.contains(&b.id) {
+                    format!("{}, ssh standby", b.label())
+                } else {
+                    b.label()
+                };
+                match (at(&b.id), b.joined || b.linked) {
+                    (Some(j), _) => rights(j, label),
+                    (None, true) => Item::Disabled(label),
+                    (None, false) => Item::action(BROTHER + i, label),
+                }
             })
             .collect(),
     };
@@ -538,7 +552,14 @@ fn brother_items(
         .iter()
         .enumerate()
         .filter(|(_, (id, _, _))| !listed.iter().any(|b| &b.id == id))
-        .map(|(j, (_, name, _))| rights(j, format!("{name}\tjoined")))
+        .map(|(j, (id, name, _))| {
+            let how = if ssh.contains(id) {
+                "over ssh"
+            } else {
+                "joined"
+            };
+            rights(j, format!("{name}\t{how}"))
+        })
         .collect();
     if !away.is_empty() {
         items.push(Item::Separator);
@@ -591,11 +612,14 @@ fn keeping_items(keeping: &(Vec<(String, String)>, Option<String>, bool)) -> Vec
 
 /// The Linux nodes menu: each node joined, with how its link stands, the
 /// way to join another, and the way to forget one. `lines` are (name,
-/// status).
-fn node_items(lines: &[(String, String)], add: usize) -> Vec<Item> {
+/// status, the relay brother it is too). A node that is a relay brother
+/// too is that brother's line under Brothers, not one here as well, and
+/// only its Forget says so.
+fn node_items(lines: &[(String, String, Option<String>)], add: usize) -> Vec<Item> {
     let mut items: Vec<Item> = lines
         .iter()
-        .map(|(name, status)| Item::Disabled(format!("{name}\t{status}")))
+        .filter(|(_, _, brother)| brother.is_none())
+        .map(|(name, status, _)| Item::Disabled(format!("{name}\t{status}")))
         .collect();
     if !items.is_empty() {
         items.push(Item::Separator);
@@ -606,7 +630,13 @@ fn node_items(lines: &[(String, String)], add: usize) -> Vec<Item> {
             .iter()
             .take(BROTHER - NODE)
             .enumerate()
-            .map(|(i, (name, _))| Item::action(NODE + i, name.clone()))
+            .map(|(i, (name, _, brother))| {
+                let label = match brother {
+                    Some(b) => format!("{name}\tssh to brother {b}"),
+                    None => name.clone(),
+                };
+                Item::action(NODE + i, label)
+            })
             .collect();
         items.push(Item::Submenu("Forget".into(), forget));
     }
@@ -761,7 +791,7 @@ mod tests {
             ("d".to_string(), "Desktop".to_string(), false),
             ("v".to_string(), "Vps".to_string(), true),
         ];
-        let items = brother_items(Some(&listed), &joined);
+        let items = brother_items(Some(&listed), &joined, &[]);
         let Item::Submenu(label, rights) = &items[0] else {
             panic!("a joined brother is a submenu");
         };
@@ -793,9 +823,13 @@ mod tests {
                 ..
             }
         ));
-        let closed = brother_items(None, &joined);
+        let closed = brother_items(None, &joined, &[]);
         assert_eq!(closed.len(), 4);
-        assert!(brother_items(Some(&[]), &[]).len() == 1);
+        assert!(brother_items(Some(&[]), &[], &[]).len() == 1);
+        // A brother that is a node over ssh too says so, once.
+        let both = brother_items(Some(&listed), &joined, &["d".into(), "v".into()]);
+        assert!(matches!(&both[0], Item::Submenu(l, _) if l == "Desktop\tlinked, ssh standby"));
+        assert!(matches!(&both[3], Item::Submenu(l, _) if l == "Vps\tover ssh"));
     }
 
     const BROTHER_1: usize = BROTHER + 1;
@@ -807,17 +841,29 @@ mod tests {
         assert_eq!(only.len(), 1);
         assert!(matches!(&only[0], Item::Action { id: 18, .. }));
         let lines = vec![
-            ("vps".to_string(), "linked".to_string()),
-            ("box".to_string(), "Permission denied".to_string()),
+            ("vps".to_string(), "linked".to_string(), None),
+            ("box".to_string(), "Permission denied".to_string(), None),
+            (
+                "lab".to_string(),
+                "linked".to_string(),
+                Some("Lab".to_string()),
+            ),
         ];
         let items = node_items(&lines, 18);
         assert!(matches!(&items[0], Item::Disabled(l) if l == "vps\tlinked"));
         assert!(matches!(&items[2], Item::Separator));
+        // The node that is a brother too has no line of its own.
+        assert!(!items
+            .iter()
+            .any(|i| matches!(i, Item::Disabled(l) if l.starts_with("lab"))));
         let Some(Item::Submenu(_, forget)) = items.last() else {
             panic!("no Forget");
         };
         assert!(
             matches!(&forget[1], Item::Action { id, label, .. } if *id == NODE + 1 && label == "box")
+        );
+        assert!(
+            matches!(&forget[2], Item::Action { id, label, .. } if *id == NODE + 2 && label == "lab\tssh to brother Lab")
         );
     }
 

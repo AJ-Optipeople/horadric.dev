@@ -467,6 +467,13 @@ impl App {
         Ok(())
     }
 
+    /// The brother session `id` is being handed to, by key, while its
+    /// handoff is under way: the receiver owns it a moment before its
+    /// `took` comes, and that is the handoff, not a takeover to fence.
+    pub(super) fn handing_out_to(&self, id: &str) -> Option<String> {
+        with(|s| s.out.get(id).map(|o| o.to.clone()))
+    }
+
     /// Starts or stops handing every session to `to`.
     pub(super) fn leave_for(&mut self, to: Option<String>) {
         with(|s| {

@@ -27,7 +27,9 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use horadric_core::brotherhood::{clock, orphan_branch, Heard, Presence, Roster, SILENT_SECS};
+use horadric_core::brotherhood::{
+    clock, orphan_branch, Heard, Owner, Owners, Presence, Roster, SILENT_SECS,
+};
 use horadric_core::handoff::{takeover_line, Record};
 use horadric_core::keeper::{self, Cut, Joins, Pruning};
 use horadric_core::keepers::{too_old, Store};
@@ -36,7 +38,7 @@ use horadric_core::keeping::{
     seen_due, stores, takeover_message, waited, Book, Holding, Next, Seen,
 };
 use horadric_core::serving::Job;
-use horadric_core::Phase;
+use horadric_core::{mesh, Phase};
 use serde_json::Value;
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
@@ -188,7 +190,10 @@ fn id_of(name: &str) -> Option<String> {
     if joined.iter().any(|(i, _)| i == name) {
         return Some(name.to_string());
     }
-    joined.into_iter().find(|(_, n)| n == name).map(|(i, _)| i)
+    // A name two brothers share names neither.
+    let mut named = joined.into_iter().filter(|(_, n)| n == name);
+    let (id, _) = named.next()?;
+    named.next().is_none().then_some(id)
 }
 
 /// A joined brother's name by its id.
@@ -196,11 +201,26 @@ fn name_of(id: &str) -> Option<String> {
     joined().into_iter().find(|(i, _)| i == id).map(|(_, n)| n)
 }
 
+/// The roster as known here, for names.
 fn names(me: &str) -> Roster {
-    let store = horadric_hooks::state_dir()
-        .and_then(|d| joining::Store::load(&d))
-        .unwrap_or_default();
-    crate::portal::joined_roster(me, &pc_name(), &store)
+    horadric_hooks::state_dir()
+        .map(|d| horadric_core::rostering::known(&d, me, &pc_name()))
+        .unwrap_or_default()
+}
+
+/// Every session's owner, as the roster holds them.
+fn owners() -> Owners {
+    horadric_hooks::state_dir()
+        .map(|d| mesh::owners(&d))
+        .unwrap_or_default()
+}
+
+/// Changes the owners the roster holds.
+fn owning<R: Default>(f: impl FnOnce(&mut Owners) -> R) -> R {
+    match horadric_hooks::state_dir() {
+        Some(d) => mesh::update(&d, |r| f(&mut r.sessions)),
+        None => R::default(),
+    }
 }
 
 /// What the tray's keeping lines show: each joined brother (id, name),
@@ -284,7 +304,7 @@ impl App {
     /// The roster number session `id` is handed off under, so the
     /// receiver owns it one higher.
     pub(super) fn keeping_number(&self, id: &str) -> u64 {
-        with(|s| s.book.number(id))
+        mesh::number(&owners(), id)
     }
 
     /// A handoff moved session `id` to brother `to` (its name, None for
@@ -303,11 +323,10 @@ impl App {
         with(|s| {
             if to != s.me {
                 s.book.forget(id);
-            }
-            if s.book.handed(id, &to, n, unix_now()) {
                 save(&s.book);
             }
         });
+        owning(|o| mesh::handed(o, id, &to, n, unix_now()));
     }
 
     /// The tile line of a session taken over elsewhere, which never
@@ -409,7 +428,7 @@ impl App {
             return;
         };
         // Refused before landing, so nothing lands that cannot be owned.
-        if with(|s| s.book.owner_after(&remote, holding.record.n)).is_none() {
+        if mesh::owner_after(&owners(), &remote, holding.record.n).is_none() {
             with(|s| s.taking.remove(id));
             self.toasts.show(
                 Kind::Done,
@@ -616,9 +635,10 @@ impl App {
         let Some(record) = record else {
             return;
         };
+        let owner_n = owning(|o| mesh::claim(o, id, &me, unix_now()));
         let next: Next = with(|s| {
             s.cutting.insert(id.to_string());
-            let next = s.book.next(id, &keeper, &me, unix_now());
+            let next = s.book.next(id, &keeper, owner_n);
             save(&s.book);
             next
         });
@@ -724,6 +744,9 @@ impl App {
             .map(|b| b.keepers.clone())
             .unwrap_or_default();
         self.keeping_keepers(&from, keepers);
+        // Its owners were merged into the roster held before this, so a
+        // keeper's roster is its word on what was taken over.
+        self.keeping_release(&from);
     }
 
     fn keeping_keepers(&mut self, from: &str, keepers: Vec<String>) {
@@ -788,34 +811,59 @@ impl App {
             .collect()
     }
 
-    /// Owners a brother `who` told: sessions of this PC taken over
-    /// meanwhile stay paused and keep their work on a branch; once the
-    /// keeper has spoken, the sessions held back at start run on.
-    fn keeping_owners(
-        &mut self,
-        who: &str,
-        owners: &BTreeMap<String, horadric_core::brotherhood::Owner>,
-    ) {
+    /// Owners a brother `who` told with `takeover`: sessions of this PC
+    /// taken over meanwhile stay paused and keep their work on a branch;
+    /// once the keeper has spoken, the sessions held back at start run on.
+    fn keeping_owners(&mut self, who: &str, told: &Owners) {
+        let me = with(|s| s.me.clone());
+        let moved = owning(|o| mesh::told(o, &me, who, told));
+        self.keeping_moved(moved);
+        self.keeping_release(who);
+    }
+
+    /// Sessions of this PC another owns now, as the roster or a brother's
+    /// `takeover` said: each is fenced, paused with its work kept on a
+    /// branch. One being handed to that very brother is the handoff's own
+    /// doing, which its `took` finishes.
+    pub(super) fn keeping_moved(&mut self, moved: Vec<(String, Owner)>) {
+        let moved: Vec<(String, Owner)> = moved
+            .into_iter()
+            .filter(|(id, o)| {
+                let to = self
+                    .handing_out_to(id)
+                    .and_then(|to| id_of(&to).or(Some(to)));
+                to.as_deref() != Some(o.brother.as_str())
+            })
+            .collect();
+        if moved.is_empty() {
+            return;
+        }
         let offset = crate::questlog::utc_offset(unix_now());
-        let (fenced, release) = with(|s| {
+        let fenced = with(|s| {
             let roster = names(&s.me);
-            let me = s.me.clone();
-            let fenced = s.book.hear(&me, who, owners, &roster, offset);
+            let fenced = s.book.fence(&moved, &roster, offset);
             save(&s.book);
-            let release: Vec<String> = if s.book.keeper() == Some(who) {
+            fenced
+        });
+        for (id, line) in fenced {
+            debug(&format!("{id} was {line}"));
+            self.keeping_orphan(&id);
+        }
+    }
+
+    /// Brother `who` spoke of owners: if it is this PC's keeper, the
+    /// sessions held back at start, and not fenced, run on.
+    fn keeping_release(&mut self, who: &str) {
+        let release: Vec<String> = with(|s| {
+            if s.book.keeper() == Some(who) {
                 s.held
                     .drain()
                     .filter(|id| s.book.fenced(id).is_none())
                     .collect()
             } else {
                 Vec::new()
-            };
-            (fenced, release)
+            }
         });
-        for (id, line) in fenced {
-            debug(&format!("{id} was {line}"));
-            self.keeping_orphan(&id);
-        }
         for id in release {
             let paused = self
                 .shared
@@ -870,11 +918,12 @@ impl App {
         if due.is_empty() {
             return;
         }
+        let mine = mesh::mine(&owners(), &with(|s| s.me.clone()));
         let msg = with(|s| {
             for n in &due {
                 s.told.insert(n.clone());
             }
-            takeover_message(&s.book.mine(&s.me))
+            takeover_message(&mine)
         });
         for n in due {
             debug(&format!("telling {n} the owners"));
@@ -1055,13 +1104,11 @@ impl App {
                 return;
             }
         };
-        let owner = with(|s| {
+        let me = with(|s| {
             s.taking.remove(&tile);
-            let me = s.me.clone();
-            let o = s.book.take_over(&id, record.n, &me, unix_now());
-            save(&s.book);
-            o
+            s.me.clone()
         });
+        let owner = owning(|o| mesh::take_over(o, &id, record.n, &me, unix_now()));
         // Checked before landing; only a number that rose meanwhile ends
         // here, and then the old owner is not fenced.
         let Some(owner) = owner else {

@@ -20,7 +20,7 @@ use serde_json::{json, Value};
 use crate::afar::Entry;
 use crate::agent::Agent;
 use crate::brotherhood::{
-    keepers_turn, offers_takeover, Fence, Heard, Owner, Presence, Roster, Said, SILENT_SECS,
+    keepers_turn, offers_takeover, Heard, Owner, Presence, Roster, Said, SILENT_SECS,
 };
 use crate::handoff::{self, git, handoff_ref, Package, Part, Record, TranscriptFile};
 use crate::keepers::{self, Meta, Side, SideFolder, Store};
@@ -71,8 +71,10 @@ pub struct Book {
     /// Its keeper takes over by itself after this many seconds silent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_takeover: Option<u64>,
-    /// Every session's owner as last heard, by Horadric id.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    /// Every session's owner, as books before the roster kept them. Read
+    /// once into `roster.json` (see [`crate::mesh`]), which holds them
+    /// now, and never written again.
+    #[serde(default, skip_serializing)]
     pub owners: BTreeMap<String, Owner>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub sent: BTreeMap<String, Sent>,
@@ -107,11 +109,27 @@ pub struct Next {
 }
 
 impl Book {
+    /// The book in `dir`. Owners an older book still holds move into the
+    /// roster the first time, so there is one place they are kept.
     pub fn load(dir: &Path) -> Book {
-        std::fs::read(dir.join(BOOK_FILE))
+        let mut book: Book = std::fs::read(dir.join(BOOK_FILE))
             .ok()
             .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        if !book.owners.is_empty() {
+            let owners = std::mem::take(&mut book.owners);
+            crate::mesh::update(dir, |r| {
+                for (id, o) in owners {
+                    if r.sessions.get(&id).is_none_or(|had| *had < o) {
+                        r.sessions.insert(id, o);
+                    }
+                }
+            });
+            if let Err(e) = book.save(dir) {
+                eprintln!("horadric: cannot keep the keeping book: {e}");
+            }
+        }
+        book
     }
 
     pub fn save(&self, dir: &Path) -> std::io::Result<()> {
@@ -139,16 +157,11 @@ impl Book {
         }
     }
 
-    /// What `me`'s next snapshot of `session` for `keeper` is cut against.
-    /// Claims the session the first time. A new keeper holds nothing, so
-    /// it gets a whole one.
-    pub fn next(&mut self, session: &str, keeper: &str, me: &str, now: u64) -> Next {
-        let owner = self.owners.entry(session.to_string()).or_insert(Owner {
-            n: 1,
-            brother: me.to_string(),
-            since: now,
-        });
-        let owner_n = owner.n;
+    /// What the next snapshot of `session` for `keeper` is cut against,
+    /// the session's roster number being `owner_n` (see
+    /// [`crate::mesh::claim`]). A new keeper holds nothing, so it gets a
+    /// whole one.
+    pub fn next(&mut self, session: &str, keeper: &str, owner_n: u64) -> Next {
         let sent = self.sent.get(session);
         let n = sent.map_or(0, |s| s.n) + 1;
         match sent.filter(|s| s.keeper == keeper) {
@@ -236,38 +249,26 @@ impl Book {
         self.fenced.remove(session);
     }
 
-    /// Takes owners brother `who` told, higher numbers winning, and
-    /// gives the sessions `me` had that were taken over meanwhile, each
-    /// with the line its tile reads. `names` is a roster for the names.
-    /// Only what `who` says it owns itself is taken: a brother cannot
-    /// hand a session to another, nor fence one by naming a stranger.
-    pub fn hear(
+    /// Sessions of `me` that went to another meanwhile (see
+    /// [`crate::brotherhood::moved`]): each is fenced, never resumed here,
+    /// with the line its tile reads, and nothing more of it goes to a
+    /// keeper. `names` is a roster for the names, `offset` the local
+    /// time's from UTC. Gives what was fenced now.
+    pub fn fence(
         &mut self,
-        me: &str,
-        who: &str,
-        theirs: &BTreeMap<String, Owner>,
+        moved: &[(String, Owner)],
         names: &Roster,
         offset: i64,
     ) -> Vec<(String, String)> {
         let mut out = Vec::new();
-        for (id, o) in theirs.iter().filter(|(_, o)| o.brother == who) {
-            let had = self.owners.get(id).cloned();
-            if had.as_ref().is_some_and(|h| h >= o) {
+        for (id, o) in moved {
+            let line = names.taken_line(o, offset);
+            if self.fenced.get(id) == Some(&line) {
                 continue;
             }
-            self.owners.insert(id.clone(), o.clone());
-            let Some(had) = had.filter(|h| h.brother == me) else {
-                continue;
-            };
-            let roster = Roster {
-                sessions: BTreeMap::from([(id.clone(), o.clone())]),
-                ..names.clone()
-            };
-            if let Fence::Orphaned { line, .. } = roster.fence(me, id, had.n, offset) {
-                self.fenced.insert(id.clone(), line.clone());
-                self.sent.remove(id);
-                out.push((id.clone(), line));
-            }
+            self.fenced.insert(id.clone(), line.clone());
+            self.sent.remove(id);
+            out.push((id.clone(), line));
         }
         out
     }
@@ -276,63 +277,6 @@ impl Book {
     /// run here.
     pub fn fenced(&self, session: &str) -> Option<&str> {
         self.fenced.get(session).map(String::as_str)
-    }
-
-    /// The number `session` gets when taken over from an owner whose
-    /// number was `held`. None at the end of the numbers, where it cannot
-    /// go up and so cannot fence the old owner.
-    pub fn owner_after(&self, session: &str, held: u64) -> Option<u64> {
-        self.owners
-            .get(session)
-            .map_or(held, |o| o.n.max(held))
-            .checked_add(1)
-    }
-
-    /// `me` takes `session` over from its owner, whose number was `held`,
-    /// and gives the new owner to tell every brother. None, changing
-    /// nothing, where [`Book::owner_after`] refuses.
-    pub fn take_over(&mut self, session: &str, held: u64, me: &str, now: u64) -> Option<Owner> {
-        let o = Owner {
-            n: self.owner_after(session, held)?,
-            brother: me.to_string(),
-            since: now,
-        };
-        self.owners.insert(session.to_string(), o.clone());
-        Some(o)
-    }
-
-    /// The number `session` is handed off under: its owner's, or 1 for
-    /// one never claimed, as [`Book::next`] would claim it.
-    pub fn number(&self, session: &str) -> u64 {
-        self.owners.get(session).map_or(1, |o| o.n)
-    }
-
-    /// A handoff moved `session` to brother `to` under number `n`, said
-    /// by `took` on the sender and by landing on the receiver. Taken only
-    /// above the number known, as a takeover's is, so the copy left
-    /// behind is fenced by the roster and an old word changes nothing.
-    /// True when taken.
-    pub fn handed(&mut self, session: &str, to: &str, n: u64, now: u64) -> bool {
-        if self.owners.get(session).is_some_and(|o| o.n >= n) {
-            return false;
-        }
-        let o = Owner {
-            n,
-            brother: to.to_string(),
-            since: now,
-        };
-        self.owners.insert(session.to_string(), o);
-        true
-    }
-
-    /// The owners `me` tells a brother whose link came up: its own only,
-    /// the only ones a brother takes from it.
-    pub fn mine(&self, me: &str) -> BTreeMap<String, Owner> {
-        self.owners
-            .iter()
-            .filter(|(_, o)| o.brother == me)
-            .map(|(id, o)| (id.clone(), o.clone()))
-            .collect()
     }
 
     /// Brother `of` said who keeps it. True when `me` is not its first
@@ -362,16 +306,11 @@ impl Book {
     }
 
     /// The roster as served, with this brother's keepers and switch in
-    /// its own entry and the owners it knows.
+    /// its own entry.
     pub fn fold(&self, roster: &mut Roster, me: &str) {
         if let Some(b) = roster.brothers.iter_mut().find(|b| b.id == me) {
             b.keepers = self.keepers.clone();
             b.auto_takeover = self.auto_takeover;
-        }
-        for (id, o) in &self.owners {
-            if roster.sessions.get(id).is_none_or(|had| had < o) {
-                roster.sessions.insert(id.clone(), o.clone());
-            }
         }
     }
 }
@@ -819,19 +758,19 @@ mod tests {
     #[test]
     fn snapshots_chain_per_keeper_and_a_new_keeper_gets_a_whole_one() {
         let mut b = Book::default();
-        let first = b.next("s", "desk", "lap", T);
+        let first = b.next("s", "desk", 1);
         assert_eq!((first.n, first.base.clone(), first.sent), (1, None, 0));
-        assert_eq!(b.owners["s"].brother, "lap");
+        assert_eq!(first.owner_n, 1);
         b.sent("s", "desk", &meta(1, "c1"), 40);
-        let second = b.next("s", "desk", "lap", T);
+        let second = b.next("s", "desk", 1);
         assert_eq!(
             (second.n, second.base.as_deref(), second.sent),
             (2, Some("c1"), 40)
         );
-        let other = b.next("s", "vps", "lap", T);
+        let other = b.next("s", "vps", 1);
         assert_eq!((other.n, other.base, other.sent), (2, None, 0));
         b.refused("s");
-        let again = b.next("s", "desk", "lap", T);
+        let again = b.next("s", "desk", 1);
         assert_eq!((again.n, again.base, again.sent), (2, None, 0));
         b.forget("s");
         assert!(b.sent.is_empty());
@@ -840,7 +779,7 @@ mod tests {
     #[test]
     fn the_side_folder_held_follows_each_snapshot_and_a_refusal_resets_it() {
         let mut b = Book::default();
-        b.next("s", "desk", "lap", T);
+        b.next("s", "desk", 1);
         let mut m = meta(1, "c1");
         m.side = vec![("subagents/a.jsonl".into(), 4)];
         b.sent("s", "desk", &m, 40);
@@ -848,12 +787,12 @@ mod tests {
         m2.base = Some("c1".into());
         m2.side = vec![("tool-results/t.txt".into(), 9)];
         b.sent("s", "desk", &m2, 50);
-        let next = b.next("s", "desk", "lap", T);
+        let next = b.next("s", "desk", 1);
         assert_eq!(next.side.len(), 2);
         // Another keeper holds none of it.
-        assert!(b.next("s", "vps", "lap", T).side.is_empty());
+        assert!(b.next("s", "vps", 1).side.is_empty());
         b.refused("s");
-        assert!(b.next("s", "desk", "lap", T).side.is_empty());
+        assert!(b.next("s", "desk", 1).side.is_empty());
     }
 
     #[test]
@@ -863,7 +802,7 @@ mod tests {
         b.filled("s", "desk");
         assert!(b.full("s", "desk"));
         assert!(!b.full("s", "vps"));
-        assert_eq!(b.next("s", "desk", "lap", T).base, None);
+        assert_eq!(b.next("s", "desk", 1).base, None);
         // A snapshot taken by a new keeper clears it.
         b.sent("s", "vps", &meta(2, "c2"), 1);
         assert!(!b.full("s", "desk"));
@@ -880,15 +819,14 @@ mod tests {
     #[test]
     fn a_session_taken_over_meanwhile_is_fenced_with_its_line() {
         let mut lap = Book::default();
-        lap.next("s", "desk", "lap", T - 600);
-        lap.next("t", "desk", "lap", T - 600);
-        let mut desk = Book::default();
-        let o = desk.take_over("s", 1, "desk", T).unwrap();
-        assert_eq!((o.n, o.brother.as_str()), (2, "desk"));
-        // Only desk itself is heard on what desk owns.
-        assert!(lap.hear("lap", "vps", &desk.owners, &names(), 0).is_empty());
-        assert_eq!(lap.owners["s"].brother, "lap");
-        let fenced = lap.hear("lap", "desk", &desk.owners, &names(), 0);
+        lap.next("s", "desk", 1);
+        let mut before = BTreeMap::new();
+        crate::mesh::claim(&mut before, "s", "lap", T - 600);
+        crate::mesh::claim(&mut before, "t", "lap", T - 600);
+        let mut after = before.clone();
+        crate::mesh::take_over(&mut after, "s", 1, "desk", T).unwrap();
+        let went = crate::brotherhood::moved("lap", &before, &after);
+        let fenced = lap.fence(&went, &names(), 0);
         assert_eq!(
             fenced,
             [(
@@ -898,76 +836,16 @@ mod tests {
         );
         assert_eq!(lap.fenced("s"), Some("taken over by Desktop at 14:12"));
         assert_eq!(lap.fenced("t"), None);
-        // Heard twice, it fences nothing more.
-        assert!(lap
-            .hear("lap", "desk", &desk.owners, &names(), 0)
-            .is_empty());
-        // An older word never wins back a session.
-        let old = BTreeMap::from([(
-            "s".to_string(),
-            Owner {
-                n: 1,
-                brother: "lap".into(),
-                since: 0,
-            },
-        )]);
-        lap.hear("lap", "lap", &old, &names(), 0);
-        assert_eq!(lap.owners["s"].brother, "desk");
-    }
-
-    #[test]
-    fn a_takeover_at_the_last_number_is_refused_and_changes_nothing() {
-        let mut b = Book::default();
-        assert_eq!(b.owner_after("s", 4), Some(5));
-        assert_eq!(b.take_over("s", u64::MAX, "desk", T), None);
-        assert!(b.owners.is_empty());
-        b.owners.insert(
-            "t".into(),
-            Owner {
-                n: u64::MAX,
-                brother: "lap".into(),
-                since: 0,
-            },
-        );
-        assert_eq!(b.take_over("t", 1, "desk", T), None);
-        assert_eq!(b.owners["t"].brother, "lap");
-    }
-
-    #[test]
-    fn a_handoff_raises_the_number_and_fences_the_copy_left_behind() {
-        let mut lap = Book::default();
-        lap.next("s", "desk", "lap", T - 600);
-        assert_eq!(lap.number("s"), 1);
-        assert_eq!(lap.number("never"), 1);
-        // Handed to desk: took says the number one up.
-        let n = lap.number("s") + 1;
-        assert!(lap.handed("s", "desk", n, T));
-        assert_eq!(lap.owners["s"].n, 2);
-        assert_eq!(lap.owners["s"].brother, "desk");
-        // Handed back later, higher again; an old word changes nothing.
-        assert!(lap.handed("s", "lap", 3, T + 60));
-        assert!(!lap.handed("s", "desk", 2, T + 120));
+        // No more snapshots of it go to the keeper.
+        assert!(!lap.sent.contains_key("s"));
+        // Told twice, it fences nothing more.
+        assert!(lap.fence(&went, &names(), 0).is_empty());
+        // The clock is local time.
+        let mut other = Book::default();
         assert_eq!(
-            (lap.owners["s"].n, lap.owners["s"].brother.as_str()),
-            (3, "lap")
+            other.fence(&went, &names(), 3600)[0].1,
+            "taken over by Desktop at 15:12"
         );
-        // A copy left with the old number is fenced by the new owner's word.
-        let mut stale = Book::default();
-        stale.next("s", "desk", "lap", T - 600);
-        let mut desk = Book::default();
-        assert!(desk.handed("s", "desk", 2, T));
-        let fenced = stale.hear("lap", "desk", &desk.owners, &names(), 0);
-        assert_eq!(fenced.len(), 1);
-        assert_eq!(stale.fenced("s"), Some("taken over by Desktop at 14:12"));
-    }
-
-    #[test]
-    fn a_brother_is_told_only_the_owners_that_are_mine() {
-        let mut b = Book::default();
-        b.next("s", "desk", "lap", T);
-        b.take_over("t", 1, "desk", T).unwrap();
-        assert_eq!(b.mine("lap").keys().collect::<Vec<_>>(), ["s"]);
-        assert_eq!(b.mine("desk").keys().collect::<Vec<_>>(), ["t"]);
     }
 
     #[test]
@@ -998,15 +876,40 @@ mod tests {
             auto_takeover: Some(AUTO_AFTER),
             ..Book::default()
         };
-        b.next("s", "desk", "lap", T);
+        b.next("s", "desk", 1);
         let mut r = names();
         b.fold(&mut r, "lap");
         assert_eq!(r.brother("lap").unwrap().keepers, ["desk"]);
         assert_eq!(r.brother("lap").unwrap().auto_takeover, Some(600));
-        assert_eq!(r.owner("s").unwrap().brother, "lap");
         let dir = std::env::temp_dir().join(format!("horadric-book-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         b.save(&dir).unwrap();
+        assert_eq!(Book::load(&dir), b);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_older_books_owners_move_into_the_roster_once() {
+        let dir = std::env::temp_dir().join(format!("horadric-book-old-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let old = r#"{"keepers":["desk"],"owners":{"s":{"n":3,"brother":"lap","since":5}}}"#;
+        std::fs::write(dir.join(BOOK_FILE), old).unwrap();
+        crate::mesh::update(&dir, |r| {
+            crate::mesh::claim(&mut r.sessions, "s", "desk", 1);
+            crate::mesh::claim(&mut r.sessions, "t", "desk", 1);
+        });
+        let b = Book::load(&dir);
+        assert!(b.owners.is_empty());
+        assert_eq!(b.keepers, ["desk"]);
+        let owners = crate::mesh::owners(&dir);
+        assert_eq!((owners["s"].n, owners["s"].brother.as_str()), (3, "lap"));
+        assert_eq!(owners["t"].brother, "desk");
+        // Written back without them, and read again it moves nothing.
+        assert!(!std::fs::read_to_string(dir.join(BOOK_FILE))
+            .unwrap()
+            .contains("owners"));
         assert_eq!(Book::load(&dir), b);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1140,7 +1043,7 @@ mod tests {
         let line = serde_json::json!({ "see": out.to_string_lossy() }).to_string();
         std::fs::write(agents.join("agent-a.jsonl"), format!("{line}\n")).unwrap();
         let mut book = Book::default();
-        let next = book.next("landing", "desk", "lap", T);
+        let next = book.next("landing", "desk", 1);
         let (meta, payload, len) = snapshot(&lap.0, "landing", &next, &transcript).unwrap();
         assert_eq!(meta.side.len(), 1);
         book.sent("landing", "desk", &meta, len);
@@ -1152,7 +1055,7 @@ mod tests {
         std::fs::write(&transcript, "{\"a\":1}\n{\"b\":2}\n").unwrap();
         std::fs::create_dir_all(out.parent().unwrap()).unwrap();
         std::fs::write(&out, "big").unwrap();
-        let next = book.next("landing", "desk", "lap", T);
+        let next = book.next("landing", "desk", 1);
         let (m2, payload, _) = snapshot(&lap.0, "landing", &next, &transcript).unwrap();
         // Only the new tool output goes the second time.
         assert_eq!(m2.side, [("tool-results/r.txt".to_string(), 3)]);

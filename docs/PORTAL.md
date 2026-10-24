@@ -447,8 +447,13 @@ brother it joined:
 
 ```json
 { "me": { "public": "<b64url, 65 byte point>", "private": "<b64url, x || y || d>" },
-  "brothers": [{ "id": "<pc id>", "name": "Laptop", "public": "<b64url>", "key": "<b64url, 32 bytes>", "joined": 1760000000, "seen": 1760000000 }] }
+  "brothers": [{ "id": "<pc id>", "name": "Laptop", "public": "<b64url>", "key": "<b64url, 32 bytes>", "joined": 1760000000, "seen": 1760000000 }],
+  "cast": [{ "id": "<pc id>", "...": "as in brothers" }] }
 ```
+
+`cast` holds brothers cast out, with the link key each had, only so one
+that comes back under it can be told so (see "Introductions and casting
+out" below). It is absent while empty.
 
 On a brother channel, until there is a key, frames are plain UTF-8 JSON:
 
@@ -523,14 +528,11 @@ brother channel, which is served as a brother whatever its hello says. A
 phone hears none of it, and its `lore` and `entries` are ignored.
 
 - `{"t":"roster","n",...}` after the hello, then whenever it changes: the
-  roster's own fields (`brothers`, `sessions`, `outcast`) beside `t`.
-  Until the mesh keeps one, it is this PC and the brothers in
-  `brothers.json`, with who keeps it, the owners it knows and the
-  switches folded in. `n` rises with every change to any of that, past
-  the latest join, and an entry that changed carries the new number, so
-  the merge takes it. A PC with no brothers sends none.
-  A brother may act (`input`, `start` and the rest) when the roster gives
-  it control; one the roster does not know only watches.
+  roster's own fields (`brothers`, `sessions`, `outcast`) beside `t`. A
+  PC with no brothers sends none. A brother may act (`input`, `start` and
+  the rest) when the roster gives it control; one the roster does not
+  know only watches. See "The roster" below for what it holds and how two
+  are merged.
 - `{"t":"state","state":"awake"|"sleeping"|"leaving"}` after the hello, at
   once when it changes ("sleeping" as Windows suspends, "leaving" as it
   shuts down, "awake" after) and every 15 seconds as a heartbeat.
@@ -565,6 +567,103 @@ fields.
   snapshot. Not `ok`, the owner sends the next one whole.
 - `{"t":"takeover","sessions":{"<id>":{"n","brother","since"}}}`: owners.
   Sent to every brother when a session is taken over, its number one
-  higher, and whenever a link comes up, with every owner the sender
-  knows. A brother whose session went elsewhere keeps it paused, its work
-  on `horadric/orphaned/<id>`. Needs control, as `takeover` always did.
+  higher, and whenever a link comes up, with the owners that are the
+  sender's own. Only those are taken from it: a brother cannot hand a
+  session to another this way. Since 0.33 the roster carries every owner
+  too, and what `takeover` brings goes into the same roster, so the two
+  never disagree. A brother whose session went elsewhere keeps it paused,
+  its work on `horadric/orphaned/<id>`. Needs control, as `takeover`
+  always did.
+
+## Protocol v3: the roster
+
+Added in 0.33. Every brother keeps `<data dir>/roster.json`: every roster
+its brothers served it, merged, with every session's owner. What a
+brother serves is that, without any entry for itself, merged with its
+own entry put together afresh (its name, its key, `holds`, its keepers
+and switch from `keeping.json`, the brothers it lets only watch and the
+keys it cast out from `standing.json`) and an entry numbered `0` for
+each brother in its `brothers.json`, so one whose own roster has not
+come yet is still known by name.
+
+```json
+{ "t": "roster", "n": 1761000042,
+  "brothers": [{ "n": 1761000042, "id": "<pc id>", "name": "Laptop", "key": "<b64url public key>",
+                 "link": "relay", "view_only": ["<id>"], "keepers": ["<id>"], "auto_takeover": 600,
+                 "cast_out": true, "holds": ["<id>", "<id>"] }],
+  "sessions": { "<horadric id>": { "n": 2, "brother": "<pc id>", "since": 1761000000 } },
+  "outcast": ["<b64url public key>"] }
+```
+
+- A brother is an entry per key it ever had: one cast out and let in
+  again under its old id has two, the old one cast out. Where two rosters
+  both have an entry of one id and key, the higher `n` wins, then the
+  greater entry as a whole, so every brother picks the same. A session
+  goes to the higher `n`. `outcast` is the union of both and never
+  shrinks, and an entry whose key is in it is cast out. Merging is the
+  same in any order and twice is once, so brothers that were apart agree
+  again whichever rosters cross first.
+- Nobody speaks for a brother but itself: a roster heard is taken without
+  its entries for the hearer, whose own entry is only ever what it puts
+  together itself.
+- A brother's own entry gets a number past every one it has heard when
+  it changes (kept in `roster-counted.json`), as a clock that only goes
+  up, so its change wins wherever it is merged.
+- `holds` lists the brothers it holds a link key for. It is what vouches
+  for a brother another has not met (see below).
+- `sessions` holds every owner: claimed with `n` 1 at a session's first
+  snapshot, one higher with each handoff's `took` and each takeover. An
+  older `keeping.json` that still holds `owners` has them moved here once.
+  A brother hearing a roster in which a session it owned is another's,
+  or its own under a higher number, keeps its copy paused, its work on
+  `horadric/orphaned/<id>`, unless it is handing that session to that
+  very brother, whose `took` then finishes the handoff.
+
+## Protocol v3: introductions and casting out
+
+Added in 0.33. Joining once joins everyone: the roster introduces.
+
+- A brother B that holds a link key for X takes one for N when the roster
+  it hears has N in good standing, N has no other key in good standing,
+  B holds no key for N, and X's entry, under the very key B holds for X
+  and in good standing, lists N in `holds`. So when A lets N in, A's
+  roster brings N to every brother of A, and every brother of A to N.
+- The key: SHA-256 of `"horadric introduced key v1"` over the ECDH
+  secret of the two long term keys, the lower id's public key, the
+  higher id's, the lower id and the higher id, each length led as the
+  join's derivations are. Each side keeps the other in `brothers.json`
+  as a brother joined, and the lower id links as usual: no code, since
+  each public key came sealed from a brother the human vouched for, so
+  the relay never had the chance to put its own in. A forged or replayed
+  roster does not open (link frames), and one heard twice changes
+  nothing.
+- A hello that comes before its introduction (the two hear of each other
+  in either order) is kept and heard again once the key comes.
+- A brother away while N came hears it from whichever brother it links
+  to first, since every roster carries every brother.
+- A brother cast out vouches for nobody: its `holds` count for nothing.
+  One it let in that others met meanwhile stays; cast that one out too.
+- Casting out (the human, on any brother) writes the key into `outcast`.
+  Every brother that hears it drops the brother's key into `cast`, closes
+  its channels and its tiles go, first sending it
+  `{"t":"cast_out"}` on any linked channel. A brother that opens
+  `cast_out` from a brother it holds (or hears a roster with its own key
+  in `outcast`) lets every brother go, its key pair and its roster with
+  them, and tells its human.
+- A brother cast out that relinks under its old key gets its hello
+  answered, then `cast_out`, then the channel closes. One asking to join,
+  under its old id or with a key in `outcast`, is refused unasked: no
+  prompt for a stolen machine to wear the human down with. It comes back
+  only when a brother's human asks it to join, with the new key it made;
+  then its old id stands again everywhere the roster reaches, and its old
+  key stays refused.
+
+## Protocol v3: one machine, one brother
+
+Added in 0.33. A Linux node joined by its SSH destination that signed in
+too is one brother. Its hello answer over `--stdio` carries `"id"` (its
+relay id) and `"key"` (its public key) once it holds a key pair. A PC that
+holds that id under that very key shows the node as that brother: one
+cluster, one tray line. The relay link is preferred; the `ssh` link waits
+ready behind it and serves only while the relay link is down. Two
+brothers that share a name are shown with the start of their keys.

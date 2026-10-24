@@ -3237,9 +3237,11 @@ fn set_control(id: &str, on: bool) {
 /// Casting out cannot be undone, so it is asked first, Cancel the default.
 fn confirm_cast_out(name: &str) -> bool {
     let text = format!(
-        "{name} will be refused from now on: it can no longer see or control \
-         this PC, and asking to join again is refused without a prompt.\n\n\
-         This cannot be undone. Only a PC set up anew can join again."
+        "{name} will be refused from now on, by this PC and by every brother: \
+         it can no longer see or control any of them, and asking to join again \
+         is refused without a prompt.\n\n\
+         This cannot be undone. Only a brother asking {name} to join again \
+         lets it back in, with a new key."
     );
     let pressed = ask(&Dialog {
         tone: Tone::Warning,
@@ -3252,21 +3254,10 @@ fn confirm_cast_out(name: &str) -> bool {
     pressed == Some(0)
 }
 
-/// Writes the brother into the outcasts with the key it joined with,
-/// before its key goes, so a link that races the drop is refused too.
+/// Casts the brother out: the brothers' state writes it where it lasts
+/// (the outcasts and the roster) before its key goes, so a link that
+/// races the drop is refused too.
 fn cast_out(id: &str) {
-    let Some(dir) = horadric_hooks::state_dir() else {
-        return;
-    };
-    let key = crate::joining::Store::load(&dir)
-        .and_then(|s| s.get(id).map(|j| j.public.clone()))
-        .unwrap_or_default();
-    let mut standing = crate::standing::Standing::load(&dir);
-    standing.cast_out(id, &key);
-    if let Err(e) = standing.save(&dir) {
-        eprintln!("horadric: cannot keep who was cast out: {e}");
-        return;
-    }
     crate::brothers::cast_out(id);
 }
 

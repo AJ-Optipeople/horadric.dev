@@ -38,6 +38,7 @@ pub mod keeping;
 pub mod lookback;
 pub mod lore;
 pub mod merge;
+pub mod mesh;
 pub mod node;
 pub mod nodes;
 pub mod overlap;

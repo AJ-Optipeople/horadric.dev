@@ -10,8 +10,9 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
+use horadric_core::brotherhood::Owner;
 use horadric_core::brothers::{
-    confirm_text, forget, let_in_text, Brothers, Event, Hands, Human, Listener, Relay,
+    cast_out_offline, confirm_text, let_in_text, Brothers, Event, Hands, Human, Listener, Relay,
 };
 use horadric_core::joining::{Crypto, Listed};
 use horadric_core::portal::id;
@@ -138,6 +139,8 @@ impl Listener for ToApp {
                 DOWNS.lock().unwrap_or_else(|e| e.into_inner()).push(ch);
                 wake_requests();
             }
+            Event::Gone { id } => tell_link(Link::Gone { id }),
+            Event::Moved { owners } => tell_link(Link::Moved { owners }),
         }
     }
 }
@@ -210,21 +213,22 @@ pub fn ask(brother: &str) {
     }
 }
 
-/// Drops the brother with this id: its key goes from `brothers.json` and
-/// every channel to it closes. The caller has already written it into
-/// `standing.json`, which refuses it from then on.
+/// Casts out the brother with this id: refused from then on here and, by
+/// the roster, on every brother; told so if linked; its key gone and every
+/// channel to it closed.
 pub fn cast_out(id: &str) {
     let mut held = STATE.lock().unwrap_or_else(|e| e.into_inner());
     match held.as_mut() {
         Some((_, b)) => b.cast_out(id),
-        // No relay link: only the file, which the next link loads.
+        // No relay link: only the files, which the next link loads.
         None => {
             let Some(dir) = horadric_hooks::state_dir() else {
                 return;
             };
-            if let Err(e) = forget(&dir, id) {
+            if let Err(e) = cast_out_offline(&dir, id) {
                 eprintln!("horadric: cannot keep the brothers: {e}");
             }
+            tell_link(Link::Gone { id: id.to_string() });
         }
     }
 }
@@ -247,6 +251,14 @@ pub enum Link {
     },
     Down {
         ch: u32,
+    },
+    /// Brother `id` was cast out: its tiles go.
+    Gone {
+        id: String,
+    },
+    /// Sessions of this PC that a roster says another owns now.
+    Moved {
+        owners: Vec<(String, Owner)>,
     },
 }
 

@@ -111,6 +111,38 @@ pub fn node_key(name: &str) -> String {
     format!("node-{}", name.replace(['@', '/'], "-"))
 }
 
+/// The brother a Linux node reached over `ssh` is, by what its hello says
+/// of itself: its relay id, when this machine holds that brother under the
+/// very key the hello names (`held`, id to public key). Then the node and
+/// that brother are one machine, shown once. A hello naming an id held
+/// under another key is no one this machine knows.
+pub fn folds_into(
+    hello: &Value,
+    held: &std::collections::BTreeMap<String, String>,
+) -> Option<String> {
+    let id = hello.get("id")?.as_str()?;
+    let key = hello.get("key")?.as_str()?;
+    (!key.is_empty() && held.get(id).map(String::as_str) == Some(key)).then(|| id.to_string())
+}
+
+/// The names to show for brothers, `(key, name)`, so two that share a name
+/// are told apart: each of those gets the start of its key beside it.
+pub fn distinct_names(named: &[(String, String)]) -> Vec<(String, String)> {
+    named
+        .iter()
+        .map(|(key, name)| {
+            let shared = named.iter().any(|(k, n)| k != key && n == name);
+            let shown = if shared {
+                let tag: String = key.trim_start_matches("node-").chars().take(4).collect();
+                format!("{name} ({tag})")
+            } else {
+                name.clone()
+            };
+            (key.clone(), shown)
+        })
+        .collect()
+}
+
 /// The URL a client dials for the PC with this id.
 pub fn phone_url(relay: &str, id: &str) -> String {
     format!("{}/phone?id={id}", relay.trim_end_matches('/'))
@@ -557,6 +589,33 @@ mod tests {
         assert_eq!(title("vps", "horadric.dev"), "horadric.dev \u{b7} vps");
         // A slash in a name cannot move the split.
         assert_eq!(split_key(&key("a/b", "p")), Some(("a b", "p")));
+    }
+
+    #[test]
+    fn a_node_over_ssh_folds_into_the_brother_it_says_it_is() {
+        let held = std::collections::BTreeMap::from([("r1".to_string(), "K1".to_string())]);
+        let hello = |id: &str, key: &str| json!({"t": "hello", "v": 3, "id": id, "key": key});
+        assert_eq!(folds_into(&hello("r1", "K1"), &held), Some("r1".into()));
+        // Another key under that id, an id not held, or no word at all:
+        // it stays a node of its own.
+        assert_eq!(folds_into(&hello("r1", "K2"), &held), None);
+        assert_eq!(folds_into(&hello("r2", "K1"), &held), None);
+        assert_eq!(folds_into(&hello("r1", ""), &held), None);
+        assert_eq!(folds_into(&json!({"t": "hello"}), &held), None);
+    }
+
+    #[test]
+    fn two_brothers_of_one_name_are_shown_apart() {
+        let named = vec![
+            ("a1b2c3".to_string(), "vps".to_string()),
+            ("node-vps".to_string(), "vps".to_string()),
+            ("ffee".to_string(), "Desk".to_string()),
+        ];
+        let shown = distinct_names(&named);
+        assert_eq!(shown[0].1, "vps (a1b2)");
+        assert_eq!(shown[1].1, "vps (vps)");
+        assert_eq!(shown[2].1, "Desk");
+        assert_ne!(shown[0].1, shown[1].1);
     }
 
     fn on(id: &str) -> OnBrother {

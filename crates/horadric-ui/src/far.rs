@@ -63,6 +63,10 @@ enum Event {
     Keyed(usize, String),
     /// Made on a thread for the brother keyed so: lore it lacks.
     Send(String, Value),
+    /// The brother keyed so was cast out.
+    Gone(String),
+    /// Sessions of this PC that a roster says another owns now.
+    Moved(Vec<(String, brotherhood::Owner)>),
 }
 
 /// One brother, kept while its link is down so its tiles stay.
@@ -116,6 +120,16 @@ pub(super) struct Far {
     /// were found in, so a project opened since is shared at once.
     lore: Lores,
     lore_dirs: Vec<PathBuf>,
+    /// A node's `ssh` link kept ready, by the relay brother it is the same
+    /// machine as, while that brother is reached over the relay: the relay
+    /// link is preferred, and this takes over when it drops.
+    standby: HashMap<String, Via>,
+}
+
+fn debug_far(what: &str) {
+    if std::env::var_os("HORADRIC_DEBUG").is_some() {
+        eprintln!("far: {what}");
+    }
 }
 
 fn wake(notify: isize) {
@@ -139,6 +153,8 @@ impl Far {
                 Link::Up { ch, id, name } => Event::Up(Via::Channel(ch), id, name),
                 Link::Heard { ch, msg } => Event::Heard(Via::Channel(ch), msg),
                 Link::Down { ch } => Event::Down(Via::Channel(ch)),
+                Link::Gone { id } => Event::Gone(id),
+                Link::Moved { owners } => Event::Moved(owners),
             };
             if to_app.lock().is_ok_and(|t| t.send(e).is_ok()) {
                 wake(notify);
@@ -160,6 +176,7 @@ impl Far {
             arrived: HashMap::new(),
             lore: Lores::default(),
             lore_dirs: Vec::new(),
+            standby: HashMap::new(),
         }
     }
 }
@@ -315,6 +332,16 @@ impl App {
                 }
                 Event::Send(key, msg) => {
                     self.far_send(&key, msg);
+                    false
+                }
+                Event::Gone(key) => {
+                    debug_far(&format!("{key} was cast out, its tiles go"));
+                    far_node::unfold(&key);
+                    self.far.standby.remove(&key);
+                    self.far_forget(&key)
+                }
+                Event::Moved(owners) => {
+                    self.keeping_moved(owners);
                     false
                 }
             };
@@ -501,7 +528,23 @@ impl App {
             lore: HashMap::new(),
         });
         p.name = name;
+        // A node reached over `ssh` that is this brother too waits, ready,
+        // while the relay link serves: it is the one preferred.
+        if let (Via::Channel(_), Some(was @ Via::Node(_))) = (via, p.via) {
+            self.far.standby.insert(key.clone(), was);
+        }
+        self.far_greet(&key, via);
+        false
+    }
+
+    /// Makes `via` the link brother `key` is served on, and says hello on
+    /// it.
+    fn far_greet(&mut self, key: &str, via: Via) {
+        let Some(p) = self.far.peers.get_mut(key) else {
+            return;
+        };
         p.via = Some(via);
+        p.client = Client::default();
         p.streams.clear();
         let mut hello = p.client.hello();
         // A node knows its viewers only by what they call themselves, and
@@ -509,18 +552,80 @@ impl App {
         if let Via::Node(_) = via {
             hello["name"] = json!(crate::portal_pair::pc_name());
         }
-        self.far_send(&key, hello);
-        false
+        self.far_send(key, hello);
+    }
+
+    /// Node `i`, reached over `ssh` under `old`, says in its hello that it
+    /// is relay brother `key`, which this PC holds: one machine, so it is
+    /// shown once, as that brother. The relay link is preferred; the `ssh`
+    /// one serves only while the relay one is down, and waits ready
+    /// otherwise. True when tiles changed.
+    fn far_fold(&mut self, i: usize, old: &str, key: &str, hello: &Value) -> bool {
+        let via = Via::Node(i);
+        let node = self.far.nodes.get(i).map(|(n, _)| n.name.clone());
+        debug_far(&format!("{old} is brother {key} too: shown once"));
+        if let Some(name) = &node {
+            far_node::fold(name, Some(key));
+        }
+        let client = self.far.peers.get(old).map(|p| p.client.clone());
+        let mut changed = self.far_forget(old);
+        crate::project::unname_brother(old);
+        self.far.names.insert(via, key.to_string());
+        let relayed = self
+            .far
+            .peers
+            .get(key)
+            .is_some_and(|p| matches!(p.via, Some(Via::Channel(_))));
+        if relayed {
+            self.far.standby.insert(key.to_string(), via);
+            return changed;
+        }
+        let name = crate::project::brother_name(key);
+        let p = self
+            .far
+            .peers
+            .entry(key.to_string())
+            .or_insert_with(|| Peer {
+                name,
+                via: None,
+                client: Client::default(),
+                streams: Streams::default(),
+                projects: Vec::new(),
+                control: false,
+                heard: brotherhood::Heard {
+                    said: State::Awake,
+                    last: unix_now(),
+                    linked: false,
+                },
+                list: Vec::new(),
+                lore: HashMap::new(),
+            });
+        p.via = Some(via);
+        p.client = client.unwrap_or_default();
+        p.streams.clear();
+        changed |= self.far_heard(via, hello);
+        changed
     }
 
     fn far_down(&mut self, via: Via) -> bool {
         let Some(name) = self.far.names.remove(&via) else {
             return false;
         };
+        if self.far.standby.get(&name) == Some(&via) {
+            self.far.standby.remove(&name);
+        }
         let Some(p) = self.far.peers.get_mut(&name) else {
             return false;
         };
         if p.via != Some(via) {
+            return false;
+        }
+        // The relay link of a brother reached over `ssh` too went: the
+        // `ssh` link serves it now, so its tiles stay lit.
+        if let Some(standby) = self.far.standby.remove(&name) {
+            debug_far(&format!("{name} goes on over ssh"));
+            self.far.names.insert(standby, name.clone());
+            self.far_greet(&name, standby);
             return false;
         }
         p.via = None;
@@ -587,6 +692,26 @@ impl App {
         let Some(name) = self.far.names.get(&via).cloned() else {
             return false;
         };
+        // A node over `ssh` that says it is a relay brother this PC holds is
+        // that brother, shown once.
+        if let (Via::Node(i), Some("hello")) = (via, msg["t"].as_str()) {
+            let held = horadric_hooks::state_dir()
+                .and_then(|d| crate::joining::Store::load(&d))
+                .map(|s| s.held())
+                .unwrap_or_default();
+            if let Some(key) = afar::folds_into(msg, &held).filter(|k| *k != name) {
+                return self.far_fold(i, &name, &key, msg);
+            }
+        }
+        // A link waiting as another's standby serves nothing.
+        if self
+            .far
+            .peers
+            .get(&name)
+            .is_some_and(|p| p.via != Some(via))
+        {
+            return false;
+        }
         if let Some(p) = self.far.peers.get_mut(&name) {
             p.heard.last = unix_now();
         }

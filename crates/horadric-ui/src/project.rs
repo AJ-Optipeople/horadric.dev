@@ -32,12 +32,30 @@ pub fn name_brother(key: &str, name: &str) {
     }
 }
 
-/// The name of the brother keyed `key`, the key until it is known.
+/// Forgets the name of the brother keyed `key`, one no longer shown: a
+/// node folded into its relay brother, or a brother cast out.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn unname_brother(key: &str) {
+    if let Ok(mut b) = BROTHERS.lock() {
+        b.remove(key);
+    }
+}
+
+/// The name of the brother keyed `key`, the key until it is known. Two
+/// brothers of one name are told apart by the start of their keys.
 pub fn brother_name(key: &str) -> String {
     BROTHERS
         .lock()
         .ok()
-        .and_then(|b| b.get(key).cloned())
+        .and_then(|b| {
+            b.get(key)?;
+            let named: Vec<(String, String)> =
+                b.iter().map(|(k, n)| (k.clone(), n.clone())).collect();
+            afar::distinct_names(&named)
+                .into_iter()
+                .find(|(k, _)| k == key)
+                .map(|(_, n)| n)
+        })
         .unwrap_or_else(|| key.to_string())
 }
 

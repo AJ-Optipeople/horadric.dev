@@ -86,6 +86,14 @@ pub(super) enum Said {
     Down {
         ch: u32,
     },
+    /// Brother `id` was cast out, here or by the roster.
+    Gone {
+        id: String,
+    },
+    /// Sessions of this node a roster says another owns now.
+    Moved {
+        owners: Vec<(String, horadric_core::brotherhood::Owner)>,
+    },
 }
 
 /// Hands linked channels' doings to the serving thread.
@@ -98,6 +106,8 @@ impl Listener for ToServing {
             Link::Asked { ch, id, msg } => Said::Asked { ch, id, msg },
             Link::Heard { ch, msg } => Said::Heard { ch, msg },
             Link::Down { ch } => Said::Down { ch },
+            Link::Gone { id } => Said::Gone { id },
+            Link::Moved { owners } => Said::Moved { owners },
         };
         let tx = self.0.lock().unwrap_or_else(|e| e.into_inner());
         let _ = tx.send(Event::Relay(said));

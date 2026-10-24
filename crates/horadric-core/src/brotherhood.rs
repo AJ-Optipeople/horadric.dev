@@ -84,6 +84,11 @@ pub struct Brother {
     pub auto_takeover: Option<u64>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub cast_out: bool,
+    /// The brothers it holds a link key for, by id: those it let in or was
+    /// let in by, and those introduced to it. What vouches for a brother
+    /// another has not met yet (see [`Roster::introduced`]).
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub holds: BTreeSet<String>,
 }
 
 impl Brother {
@@ -99,9 +104,19 @@ impl Brother {
             keepers: Vec::new(),
             auto_takeover: None,
             cast_out: false,
+            holds: BTreeSet::new(),
         }
     }
+
+    /// Whether it is a brother in good standing in `roster`: not cast out,
+    /// nor its key.
+    fn live(&self, roster: &Roster) -> bool {
+        !self.cast_out && !roster.refuses(&self.key)
+    }
 }
+
+/// Every session's owner, by Horadric id.
+pub type Owners = BTreeMap<String, Owner>;
 
 /// Who owns a session. `n` only goes up: each handoff and each takeover
 /// raises it, which is what fences a brother that comes back with an old
@@ -144,7 +159,7 @@ pub struct Counted {
     /// A hash of the sessions and outcast keys.
     #[serde(default)]
     pub rest: u64,
-    /// Each brother's number and a hash of its entry, by id.
+    /// Each brother's number and a hash of its entry, by its id and key.
     #[serde(default)]
     pub brothers: BTreeMap<String, (u64, u64)>,
 }
@@ -174,12 +189,37 @@ impl Roster {
         }
     }
 
+    /// Brother `id` as it stands now. A brother cast out and let in again
+    /// with a new key has an entry for each key, so this is the one in good
+    /// standing, else the newest.
     pub fn brother(&self, id: &str) -> Option<&Brother> {
-        self.brothers.iter().find(|b| b.id == id)
+        self.at(id).map(|i| &self.brothers[i])
     }
 
     fn brother_mut(&mut self, id: &str) -> Option<&mut Brother> {
-        self.brothers.iter_mut().find(|b| b.id == id)
+        self.at(id).map(|i| &mut self.brothers[i])
+    }
+
+    fn at(&self, id: &str) -> Option<usize> {
+        let of = || {
+            self.brothers
+                .iter()
+                .enumerate()
+                .filter(move |(_, b)| b.id == id)
+        };
+        of().filter(|(_, b)| b.live(self))
+            .max_by_key(|(_, b)| b.n)
+            .or_else(|| of().max_by_key(|(_, b)| b.n))
+            .map(|(i, _)| i)
+    }
+
+    /// Where an entry with this id and key goes, so the list stays in the
+    /// order a merge gives and two equal rosters compare equal.
+    fn insert(&mut self, b: Brother) {
+        let at = self
+            .brothers
+            .partition_point(|o| (o.id.as_str(), o.key.as_str()) < (b.id.as_str(), b.key.as_str()));
+        self.brothers.insert(at, b);
     }
 
     /// The name to show for a brother, its id when the roster lacks it.
@@ -208,21 +248,17 @@ impl Roster {
         if self.refuses(&b.key) {
             return Err(Refused::CastOut);
         }
-        let b = Brother {
+        if self.brother(&b.id).is_some_and(|old| old.live(self)) {
+            return Err(Refused::Taken);
+        }
+        // The entry of its old key stays beside the new one, cast out, so
+        // a roster still holding the old one never brings it back.
+        self.brothers.retain(|o| !(o.id == b.id && o.key == b.key));
+        self.insert(Brother {
             n: self.n + 1,
             cast_out: false,
             ..b
-        };
-        match self.brother_mut(&b.id) {
-            Some(old) if !old.cast_out => return Err(Refused::Taken),
-            Some(old) => *old = b,
-            None => {
-                // Kept in id order, the order a merge gives, so two equal
-                // rosters compare equal.
-                let at = self.brothers.partition_point(|o| o.id < b.id);
-                self.brothers.insert(at, b);
-            }
-        }
+        });
         self.n += 1;
         Ok(())
     }
@@ -237,9 +273,86 @@ impl Roster {
         b.cast_out = true;
         b.n = next;
         let key = b.key.clone();
-        self.outcast.insert(key);
+        if !key.is_empty() {
+            self.outcast.insert(key);
+        }
         self.n += 1;
         true
+    }
+
+    /// Casts out brother `id` under the key `key` it had, adding its entry
+    /// first when this roster has none for that key, as one only held in
+    /// `brothers.json` has not. So the cast out travels even for a brother
+    /// whose own roster never came.
+    pub fn cast_out_key(&mut self, id: &str, name: &str, key: &str) {
+        if !self.brothers.iter().any(|b| b.id == id && b.key == key) {
+            self.insert(Brother::new(id, name, key, Link::Relay));
+        }
+        let next = self.n + 1;
+        for b in self
+            .brothers
+            .iter_mut()
+            .filter(|b| b.id == id && b.key == key)
+        {
+            b.cast_out = true;
+            b.n = b.n.max(next);
+        }
+        if !key.is_empty() {
+            self.outcast.insert(key.to_string());
+        }
+        self.n += 1;
+    }
+
+    /// This roster without brother `me`'s entries: what `me` takes from a
+    /// roster it hears, since nobody but `me` says who `me` is, whom it
+    /// lets control it, or who keeps it. The keys cast out stay, its own
+    /// among them if it was.
+    pub fn without(&self, me: &str) -> Roster {
+        Roster {
+            brothers: self
+                .brothers
+                .iter()
+                .filter(|b| b.id != me)
+                .cloned()
+                .collect(),
+            ..self.clone()
+        }
+    }
+
+    /// The brothers `me` takes a link key for by introduction, from the
+    /// brothers it holds a key for now (`held`, id to public key): each one
+    /// in good standing that `me` does not hold yet, whose id has no other
+    /// key in good standing, and that a brother `me` holds, in good
+    /// standing under the key `me` holds for it, says it holds too. So a
+    /// key only comes from a brother the human vouched for, over its sealed
+    /// link, and one cast out vouches for nobody.
+    pub fn introduced(&self, me: &str, held: &BTreeMap<String, String>) -> Vec<&Brother> {
+        let live = |b: &&Brother| b.live(self);
+        self.brothers
+            .iter()
+            .filter(live)
+            .filter(|e| e.id != me && !e.key.is_empty() && !held.contains_key(&e.id))
+            .filter(|e| {
+                !self
+                    .brothers
+                    .iter()
+                    .filter(live)
+                    .any(|o| o.id == e.id && o.key != e.key)
+            })
+            .filter(|e| {
+                self.brothers.iter().filter(live).any(|x| {
+                    x.id != e.id && held.get(&x.id) == Some(&x.key) && x.holds.contains(&e.id)
+                })
+            })
+            .collect()
+    }
+
+    /// The brothers in `held` (id to public key) whose key was cast out.
+    pub fn cast_out_of(&self, held: &BTreeMap<String, String>) -> Vec<String> {
+        held.iter()
+            .filter(|(_, key)| self.refuses(key))
+            .map(|(id, _)| id.clone())
+            .collect()
     }
 
     /// Changes one brother and raises the number, so the change wins.
@@ -281,7 +394,7 @@ impl Roster {
     /// Whether the link from `by` may act on `of`. A brother cast out, or
     /// one the roster does not know, controls nothing.
     pub fn control(&self, of: &str, by: &str) -> bool {
-        let known = |id| self.brother(id).is_some_and(|b| !b.cast_out);
+        let known = |id| self.brother(id).is_some_and(|b| b.live(self));
         known(of) && known(by) && self.brother(of).is_some_and(|b| !b.view_only.contains(by))
     }
 
@@ -333,28 +446,35 @@ impl Roster {
         match self.owner(session) {
             Some(o) if o.brother != me || o.n > held => Fence::Orphaned {
                 branch: orphan_branch(session),
-                line: format!(
-                    "taken over by {} at {}",
-                    self.name(&o.brother),
-                    clock(o.since, offset)
-                ),
+                line: self.taken_line(o, offset),
             },
             _ => Fence::Resume,
         }
     }
 
+    /// What the tile of a session now owned by `o` says on the brother that
+    /// had it: "taken over by Desktop at 14:12".
+    pub fn taken_line(&self, o: &Owner, offset: i64) -> String {
+        format!(
+            "taken over by {} at {}",
+            self.name(&o.brother),
+            clock(o.since, offset)
+        )
+    }
+
     /// Two rosters made one. The same whichever is `self` and in any
     /// grouping, and merging one in twice changes nothing more, so
-    /// brothers agree again however their rosters cross. A brother in only
-    /// one roster is kept; where both have it, the entry changed last
-    /// wins, and a session goes to the higher number. A key cast out in
-    /// either stays cast out.
+    /// brothers agree again however their rosters cross. A brother is an
+    /// entry per key it ever had. An entry in only one roster is kept;
+    /// where both have it, the entry changed last wins, and a session goes
+    /// to the higher number. A key cast out in either stays cast out.
     pub fn merge(&self, other: &Roster) -> Roster {
         let outcast: BTreeSet<String> = self.outcast.union(&other.outcast).cloned().collect();
-        let mut brothers: BTreeMap<&str, &Brother> = BTreeMap::new();
+        let mut brothers: BTreeMap<(&str, &str), &Brother> = BTreeMap::new();
         for b in self.brothers.iter().chain(&other.brothers) {
-            if brothers.get(b.id.as_str()).is_none_or(|&had| b > had) {
-                brothers.insert(&b.id, b);
+            let at = (b.id.as_str(), b.key.as_str());
+            if brothers.get(&at).is_none_or(|&had| b > had) {
+                brothers.insert(at, b);
             }
         }
         let brothers = brothers
@@ -392,14 +512,15 @@ impl Roster {
         let mut brothers = BTreeMap::new();
         for b in &mut self.brothers {
             let entry = hash_json(&Brother { n: 0, ..b.clone() });
-            match last.brothers.get(&b.id) {
+            let at = format!("{} {}", b.id, b.key);
+            match last.brothers.get(&at) {
                 Some(&(n, was)) if was == entry => b.n = b.n.max(n),
                 _ => {
                     b.n = b.n.max(next);
                     changed = true;
                 }
             }
-            brothers.insert(b.id.clone(), (b.n, entry));
+            brothers.insert(at, (b.n, entry));
         }
         changed |= last.brothers.keys().any(|id| !brothers.contains_key(id));
         let rest = hash_json(&(&self.sessions, &self.outcast));
@@ -464,6 +585,22 @@ pub fn keepers_turn<'a>(
         }
     }
     false
+}
+
+/// The sessions `me` owned in `before` that `after` gives to another, or
+/// to `me` under a higher number than it held: taken over or handed on
+/// while `me` was not looking, so its own copy must not run on. The owner
+/// each now has beside it.
+pub fn moved(me: &str, before: &Owners, after: &Owners) -> Vec<(String, Owner)> {
+    after
+        .iter()
+        .filter(|(id, o)| {
+            before
+                .get(*id)
+                .is_some_and(|b| b.brother == me && (o.brother != me || o.n > b.n))
+        })
+        .map(|(id, o)| (id.clone(), o.clone()))
+        .collect()
 }
 
 /// The branch a fenced session's work is kept on.
@@ -1059,5 +1196,269 @@ mod tests {
             orphan_branch("fix-login-51234"),
             "horadric/orphaned/fix-login-51234"
         );
+    }
+
+    /// Brother `id`'s own entry, numbered `n`, holding `holds`.
+    fn own(id: &str, n: u64, holds: &[&str]) -> Brother {
+        Brother {
+            n,
+            holds: holds.iter().map(|h| h.to_string()).collect(),
+            ..b(id)
+        }
+    }
+
+    fn roster(brothers: Vec<Brother>) -> Roster {
+        let mut r = Roster {
+            n: brothers.iter().map(|b| b.n).max().unwrap_or(0),
+            ..Roster::default()
+        };
+        for b in brothers {
+            r.insert(b);
+        }
+        r
+    }
+
+    fn held(ids: &[&str]) -> BTreeMap<String, String> {
+        ids.iter()
+            .map(|id| (id.to_string(), format!("key-{id}")))
+            .collect()
+    }
+
+    fn ids(list: Vec<&Brother>) -> Vec<&str> {
+        list.into_iter().map(|b| b.id.as_str()).collect()
+    }
+
+    #[test]
+    fn rosters_merged_in_any_order_come_out_the_same() {
+        // Five brothers' views, each knowing a different part: a join, a
+        // rename, a cast out, a rejoin under a new key, owners moving.
+        let mut a = roster(vec![
+            own("desktop", 3, &["laptop"]),
+            own("laptop", 2, &["desktop"]),
+        ]);
+        a.claim("s1", "desktop", T);
+        let mut c = a.clone();
+        c.insert(own("vps", 5, &["laptop"]));
+        c.rename("laptop", "Lap");
+        c.move_session("s1", "laptop", T + 1);
+        let mut d = c.clone();
+        d.cast_out("vps");
+        d.insert(Brother {
+            key: "key-vps-2".into(),
+            ..own("vps", 9, &["desktop"])
+        });
+        let mut e = a.clone();
+        e.claim("s2", "laptop", T);
+        e.set_keepers("desktop", vec!["laptop".into()]);
+        let f = Roster::first(b("nas"));
+        let all = [a, c, d, e, f];
+        let one = all.iter().fold(Roster::default(), |m, r| m.merge(r));
+        // Every order of five, folded either way round.
+        let mut order: Vec<usize> = (0..all.len()).collect();
+        let mut seen = 0;
+        permute(&mut order, 0, &mut |o| {
+            let left = o.iter().fold(Roster::default(), |m, &i| m.merge(&all[i]));
+            let right = o.iter().fold(Roster::default(), |m, &i| all[i].merge(&m));
+            assert_eq!(left, one, "{o:?}");
+            assert_eq!(right, one, "{o:?}");
+            seen += 1;
+        });
+        assert_eq!(seen, 120);
+        // And in pairs first, then together.
+        let pairs = all[0].merge(&all[3]).merge(&all[1].merge(&all[4]));
+        assert_eq!(pairs.merge(&all[2]), one);
+        // What it holds: the old vps key out, the new one in good standing.
+        assert!(one.refuses("key-vps"));
+        assert_eq!(one.brother("vps").unwrap().key, "key-vps-2");
+        assert_eq!(one.admits("key-vps-2").map(|b| b.id.as_str()), Some("vps"));
+        assert_eq!(one.owner("s1").unwrap().brother, "laptop");
+        assert!(one.owner("s2").is_some() && one.brother("nas").is_some());
+        assert_eq!(one.brother("laptop").unwrap().name, "Lap");
+    }
+
+    fn permute(o: &mut Vec<usize>, k: usize, f: &mut impl FnMut(&[usize])) {
+        if k == o.len() {
+            return f(o);
+        }
+        for i in k..o.len() {
+            o.swap(k, i);
+            permute(o, k + 1, f);
+            o.swap(k, i);
+        }
+    }
+
+    #[test]
+    fn an_outcast_stays_out_whatever_roster_comes_after() {
+        let mut out = roster(vec![own("desktop", 4, &["laptop"]), own("laptop", 4, &[])]);
+        out.cast_out("laptop");
+        // A roster from before, a forged one numbered far higher, and the
+        // outcast's own: none brings the key back.
+        let before = roster(vec![own("desktop", 4, &["laptop"]), own("laptop", 4, &[])]);
+        let forged = roster(vec![own("laptop", 1 << 40, &["desktop"])]);
+        let mut m = out.clone();
+        for r in [&before, &forged, &before.merge(&forged)] {
+            m = m.merge(r);
+            assert!(m.refuses("key-laptop"));
+            assert!(m.admits("key-laptop").is_none());
+            assert!(!m.control("desktop", "laptop"));
+            assert!(m.cast_out_of(&held(&["laptop", "desktop"])) == ["laptop"]);
+        }
+        // Nor does it vouch for anyone, nor is it introduced.
+        let mut late = m.clone();
+        late.insert(own("thief", 1, &[]));
+        if let Some(l) = late.brothers.iter_mut().find(|b| b.id == "laptop") {
+            l.holds.insert("thief".into());
+        }
+        assert!(late.introduced("desktop", &held(&["laptop"])).is_empty());
+        assert!(late.introduced("vps", &held(&["desktop"])).is_empty());
+    }
+
+    #[test]
+    fn a_brother_is_introduced_only_by_one_held_in_good_standing() {
+        // Desktop let the vps in, and holds the laptop.
+        let r = roster(vec![
+            own("desktop", 5, &["laptop", "vps"]),
+            own("laptop", 3, &["desktop"]),
+            own("vps", 5, &["desktop"]),
+        ]);
+        // The laptop meets the vps through the desktop, and the vps the
+        // laptop the same way.
+        assert_eq!(ids(r.introduced("laptop", &held(&["desktop"]))), ["vps"]);
+        assert_eq!(ids(r.introduced("vps", &held(&["desktop"]))), ["laptop"]);
+        // Held already, or itself: nothing.
+        assert!(r
+            .introduced("laptop", &held(&["desktop", "vps"]))
+            .is_empty());
+        assert!(r
+            .introduced("desktop", &held(&["laptop", "vps"]))
+            .is_empty());
+        // A brother that holds the voucher under another key (the relay
+        // or a stranger playing it) takes no one from it.
+        let mut other = held(&["desktop"]);
+        other.insert("desktop".into(), "key-of-someone-else".into());
+        assert!(r.introduced("laptop", &other).is_empty());
+        // A brother no one held vouches for: not introduced.
+        let mut lone = r.clone();
+        lone.insert(own("stranger", 9, &["laptop"]));
+        assert_eq!(ids(lone.introduced("laptop", &held(&["desktop"]))), ["vps"]);
+        // The vps vouching for itself is not enough.
+        let mut selfish = roster(vec![
+            own("desktop", 5, &[]),
+            own("vps", 5, &["vps", "desktop"]),
+        ]);
+        assert!(selfish.introduced("laptop", &held(&["desktop"])).is_empty());
+        // Once the desktop says it holds the vps, the vps is introduced.
+        selfish.insert(own("desktop", 6, &["vps"]));
+        selfish
+            .brothers
+            .retain(|b| !(b.id == "desktop" && b.n == 5));
+        assert_eq!(
+            ids(selfish.introduced("laptop", &held(&["desktop"]))),
+            ["vps"]
+        );
+        // An id with two keys in good standing is no one's to choose.
+        let mut two = r.clone();
+        two.insert(Brother {
+            key: "key-vps-other".into(),
+            ..own("vps", 6, &[])
+        });
+        assert!(two.introduced("laptop", &held(&["desktop"])).is_empty());
+        // The voucher cast out: no one comes in by it.
+        let mut out = r.clone();
+        out.cast_out("desktop");
+        assert!(out.introduced("laptop", &held(&["desktop"])).is_empty());
+        // The one introduced cast out: not taken either.
+        let mut gone = r.clone();
+        gone.cast_out("vps");
+        assert!(gone.introduced("laptop", &held(&["desktop"])).is_empty());
+    }
+
+    #[test]
+    fn a_brother_hears_others_but_never_its_own_entry() {
+        let mut theirs = roster(vec![own("desktop", 9, &[]), own("laptop", 9, &[])]);
+        theirs.brothers[0].view_only.insert("laptop".into());
+        theirs.outcast.insert("key-old".into());
+        let heard = theirs.without("desktop");
+        assert!(heard.brother("desktop").is_none());
+        assert!(heard.brother("laptop").is_some());
+        assert!(heard.refuses("key-old"));
+    }
+
+    #[test]
+    fn a_rejoin_under_its_old_id_is_a_second_entry() {
+        let mut r = three();
+        r.cast_out("laptop");
+        let again = Brother {
+            key: "key-laptop-2".into(),
+            ..b("laptop")
+        };
+        assert_eq!(r.join(again.clone()), Ok(()));
+        assert_eq!(r.brothers.iter().filter(|b| b.id == "laptop").count(), 2);
+        assert_eq!(r.brother("laptop").unwrap().key, "key-laptop-2");
+        assert!(r.control("desktop", "laptop"));
+        // While its new key is in good standing, a third is refused.
+        let third = Brother {
+            key: "key-laptop-3".into(),
+            ..b("laptop")
+        };
+        assert_eq!(r.join(third), Err(Refused::Taken));
+        // Renamed: the entry in good standing changes.
+        r.rename("laptop", "New");
+        assert_eq!(r.brother("laptop").unwrap().name, "New");
+        assert!(r
+            .brothers
+            .iter()
+            .any(|b| b.id == "laptop" && b.name == "Laptop"));
+    }
+
+    #[test]
+    fn a_cast_out_travels_even_for_a_brother_the_roster_never_had() {
+        let mut r = roster(vec![own("desktop", 3, &["vps"])]);
+        r.cast_out_key("vps", "vps", "key-vps");
+        let vps = r.brothers.iter().find(|b| b.id == "vps").unwrap();
+        assert!(vps.cast_out && vps.n > 3);
+        assert!(r.refuses("key-vps"));
+        // Merged into a roster that knew it in good standing, it stays out.
+        let before = roster(vec![own("vps", 50, &["desktop"])]);
+        assert!(before.merge(&r).admits("key-vps").is_none());
+        // A second key of the same id is untouched.
+        let mut two = r.clone();
+        two.insert(Brother {
+            key: "key-vps-2".into(),
+            ..own("vps", 9, &[])
+        });
+        assert!(two.admits("key-vps-2").is_some());
+    }
+
+    #[test]
+    fn a_session_moved_away_is_told_and_one_still_mine_is_not() {
+        let at = |b: &str, n: u64| Owner {
+            n,
+            brother: b.into(),
+            since: T,
+        };
+        let before: Owners = [
+            ("s1".into(), at("laptop", 1)),
+            ("s2".into(), at("laptop", 2)),
+            ("s3".into(), at("desktop", 1)),
+            ("s4".into(), at("laptop", 1)),
+        ]
+        .into();
+        let after: Owners = [
+            ("s1".into(), at("desktop", 2)),
+            ("s2".into(), at("laptop", 2)),
+            ("s3".into(), at("laptop", 2)),
+            ("s4".into(), at("laptop", 3)),
+            ("s5".into(), at("desktop", 1)),
+        ]
+        .into();
+        assert_eq!(
+            moved("laptop", &before, &after),
+            vec![
+                ("s1".into(), at("desktop", 2)),
+                ("s4".into(), at("laptop", 3))
+            ]
+        );
+        assert!(moved("nas", &before, &after).is_empty());
     }
 }

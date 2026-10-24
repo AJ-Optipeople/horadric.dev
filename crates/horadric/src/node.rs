@@ -366,6 +366,16 @@ impl Serve for Machine {
         self.kin_roster()
     }
 
+    /// Who this node is to the brotherhood, its relay id and key, so a PC
+    /// that reaches it over `ssh` as well knows the two for one brother.
+    fn hello(&self, answer: &mut Value) {
+        let key = relay::store().me.map(|m| m.public);
+        if let (Some(id), Some(key)) = (relay::me(), key) {
+            answer["id"] = json!(id);
+            answer["key"] = json!(key);
+        }
+    }
+
     fn state(&self) -> &'static str {
         if LEAVING.load(Ordering::SeqCst) {
             "leaving"
@@ -670,6 +680,11 @@ fn start(node: &Shared, asked: NewSession) -> Result<String, String> {
     let cwd = PathBuf::from(&asked.cwd);
     if !cwd.is_dir() {
         return Err(format!("{} is not a folder here", asked.cwd));
+    }
+    // Nobody sits at a server to answer Claude Code's trust prompt, and it
+    // asks again for a folder below one already trusted.
+    if asked.agent == Agent::Claude {
+        trust(&cwd);
     }
     let base = asked
         .name
@@ -1118,6 +1133,11 @@ fn relayed(
             machine.kin_down(ich);
             machine.called.remove(&ich);
         }
+        relay::Said::Gone { id } => {
+            eprintln!("horadric node: {} was cast out", machine.shown(&id));
+            machine.kin.heard.remove(&id);
+        }
+        relay::Said::Moved { owners } => machine.keeping_moved(owners),
     }
 }
 

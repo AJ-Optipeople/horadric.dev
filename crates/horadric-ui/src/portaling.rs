@@ -23,7 +23,6 @@ use std::sync::mpsc::{self, Receiver};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use horadric_core::brotherhood::Counted;
 use horadric_core::portal::{b64url, unb64url, Config, Kind, Paired};
 use horadric_core::serving::{answers, Job, Out, Running, Serve, Server};
 use horadric_core::webpush;
@@ -36,7 +35,6 @@ use windows::Win32::UI::WindowsAndMessaging::{KillTimer, PostMessageW, SetTimer}
 use super::{unix_now, App, PORTAL_TIMER, WM_HORADRIC_PORTAL};
 use crate::brothers;
 use crate::console::GridSize;
-use crate::joining;
 use crate::portal::{self, Sender};
 use crate::portal_crypto;
 use crate::portal_link::{Incoming, Link};
@@ -48,10 +46,6 @@ use crate::worktree;
 
 /// How often `portal.json` is read, so `horadric portal` takes hold soon.
 const CHECK_EVERY: Duration = Duration::from_secs(2);
-
-/// What the served roster carried last, in the state folder, so its
-/// number keeps rising across restarts.
-const COUNTED: &str = "roster-counted.json";
 
 /// How often a watched screen is looked at: at most 4 sends a second.
 const PUSH_MS: u32 = 250;
@@ -601,31 +595,8 @@ impl Portal {
     /// The roster this PC serves its brothers: from the brothers it
     /// joined, None before it joined any.
     fn roster(&self) -> Option<horadric_core::brotherhood::Roster> {
-        let store = joining::Store::load(&self.dir)?;
-        if store.brothers.is_empty() {
-            return None;
-        }
         let me = horadric_core::portal::id(&self.config.secret);
-        let mut roster = portal::joined_roster(&me, &pc_name(), &store);
-        // Who keeps this PC and its switch, and every owner it knows.
-        horadric_core::keeping::Book::load(&self.dir).fold(&mut roster, &me);
-        // Who may control this PC and who was cast out, as the tray set.
-        crate::standing::Standing::load(&self.dir).apply(&mut roster, &me);
-        // None of those parts knows the roster's number: it rises here,
-        // with every change since the roster was last served.
-        let path = self.dir.join(COUNTED);
-        let last: Counted = std::fs::read(&path)
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_default();
-        let now = roster.count(&last);
-        if now != last {
-            let text = serde_json::to_vec(&now).unwrap_or_default();
-            if let Err(e) = std::fs::write(&path, text) {
-                eprintln!("horadric: cannot keep the roster's number: {e}");
-            }
-        }
-        Some(roster)
+        horadric_core::rostering::served(&self.dir, &me, &pc_name())
     }
 
     /// Cuts off every connection from a phone no longer in the config,

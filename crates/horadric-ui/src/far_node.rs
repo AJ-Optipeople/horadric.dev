@@ -64,6 +64,42 @@ pub fn status(name: &str) -> String {
     }
 }
 
+/// The nodes that are a relay brother too, by name, with that brother's
+/// id: one machine, shown once, as that brother.
+static FOLDED: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
+
+/// Node `name` is the relay brother `id` (None: it is not, or no longer).
+pub fn fold(name: &str, id: Option<&str>) {
+    let mut f = FOLDED.lock().unwrap_or_else(|e| e.into_inner());
+    let map = f.get_or_insert_with(HashMap::new);
+    match id {
+        Some(id) => map.insert(name.to_string(), id.to_string()),
+        None => map.remove(name),
+    };
+}
+
+/// Brother `id` was cast out: no node is that brother any more.
+pub fn unfold(id: &str) {
+    let mut f = FOLDED.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(m) = f.as_mut() {
+        m.retain(|_, b| b != id);
+    }
+}
+
+/// The relay brother node `name` is, for the tray to show it once.
+pub fn folded(name: &str) -> Option<String> {
+    let f = FOLDED.lock().unwrap_or_else(|e| e.into_inner());
+    f.as_ref().and_then(|m| m.get(name).cloned())
+}
+
+/// Every node folded into a relay brother, by that brother's id.
+pub fn folded_ids() -> Vec<String> {
+    let f = FOLDED.lock().unwrap_or_else(|e| e.into_inner());
+    f.as_ref()
+        .map(|m| m.values().cloned().collect())
+        .unwrap_or_default()
+}
+
 type Shared<T> = Arc<Mutex<Option<T>>>;
 
 /// A link to one node. Dropping it ends its threads and its `ssh`.

@@ -60,15 +60,25 @@ impl Kin {
     }
 
     /// The brother of a name or id, as a PC's `handoff` or a human names
-    /// it, by its id.
+    /// it, by its id. A name two brothers share names neither: two
+    /// machines may be called the same, and the wrong one must not get a
+    /// session.
     pub(super) fn id_of(&self, who: &str) -> Option<String> {
         if self.peers.values().any(|p| p.id == who) {
             return Some(who.to_string());
         }
-        self.peers
+        let mut ids: Vec<&str> = self
+            .peers
             .values()
-            .find(|p| p.name == who)
-            .map(|p| p.id.clone())
+            .filter(|p| p.name == who)
+            .map(|p| p.id.as_str())
+            .collect();
+        ids.sort();
+        ids.dedup();
+        match ids.as_slice() {
+            [one] => Some(one.to_string()),
+            _ => None,
+        }
     }
 
     /// Whether brother `id` is linked and has answered hello, so what is
