@@ -9,6 +9,7 @@
 - A [/] quest whose session a dev instance started (state in %APPDATA%\Horadric-dev) died with it: no tell reaches it, hand it to the human with "restart it" at once (lore #51).
 
 ## Lately
+- 2026-10-24 Round (12:16, human left, main at 17f6b5f): four more Linux node and handoff commits (12:04 to 12:11), 11 files still hold 719+/402- uncommitted from the live session, so held "Ship Local" again. Log done, no aim.
 - 2026-10-24 Round (11:57, hourly, main at 4b3094f): 11 code commits since the c0ffda6 ship (Brotherhood, Linux node, terminal glass, 11:01 to 11:44), but 17 files hold 1024+/430- uncommitted from a live session committing every few minutes, so held "Ship Local": it builds from the shared tree. Log done, no aim.
 - 2026-10-24 Round (quest landed, main at 8af1152): no code commit since the c0ffda6 ship (only my memory), the log was moved to tasks-done.md. hooks lib.rs and main.rs sit uncommitted with cargo running, a live session's. Nothing to ship, no aim. Nothing to do.
 - 2026-10-24 Round (hourly, main at 713c969, only my memory since the c0ffda6 ship): uncommitted brethren.rs, store.rs, heavy.rs, performance.md still a live session's. Log empty, no aim. Nothing to do.
