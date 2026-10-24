@@ -365,13 +365,14 @@ pub fn offer(heard: Heard, me_name: &str, now: u64) -> Option<String> {
 
 /// Everything a takeover lands from what the keeper holds: the record,
 /// the transcript as `<claude id>.jsonl`, and the work as a bundle of the
-/// session's handoff ref, so landing is a handoff's.
+/// conversation's handoff ref, so landing is a handoff's.
 pub fn package(store: &Store, holding: &Holding, session: &str) -> Result<Package, String> {
     let commit = store
         .commit(session)
         .ok_or("nothing kept of this session")?;
     let repo = store.repo();
-    let refname = handoff_ref(session).ok_or("not a session id")?;
+    // Landing fetches the ref by Claude's id, as a handoff's is.
+    let refname = handoff_ref(&holding.record.session).ok_or("the session had no conversation")?;
     git(&repo, &["update-ref", &refname, &commit], &[])?;
     let file = std::env::temp_dir().join(format!(
         "horadric-takeover-{}-{session}.bundle",
@@ -384,9 +385,6 @@ pub fn package(store: &Store, holding: &Holding, session: &str) -> Result<Packag
     let work = work.map_err(|e| format!("cannot read the bundle: {e}"))?;
     let transcript = std::fs::read(store.transcript()).map_err(|e| e.to_string())?;
     let claude = &holding.record.session;
-    if claude.is_empty() {
-        return Err("the session had no conversation to resume".into());
-    }
     let record = Record {
         commit: Some(commit),
         ..holding.record.clone()
@@ -413,6 +411,40 @@ pub fn snapshot(
     let (meta, payload) =
         keepers::take(dir, session, next.n, next.base.as_deref(), &text, next.sent)?;
     Ok((meta, payload, text.len() as u64))
+}
+
+/// Fills in where a session's record says it is: its repository, its
+/// folder below the top, its branch and its transcripts folder. Gives the
+/// top, which its work is committed from, so what changed beside a
+/// subfolder goes too.
+pub fn describe(record: &mut Record, cwd: &Path, transcript: &Path) -> Result<PathBuf, String> {
+    let top = git(cwd, &["rev-parse", "--show-toplevel"], &[])?;
+    record.repo = handoff::repo_id(cwd).ok_or("not in a git repository")?;
+    record.prefix = git(cwd, &["rev-parse", "--show-prefix"], &[])
+        .map(|p| p.trim().trim_end_matches('/').to_string())
+        .unwrap_or_default();
+    record.branch = git(cwd, &["rev-parse", "--abbrev-ref", "HEAD"], &[])
+        .ok()
+        .map(|b| b.trim().to_string())
+        .filter(|b| !b.is_empty() && b != "HEAD");
+    record.transcripts = transcript
+        .parent()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    Ok(PathBuf::from(top.trim()))
+}
+
+/// Keeps the work of a session taken over elsewhere on its orphan branch,
+/// so nothing done here since its keeper's snapshot is lost. The checkout
+/// itself is left as it is.
+pub fn keep_orphan(cwd: &Path, session: &str) -> Result<String, String> {
+    let top = git(cwd, &["rev-parse", "--show-toplevel"], &[])?;
+    let branch = format!("refs/heads/{}", crate::brotherhood::orphan_branch(session));
+    handoff::commit_work(
+        Path::new(top.trim()),
+        &branch,
+        "Horadric: the work of a session taken over elsewhere",
+    )
 }
 
 /// The keeper's folder for every session it keeps, in its state folder.
@@ -609,6 +641,37 @@ mod tests {
     }
 
     #[test]
+    fn a_record_says_where_it_is_and_orphaned_work_gets_a_branch() {
+        let repo = Repo::new("keeping-describe");
+        repo.commit(
+            "sub/a.txt",
+            "one
+",
+        );
+        repo.write(
+            "sub/a.txt",
+            "mine
+",
+        );
+        let mut r = Record::default();
+        let top = describe(&mut r, &repo.0.join("sub"), Path::new("C:/p/k/x.jsonl")).unwrap();
+        assert_eq!(r.prefix, "sub");
+        assert_eq!(r.branch.as_deref(), Some("main"));
+        assert_eq!(r.repo.roots.len(), 1);
+        assert!(r.transcripts.ends_with('k'));
+        assert!(top.join("sub").is_dir());
+        let c = keep_orphan(&repo.0.join("sub"), "s-9").unwrap();
+        let on = repo.git(&["rev-parse", "horadric/orphaned/s-9"]);
+        assert_eq!(on.trim(), c);
+        assert_eq!(
+            repo.git(&["show", "horadric/orphaned/s-9:sub/a.txt"]),
+            "mine
+"
+        );
+        assert_eq!(repo.git(&["status", "--porcelain"]).trim(), "M sub/a.txt");
+    }
+
+    #[test]
     fn what_a_keeper_holds_lands_as_a_handoff_would() {
         let lap = Repo::new("keeping-lap");
         lap.commit("a.txt", "one\n");
@@ -650,7 +713,7 @@ mod tests {
         let bundle = root.join("w.bundle");
         std::fs::write(&bundle, &p.work).unwrap();
         let folder = desk.0.with_extension("wt");
-        handoff::apply_bundle(&desk.0, &bundle, "landing", &folder, "taken").unwrap();
+        handoff::apply_bundle(&desk.0, &bundle, "claude-1", &folder, "taken").unwrap();
         assert_eq!(
             std::fs::read_to_string(folder.join("a.txt")).unwrap(),
             "two\n"
