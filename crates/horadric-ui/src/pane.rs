@@ -33,6 +33,7 @@ use alacritty_terminal::term::search::{Match, RegexSearch};
 use alacritty_terminal::term::{Term, TermMode};
 use alacritty_terminal::vte::ansi::Rgb;
 use horadric_core::saved::Side as DockSide;
+use horadric_core::Phase;
 use windows::core::{w, Result, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::LOGFONTW;
@@ -92,6 +93,7 @@ use crate::links::{self, Target};
 use crate::motion::{self, REVEAL, SPOTLIGHT};
 use crate::paste::{self, Source};
 use crate::sanctuary;
+use crate::sparks::{Fx, Glass, Seen};
 use crate::suggest::{self, Suggest};
 use crate::terminal::WM_STAGE_LAYOUT;
 use crate::theme::{self, Color};
@@ -111,6 +113,10 @@ const BLINK_TIMER: usize = 3;
 const RAIN_TIMER: usize = 4;
 /// The Arcane Sanctuary's next frame while its layout settles.
 const SKY_TIMER: usize = 5;
+/// Asks for the next frame while something flies in the glass.
+const FX_TIMER: usize = 6;
+/// The same, at the slower beat of motes drifting or a rim breathing.
+const FX_SLOW_TIMER: usize = 7;
 /// How often the rain moves on, about as often as it did on the film's
 /// monitors.
 const RAIN_MS: u32 = 80;
@@ -196,6 +202,7 @@ struct Shown {
     dpi: u32,
     font: (f32, String),
     theme: theme::Theme,
+    fx: Fx,
 }
 
 pub struct Pane {
@@ -279,6 +286,11 @@ pub struct Pane {
     tracking: Cell<bool>,
     /// An Arcane Sanctuary's vsync clock runs.
     sky_ticking: Cell<bool>,
+    /// The light moving in the glass, and the beat its clock runs at.
+    glass_fx: RefCell<Glass>,
+    fx_beat: Cell<Option<Duration>>,
+    /// When a key last went to the program, so the cursor glides after it.
+    keyed: Cell<Option<Instant>>,
 }
 
 /// The keys that make no character, which `WM_CHAR` never carries.
@@ -365,6 +377,9 @@ impl Pane {
             typed: RefCell::new(String::new()),
             resizing: Cell::new(None),
             sky_ticking: Cell::new(false),
+            glass_fx: RefCell::new(Glass::default()),
+            fx_beat: Cell::new(None),
+            keyed: Cell::new(None),
         });
         // A browser pane's page is a window inside it, which its own
         // drawing must leave alone.
@@ -881,14 +896,15 @@ impl Pane {
         if let Some(key) = &self.console.sky {
             detail = sanctuary::detail(key);
         }
-        let phase = self
+        let session_phase = self
             .shared
             .registry
             .lock()
             .ok()
             .and_then(|r| r.get(&self.console.id).map(|s| s.phase.clone()));
-        let phase =
-            phase.and_then(|p| (theme::edge_strength(&p) > 0.0).then(|| theme::phase_color(&p)));
+        let phase = session_phase
+            .as_ref()
+            .and_then(|p| (theme::edge_strength(p) > 0.0).then(|| theme::phase_color(p)));
         let edit = self.address.borrow().clone();
         let shown = match &edit {
             Some(f) => f.text.clone(),
@@ -1020,6 +1036,7 @@ impl Pane {
             }
         }
         let rain = self.rain();
+        let fx = self.fx(&frame, &cell, session_phase);
         // A browser pane's header has its tabs and address besides, and its
         // frame is empty and cheap, so it always draws, and so does a pane
         // the rain moves behind.
@@ -1042,6 +1059,7 @@ impl Pane {
             dpi,
             font: (font.size(), font.family()),
             theme: theme::current(),
+            fx,
         };
         let sky = self
             .console
@@ -1072,6 +1090,7 @@ impl Pane {
                 plate,
                 rain,
                 sky.as_ref(),
+                &look.fx,
             )
         });
         let drawn = matches!(result, Some(Ok(())));
@@ -1082,6 +1101,59 @@ impl Pane {
         *self.drawn.borrow_mut() = drawn.then_some(look);
         if let Some(key) = &self.console.sky {
             self.sky_clock(key);
+        }
+    }
+
+    /// Moves the light in the glass on to now, and keeps its clock running
+    /// at the beat it wants, or stopped once nothing moves.
+    fn fx(&self, frame: &frame::Frame, cell: &CellSize, phase: Option<Phase>) -> Fx {
+        let session = self.is_session() && self.console.exit_code().is_none();
+        // An agent not yet heard from is still being summoned.
+        let phase = match (session, self.console.shell, phase) {
+            (false, ..) | (_, true, _) => None,
+            (true, false, p) => Some(p.unwrap_or(Phase::Idle)),
+        };
+        let caret = frame
+            .caret
+            .as_ref()
+            .filter(|_| self.focused.get() && self.is_session())
+            .filter(|_| self.console.exit_code().is_none())
+            .map(|c| (c.col as f32 * cell.w, c.row as f32 * cell.h));
+        let seen = Seen {
+            phase: phase.as_ref(),
+            caret,
+            typed: self.keyed.get(),
+            empty: frame.runs.is_empty() && frame.loose.is_empty(),
+            animate: crate::backdrop::animations_on(),
+        };
+        let fx = self
+            .glass_fx
+            .borrow_mut()
+            .step(Instant::now(), self.serial() as u64, &seen);
+        let beat = fx.next_frame();
+        if self.fx_beat.get() != beat {
+            self.stop_fx_clock();
+            self.fx_beat.set(beat);
+            unsafe {
+                match beat {
+                    Some(d) if d <= motion::FRAME_FAST => crate::vsync::start(self.hwnd, FX_TIMER),
+                    Some(d) => {
+                        SetTimer(Some(self.hwnd), FX_SLOW_TIMER, d.as_millis() as u32, None);
+                    }
+                    None => {}
+                }
+            }
+        }
+        fx
+    }
+
+    fn stop_fx_clock(&self) {
+        match self.fx_beat.take() {
+            Some(d) if d <= motion::FRAME_FAST => crate::vsync::stop(self.hwnd, FX_TIMER),
+            Some(_) => unsafe {
+                let _ = KillTimer(Some(self.hwnd), FX_SLOW_TIMER);
+            },
+            None => {}
         }
     }
 
@@ -1205,6 +1277,7 @@ impl Pane {
         });
         self.console.note_typed();
         self.caret_since.set(Instant::now());
+        self.keyed.set(Some(Instant::now()));
         self.console.write(bytes);
         if moved {
             self.invalidate();
@@ -2654,6 +2727,22 @@ impl Pane {
                 self.invalidate();
                 Some(LRESULT(0))
             }
+            WM_TIMER if wparam.0 == FX_TIMER || wparam.0 == FX_SLOW_TIMER => {
+                if wparam.0 == FX_TIMER {
+                    crate::vsync::took(self.hwnd, FX_TIMER);
+                }
+                if unsafe { IsWindowVisible(self.hwnd) }.as_bool() {
+                    self.invalidate();
+                } else {
+                    // A hidden pane gets no paint to step its light and stop
+                    // the clock, so the clock stops here. The next paint
+                    // starts it again if anything still moves, and has to
+                    // draw rather than present the frame it froze on.
+                    self.stop_fx_clock();
+                    self.stale.set(true);
+                }
+                Some(LRESULT(0))
+            }
             WM_TIMER if wparam.0 == SKY_TIMER => {
                 crate::vsync::took(self.hwnd, SKY_TIMER);
                 if let Some(key) = &self.console.sky {
@@ -3076,6 +3165,7 @@ impl Pane {
                     web::detach(key, self.hwnd);
                 }
                 crate::vsync::stop(self.hwnd, SKY_TIMER);
+                crate::vsync::stop(self.hwnd, FX_TIMER);
                 None
             }
             _ => None,

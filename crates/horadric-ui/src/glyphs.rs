@@ -40,8 +40,9 @@ use crate::favicon::{self, Favicon};
 use crate::frame::{Decoration, Frame, BOLD, ITALIC};
 use crate::render::{self, hwnd_target, Gpu};
 use crate::sky::SkyFrame;
+use crate::sparks::{self, Fx, Spark};
 use crate::theme::{self, Color};
-use crate::{rain, viewport};
+use crate::{rain, summon, viewport};
 use horadric_core::sanctuary::Kind;
 use horadric_core::saved::Side;
 
@@ -874,6 +875,7 @@ impl GridTarget {
         plate: (f32, f32),
         rain: Option<(u64, f32)>,
         sky: Option<&SkyFrame>,
+        fx: &Fx,
     ) -> Result<()> {
         let (ox, oy) = grid_origin();
         let x = |col: usize| ox + col as f32 * cell.w;
@@ -912,6 +914,15 @@ impl GridTarget {
 
             if let Some((seed, t)) = rain {
                 self.rain(font, cell, &inner, seed, t);
+            }
+            if let Some((t, strength)) = fx.summon {
+                self.summon(font, cell, &inner, t, strength);
+            }
+            if let Some((seed, t, strength)) = fx.motes {
+                let (w, h) = (inner.right - inner.left, inner.bottom - inner.top);
+                let motes = sparks::motes(seed, w, h, t);
+                let ink = theme::palette().working;
+                self.sparks(&motes, (inner.left, inner.top), ink, 0.85 * strength);
             }
 
             for f in &frame.fills {
@@ -992,7 +1003,14 @@ impl GridTarget {
             }
 
             if let Some(c) = &frame.caret {
-                let r = rect(c.row, c.col, c.cells);
+                let mut r = rect(c.row, c.col, c.cells);
+                if let Some((gx, gy)) = fx.caret {
+                    let (w, h) = (r.right - r.left, r.bottom - r.top);
+                    r.left = ox + gx;
+                    r.top = oy + gy;
+                    r.right = r.left + w;
+                    r.bottom = r.top + h;
+                }
                 let bar = cell.stroke.max(cell.w / 8.0);
                 self.brush.SetColor(&color(c.color));
                 match c.shape {
@@ -1024,6 +1042,16 @@ impl GridTarget {
                     }
                 }
             }
+            if !fx.trail.is_empty() {
+                let p = theme::palette();
+                // From the middle of the cells the cursor crossed, not
+                // their corners.
+                let mid = (ox + cell.w / 2.0, oy + cell.h / 2.0);
+                self.sparks(&fx.trail, mid, p.unique, 1.0);
+            }
+            if let Some((at, light)) = fx.sweep {
+                self.sweep(&inner, at, light);
+            }
             self.rt.PopAxisAlignedClip();
             self.rt.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
 
@@ -1035,6 +1063,9 @@ impl GridTarget {
                 self.rt.PopAxisAlignedClip();
             }
             self.glass(&screen, header);
+            if let Some((ink, breath)) = fx.rim {
+                self.rim(&screen, ink, breath);
+            }
             if let Some(bar) = &header.bar {
                 self.tab_strip(gpu, bar, size.width, header.accent);
             }
@@ -1535,6 +1566,181 @@ impl GridTarget {
             D2D1_DRAW_TEXT_OPTIONS_NONE,
             DWRITE_MEASURING_MODE_NATURAL,
         );
+    }
+
+    /// Points of light, each a hot core in a soft halo, from `(ox, oy)`.
+    unsafe fn sparks(&self, sparks: &[Spark], (ox, oy): (f32, f32), ink: Color, strength: f32) {
+        self.rt.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+        for s in sparks {
+            let light = (s.light * strength).clamp(0.0, 1.0);
+            if light < 0.02 {
+                continue;
+            }
+            let at = Vector2 {
+                X: ox + s.x,
+                Y: oy + s.y,
+            };
+            self.brush
+                .SetColor(&render::color(ink.with_alpha(0.22 * light)));
+            self.rt.FillEllipse(
+                &D2D1_ELLIPSE {
+                    point: at,
+                    radiusX: s.r * 3.0,
+                    radiusY: s.r * 3.0,
+                },
+                &self.brush,
+            );
+            // The core runs hotter than its colour, nearly white, as a
+            // spark does.
+            let hot = Color {
+                r: ink.r + (1.0 - ink.r) * 0.6,
+                g: ink.g + (1.0 - ink.g) * 0.6,
+                b: ink.b + (1.0 - ink.b) * 0.6,
+                a: light,
+            };
+            self.brush.SetColor(&render::color(hot));
+            self.rt.FillEllipse(
+                &D2D1_ELLIPSE {
+                    point: at,
+                    radiusX: s.r,
+                    radiusY: s.r,
+                },
+                &self.brush,
+            );
+        }
+        self.rt.SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
+    }
+
+    /// The line of light running down the glass as a turn ends, with a
+    /// glow trailing above it, in the colour of a finished turn.
+    unsafe fn sweep(&self, inner: &D2D_RECT_F, at: f32, light: f32) {
+        const TAIL: usize = 14;
+        const STEP: f32 = 3.0;
+        let ink = theme::palette().done;
+        let y = inner.top + (inner.bottom - inner.top) * at;
+        // Aliased, a line this thin would flip between one pixel and two
+        // as it moves.
+        self.rt.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+        for i in 0..TAIL {
+            let fade = 1.0 - i as f32 / TAIL as f32;
+            self.brush
+                .SetColor(&render::color(ink.with_alpha(0.10 * light * fade * fade)));
+            self.rt.FillRectangle(
+                &D2D_RECT_F {
+                    left: inner.left,
+                    top: y - (i + 1) as f32 * STEP,
+                    right: inner.right,
+                    bottom: y - i as f32 * STEP,
+                },
+                &self.brush,
+            );
+        }
+        // The line burns hottest in the middle and thins out to the
+        // edges, as light off a blade.
+        const PIECES: usize = 32;
+        let w = (inner.right - inner.left) / PIECES as f32;
+        for i in 0..PIECES {
+            let across = (i as f32 + 0.5) / PIECES as f32;
+            let heat = (std::f32::consts::PI * across).sin().powf(1.5);
+            self.brush
+                .SetColor(&render::color(ink.with_alpha(0.9 * light * heat)));
+            self.rt.FillRectangle(
+                &D2D_RECT_F {
+                    left: inner.left + i as f32 * w,
+                    top: y - 1.0,
+                    right: inner.left + (i + 1) as f32 * w,
+                    bottom: y + 0.5,
+                },
+                &self.brush,
+            );
+        }
+        self.rt.SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
+    }
+
+    /// The glass glowing from its edge inward, `breath` from rest to full.
+    unsafe fn rim(&self, screen: &D2D_RECT_F, ink: Color, breath: f32) {
+        const RINGS: usize = 8;
+        for i in 0..RINGS {
+            let inset = 1.0 + i as f32 * 2.0;
+            let fade = 1.0 - i as f32 / RINGS as f32;
+            let edge = D2D_RECT_F {
+                left: screen.left + inset,
+                top: screen.top + inset,
+                right: screen.right - inset,
+                bottom: screen.bottom - inset,
+            };
+            self.brush.SetColor(&render::color(
+                ink.with_alpha((0.10 + 0.35 * breath) * fade * fade),
+            ));
+            self.rt.DrawRoundedRectangle(
+                &rounded(&edge, (SCREEN_RADIUS - inset).max(1.0)),
+                &self.brush,
+                2.0,
+                None,
+            );
+        }
+    }
+
+    /// The Horadric cube turning in the middle of the glass, drawn in the
+    /// grid's own font, in the gold of a unique item.
+    unsafe fn summon(
+        &self,
+        font: &Font,
+        cell: &CellSize,
+        inner: &D2D_RECT_F,
+        t: f32,
+        strength: f32,
+    ) {
+        const STEPS: usize = 5;
+        let (ox, oy) = grid_origin();
+        let cols = ((inner.right - ox) / cell.w).floor().max(0.0) as usize;
+        let rows = ((inner.bottom - oy) / cell.h).floor().max(0.0) as usize;
+        let mut steps: [(Vec<u16>, Vec<DWRITE_GLYPH_OFFSET>); STEPS] = Default::default();
+        for m in summon::frame(t, cols, rows, cell.h / cell.w) {
+            let glyph = font.glyph(m.ch, 0);
+            if glyph == 0 {
+                continue;
+            }
+            let step = ((m.light * STEPS as f32).ceil() as usize).clamp(1, STEPS) - 1;
+            steps[step].0.push(glyph);
+            steps[step].1.push(DWRITE_GLYPH_OFFSET {
+                advanceOffset: m.col as f32 * cell.w,
+                ascenderOffset: -(m.row as f32 * cell.h),
+            });
+        }
+        let ink = theme::palette().unique;
+        let face = font.faces.borrow().faces[0].clone();
+        for (i, (indices, offsets)) in steps.iter().enumerate() {
+            if indices.is_empty() {
+                continue;
+            }
+            let level = (i + 1) as f32 / STEPS as f32;
+            let advances = vec![0.0f32; indices.len()];
+            let run = DWRITE_GLYPH_RUN {
+                fontFace: ManuallyDrop::new(Some(face.clone())),
+                fontEmSize: font.size.get(),
+                glyphCount: indices.len() as u32,
+                glyphIndices: indices.as_ptr(),
+                glyphAdvances: advances.as_ptr(),
+                glyphOffsets: offsets.as_ptr(),
+                isSideways: false.into(),
+                bidiLevel: 0,
+            };
+            self.brush.SetColor(&render::color(
+                ink.with_alpha((0.15 + 0.85 * level) * strength),
+            ));
+            self.rt.DrawGlyphRun(
+                Vector2 {
+                    X: ox,
+                    Y: oy + cell.baseline,
+                },
+                &run,
+                &self.brush,
+                DWRITE_MEASURING_MODE_NATURAL,
+            );
+            let mut run = run;
+            ManuallyDrop::drop(&mut run.fontFace);
+        }
     }
 
     /// The plate round the glass and the glass itself, with the plate's lit
