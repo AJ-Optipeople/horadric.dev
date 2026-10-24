@@ -10,31 +10,55 @@
 //!
 //! What the node lands goes into a worktree of its own checkout of the
 //! project, found by the repository's identity among the folders it knows
-//! and those in the home folder.
+//! and those in the home folder. Without one, it clones the project beside
+//! its other checkouts, since nobody is at a node to ask where; a project
+//! with no remote it refuses.
+//!
+//! Each side names the other as it is known there: the PC by the name its
+//! hello gave, this node by the name the PC's hello says it has there
+//! ("vps"), else its host name.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use horadric_core::handing::{
-    self, asks_receiver, bases_answer, bases_ask, between_turns, refused, took_message, Arriving,
-    Do, Landed, Outgoing,
+    self, asks_receiver, bases_answer, bases_ask_placing, bases_placing, bases_refused,
+    between_turns, refused, took_message, Arriving, Do, Landed, Outgoing, PlaceAsk,
 };
 use horadric_core::handoff::{self, moved_line, split, Record, RepoId};
+use horadric_core::placing;
 use horadric_core::saved::SavedSession;
 use horadric_core::serving::Job;
 use horadric_core::worktree::Worktree;
 use horadric_core::{Agent, Phase};
 use serde_json::Value;
 
-use super::{lock, machine_name, node_state, resume, trust, Event, Machine, Shared};
+use super::{lock, machine_name, node_state, resume, trust, wire, Event, Machine, Shared};
+
+/// Where a project this node had no checkout of stands, by the session
+/// handed with it: the sender asks again every few seconds and hears it.
+#[derive(Debug, Clone)]
+enum Place {
+    Cloning,
+    Ready(PathBuf),
+    No(String),
+}
+
+type Places = Arc<Mutex<HashMap<String, Place>>>;
+
+fn places_of(p: &Places) -> std::sync::MutexGuard<'_, HashMap<String, Place>> {
+    p.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 /// The handoffs on their way, and what goes out to viewers.
 #[derive(Default)]
 pub(super) struct Handing {
     out: HashMap<String, Outgoing>,
     arriving: Arriving,
+    /// Projects cloned for handoffs here, by session.
+    places: Places,
     /// Messages for viewers, by the name each gave in its hello, sent by
     /// the serving thread after each round.
     pub(super) outbox: Vec<(String, Value)>,
@@ -49,6 +73,18 @@ fn now() -> u64 {
 impl Machine {
     fn linked(&self, to: &str) -> bool {
         self.names.values().any(|n| n == to)
+    }
+
+    /// This node as the viewer named `who` calls it.
+    fn called_by(&self, who: &str) -> String {
+        let ch = self
+            .names
+            .iter()
+            .filter(|(_, n)| *n == who)
+            .map(|(ch, _)| *ch)
+            .max();
+        let heard = ch.and_then(|ch| self.called.get(&ch));
+        wire::known_as(heard.map(String::as_str), &machine_name())
     }
 
     /// Hands session `id` to the viewer named `to` once its turn ends, as
@@ -118,18 +154,39 @@ impl Machine {
             Do::AskBases => {
                 // The agent stops first, so nothing changes the tree or the
                 // transcript while they travel.
-                let cwd = {
+                let (cwd, name, top) = {
                     let n = lock(&self.node);
                     if let Some(h) = n.hosted.get(id) {
                         h.remote.kill();
                     }
-                    n.registry.get(id).map(|s| s.cwd.clone())
+                    n.registry
+                        .get(id)
+                        .map(|s| {
+                            let top = s
+                                .worktree
+                                .as_ref()
+                                .map_or_else(|| s.cwd.clone(), |w| w.main.clone());
+                            (s.cwd.clone(), s.name.clone(), top)
+                        })
+                        .unwrap_or_default()
                 };
-                let repo = cwd
-                    .as_deref()
-                    .and_then(|c| handoff::repo_id(Path::new(c)))
-                    .unwrap_or_default();
-                self.hand.outbox.push((o.to.clone(), bases_ask(id, &repo)));
+                let dir = Path::new(&cwd);
+                let repo = handoff::repo_id(dir);
+                // What a receiver without the project asks its human.
+                let place = PlaceAsk {
+                    url: repo
+                        .as_ref()
+                        .and_then(|_| placing::clone_url(&handoff::remote_urls(dir))),
+                    name,
+                    folder: Path::new(&top)
+                        .file_name()
+                        .map(|n| placing::folder_name(&n.to_string_lossy()))
+                        .unwrap_or_default(),
+                    plain: repo.is_none() && dir.is_dir(),
+                    from: self.called_by(&o.to),
+                };
+                let ask = bases_ask_placing(id, &repo.unwrap_or_default(), &place);
+                self.hand.outbox.push((o.to.clone(), ask));
             }
             Do::Pack { known, clean } => self.pack(id, known, clean),
             Do::LetGo(n) => self.let_go(id, &o.to, n),
@@ -143,6 +200,13 @@ impl Machine {
 
     /// Packs session `id` on a thread for its receiver, which has `known`.
     fn pack(&mut self, id: &str, known: Vec<String>, clean: bool) {
+        let to = self
+            .hand
+            .out
+            .get(id)
+            .map(|o| o.to.clone())
+            .unwrap_or_default();
+        let from = self.called_by(&to);
         let record = {
             let n = lock(&self.node);
             n.registry.get(id).and_then(|s| {
@@ -157,7 +221,7 @@ impl Machine {
                     cwd: s.cwd.clone(),
                     agent: "claude".into(),
                     model: model_of(n.args.get(id).map_or(&[][..], Vec::as_slice)),
-                    from: machine_name(),
+                    from: from.clone(),
                     interrupted: !clean,
                     ..Record::default()
                 })
@@ -266,6 +330,9 @@ impl Machine {
             }
             let repo: RepoId = serde_json::from_value(msg["repo"].clone()).unwrap_or_default();
             let checkout = checkout_of(&self.node, &repo);
+            if let (None, Some(ask)) = (&checkout, handing::heard_place(msg)) {
+                return Some(self.placing_answer(&id, ask));
+            }
             return Some(Box::new(move || {
                 bases_answer(&id, checkout.map(|c| handoff::known_commits(&c)))
             }));
@@ -276,13 +343,21 @@ impl Machine {
             Err(e) => return Some(Box::new(move || refused(&id, &e))),
         };
         let node = Arc::clone(&self.node);
+        let places = Arc::clone(&self.hand.places);
+        // Named as each side knows the other, for the moved line.
+        let from = wire::known_as(Some(who), &package.record.from);
+        let me = self.called_by(who);
         Some(Box::new(move || {
             let record = package.record.clone();
             let id = record.id.clone();
             if id.is_empty() || lock(&node).registry.get(&id).is_some() {
                 return refused(&id, "a session of that id is here already");
             }
-            let Some(repo) = checkout_of(&node, &record.repo) else {
+            let cloned = match places_of(&places).get(&id) {
+                Some(Place::Ready(dir)) => Some(dir.clone()),
+                _ => None,
+            };
+            let Some(repo) = cloned.or_else(|| checkout_of(&node, &record.repo)) else {
                 return refused(&id, "no checkout of this project on this node");
             };
             let Some(projects) = horadric_hooks::transcript::projects() else {
@@ -292,8 +367,9 @@ impl Machine {
                 Ok(l) => l,
                 Err(e) => return refused(&id, &format!("cannot land it: {e}")),
             };
-            match adopt(&node, &record, landed) {
+            match adopt(&node, &record, landed, &from, &me) {
                 Ok(()) => {
+                    places_of(&places).remove(&id);
                     let n = record.n.saturating_add(1);
                     lock(&node).took.insert(id.clone(), n);
                     took_message(&id, n)
@@ -301,6 +377,63 @@ impl Machine {
                 Err(e) => refused(&id, &format!("cannot resume it: {e}")),
             }
         }))
+    }
+
+    /// The answer to a `bases` ask for session `id` of a project this node
+    /// has no checkout of: the first time, a clone beside its other
+    /// checkouts starts (or a refusal saying why it cannot), then it is
+    /// cloning, ready with its commits, or why it failed.
+    fn placing_answer(&mut self, id: &str, ask: PlaceAsk) -> Job {
+        let id = id.to_string();
+        let state = places_of(&self.hand.places).get(&id).cloned();
+        match state {
+            Some(Place::Ready(dir)) => {
+                Box::new(move || bases_answer(&id, Some(handoff::known_commits(&dir))))
+            }
+            Some(Place::No(why)) => {
+                places_of(&self.hand.places).remove(&id);
+                Box::new(move || bases_refused(&id, &why))
+            }
+            Some(Place::Cloning) => Box::new(move || bases_placing(&id)),
+            None if id.is_empty() => Box::new(move || bases_answer(&id, None)),
+            None => {
+                let recent: Vec<String> = lock(&self.node)
+                    .recent
+                    .iter()
+                    .filter(|r| Path::new(r).is_dir())
+                    .cloned()
+                    .collect();
+                let home = horadric_hooks::home();
+                let parent =
+                    placing::checkouts_parent(&recent, home.as_deref(), |p| Path::new(p).is_dir());
+                let chosen =
+                    placing::unattended(&ask, parent.as_deref(), |f| Path::new(f).exists());
+                let (url, dest) = match chosen {
+                    Ok(c) => c,
+                    Err(why) => return Box::new(move || bases_refused(&id, &why)),
+                };
+                places_of(&self.hand.places).insert(id.clone(), Place::Cloning);
+                let p = Arc::clone(&self.hand.places);
+                let key = id.clone();
+                // Off the serving thread: a clone takes as long as the
+                // repository is large, and the sender asks again meanwhile.
+                std::thread::spawn(move || {
+                    let dest = PathBuf::from(dest);
+                    let place = match placing::clone_into(&url, &dest) {
+                        Ok(()) => {
+                            eprintln!("horadric node: cloned {url} into {}", dest.display());
+                            Place::Ready(dest)
+                        }
+                        Err(e) => {
+                            let _ = std::fs::remove_dir_all(&dest);
+                            Place::No(format!("the clone of {url} failed: {e}"))
+                        }
+                    };
+                    places_of(&p).insert(key, place);
+                });
+                Box::new(move || bases_placing(&id))
+            }
+        }
     }
 
     /// The receiver's commits, for a handoff from here.
@@ -313,8 +446,17 @@ impl Machine {
         };
         let step = match handing::heard_bases(msg) {
             (known, true) => o.heard_bases(known),
-            (_, false) if matches!(o.stage, handing::Stage::Bases(_)) => {
-                Do::Fail(format!("{who} has no checkout of this project"))
+            // Its human is saying where the project goes: ask again until
+            // it is ready, as a Windows sender does.
+            _ if handing::heard_placing(msg) => {
+                o.heard_placing(now());
+                Do::Wait
+            }
+            (_, false) if matches!(o.stage, handing::Stage::Bases(_)) || o.placing() => {
+                Do::Fail(match msg["text"].as_str() {
+                    Some(why) => format!("{who} says {why}"),
+                    None => format!("{who} has no checkout of this project"),
+                })
             }
             // Asked again after a drop, of a receiver that does not run it
             // (yet): the time limit decides.
@@ -406,7 +548,13 @@ fn repos_below(dir: &Path, depth: usize) -> Vec<String> {
 /// Takes in a handed off session that has landed: under its own id in its
 /// new worktree, resumed with its conversation, its next prompt told it
 /// moved.
-fn adopt(node: &Shared, record: &Record, landed: Landed) -> Result<(), String> {
+fn adopt(
+    node: &Shared,
+    record: &Record,
+    landed: Landed,
+    from: &str,
+    me: &str,
+) -> Result<(), String> {
     let id = record.id.clone();
     let args: Vec<String> = record
         .model
@@ -414,12 +562,7 @@ fn adopt(node: &Shared, record: &Record, landed: Landed) -> Result<(), String> {
         .flat_map(|m| ["--model".to_string(), m.clone()])
         .collect();
     let cwd = landed.cwd.to_string_lossy().into_owned();
-    let first = moved_line(
-        &record.from,
-        &machine_name(),
-        &landed.worktree.path,
-        !record.interrupted,
-    );
+    let first = moved_line(from, me, &landed.worktree.path, !record.interrupted);
     trust(&landed.cwd);
     let saved = SavedSession {
         id: id.clone(),
@@ -431,7 +574,7 @@ fn adopt(node: &Shared, record: &Record, landed: Landed) -> Result<(), String> {
         args: args.clone(),
         claude_session_id: Some(record.session.clone()),
         prompted: true,
-        last_line: format!("moved here from {}", record.from),
+        last_line: format!("moved here from {from}"),
         running: false,
         shell: false,
         ssh: None,

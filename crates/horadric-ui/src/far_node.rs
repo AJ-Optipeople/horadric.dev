@@ -92,11 +92,12 @@ impl NodeLink {
                 .spawn(move || read_loop(&node, &ssh, &stop, &child, &stdin, &*heard))
                 .ok()?;
         }
+        let name = node.name.clone();
         std::thread::Builder::new()
             .name("node-link-out".into())
             .spawn(move || {
                 for msg in rx {
-                    let frame = nodes::frame(&msg);
+                    let frame = nodes::frame(&nodes::naming_hello(msg, &name));
                     let mut s = stdin.lock().unwrap_or_else(|e| e.into_inner());
                     // Said between links has nobody to hear it; the next
                     // link starts over with hello.

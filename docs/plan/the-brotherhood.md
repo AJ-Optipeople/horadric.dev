@@ -687,10 +687,25 @@ Each step is useful alone and each is verified before the next starts.
     looks there too; Claude Code 2.1.3 asks for trust in a folder below a
     trusted one, on Windows and Linux alike, so trust is written for the
     exact folder; a landing that cannot resume is undone, so the next try
-    is not refused as a duplicate. Not yet: the node does not ask where a
-    project goes when it has no checkout (it refuses), and it names
-    itself by host name in the moved line, not by the name the PC gave
-    it.
+    is not refused as a duplicate.
+
+    Gaps closed on 2026-10-24. Nobody sits at a node to ask, so a node
+    without a checkout clones the project's remote by itself, beside its
+    other checkouts (else in home), answering `"placing":true` while the
+    clone runs; with no remote it refuses: "no checkout of X here, and it
+    has no remote to clone" (`placing::unattended`). A node handing to a
+    PC sends `place` with its `bases` ask and waits while the PC's human
+    decides, asking again every 3 seconds, as a Windows sender does. The
+    PC's hello to a node also says `you`, the node's name in its list,
+    which the node calls itself by toward that PC (else its host name),
+    so both moved lines say "vps". Seen against `exit1-eu`: a haiku
+    session in a scratch repository with no checkout on the VPS, handed
+    to vps, was cloned into `~/l11g-one`, landed in `l11g-one.main-2`
+    with both changes and its tile read "moved here from MORTEN"; a
+    session started on the node in a repository the PC lacked, handed to
+    the PC, showed the node "waiting for MORTEN to say where it goes",
+    the PC's dialog "vps hands ... to this PC", and after Clone it landed
+    as "moved here from vps".
 12. **Keepers.** Turn end snapshots to the first keeper, kept in its
     state folder, pruned when the session ends or moves. Pure and tested:
     a snapshot's bundle against the last, applying a chain of them.

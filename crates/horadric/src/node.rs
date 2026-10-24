@@ -117,6 +117,9 @@ struct Machine {
     /// The name each viewer gave in its hello, by channel: who a handoff
     /// goes to and who one comes from.
     names: HashMap<u32, String>,
+    /// What each viewer calls this node, by channel, from its hello: the
+    /// name a session handed between them says it moved from or to.
+    called: HashMap<u32, String>,
     hand: handing::Handing,
 }
 
@@ -456,6 +459,7 @@ fn serve() -> Result<(), String> {
             node: Arc::clone(&node),
             events: events.clone(),
             names: HashMap::new(),
+            called: HashMap::new(),
             hand: handing::Handing::default(),
         };
         thread::spawn(move || serving(machine, heard, events));
@@ -799,6 +803,10 @@ fn serving(mut machine: Machine, heard: mpsc::Receiver<Event>, events: Sender<Ev
                     if msg["t"] == "hello" {
                         let name = wire::hello_name(&msg).unwrap_or_default();
                         machine.names.insert(ch, name);
+                        match wire::hello_you(&msg) {
+                            Some(you) => machine.called.insert(ch, you),
+                            None => machine.called.remove(&ch),
+                        };
                     }
                     let who = machine.names.get(&ch).cloned().unwrap_or_default();
                     let now = SystemTime::now()
@@ -816,6 +824,7 @@ fn serving(mut machine: Machine, heard: mpsc::Receiver<Event>, events: Sender<Ev
                     server.close(ch);
                     links.remove(&ch);
                     machine.names.remove(&ch);
+                    machine.called.remove(&ch);
                 }
                 Ok(Event::Answer(ch, msg)) => send(&links, ch, &msg),
                 Ok(Event::Packed(id, packed)) => machine.packed(&id, packed),

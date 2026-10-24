@@ -130,6 +130,27 @@ pub fn hello_name(hello: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
+/// What a viewer's hello says this node is called there (`you`), which is
+/// what a session handed between them names it.
+pub fn hello_you(hello: &Value) -> Option<String> {
+    hello["you"]
+        .as_str()
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .map(str::to_string)
+}
+
+/// A brother as the side that reads the moved line knows it: the name it
+/// was `heard` by there, else the name it gave itself (`own`, its host
+/// name for this node).
+pub fn known_as(heard: Option<&str>, own: &str) -> String {
+    heard
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .unwrap_or(own)
+        .to_string()
+}
+
 /// `path` with the folders agents install themselves into added after it:
 /// Claude Code's native installer and npm's user prefix under `home`, and
 /// `/usr/local/bin`. A node runs as a systemd user service, whose PATH
@@ -253,6 +274,16 @@ mod tests {
         );
         assert_eq!(hello_name(&json!({"name": ""})), None);
         assert_eq!(hello_name(&json!({})), None);
+    }
+
+    #[test]
+    fn a_brother_is_named_as_the_other_side_knows_it() {
+        assert_eq!(hello_you(&json!({"you": " vps "})).as_deref(), Some("vps"));
+        assert_eq!(hello_you(&json!({"you": ""})), None);
+        assert_eq!(hello_you(&json!({"name": "Desk"})), None);
+        assert_eq!(known_as(Some("vps"), "srv1387547"), "vps");
+        assert_eq!(known_as(Some(" "), "srv1387547"), "srv1387547");
+        assert_eq!(known_as(None, "srv1387547"), "srv1387547");
     }
 
     #[test]

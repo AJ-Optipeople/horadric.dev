@@ -122,6 +122,17 @@ pub fn ssh_args(node: &Node) -> Vec<String> {
     .collect()
 }
 
+/// `msg` as it goes to the node named `name` here: a hello also says that
+/// name as `you`, since a node knows itself only by its host name, and a
+/// session handed from it should say it came from "vps" as this PC knows
+/// it.
+pub fn naming_hello(mut msg: Value, name: &str) -> Value {
+    if msg["t"] == "hello" && !name.trim().is_empty() {
+        msg["you"] = Value::String(name.trim().to_string());
+    }
+    msg
+}
+
 /// One message as the bytes that go to the node's stdin.
 pub fn frame(msg: &Value) -> Vec<u8> {
     encode(msg.to_string().as_bytes())
@@ -206,6 +217,17 @@ mod tests {
             ssh: ssh.into(),
             command: None,
         }
+    }
+
+    #[test]
+    fn a_hello_tells_the_node_what_it_is_called_here() {
+        let hello = naming_hello(json!({"t": "hello", "name": "Desk"}), " vps ");
+        assert_eq!(hello["you"], "vps");
+        assert_eq!(hello["name"], "Desk");
+        assert!(naming_hello(json!({"t": "list"}), "vps")
+            .get("you")
+            .is_none());
+        assert!(naming_hello(json!({"t": "hello"}), "").get("you").is_none());
     }
 
     #[test]

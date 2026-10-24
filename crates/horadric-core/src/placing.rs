@@ -135,10 +135,13 @@ pub fn checkouts_parent(
     .or(home)
 }
 
-/// `parent\name`, or `parent\name-2` and on when that is taken.
+/// `parent\name`, or `parent\name-2` and on when that is taken. A parent
+/// written the Linux way (`/home/agent`) gets `/` between, since a node
+/// places projects too.
 pub fn free_folder(parent: &str, name: &str, exists: impl Fn(&str) -> bool) -> String {
+    let sep = if parent.starts_with('/') { '/' } else { '\\' };
     let parent = parent.trim_end_matches(['/', '\\']);
-    let at = |n: &str| format!("{parent}\\{n}");
+    let at = |n: &str| format!("{parent}{sep}{n}");
     if !exists(&at(name)) {
         return at(name);
     }
@@ -146,6 +149,35 @@ pub fn free_folder(parent: &str, name: &str, exists: impl Fn(&str) -> bool) -> S
         .map(|n| at(&format!("{name}-{n}")))
         .find(|f| !exists(f))
         .expect("an unbounded range always finds a free name")
+}
+
+/// Where a receiver with no human at it (a Linux node) clones a project
+/// it has no checkout of: the URL, and a new folder in `parent`, where its
+/// other checkouts are. Without a remote or a parent it cannot, and says
+/// why for the sender to show.
+pub fn unattended(
+    ask: &crate::handing::PlaceAsk,
+    parent: Option<&str>,
+    exists: impl Fn(&str) -> bool,
+) -> Result<(String, String), String> {
+    let project = if ask.folder.is_empty() {
+        "this project".to_string()
+    } else {
+        ask.folder.clone()
+    };
+    if ask.plain {
+        return Err(format!(
+            "no checkout of {project} here, and a folder without git needs someone here to say where it goes"
+        ));
+    }
+    let Some(url) = ask.url.clone().filter(|u| !u.trim().is_empty()) else {
+        return Err(format!(
+            "no checkout of {project} here, and it has no remote to clone"
+        ));
+    };
+    let parent = parent.ok_or("no folder here to clone it into")?;
+    let dest = free_folder(parent, &clone_name(&url), exists);
+    Ok((url, dest))
 }
 
 /// What a folder the human picked holds.
@@ -458,6 +490,45 @@ mod tests {
         let taken = |f: &str| f == "C:\\p\\x" || f == "C:\\p\\x-2";
         assert_eq!(free_folder("C:\\p\\", "x", taken), "C:\\p\\x-3");
         assert_eq!(free_folder("C:\\p", "y", taken), "C:\\p\\y");
+        let linux = |f: &str| f == "/home/agent/x";
+        assert_eq!(free_folder("/home/agent/", "x", linux), "/home/agent/x-2");
+        assert_eq!(free_folder("/home/agent", "y", linux), "/home/agent/y");
+    }
+
+    #[test]
+    fn a_node_clones_what_it_lacks_or_says_why_not() {
+        use crate::handing::PlaceAsk;
+        let mut ask = PlaceAsk {
+            url: Some("agent@vps:repos/l11.git".into()),
+            folder: "l11repo".into(),
+            ..Default::default()
+        };
+        let none = |_: &str| false;
+        assert_eq!(
+            unattended(&ask, Some("/home/agent/l11"), |f| f
+                == "/home/agent/l11/l11"),
+            Ok((
+                "agent@vps:repos/l11.git".to_string(),
+                "/home/agent/l11/l11-2".to_string()
+            ))
+        );
+        assert!(unattended(&ask, None, none).is_err());
+        ask.url = None;
+        assert_eq!(
+            unattended(&ask, Some("/home/agent"), none),
+            Err("no checkout of l11repo here, and it has no remote to clone".into())
+        );
+        ask.url = Some("u".into());
+        ask.plain = true;
+        assert!(unattended(&ask, Some("/home/agent"), none)
+            .unwrap_err()
+            .contains("without git"));
+        ask.plain = false;
+        ask.folder.clear();
+        ask.url = Some(" ".into());
+        assert!(unattended(&ask, Some("/h"), none)
+            .unwrap_err()
+            .contains("this project"));
     }
 
     #[test]
