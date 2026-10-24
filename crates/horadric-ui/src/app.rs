@@ -8079,6 +8079,7 @@ impl App {
 
         // Add clusters for new projects, off screen until laid out, or where
         // the user last put them.
+        let mut created = false;
         for key in &projects {
             if self.clusters.iter().any(|c| &c.key == key) {
                 continue;
@@ -8101,9 +8102,16 @@ impl App {
                         c.set_tome_collapsed(place.tome_collapsed);
                     }
                     self.clusters.push(c);
+                    created = true;
                 }
                 Err(e) => eprintln!("horadric: cannot create window: {e}"),
             }
+        }
+        // A new cluster is measured for its column below, and its Runetome
+        // would otherwise come at the next tick, two rows of stones taller
+        // than it was measured, and hang past the bottom of the screen.
+        if created {
+            self.refresh_tomes();
         }
 
         self.order_sessions();
@@ -8973,15 +8981,12 @@ impl App {
                 .iter()
                 .enumerate()
                 .map(|(i, (_, keys))| {
-                    let used: i32 = self
+                    let items: Vec<columns::Stacked> = self
                         .column_windows(keys, i == 0)
                         .iter()
-                        .map(|t| {
-                            let s = t.stacked();
-                            s.fixed + g.gap + s.files.map_or(0, |_| g.min_files)
-                        })
-                        .sum();
-                    g.height - used
+                        .map(Tile::stacked)
+                        .collect();
+                    columns::room(&items, g.height, g.gap, g.min_files)
                 })
                 .collect();
             let col = columns::place_new(&rooms, need, shown.len() < g.fits);

@@ -331,6 +331,18 @@ pub fn clip(top: i32, bottom: i32, y: i32, h: i32) -> Option<(i32, i32)> {
     Some((from, to))
 }
 
+/// How much of a column `height` tall holding `items` is left for one more
+/// window and the gap above it, with every open files tile at `min_files`,
+/// the least [`fill`] gives one before the column scrolls. Negative when
+/// the column already scrolls.
+pub fn room(items: &[Stacked], height: i32, gap: i32, min_files: i32) -> i32 {
+    let used: i32 = items
+        .iter()
+        .map(|s| s.fixed + gap + s.files.map_or(0, |_| min_files))
+        .sum();
+    height - used
+}
+
 /// Which visible column a new project goes into, given how much height
 /// each has to spare and how much the project needs. The one with the most
 /// room when it fits there, otherwise a new column at the end when
@@ -674,6 +686,57 @@ mod tests {
         assert_eq!(place_new(&[100, 150], 200, false), 1);
         assert_eq!(place_new(&[], 200, true), 0);
         assert_eq!(place_new(&[], 200, false), 0);
+    }
+
+    #[test]
+    fn room_counts_each_open_files_tile_at_its_least() {
+        let items = [
+            Stacked {
+                fixed: 100,
+                files: None,
+            },
+            Stacked {
+                fixed: 50,
+                files: Some(3),
+            },
+        ];
+        assert_eq!(room(&items, 500, 10, 60), 500 - 110 - 120);
+        assert_eq!(room(&[], 500, 10, 60), 500);
+    }
+
+    #[test]
+    fn a_project_added_last_never_hangs_below_the_work_area() {
+        // A 1440 pixel screen less a 48 pixel taskbar, with a 12 pixel
+        // margin: the columns run from 12 to 1380.
+        let (top, height, gap, min_files) = (12, 1440 - 48 - 24, 12, 100);
+        let bottom = top + height;
+        let tall = |fixed| Stacked { fixed, files: None };
+        let mut cols = vec![
+            vec![tall(340), tall(316), tall(492)],
+            vec![tall(492), tall(492)],
+        ];
+        let rooms: Vec<i32> = cols
+            .iter()
+            .map(|c| room(c, height, gap, min_files))
+            .collect();
+        // Measured before its Runetome came, it fit the second column and
+        // then grew two rows of stones past the bottom of the screen.
+        assert_eq!(place_new(&rooms, 352, true), 1);
+        let mut grown = cols[1].clone();
+        grown.push(tall(492));
+        let (filled, scroll) = fill(&grown, top, height, gap, min_files, 0);
+        assert!(scroll > 0 && filled[2].y + 492 > bottom);
+        // Measured whole, it opens a column of its own.
+        let col = place_new(&rooms, 492, true);
+        assert_eq!(col, 2);
+        cols.push(vec![tall(492)]);
+        for c in &cols {
+            let (filled, scroll) = fill(c, top, height, gap, min_files, 0);
+            assert_eq!(scroll, 0);
+            for (f, s) in filled.iter().zip(c) {
+                assert!(f.y >= top && f.y + s.fixed <= bottom, "{f:?} past {bottom}");
+            }
+        }
     }
 
     #[test]
