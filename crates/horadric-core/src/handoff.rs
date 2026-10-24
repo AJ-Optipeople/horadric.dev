@@ -757,12 +757,20 @@ pub fn unpack(bytes: &[u8]) -> Option<Package> {
 pub struct Record {
     /// Claude Code's conversation id, what `claude --resume` takes.
     pub session: String,
+    /// Horadric's id for the session, kept on the receiver so its tile on
+    /// every brother is the same tile.
+    #[serde(default)]
+    pub id: String,
     pub name: String,
     /// The project folder on the sender.
     pub project: String,
     /// The folder the session ran in on the sender, its worktree if it had
     /// one. The transcript's `cwd` fields are moved from under it.
     pub cwd: String,
+    /// Where `cwd` is inside its repository, `src/ui/` or empty at the
+    /// top, so the session lands in the same folder of its new worktree.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub prefix: String,
     /// So the receiver finds its own checkout of the project.
     #[serde(default)]
     pub repo: RepoId,

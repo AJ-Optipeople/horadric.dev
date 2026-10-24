@@ -23,6 +23,7 @@ pub mod fleet;
 pub mod glow;
 pub mod google;
 pub mod guard;
+pub mod handing;
 pub mod handoff;
 pub mod heavy;
 pub mod history;

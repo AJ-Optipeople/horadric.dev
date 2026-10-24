@@ -1,0 +1,620 @@
+//! Handing a session to a brother, as it happens: the sender's steps from
+//! "Hand off to" to letting go, the receiver's from the first part to
+//! `took`, and the two halves that touch the disk, packing a session and
+//! landing one (see docs/plan/the-brotherhood.md, "Handing off"). What
+//! travels is [`crate::handoff`]; this is when and in what order.
+//!
+//! The wire is protocol v3's `handoff`, `bundle` and `took`, and one ask
+//! of its own: before cutting the bundle the sender asks the receiver
+//! which commits it has, `{"t":"bases","id","repo"}`, answered with
+//! `{"t":"bases","id","commits","found"}`, so the bundle holds only what
+//! the receiver lacks.
+//!
+//! The sender keeps the session until the receiver says it runs. A
+//! handoff that fails on the way leaves it paused where it was, its work
+//! still in its folder, for a click to resume.
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
+
+use serde_json::{json, Value};
+
+use crate::handoff::{
+    self, apply_bundle, commit_work, cut_bundle, file_transcript, gather_transcript, handoff_ref,
+    pack, repo_id, transcript_folder, transcript_key, Joiner, Package, Part, Record, RepoId,
+};
+use crate::session::{Phase, WaitReason};
+use crate::worktree::{self, Worktree};
+
+/// How long an interrupted turn gets to stop before the session is moved
+/// anyway, in seconds.
+pub const STOP_SECS: u64 = 10;
+/// How long the receiver gets to say what commits it has.
+pub const BASES_SECS: u64 = 30;
+/// How long the receiver gets from the last part to running the session:
+/// a worktree, the transcript and a `claude --resume`.
+pub const TOOK_SECS: u64 = 180;
+
+/// Whether a session in `phase` is between turns, so moving it cuts
+/// nothing: never started, finished, waiting on the human's answer, or
+/// failed, and a paused or ended one has no turn at all. A tool waiting
+/// for permission or a dialog is mid turn.
+pub fn between_turns(phase: &Phase) -> bool {
+    match phase {
+        Phase::Idle | Phase::Done | Phase::Ended | Phase::Paused => true,
+        Phase::Waiting(WaitReason::Input | WaitReason::Error(_)) => true,
+        Phase::Waiting(WaitReason::Permission | WaitReason::Dialog) | Phase::Working => false,
+    }
+}
+
+/// Where an outgoing handoff is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Stage {
+    /// Waiting for the turn to end.
+    Turn,
+    /// "Now": the turn was interrupted at this time and is stopping.
+    Stopping(u64),
+    /// The receiver was asked for its commits at this time.
+    Bases(u64),
+    /// Packing and sending, off the UI thread.
+    Sending,
+    /// Every part went at this time; waiting for `took`.
+    Took(u64),
+}
+
+/// What the sender should do next.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Do {
+    Wait,
+    /// Interrupt the turn, as Esc does.
+    Interrupt,
+    /// Stop the agent, then ask the receiver for its commits.
+    AskBases,
+    /// Pack the session against these commits and send it.
+    Pack {
+        known: Vec<String>,
+        clean: bool,
+    },
+    /// The receiver runs it, as the roster's number `n`: let go.
+    LetGo(u64),
+    /// Give up, keeping the session here, and say why.
+    Fail(String),
+}
+
+/// One session on its way to a brother.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Outgoing {
+    /// Horadric's id of the session.
+    pub id: String,
+    /// The brother it goes to, by name.
+    pub to: String,
+    /// The human asked for it to go mid turn.
+    pub now: bool,
+    /// Its last turn ended by itself rather than by an interrupt.
+    pub clean: bool,
+    pub stage: Stage,
+}
+
+impl Outgoing {
+    pub fn new(id: &str, to: &str, now: bool) -> Self {
+        Outgoing {
+            id: id.into(),
+            to: to.into(),
+            now,
+            clean: true,
+            stage: Stage::Turn,
+        }
+    }
+
+    /// The human clicked "Now".
+    pub fn hurry(&mut self) {
+        self.now = true;
+    }
+
+    /// Looks at the session and the link at time `at`, in seconds.
+    /// `between` is [`between_turns`] of its phase, `linked` whether the
+    /// receiver answers now.
+    pub fn tick(&mut self, between: bool, linked: bool, at: u64) -> Do {
+        match self.stage {
+            Stage::Turn if !linked => Do::Wait,
+            Stage::Turn if between => {
+                self.stage = Stage::Bases(at);
+                Do::AskBases
+            }
+            Stage::Turn if self.now => {
+                self.stage = Stage::Stopping(at);
+                self.clean = false;
+                Do::Interrupt
+            }
+            Stage::Turn => Do::Wait,
+            Stage::Stopping(since) if between || at.saturating_sub(since) >= STOP_SECS => {
+                if !linked {
+                    return self.fail("is out of reach");
+                }
+                self.stage = Stage::Bases(at);
+                Do::AskBases
+            }
+            Stage::Bases(_) | Stage::Took(_) if !linked => self.fail("is out of reach"),
+            Stage::Bases(since) if at.saturating_sub(since) >= BASES_SECS => {
+                self.fail("did not answer")
+            }
+            Stage::Took(since) if at.saturating_sub(since) >= TOOK_SECS => {
+                self.fail("did not say it runs the session")
+            }
+            _ => Do::Wait,
+        }
+    }
+
+    fn fail(&mut self, why: &str) -> Do {
+        Do::Fail(format!("{} {why}", self.to))
+    }
+
+    /// The receiver's commits came.
+    pub fn heard_bases(&mut self, known: Vec<String>) -> Do {
+        if !matches!(self.stage, Stage::Bases(_)) {
+            return Do::Wait;
+        }
+        self.stage = Stage::Sending;
+        Do::Pack {
+            known,
+            clean: self.clean,
+        }
+    }
+
+    /// Every part went at `at`.
+    pub fn sent(&mut self, at: u64) {
+        if self.stage == Stage::Sending {
+            self.stage = Stage::Took(at);
+        }
+    }
+
+    /// The receiver said it runs the session, as number `n`.
+    pub fn heard_took(&mut self, n: u64) -> Do {
+        match self.stage {
+            Stage::Sending | Stage::Took(_) => Do::LetGo(n),
+            _ => Do::Wait,
+        }
+    }
+
+    /// What the session's tile says while it goes.
+    pub fn line(&self) -> String {
+        let to = &self.to;
+        match self.stage {
+            Stage::Turn => format!("hands off to {to} when this turn ends"),
+            Stage::Stopping(_) => format!("stopping the turn to hand off to {to}"),
+            Stage::Bases(_) | Stage::Sending => format!("handing off to {to}"),
+            Stage::Took(_) => format!("waiting for {to} to take it"),
+        }
+    }
+
+    /// Whether the session's agent was stopped for the move, so a failure
+    /// leaves it paused rather than running.
+    pub fn stopped(&self) -> bool {
+        !matches!(self.stage, Stage::Turn | Stage::Stopping(_))
+    }
+}
+
+/// The ask for the receiver's commits.
+pub fn bases_ask(id: &str, repo: &RepoId) -> Value {
+    json!({"t": "bases", "id": id, "repo": repo})
+}
+
+/// The receiver's answer: its commits of the repository, if it has it.
+pub fn bases_answer(id: &str, commits: Option<Vec<String>>) -> Value {
+    let found = commits.is_some();
+    json!({"t": "bases", "id": id, "commits": commits.unwrap_or_default(), "found": found})
+}
+
+/// The commits of a [`bases_answer`], and whether the repository was found.
+pub fn heard_bases(msg: &Value) -> (Vec<String>, bool) {
+    let commits = msg["commits"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    (commits, msg["found"].as_bool().unwrap_or(false))
+}
+
+/// The receiver runs the session, as the roster's number `n`. Protocol
+/// v3 names it `n`, but `n` is every message's count on a link, and an
+/// answer carrying one is taken for an ask, so it goes as `number`.
+pub fn took_message(id: &str, n: u64) -> Value {
+    json!({"t": "took", "id": id, "number": n})
+}
+
+/// The roster's number a [`took_message`] carries.
+pub fn heard_took(msg: &Value) -> u64 {
+    msg["number"].as_u64().unwrap_or(0)
+}
+
+/// A refusal of a handoff, which the sender reads as [`Do::Fail`].
+pub fn refused(id: &str, text: &str) -> Value {
+    json!({"t": "error", "for": "bundle", "id": id, "text": text})
+}
+
+/// The bundles arriving from brothers, by who sends them and the session.
+#[derive(Debug, Default)]
+pub struct Arriving {
+    joiners: HashMap<(String, String), Joiner>,
+}
+
+impl Arriving {
+    /// Takes one `bundle` message from `who`: the whole package once its
+    /// last part is in. A part that does not fit drops what came of that
+    /// session so far, so a sender that starts over is heard afresh.
+    pub fn take(&mut self, who: &str, msg: &Value) -> Result<Option<Package>, String> {
+        let part: Part =
+            serde_json::from_value(msg.clone()).map_err(|_| "not a bundle part".to_string())?;
+        let key = (who.to_string(), part.id.clone());
+        let joiner = self
+            .joiners
+            .entry(key.clone())
+            .or_insert_with(|| Joiner::new(&part.id));
+        match joiner.add(&part) {
+            Ok(None) => Ok(None),
+            Ok(Some(bytes)) => {
+                self.joiners.remove(&key);
+                handoff::unpack(&bytes)
+                    .map(Some)
+                    .ok_or_else(|| "the bundle could not be read".to_string())
+            }
+            Err(e) => {
+                self.joiners.remove(&key);
+                Err(format!("a bundle part was refused: {e:?}"))
+            }
+        }
+    }
+}
+
+/// A path as this system writes it, since Claude Code keys transcripts by
+/// the folder as the agent sees it.
+fn native(path: &str) -> String {
+    if cfg!(windows) {
+        path.replace('/', "\\")
+    } else {
+        path.to_string()
+    }
+}
+
+/// Packs the session `record` names, held in `cwd`, for a receiver that
+/// has the commits `known`: its transcript from under `projects` (Claude
+/// Code's `~/.claude/projects`), its work as a bundle of a commit on its
+/// private ref, and the record filled in with where it all came from.
+pub fn pack_session(
+    record: &mut Record,
+    cwd: &Path,
+    projects: &Path,
+    known: &[String],
+) -> Result<Vec<u8>, String> {
+    let folder = transcript_folder(projects, &record.cwd, &record.session)
+        .ok_or("Claude Code holds no transcript of this session")?;
+    let files = gather_transcript(&folder, &record.session)?;
+    record.transcripts = folder.to_string_lossy().into_owned();
+    record.repo = repo_id(cwd).ok_or("the session's folder is in no git repository")?;
+    record.prefix = handoff::git(cwd, &["rev-parse", "--show-prefix"], &[])
+        .map(|p| p.trim().trim_end_matches('/').to_string())
+        .unwrap_or_default();
+    record.branch = handoff::git(cwd, &["rev-parse", "--abbrev-ref", "HEAD"], &[])
+        .ok()
+        .map(|b| b.trim().to_string())
+        .filter(|b| !b.is_empty() && b != "HEAD");
+    // From the top, since `add -A .` below a subfolder would leave out
+    // what changed beside it.
+    let top = handoff::git(cwd, &["rev-parse", "--show-toplevel"], &[])?;
+    let top = Path::new(top.trim());
+    let refname = handoff_ref(&record.session).ok_or("not a session id")?;
+    let message = format!("Handoff of {} to another brother", record.name);
+    record.commit = Some(commit_work(top, &refname, &message)?);
+    let out = scratch("bundle");
+    let cut = cut_bundle(top, &refname, known, &out);
+    let work = cut.and_then(|_| std::fs::read(&out).map_err(|e| e.to_string()));
+    let _ = std::fs::remove_file(&out);
+    Ok(pack(&Package {
+        record: record.clone(),
+        files,
+        work: work?,
+    }))
+}
+
+/// Drops the private ref a handoff left in `dir`'s repository, once the
+/// receiver runs the session: the work is there now.
+pub fn forget_ref(dir: &Path, session: &str) {
+    if let Some(refname) = handoff_ref(session) {
+        let _ = handoff::git(dir, &["update-ref", "-d", &refname], &[]);
+    }
+}
+
+fn scratch(what: &str) -> PathBuf {
+    static N: AtomicU32 = AtomicU32::new(0);
+    std::env::temp_dir().join(format!(
+        "horadric-{what}-{}-{}",
+        std::process::id(),
+        N.fetch_add(1, Ordering::Relaxed)
+    ))
+}
+
+/// A handed off session on the receiver, ready to resume.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Landed {
+    /// Where to run `claude --resume`: the session's folder in its new
+    /// worktree.
+    pub cwd: PathBuf,
+    pub worktree: Worktree,
+    /// The handoff commit its tree came from.
+    pub commit: String,
+}
+
+/// Lands `package` in `repo`, the receiver's checkout of the project (any
+/// folder of it): its work in a new worktree beside the main tree, on a
+/// branch named after the one it was on, and its transcript filed under
+/// `projects` by the new folder, with its paths moved there. The
+/// receiver's own checkout is never touched.
+pub fn land(package: &Package, repo: &Path, projects: &Path) -> Result<Landed, String> {
+    let r = &package.record;
+    let place = handoff::git(
+        repo,
+        &[
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-dir",
+            "--git-common-dir",
+            "--show-toplevel",
+        ],
+        &[],
+    )?;
+    let top = worktree::main_tree(&place)
+        .map(|p| p.top)
+        .ok_or_else(|| format!("{} is not a main working tree", repo.display()))?;
+    let wanted = r
+        .branch
+        .as_deref()
+        .filter(|b| !b.is_empty())
+        .unwrap_or(&r.name);
+    let branch = worktree::branch(wanted, |b| {
+        Path::new(&worktree::folder(&top, b)).exists()
+            || handoff::rev(Path::new(&top), &format!("refs/heads/{b}")).is_some()
+    });
+    let folder = native(&worktree::folder(&top, &branch));
+    let bundle = scratch("landing");
+    std::fs::write(&bundle, &package.work).map_err(|e| e.to_string())?;
+    let applied = apply_bundle(
+        Path::new(&top),
+        &bundle,
+        &r.session,
+        Path::new(&folder),
+        &branch,
+    );
+    let _ = std::fs::remove_file(&bundle);
+    let commit = applied?;
+    let cwd = match r.prefix.as_str() {
+        "" => PathBuf::from(&folder),
+        prefix => Path::new(&folder).join(native(prefix)),
+    };
+    let cwd_text = cwd.to_string_lossy().into_owned();
+    let to_folder = projects.join(transcript_key(&cwd_text));
+    file_transcript(
+        &package.files,
+        &to_folder,
+        &r.transcripts,
+        &r.cwd,
+        &cwd_text,
+    )?;
+    Ok(Landed {
+        cwd,
+        worktree: Worktree {
+            path: folder,
+            main: top.replace('\\', "/"),
+            branch,
+            ports: None,
+        },
+        commit,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::handoff::tests::Repo;
+    use crate::handoff::{split, TranscriptFile};
+
+    #[test]
+    fn only_a_turn_that_ended_or_waits_on_an_answer_is_between_turns() {
+        assert!(between_turns(&Phase::Idle));
+        assert!(between_turns(&Phase::Done));
+        assert!(between_turns(&Phase::Paused));
+        assert!(between_turns(&Phase::Waiting(WaitReason::Input)));
+        assert!(between_turns(&Phase::Waiting(WaitReason::Error(
+            "x".into()
+        ))));
+        assert!(!between_turns(&Phase::Working));
+        assert!(!between_turns(&Phase::Waiting(WaitReason::Permission)));
+        assert!(!between_turns(&Phase::Waiting(WaitReason::Dialog)));
+    }
+
+    #[test]
+    fn a_handoff_waits_for_the_turn_then_asks_packs_and_lets_go() {
+        let mut o = Outgoing::new("s1", "Desktop", false);
+        assert_eq!(o.tick(false, true, 0), Do::Wait);
+        assert_eq!(o.line(), "hands off to Desktop when this turn ends");
+        assert_eq!(o.tick(true, false, 1), Do::Wait, "not while out of reach");
+        assert!(!o.stopped());
+        assert_eq!(o.tick(true, true, 2), Do::AskBases);
+        assert!(o.stopped());
+        assert_eq!(o.heard_took(1), Do::Wait, "a took before the bundle is not");
+        assert_eq!(
+            o.heard_bases(vec!["c1".into()]),
+            Do::Pack {
+                known: vec!["c1".into()],
+                clean: true
+            }
+        );
+        assert_eq!(o.heard_bases(vec![]), Do::Wait, "asked once");
+        o.sent(3);
+        assert_eq!(o.line(), "waiting for Desktop to take it");
+        assert_eq!(o.tick(true, true, 4), Do::Wait);
+        assert_eq!(o.heard_took(5), Do::LetGo(5));
+    }
+
+    #[test]
+    fn now_interrupts_and_goes_once_the_turn_stops_or_after_a_while() {
+        let mut o = Outgoing::new("s1", "Desktop", false);
+        assert_eq!(o.tick(false, true, 0), Do::Wait);
+        o.hurry();
+        assert_eq!(o.tick(false, true, 1), Do::Interrupt);
+        assert_eq!(o.tick(false, true, 2), Do::Wait, "interrupted once");
+        assert_eq!(o.tick(false, true, 1 + STOP_SECS), Do::AskBases);
+        assert!(matches!(
+            o.heard_bases(vec![]),
+            Do::Pack { clean: false, .. }
+        ));
+        let mut o = Outgoing::new("s1", "Desktop", true);
+        assert_eq!(o.tick(false, true, 0), Do::Interrupt);
+        assert_eq!(o.tick(true, true, 1), Do::AskBases);
+    }
+
+    #[test]
+    fn a_receiver_that_goes_quiet_fails_the_handoff() {
+        let mut o = Outgoing::new("s1", "Desktop", false);
+        o.tick(true, true, 0);
+        assert_eq!(
+            o.tick(true, true, BASES_SECS),
+            Do::Fail("Desktop did not answer".into())
+        );
+        let mut o = Outgoing::new("s1", "Desktop", false);
+        o.tick(true, true, 0);
+        assert_eq!(
+            o.tick(true, false, 1),
+            Do::Fail("Desktop is out of reach".into())
+        );
+        let mut o = Outgoing::new("s1", "Desktop", false);
+        o.tick(true, true, 0);
+        o.heard_bases(vec![]);
+        o.sent(10);
+        assert_eq!(o.tick(true, true, 10 + TOOK_SECS - 1), Do::Wait);
+        assert!(matches!(o.tick(true, true, 10 + TOOK_SECS), Do::Fail(_)));
+    }
+
+    #[test]
+    fn the_wire_reads_back() {
+        let repo = RepoId {
+            remotes: vec!["github.com/a/b".into()],
+            roots: vec![],
+        };
+        let ask = bases_ask("s1", &repo);
+        assert_eq!(ask["t"], "bases");
+        assert_eq!(ask["repo"]["remotes"][0], "github.com/a/b");
+        let a = bases_answer("s1", Some(vec!["c1".into(), "c2".into()]));
+        assert_eq!(heard_bases(&a), (vec!["c1".into(), "c2".into()], true));
+        assert_eq!(heard_bases(&bases_answer("s1", None)), (vec![], false));
+        assert_eq!(
+            took_message("s1", 3),
+            json!({"t": "took", "id": "s1", "number": 3})
+        );
+        assert_eq!(refused("s1", "no")["for"], "bundle");
+    }
+
+    #[test]
+    fn parts_arrive_per_sender_and_a_bad_one_starts_over() {
+        let p = Package {
+            record: Record {
+                session: "c1".into(),
+                ..Default::default()
+            },
+            files: vec![TranscriptFile {
+                path: "c1.jsonl".into(),
+                bytes: b"{}\n".to_vec(),
+            }],
+            work: vec![7; handoff::PART_BYTES + 3],
+        };
+        let parts = split("s1", &pack(&p));
+        assert_eq!(parts.len(), 2);
+        let msg = |i: usize| serde_json::to_value(&parts[i]).unwrap();
+        let mut a = Arriving::default();
+        assert_eq!(a.take("Laptop", &msg(1)).unwrap(), None);
+        assert_eq!(a.take("Other", &msg(0)).unwrap(), None, "another sender's");
+        assert_eq!(a.take("Laptop", &msg(0)).unwrap(), Some(p.clone()));
+        let mut bad = msg(1);
+        bad["of"] = json!(5);
+        assert!(a.take("Other", &bad).is_err());
+        assert_eq!(a.take("Other", &msg(1)).unwrap(), None, "heard afresh");
+        assert!(a.take("Laptop", &json!({"t": "bundle"})).is_err());
+    }
+
+    #[test]
+    fn a_session_packed_on_one_side_lands_in_a_worktree_on_the_other() {
+        let sender = Repo::new("hand-send");
+        sender.commit("a.txt", "one\n");
+        sender.write("src/b.txt", "two\n");
+        sender.git(&["add", "src/b.txt"]);
+        sender.git(&["commit", "-q", "-m", "b"]);
+        let receiver = Repo::new("hand-recv");
+        receiver.git(&["pull", "-q", &sender.0.to_string_lossy(), "main"]);
+        sender.write("a.txt", "one changed\n");
+        sender.write("src/new.txt", "untracked\n");
+        let cwd = sender.0.join("src");
+        let cwd_text = cwd.to_string_lossy().into_owned();
+        // Claude Code's projects folder on each side.
+        let projects = sender.0.with_extension("projects");
+        let theirs = receiver.0.with_extension("projects");
+        let held = projects.join(transcript_key(&cwd_text));
+        std::fs::create_dir_all(held.join("c1").join("tool-results")).unwrap();
+        let line = json!({"type": "user", "cwd": cwd_text, "sessionId": "c1",
+            "message": {"content": format!("see {}", held.join("c1").join("tool-results").join("t.txt").display())}});
+        std::fs::write(held.join("c1.jsonl"), format!("{line}\n")).unwrap();
+        std::fs::write(held.join("c1").join("tool-results").join("t.txt"), "big").unwrap();
+
+        let mut record = Record {
+            session: "c1".into(),
+            id: "fix".into(),
+            name: "fix login".into(),
+            cwd: cwd_text.clone(),
+            from: "Laptop".into(),
+            ..Default::default()
+        };
+        let known = handoff::known_commits(&receiver.0);
+        let bytes = pack_session(&mut record, &cwd, &projects, &known).unwrap();
+        assert_eq!(record.prefix, "src");
+        assert_eq!(record.branch.as_deref(), Some("main"));
+        assert!(record.commit.is_some());
+        let package = handoff::unpack(&bytes).unwrap();
+        assert_eq!(package.files.len(), 2);
+
+        let landed = land(&package, &receiver.0, &theirs).unwrap();
+        let tree = PathBuf::from(&landed.worktree.path);
+        assert_eq!(landed.worktree.branch, "main-2", "main is taken");
+        assert_eq!(landed.cwd, tree.join("src"));
+        let read = |f: &str| std::fs::read_to_string(tree.join(f)).unwrap();
+        assert_eq!(read("a.txt"), "one changed\n");
+        assert_eq!(read("src/new.txt"), "untracked\n");
+        assert_eq!(
+            receiver.read("a.txt").as_deref(),
+            Some("one\n"),
+            "untouched"
+        );
+        let new_cwd = landed.cwd.to_string_lossy().into_owned();
+        let filed = theirs.join(transcript_key(&new_cwd));
+        let text = std::fs::read_to_string(filed.join("c1.jsonl")).unwrap();
+        let v: Value = serde_json::from_str(text.trim()).unwrap();
+        assert_eq!(v["cwd"], json!(new_cwd));
+        let said = v["message"]["content"].as_str().unwrap();
+        let moved = filed.join("c1").join("tool-results").join("t.txt");
+        assert_eq!(said, format!("see {}", moved.display()));
+        assert!(filed
+            .join("c1")
+            .join("tool-results")
+            .join("t.txt")
+            .is_file());
+
+        forget_ref(&sender.0, "c1");
+        assert!(handoff::rev(&sender.0, "refs/horadric/handoff/c1").is_none());
+        let _ = receiver.git(&["worktree", "remove", "--force", &landed.worktree.path]);
+        let _ = std::fs::remove_dir_all(&tree);
+        let _ = std::fs::remove_dir_all(&projects);
+        let _ = std::fs::remove_dir_all(&theirs);
+    }
+}
