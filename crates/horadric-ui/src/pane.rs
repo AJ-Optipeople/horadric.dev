@@ -1036,7 +1036,7 @@ impl Pane {
             }
         }
         let rain = self.rain();
-        let fx = self.fx(&frame, &cell, session_phase);
+        let fx = self.fx(&frame, at, &cell, session_phase);
         // A browser pane's header has its tabs and address besides, and its
         // frame is empty and cheap, so it always draws, and so does a pane
         // the rain moves behind.
@@ -1106,19 +1106,24 @@ impl Pane {
 
     /// Moves the light in the glass on to now, and keeps its clock running
     /// at the beat it wants, or stopped once nothing moves.
-    fn fx(&self, frame: &frame::Frame, cell: &CellSize, phase: Option<Phase>) -> Fx {
+    fn fx(
+        &self,
+        frame: &frame::Frame,
+        at: Option<(usize, usize)>,
+        cell: &CellSize,
+        phase: Option<Phase>,
+    ) -> Fx {
         let session = self.is_session() && self.console.exit_code().is_none();
         // An agent not yet heard from is still being summoned.
         let phase = match (session, self.console.shell, phase) {
             (false, ..) | (_, true, _) => None,
             (true, false, p) => Some(p.unwrap_or(Phase::Idle)),
         };
-        let caret = frame
-            .caret
-            .as_ref()
-            .filter(|_| self.focused.get() && self.is_session())
-            .filter(|_| self.console.exit_code().is_none())
-            .map(|c| (c.col as f32 * cell.w, c.row as f32 * cell.h));
+        // Where the cursor is parked, drawn or not: agents hide it and draw
+        // their own, and a blink would break the glide.
+        let caret = at
+            .filter(|_| self.focused.get() && session)
+            .map(|(row, col)| (col as f32 * cell.w, row as f32 * cell.h));
         let seen = Seen {
             phase: phase.as_ref(),
             caret,

@@ -29,7 +29,7 @@ pub const SWEEP: Duration = Duration::from_millis(1100);
 /// feels behind the keys.
 pub const GLIDE: Duration = Duration::from_millis(70);
 /// How long the sparks a cursor sheds take to burn out.
-pub const TRAIL: Duration = Duration::from_millis(520);
+pub const TRAIL: Duration = Duration::from_millis(650);
 /// Between frames while only the motes rise. They drift slowly, and twenty
 /// frames a second of them looks nearly the same as sixty, while every
 /// frame redraws the whole grid of each working pane.
@@ -110,7 +110,9 @@ pub fn trail(seed: u64, from: (f32, f32), to: (f32, f32), elapsed: Duration) -> 
     if dist < 0.5 || elapsed >= TRAIL {
         return Vec::new();
     }
-    let count = (dist / 5.0).clamp(3.0, 14.0) as u64;
+    // A keystroke moves the cursor one cell, and three sparks off a
+    // cell read as dust: each one throws a handful.
+    let count = (dist / 4.0).clamp(7.0, 16.0) as u64;
     let s = elapsed.as_secs_f32();
     (0..count)
         .filter_map(|i| {
@@ -126,13 +128,13 @@ pub fn trail(seed: u64, from: (f32, f32), to: (f32, f32), elapsed: Duration) -> 
                 return None;
             }
             let angle = -PI / 2.0 + (unit(&[seed, i, 1]) - 0.5) * 2.4;
-            let speed = 18.0 + 40.0 * unit(&[seed, i, 2]);
+            let speed = 40.0 + 80.0 * unit(&[seed, i, 2]);
             // Falls back a little as it slows, as an ember does.
             let fall = 30.0 * age * age;
             Some(Spark {
                 x: from.0 + dx * along + angle.cos() * speed * age,
                 y: from.1 + dy * along + angle.sin() * speed * age + fall,
-                r: 0.6 + 1.0 * unit(&[seed, i, 3]),
+                r: 1.0 + 1.4 * unit(&[seed, i, 3]),
                 light: left * left,
             })
         })
