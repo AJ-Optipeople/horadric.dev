@@ -9,6 +9,7 @@
 - A [/] quest whose session a dev instance started (state in %APPDATA%\Horadric-dev) died with it: no tell reaches it, hand it to the human with "restart it" at once (lore #51).
 
 ## Lately
+- 2026-10-24 Round (human left, main at 27c81b2, only my memory since c0ffda6): the c0ffda6 Ship Local reloaded fine at 05:47. Uncommitted brethren.rs, store.rs, heavy.rs are a live session's. Log empty, no aim. Nothing to do.
 - 2026-10-24 Round (05:42, human left, main at c0ffda6): the 6b80f52 Ship Local reloaded fine at 05:15, but four Brotherhood commits (74fd245 to c0ffda6) came after it, code files show no diff and no cargo runs, so cast "Ship Local" again. Log empty, no aim.
 - 2026-10-24 Round (quest landed, main at 6b80f52): "Land the picked thing branch" landed, code files show no diff, no cargo running, so cast "Ship Local" for everything since the 10-23 23:55 reload. Log empty, no aim.
 - 2026-10-24 Round (05:01, main at c04ea81): app.rs, console.rs and lib.rs are committed now and the code files left show no diff, so told "Land the picked thing branch" to merge main in, recheck and fast-forward. Held "Ship Local" one round so it carries the picked thing with the Brotherhood commits.
@@ -130,4 +131,3 @@
 
 ## Open
 - Once quests run with a pack, the pack comparison resumes by itself.
-- Ship Local cast at c0ffda6 (05:42). Next round: check reload.log says reloaded after it.
