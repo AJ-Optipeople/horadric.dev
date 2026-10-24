@@ -796,6 +796,12 @@ impl Server {
             for &ch in &greeted {
                 out.send(ch, projects.clone());
             }
+            // A project new since hello shares its lore now, not at the
+            // next hello, which on a node's link may be days away. Those
+            // told before are told again, which costs a send of nothing.
+            if self.projects_sent.is_some() {
+                self.lore_again(serve, out);
+            }
             self.projects_sent = Some(print);
         }
         let edge = self
@@ -833,6 +839,20 @@ impl Server {
             if c.screen != Some(print) {
                 c.screen = Some(print);
                 out.send(ch, msg);
+            }
+        }
+    }
+
+    /// Tells each brother what this machine holds of every shared lore,
+    /// as hello does.
+    fn lore_again(&mut self, serve: &mut impl Serve, out: &mut Out) {
+        if !self.clients.values().any(Client::brother) {
+            return;
+        }
+        let lore = serve.lore_projects();
+        for (&ch, _) in self.clients.iter().filter(|(_, c)| c.brother()) {
+            for (project, have) in &lore {
+                out.send(ch, lore_message(project, have));
             }
         }
     }
@@ -940,6 +960,16 @@ pub fn state_message(state: &str) -> Value {
 }
 
 /// The `lore` message: what this machine holds of a project's lore.
+/// What a job's answer sends: nothing for null, each item of an array
+/// (a long lore catch up goes as several `entries`), else itself.
+pub fn answers(v: Value) -> Vec<Value> {
+    match v {
+        Value::Null => Vec::new(),
+        Value::Array(list) => list,
+        one => vec![one],
+    }
+}
+
 pub fn lore_message(project: &Value, have: &Value) -> Value {
     json!({"t": "lore", "project": project, "have": have})
 }
@@ -979,6 +1009,8 @@ mod tests {
         kept: Vec<(String, Value)>,
         /// The human switched control off for every brother.
         locked: bool,
+        /// Its projects' paths.
+        projects: Vec<&'static str>,
     }
 
     impl Serve for Fake {
@@ -989,7 +1021,12 @@ mod tests {
             json!({"t": "sessions", "list": [{"id": "s1"}]})
         }
         fn projects(&self) -> Value {
-            json!({"t": "projects", "list": []})
+            let list: Vec<Value> = self
+                .projects
+                .iter()
+                .map(|p| json!({"path": p, "name": p}))
+                .collect();
+            json!({"t": "projects", "list": list})
         }
         fn folders(&self) -> Value {
             json!({"t": "folders", "roots": []})
@@ -1120,13 +1157,16 @@ mod tests {
     /// What goes out, the jobs' answers too, as a transport sends it.
     fn sent(out: Out) -> Vec<Value> {
         let mut msgs: Vec<Value> = out.msgs.into_iter().map(|(_, m)| m).collect();
-        msgs.extend(
-            out.later
-                .into_iter()
-                .map(|(_, job)| job())
-                .filter(|m| !m.is_null()),
-        );
+        msgs.extend(out.later.into_iter().flat_map(|(_, job)| answers(job())));
         msgs
+    }
+
+    #[test]
+    fn a_jobs_answer_sends_nothing_each_item_or_itself() {
+        assert!(answers(Value::Null).is_empty());
+        let two = json!([{"t": "entries"}, {"t": "entries"}]);
+        assert_eq!(answers(two).len(), 2);
+        assert_eq!(answers(json!({"t": "bases"})), [json!({"t": "bases"})]);
     }
 
     fn of<'a>(msgs: &'a [Value], t: &str) -> Vec<&'a Value> {
@@ -1467,6 +1507,32 @@ mod tests {
             .collect();
         assert!(of(&msgs, "roster").is_empty());
         assert_eq!(of(&msgs, "state")[0]["state"], "sleeping");
+    }
+
+    #[test]
+    fn a_project_new_since_hello_tells_its_lore_to_brothers_only() {
+        let mut serve = Fake::default();
+        let hello = json!({"t": "hello", "v": 3, "kind": "brother"});
+        let (mut server, _) = greeted(&mut serve, "b", hello);
+        server.open(2);
+        server.heard(2, "phone", &json!({"t": "hello", "v": 3}), 0, || "P".into());
+        let _ = server.answer(&mut serve, 0);
+        fn tick(serve: &mut Fake, server: &mut Server) -> Vec<(u32, Value)> {
+            server.looked = None;
+            server.tick(serve).msgs
+        }
+        // Nothing changed, nothing is told again.
+        let quiet = tick(&mut serve, &mut server);
+        assert!(quiet.iter().all(|(_, m)| m["t"] != "lore"));
+        serve.projects = vec!["/p"];
+        let told = tick(&mut serve, &mut server);
+        let lore: Vec<u32> = told
+            .iter()
+            .filter(|(_, m)| m["t"] == "lore")
+            .map(|(ch, _)| *ch)
+            .collect();
+        assert_eq!(lore, [1]);
+        assert!(told.iter().any(|(ch, m)| *ch == 2 && m["t"] == "projects"));
     }
 
     #[test]

@@ -11,7 +11,8 @@
 //! ready, so no window waits on it, and the model is loaded at the app's
 //! start when its files are already on disk ([`warm`]). How the model is
 //! fetched is the caller's ([`set_fetch`]): WinHTTP on Windows, the
-//! portable link on Linux.
+//! portable link on Linux. A node lets the model go when nothing asked
+//! for a while ([`set_unload_after`]), so an idle server holds none.
 //!
 //! The code index lives in the `horadric` binary, so it hands over what
 //! the memory keeps of it with [`set_code_source`]. A recall owes the
@@ -89,6 +90,37 @@ static FETCH: OnceLock<Fetch> = OnceLock::new();
 /// already on disk still loads, and one that is not is never fetched.
 pub fn set_fetch(f: Fetch) {
     let _ = FETCH.set(f);
+}
+
+static UNLOAD: OnceLock<Duration> = OnceLock::new();
+
+/// Lets the model go once nothing was asked and nothing embedded for
+/// `after`, and loads it again for the next recall, which waits on it
+/// then. Unset, as in the app, it is kept: a desktop's quests should not
+/// wait on a load.
+pub fn set_unload_after(after: Duration) {
+    let _ = UNLOAD.set(after);
+}
+
+/// What the memory's thread waits for when nothing is behind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Wait {
+    /// The next message, however long.
+    Forever,
+    /// The next message, or this long, when the model is to go.
+    For(Duration),
+    /// Nothing: the model goes now.
+    Unload,
+}
+
+/// How long the thread waits, given when the model goes (`unload`),
+/// whether it is held, and how long since it was last used.
+fn wait(unload: Option<Duration>, held: bool, idle: Duration) -> Wait {
+    match unload {
+        Some(after) if held && idle >= after => Wait::Unload,
+        Some(after) if held => Wait::For(after - idle),
+        _ => Wait::Forever,
+    }
 }
 
 static PIECES: OnceLock<PieceSource> = OnceLock::new();
@@ -385,6 +417,10 @@ fn run(state: &Path, rx: Receiver<Msg>, loaded: Sender<Msg>) {
     let mut backlog = backlog();
     let mut projects = Projects::default();
     let mut loading = false;
+    // The model was let go for being idle, so its files are on disk and
+    // the next recall loads it before it answers.
+    let mut unloaded = false;
+    let mut used = Instant::now();
     let mut behind = !backlog.is_empty();
     // The folder a recall came from whose code is owed a sync, and when
     // each was last synced.
@@ -399,9 +435,21 @@ fn run(state: &Path, rx: Receiver<Msg>, loaded: Sender<Msg>) {
                 Err(RecvTimeoutError::Disconnected) => return,
             }
         } else {
-            match rx.recv() {
-                Ok(m) => Some(m),
-                Err(_) => return,
+            match wait(UNLOAD.get().copied(), keeper.has_model(), used.elapsed()) {
+                Wait::Forever => match rx.recv() {
+                    Ok(m) => Some(m),
+                    Err(_) => return,
+                },
+                Wait::For(d) => match rx.recv_timeout(d) {
+                    Ok(m) => Some(m),
+                    Err(RecvTimeoutError::Timeout) => continue,
+                    Err(RecvTimeoutError::Disconnected) => return,
+                },
+                Wait::Unload => {
+                    keeper.drop_model();
+                    (loading, unloaded) = (false, true);
+                    continue;
+                }
             }
         };
         match msg {
@@ -412,6 +460,16 @@ fn run(state: &Path, rx: Receiver<Msg>, loaded: Sender<Msg>) {
                 }
             }
             Some(Msg::Recall(body, to)) => {
+                used = Instant::now();
+                // One let go for being idle is on disk and quick to load,
+                // so this recall finds by meaning, not by words.
+                if unloaded && !loading {
+                    match load(&models) {
+                        Ok(model) => keeper.set_model(model),
+                        Err(e) => eprintln!("horadric: memory could not load its model again: {e}"),
+                    }
+                    (loading, unloaded) = (true, false);
+                }
                 // The model is wanted from the first recall on, not before.
                 if !loading {
                     loading = true;
@@ -453,6 +511,7 @@ fn run(state: &Path, rx: Receiver<Msg>, loaded: Sender<Msg>) {
             }
             Some(Msg::Model(Ok(model))) => {
                 keeper.set_model(*model);
+                used = Instant::now();
                 behind = true;
             }
             Some(Msg::Model(Err(e))) => eprintln!("horadric: memory has no model: {e}"),
@@ -473,7 +532,12 @@ fn run(state: &Path, rx: Receiver<Msg>, loaded: Sender<Msg>) {
                     continue;
                 }
                 match keeper.catch_up(STEP) {
-                    Ok(n) => behind = n > 0,
+                    Ok(n) => {
+                        if n > 0 {
+                            used = Instant::now();
+                        }
+                        behind = n > 0;
+                    }
                     Err(e) => {
                         eprintln!("horadric: memory could not embed: {e}");
                         behind = false;
@@ -629,6 +693,18 @@ mod tests {
             agent,
             limits: None,
         }
+    }
+
+    #[test]
+    fn a_held_model_goes_once_idle_past_the_unload_time() {
+        let min = Duration::from_secs(60);
+        assert_eq!(wait(None, true, min * 100), Wait::Forever);
+        assert_eq!(wait(Some(min), false, min * 2), Wait::Forever);
+        assert_eq!(
+            wait(Some(min), true, Duration::from_secs(20)),
+            Wait::For(Duration::from_secs(40))
+        );
+        assert_eq!(wait(Some(min), true, min), Wait::Unload);
     }
 
     #[test]

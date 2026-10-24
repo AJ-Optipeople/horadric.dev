@@ -924,6 +924,7 @@ version = "0.32.0"
 dependencies = [
  "horadric-core",
  "horadric-hooks",
+ "horadric-link",
  "horadric-memory",
  "horadric-pty",
  "horadric-ui",

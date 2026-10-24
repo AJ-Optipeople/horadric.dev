@@ -25,7 +25,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use horadric_core::brotherhood::Counted;
 use horadric_core::portal::{b64url, unb64url, Config, Kind, Paired};
-use horadric_core::serving::{Job, Out, Running, Serve, Server};
+use horadric_core::serving::{answers, Job, Out, Running, Serve, Server};
 use horadric_core::webpush;
 use horadric_core::worktree::Worktree;
 use horadric_core::Phase;
@@ -937,15 +937,6 @@ impl Serve for Here<'_> {
         if let Some(p) = &self.0.portal {
             portal_push::send_all(&p.dir, &p.config, payload);
         }
-    }
-}
-
-/// What a job's answer sends: nothing for null, each item of an array.
-fn answers(v: Value) -> Vec<Value> {
-    match v {
-        Value::Null => Vec::new(),
-        Value::Array(list) => list,
-        one => vec![one],
     }
 }
 

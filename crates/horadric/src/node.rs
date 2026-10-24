@@ -30,7 +30,7 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use horadric_core::node::{self as framing, Decoder, PREAMBLE};
-use horadric_core::serving::{Job, Out, Running, Serve, Server, LOOK_EVERY};
+use horadric_core::serving::{answers, Job, Out, Running, Serve, Server, LOOK_EVERY};
 use horadric_core::{session_id, Agent, Phase, Registry, Session};
 use horadric_hooks::listener::{self, Command as Asked, NewSession, Tagged};
 use horadric_hooks::{OWNER_ENV, SESSION_ENV};
@@ -58,6 +58,11 @@ const ROWS: u16 = 40;
 /// How often the streams are looked at while a viewer streams one, quick
 /// enough that typing over `ssh` echoes at once.
 const STREAM_EVERY: Duration = Duration::from_millis(15);
+
+/// How long the memory keeps its model with nothing asked: a server
+/// mostly waits, and the model is a hundred MB it loads again in a
+/// moment.
+const MODEL_REST: Duration = Duration::from_secs(10 * 60);
 
 /// How often what changed is written to disk: often enough that a crash
 /// loses little, seldom enough that a busy agent's hooks do not each write.
@@ -428,6 +433,8 @@ fn save(node: &Shared) {
 
 fn serve() -> Result<(), String> {
     let port = horadric_hooks::port();
+    memory::set_fetch(horadric_link::http::get);
+    memory::set_unload_after(MODEL_REST);
     memory::set_code_source(crate::lore::code_files);
     memory::set_piece_source(crate::code::pieces);
     // Bound before the port, so whoever sees the port up can connect a
@@ -892,7 +899,13 @@ fn serving(mut machine: Machine, heard: mpsc::Receiver<Event>, events: Sender<Ev
                     machine.names.remove(&ch);
                     machine.called.remove(&ch);
                 }
-                Ok(Event::Answer(ch, msg)) => send(&links, ch, &msg),
+                // A lore catch up is several messages, and a job with
+                // nothing to say answers null, which is no message.
+                Ok(Event::Answer(ch, msg)) => {
+                    for m in answers(msg) {
+                        send(&links, ch, &m);
+                    }
+                }
                 Ok(Event::Packed(id, packed)) => machine.packed(&id, packed),
                 Err(RecvTimeoutError::Timeout) => break,
                 Err(RecvTimeoutError::Disconnected) => return,

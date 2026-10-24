@@ -49,3 +49,7 @@ windows = { version = "0.62", features = [
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# What a node has no WinHTTP for: the HTTPS the memory's model comes over.
+[target.'cfg(target_os = "linux")'.dependencies]
+horadric-link = { path = "../horadric-link" }

@@ -182,6 +182,12 @@ impl<E: Embed> Keeper<E> {
         self.model.is_some()
     }
 
+    /// Lets the model go, as an idle node does to hold no model: recall
+    /// finds by words until one is set again.
+    pub fn drop_model(&mut self) -> Option<E> {
+        self.model.take()
+    }
+
     /// The store, for the shared lore (`crate::share`): what another
     /// brother sends lands in it and is embedded by [`Keeper::catch_up`]
     /// with everything else still missing a vector.
@@ -857,6 +863,30 @@ mod tests {
             .unwrap()
             .text;
         assert!(!got.contains("sofa"), "{got}");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_keeper_whose_model_went_finds_by_words() {
+        let dir = temp("dropped");
+        let mut k = keeper(&dir);
+        assert!(k.drop_model().is_some());
+        assert!(!k.has_model());
+        assert!(k.drop_model().is_none());
+        let l = lore(&["The kitten sleeps.", "Rain on Tuesday."]);
+        let found = k
+            .recall(
+                "p",
+                &l,
+                &ask("kitten"),
+                None,
+                Duration::from_secs(5),
+                &recall::hashes(|_| None),
+                &[],
+                None,
+            )
+            .unwrap();
+        assert!(found.text.contains("The kitten sleeps."), "{}", found.text);
         fs::remove_dir_all(&dir).unwrap();
     }
 

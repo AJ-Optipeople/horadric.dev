@@ -19,6 +19,7 @@
 //! after ([`App::far_lore`]). The Town Portal need not be on for that.
 
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
@@ -111,9 +112,10 @@ pub(super) struct Far {
     /// Brothers' tiles new a moment ago, by their session's own id: their
     /// id here and when, for a tile elsewhere going just after.
     arrived: HashMap<String, (String, SystemTime)>,
-    /// The tiles' projects shared with the nodes, as the last node's hello
-    /// found them.
+    /// The tiles' projects shared with the nodes, and the folders they
+    /// were found in, so a project opened since is shared at once.
     lore: Lores,
+    lore_dirs: Vec<PathBuf>,
 }
 
 fn wake(notify: isize) {
@@ -157,6 +159,7 @@ impl Far {
             left: HashMap::new(),
             arrived: HashMap::new(),
             lore: Lores::default(),
+            lore_dirs: Vec::new(),
         }
     }
 }
@@ -361,6 +364,26 @@ impl App {
     /// lacks of the projects it said, when anything changed since the last
     /// send: read on a thread, sent from the next drain.
     fn far_lore(&mut self, only: Option<&str>) {
+        let linked: Vec<String> = self
+            .far
+            .peers
+            .iter()
+            .filter(|(_, p)| matches!(p.via, Some(Via::Node(_))))
+            .map(|(k, _)| k.clone())
+            .collect();
+        if linked.is_empty() {
+            return;
+        }
+        // A project opened since the nodes' hello is told to them now,
+        // the rest again, which costs them a send of nothing.
+        if only.is_none() && self.tile_dirs() != self.far.lore_dirs {
+            self.far_lore_find();
+            for key in &linked {
+                for (project, have) in self.far.lore.told() {
+                    self.far_send(key, json!({"t": "lore", "project": project, "have": have}));
+                }
+            }
+        }
         let mut jobs = Vec::new();
         for (key, p) in self.far.peers.iter_mut() {
             if !matches!(p.via, Some(Via::Node(_))) || only.is_some_and(|o| o != key) {
@@ -376,10 +399,7 @@ impl App {
         for (key, job) in jobs {
             let tx = self.far.tx.clone();
             std::thread::spawn(move || {
-                let Value::Array(msgs) = job() else {
-                    return;
-                };
-                for msg in msgs {
+                for msg in horadric_core::serving::answers(job()) {
                     if tx.send(Event::Send(key.clone(), msg)).is_err() {
                         return;
                     }
@@ -389,13 +409,24 @@ impl App {
         }
     }
 
+    /// Finds the tiles' projects whose lore the nodes share, by
+    /// repository.
+    fn far_lore_find(&mut self) {
+        self.far.lore_dirs = self.tile_dirs();
+        self.far.lore = Lores::of(self.far.lore_dirs.clone());
+    }
+
     /// The folders of the tiles' projects, as the Town Portal shares the
-    /// lore of.
-    pub(super) fn tile_dirs(&self) -> Vec<std::path::PathBuf> {
-        self.clusters
+    /// lore of, sorted, so moving a cluster is no change.
+    pub(super) fn tile_dirs(&self) -> Vec<PathBuf> {
+        let mut dirs: Vec<PathBuf> = self
+            .clusters
             .iter()
             .filter_map(|c| self.project_dir(&c.key))
-            .collect()
+            .collect();
+        dirs.sort();
+        dirs.dedup();
+        dirs
     }
 
     /// Sends `msg` to the brother keyed `key`, stamped as every message
@@ -606,7 +637,7 @@ impl App {
                 // What this PC holds of each shared lore, so the brother
                 // sends what it lacks and then what is written after.
                 let told = if matches!(via, Via::Node(_)) {
-                    self.far.lore = Lores::of(self.tile_dirs());
+                    self.far_lore_find();
                     self.far.lore.told()
                 } else {
                     self.portal_lore()
