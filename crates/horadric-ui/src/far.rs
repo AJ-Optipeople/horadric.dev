@@ -62,6 +62,9 @@ struct Peer {
     projects: Vec<(String, String)>,
     control: bool,
     heard: brotherhood::Heard,
+    /// Its sessions as last listed, so tiles dimmed while it slept get
+    /// their own lines back when it wakes without relinking.
+    list: Vec<afar::Entry>,
 }
 
 pub(super) struct Far {
@@ -368,6 +371,7 @@ impl App {
                 last: unix_now(),
                 linked: false,
             },
+            list: Vec::new(),
         });
         p.via = Some(via);
         p.streams.clear();
@@ -487,7 +491,12 @@ impl App {
                 }
                 self.far_lines()
             }
-            Heard::Sessions(list) => self.far_sessions(&name, &list),
+            Heard::Sessions(list) => {
+                if let Some(p) = self.far.peers.get_mut(&name) {
+                    p.list = list.clone();
+                }
+                self.far_sessions(&name, &list)
+            }
             Heard::Projects(list) => {
                 if let Some(p) = self.far.peers.get_mut(&name) {
                     p.projects = list;
@@ -539,6 +548,18 @@ impl App {
                     id.map(|i| format!(" of {i}")).unwrap_or_default()
                 );
                 false
+            }
+            Heard::State(said) => {
+                let Some(p) = self.far.peers.get_mut(&name) else {
+                    return false;
+                };
+                if std::env::var_os("HORADRIC_DEBUG").is_some() {
+                    eprintln!("far: {name} is {said:?}");
+                }
+                p.heard.said = said;
+                let list = p.list.clone();
+                let listed = self.far_sessions(&name, &list);
+                self.far_lines() || listed
             }
             Heard::Unpaired => {
                 eprintln!("horadric: {name} forgot this PC");

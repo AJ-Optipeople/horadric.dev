@@ -150,6 +150,8 @@ pub enum Heard {
         id: Option<String>,
         text: String,
     },
+    /// What it says it is doing: awake, about to sleep, or leaving.
+    State(crate::brotherhood::Said),
     /// It forgot this PC: the key opens nothing any more.
     Unpaired,
     Other,
@@ -211,6 +213,10 @@ pub fn hear(msg: &Value) -> Heard {
         Some("error") => Heard::Error {
             id: text("id"),
             text: text("text").unwrap_or_default(),
+        },
+        Some("state") => match msg.get("state").cloned().map(serde_json::from_value) {
+            Some(Ok(said)) => Heard::State(said),
+            _ => Heard::Other,
         },
         Some("unpaired") => Heard::Unpaired,
         _ => Heard::Other,
@@ -466,6 +472,15 @@ mod tests {
             hear(&json!({"t":"size","id":"a","cols":80,"rows":0})),
             Heard::Other
         );
+        assert_eq!(
+            hear(&json!({"t":"state","state":"sleeping"})),
+            Heard::State(crate::brotherhood::Said::Sleeping)
+        );
+        assert_eq!(
+            hear(&json!({"t":"state","state":"awake"})),
+            Heard::State(crate::brotherhood::Said::Awake)
+        );
+        assert_eq!(hear(&json!({"t":"state","state":"dreaming"})), Heard::Other);
         assert_eq!(
             hear(&json!({"t":"projects","list":[{"path":"C:/p","name":"p"}]})),
             Heard::Projects(vec![("C:/p".into(), "p".into())])
