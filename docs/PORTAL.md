@@ -469,3 +469,31 @@ it sees the other in `brothers`.
 A refused token closes the PC's socket with 4401: the PC drops its
 access token, refreshes it and tries again with the usual backoff. 4503
 waits 30 seconds.
+
+## Protocol v3: roster, state and lore
+
+Sent to a client whose hello said `"kind":"brother"`, and to every linked
+brother channel, which is served as a brother whatever its hello says. A
+phone hears none of it, and its `lore` and `entries` are ignored.
+
+- `{"t":"roster","n",...}` after the hello, then whenever it changes: the
+  roster's own fields (`brothers`, `sessions`, `outcast`) beside `t`.
+  Until the mesh keeps one, it is this PC and the brothers in
+  `brothers.json`, `n` the latest join. A PC with no brothers sends none.
+  A brother may act (`input`, `start` and the rest) when the roster gives
+  it control; one the roster does not know only watches.
+- `{"t":"state","state":"awake"|"sleeping"|"leaving"}` after the hello, at
+  once when it changes ("sleeping" as Windows suspends, "leaving" as it
+  shuts down, "awake" after) and every 15 seconds as a heartbeat.
+- `{"t":"lore","project","have"}` after the hello, one per tile project in
+  git, `project` its repository (`{"remotes","roots"}`, as handing off
+  matches one) and `have` the highest number held of each writing
+  brother. A brother answers with its own `lore`; the PC then sends
+  `{"t":"entries","project","b64"}` with what that `have` lacks, in as many
+  messages as keep each under 384 KB of packed entries, and after that
+  what is written as it is written. `entries` from a brother go into the
+  PC's copy of the project's lore. A project is the brother's when either
+  repository names a remote of the other, or, with no remote, the same
+  first commit.
+- A PC never serves on a session it only shows for a brother: not in
+  `sessions`, not to `attach`, `watch`, `input` or `stop`.
