@@ -9,6 +9,7 @@
 - A [/] quest whose session a dev instance started (state in %APPDATA%\Horadric-dev) died with it: no tell reaches it, hand it to the human with "restart it" at once (lore #51).
 
 ## Lately
+- 2026-10-24 Round (hourly, main at 3f34c35, only my memory since the c0ffda6 ship): uncommitted brethren.rs, store.rs, heavy.rs, performance.md are a live session's. Log empty, no aim. Nothing to do.
 - 2026-10-24 Round (human left, main at 27c81b2, only my memory since c0ffda6): the c0ffda6 Ship Local reloaded fine at 05:47. Uncommitted brethren.rs, store.rs, heavy.rs are a live session's. Log empty, no aim. Nothing to do.
 - 2026-10-24 Round (05:42, human left, main at c0ffda6): the 6b80f52 Ship Local reloaded fine at 05:15, but four Brotherhood commits (74fd245 to c0ffda6) came after it, code files show no diff and no cargo runs, so cast "Ship Local" again. Log empty, no aim.
 - 2026-10-24 Round (quest landed, main at 6b80f52): "Land the picked thing branch" landed, code files show no diff, no cargo running, so cast "Ship Local" for everything since the 10-23 23:55 reload. Log empty, no aim.
