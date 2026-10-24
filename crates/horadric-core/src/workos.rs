@@ -311,6 +311,68 @@ pub fn read_stored(blob: &[u8]) -> Option<(String, String)> {
     Some((text("refresh")?, text("id")?))
 }
 
+/// What one poll of a device code means for the next.
+#[derive(Debug, PartialEq)]
+pub enum Polled {
+    /// Poll again after this many seconds.
+    Wait(u64),
+    /// Signed in.
+    Signed(Auth),
+    /// Stop, saying why in the human's words.
+    Stop(String),
+}
+
+/// The step after a poll answered `poll`, polling every `interval`
+/// seconds, `left` seconds before the codes run out. A slow down lasts
+/// for every poll after it, so the interval it gives is the new one.
+pub fn after_poll(poll: Poll, interval: u64, left: u64) -> Polled {
+    let wait = match poll {
+        Poll::Signed(auth) => return Polled::Signed(auth),
+        Poll::Pending => interval,
+        Poll::SlowDown => slower(interval),
+        Poll::Denied => return Polled::Stop("the sign in was refused in the browser".into()),
+        Poll::Expired => return Polled::Stop(EXPIRED.into()),
+        Poll::Failed(why) => return Polled::Stop(format!("WorkOS said: {why}")),
+    };
+    if wait >= left {
+        return Polled::Stop(EXPIRED.into());
+    }
+    Polled::Wait(wait)
+}
+
+const EXPIRED: &str = "the code ran out before it was confirmed; sign in again for a new one";
+
+/// What a machine with no Credential Manager, a Linux node, keeps in
+/// `workos.json`: the refresh token, who it is, and which WorkOS client
+/// signed it in, so a token from staging is never refreshed against
+/// production.
+pub fn kept_file(refresh: &str, user: &User, client: &str) -> String {
+    serde_json::json!({
+        "refresh": refresh,
+        "id": user.id,
+        "email": user.email,
+        "client": client,
+    })
+    .to_string()
+}
+
+/// Reads [`kept_file`] back as (refresh token, user), `None` when it is
+/// not one, or was signed in with another client than `client`.
+pub fn read_kept_file(text: &str, client: &str) -> Option<(String, User)> {
+    let v: serde_json::Value = serde_json::from_str(text).ok()?;
+    let field = |k: &str| v.get(k).and_then(|x| x.as_str()).map(str::to_string);
+    if field("client").as_deref() != Some(client) {
+        return None;
+    }
+    Some((
+        field("refresh")?,
+        User {
+            id: field("id")?,
+            email: field("email").unwrap_or_default(),
+        },
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -556,5 +618,49 @@ mod tests {
         );
         assert_eq!(read_stored(b"old"), None);
         assert_eq!(read_stored(br#"{"refresh":"r"}"#), None);
+    }
+
+    #[test]
+    fn a_poll_says_when_to_poll_again_and_when_to_stop() {
+        assert_eq!(after_poll(Poll::Pending, 5, 300), Polled::Wait(5));
+        assert_eq!(after_poll(Poll::SlowDown, 5, 300), Polled::Wait(10));
+        assert!(
+            matches!(after_poll(Poll::Pending, 5, 4), Polled::Stop(w) if w.contains("ran out"))
+        );
+        assert!(
+            matches!(after_poll(Poll::Expired, 5, 300), Polled::Stop(w) if w.contains("ran out"))
+        );
+        assert!(
+            matches!(after_poll(Poll::Denied, 5, 300), Polled::Stop(w) if w.contains("refused"))
+        );
+        assert_eq!(
+            after_poll(Poll::Failed("no".into()), 5, 300),
+            Polled::Stop("WorkOS said: no".into())
+        );
+        let auth = Auth {
+            access: "a".into(),
+            refresh: "r".into(),
+            user: None,
+        };
+        assert!(matches!(
+            after_poll(Poll::Signed(auth), 5, 1),
+            Polled::Signed(_)
+        ));
+    }
+
+    #[test]
+    fn the_kept_file_reads_back_for_its_own_client_only() {
+        let user = User {
+            id: "user_01".into(),
+            email: "a@b.dk".into(),
+        };
+        let text = kept_file("r\"1", &user, DEV_CLIENT_ID);
+        assert_eq!(
+            read_kept_file(&text, DEV_CLIENT_ID),
+            Some(("r\"1".into(), user))
+        );
+        assert_eq!(read_kept_file(&text, CLIENT_ID), None);
+        assert_eq!(read_kept_file("{}", CLIENT_ID), None);
+        assert_eq!(read_kept_file("old", CLIENT_ID), None);
     }
 }

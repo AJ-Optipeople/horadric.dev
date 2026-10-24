@@ -126,7 +126,8 @@ impl Store {
     pub fn save(&self, dir: &Path) -> io::Result<()> {
         std::fs::create_dir_all(dir)?;
         let text = serde_json::to_string_pretty(self).map_err(io::Error::other)?;
-        std::fs::write(dir.join(FILE), text)
+        // It holds this machine's private key and every link key.
+        crate::portal::write_private(&dir.join(FILE), text.as_bytes())
     }
 
     pub fn get(&self, id: &str) -> Option<&Joined> {

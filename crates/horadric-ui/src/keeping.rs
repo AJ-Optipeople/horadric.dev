@@ -28,12 +28,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use horadric_core::brotherhood::{clock, orphan_branch, Heard, Presence, Roster, SILENT_SECS};
-use horadric_core::handoff::{takeover_line, Joiner, Record};
-use horadric_core::keepers::{decode, over_cap, too_old, unlisted_gone, Shelf, Store, FULL};
+use horadric_core::handoff::{takeover_line, Record};
+use horadric_core::keeper::{self, Cut, Joins, Pruning};
+use horadric_core::keepers::{too_old, Store};
 use horadric_core::keeping::{
-    self, auto_due, full_message, keep_messages, keep_part, kept_entry, kept_full, kept_message,
-    kept_of, owners_of, restored_heard, seen_due, store_of, stores, takeover_message, waited, Book,
-    Holding, Next, Seen,
+    self, auto_due, keep_messages, kept_entry, kept_full, kept_of, owners_of, restored_heard,
+    seen_due, stores, takeover_message, waited, Book, Holding, Next, Seen,
 };
 use horadric_core::serving::Job;
 use horadric_core::Phase;
@@ -66,13 +66,6 @@ enum Back {
     },
 }
 
-struct Cut {
-    meta: horadric_core::keepers::Meta,
-    payload: Vec<u8>,
-    len: u64,
-    record: Record,
-}
-
 static BACK: Mutex<Vec<Back>> = Mutex::new(Vec::new());
 
 /// One snapshot at a time goes into a keeper's store, so two that came
@@ -89,17 +82,13 @@ struct State {
     cutting: HashSet<String>,
     again: HashMap<String, String>,
     /// Keep parts arriving, by (brother, session).
-    joins: HashMap<(String, String), (Joiner, Option<Holding>)>,
+    joins: Joins,
     /// Brothers told the owners since their link last came up.
     told: HashSet<String>,
     /// Sessions held back at start until the keeper is heard from.
     held: HashSet<String>,
-    /// Brothers' sessions this keeper holds that were seen listed, as
-    /// (brother name, session), so one gone from the list is pruned.
-    seen: HashSet<(String, String)>,
-    /// Kept sessions their linked brother does not list, since when, so
-    /// one never seen listed goes too once that has lasted.
-    unlisted: HashMap<(String, String), u64>,
+    /// When a kept session goes because its brother no longer lists it.
+    pruning: Pruning,
     /// When the stores were last looked at for their age.
     aged: u64,
     /// Takeovers under way, by the brother's tile id.
@@ -258,21 +247,11 @@ fn remote_of(app: &App, id: &str) -> Option<(String, String)> {
 }
 
 /// The keeper's store and holding of brother `from`'s session `remote`,
-/// found by the folder its link filed it under, never by the name the
-/// holding claims. The holding comes back with that id and the name
-/// this PC knows the brother by.
+/// with the name this PC knows the brother by.
 fn held_of(from: &str, remote: &str) -> Option<(Store, Holding)> {
-    let store = store_of(&keeping::root(&horadric_hooks::state_dir()?), from, remote)?;
-    let h = Holding::load(&store)?;
-    let from_name = name_of(from)?;
-    Some((
-        store,
-        Holding {
-            from: from.to_string(),
-            from_name,
-            ..h
-        },
-    ))
+    let dir = horadric_hooks::state_dir()?;
+    let joined = joining::Store::load(&dir).unwrap_or_default();
+    keeper::held_of(&keeping::root(&dir), &joined, from, remote)
 }
 
 /// Drops everything this PC keeps of brother `from`, which named
@@ -281,44 +260,10 @@ fn let_go(from: &str) {
     let Some(dir) = horadric_hooks::state_dir() else {
         return;
     };
-    for (_, session, store) in stores(&keeping::root(&dir))
-        .into_iter()
-        .filter(|(f, _, _)| f == from)
-    {
-        debug(&format!("{from} named another keeper, {session} goes"));
-        if let Err(e) = store.prune() {
-            eprintln!("horadric: cannot drop the snapshots of {session}: {e}");
-        }
-    }
-}
-
-/// Drops the oldest stores until what is kept under `root` fits in
-/// `cap` bytes, sparing those of brothers not in `awake`.
-fn fit(root: &Path, cap: u64, awake: &HashSet<String>) {
-    let all = stores(root);
-    let shelves: Vec<Shelf> = all
-        .iter()
-        .map(|(from, session, store)| {
-            let (bytes, at) = store.shelf();
-            Shelf {
-                from: from.clone(),
-                session: session.clone(),
-                bytes,
-                at,
-            }
-        })
-        .collect();
-    for s in over_cap(&shelves, cap, |s| !awake.contains(&s.from)) {
-        debug(&format!(
-            "past the cap, {} of {} goes ({} bytes)",
-            s.session, s.from, s.bytes
-        ));
-        if let Some((_, _, store)) = all.iter().find(|(f, n, _)| *f == s.from && *n == s.session) {
-            if let Err(e) = store.prune() {
-                eprintln!("horadric: cannot drop the snapshots of {}: {e}", s.session);
-            }
-        }
-    }
+    debug(&format!(
+        "{from} named another keeper, what is kept of it goes"
+    ));
+    keeper::let_go(&keeping::root(&dir), from);
 }
 
 impl App {
@@ -382,6 +327,44 @@ impl App {
             return None;
         }
         keeping::offer(heard, &pc_name(), unix_now())
+    }
+
+    /// What a brother's tile offers when another brother keeps it: "Take
+    /// over on <keeper>" while its owner is silent and its first keeper is
+    /// linked here. A Linux node keeper has no tiles to click, so this PC
+    /// asks it with a `handoff` to itself. Gives the keeper and the label.
+    pub(super) fn keeping_offer_elsewhere(&self, id: &str) -> Option<(String, String)> {
+        let (owner, _) = remote_of(self, id)?;
+        let (heard, _) = self.far_presence(&owner)?;
+        let keeper = with(|s| {
+            let first = s.book.keepers_of.get(&owner)?.first()?.clone();
+            (first != s.me).then_some(first)
+        })?;
+        if !self.far_takers().contains(&keeper) {
+            return None;
+        }
+        let name = crate::project::brother_name(&keeper);
+        keeping::offer(heard, &name, unix_now()).map(|label| (keeper, label))
+    }
+
+    /// Asks the keeper of brother's tile `id` to take it over, as
+    /// [`App::keeping_offer_elsewhere`] offered.
+    pub(super) fn keeping_ask_take_over(&mut self, id: &str) {
+        let (Some((keeper, _)), Some((_, remote))) =
+            (self.keeping_offer_elsewhere(id), remote_of(self, id))
+        else {
+            return;
+        };
+        let msg = serde_json::json!({"t": "handoff", "id": remote, "to": keeper});
+        self.far_tell(&keeper, msg);
+        self.toasts.show(
+            Kind::Done,
+            "Taking over",
+            &format!(
+                "Asked {} to take it over.",
+                crate::project::brother_name(&keeper)
+            ),
+        );
     }
 
     /// Whether this PC is the keeper of brother `from` that takes over:
@@ -630,7 +613,7 @@ impl App {
                 ..Record::default()
             })
         });
-        let Some(mut record) = record else {
+        let Some(record) = record else {
             return;
         };
         let next: Next = with(|s| {
@@ -639,22 +622,11 @@ impl App {
             save(&s.book);
             next
         });
-        record.n = next.owner_n;
         let notify = self.notify.0 as isize;
         let id = id.to_string();
         let transcript = PathBuf::from(transcript);
         std::thread::spawn(move || {
-            let cut = (|| {
-                let cwd = PathBuf::from(&record.cwd);
-                let top = keeping::describe(&mut record, &cwd, &transcript)?;
-                let (meta, payload, len) = keeping::snapshot(&top, &id, &next, &transcript)?;
-                Ok(Cut {
-                    meta,
-                    payload,
-                    len,
-                    record,
-                })
-            })();
+            let cut = keeper::cut(&id, record, &next, &transcript);
             back(
                 Back::Cut {
                     id,
@@ -777,79 +749,28 @@ impl App {
             self.keeping_owners(who, &owners_of(msg));
             return None;
         }
-        let (part, holding) = keep_part(msg)?;
-        let key = (who.to_string(), part.id.clone());
-        let id = part.id.clone();
-        let whole = with(|s| {
-            let (joiner, held) = s
-                .joins
-                .entry(key.clone())
-                .or_insert_with(|| (Joiner::new(&id), None));
-            if part.part == 0 {
-                *joiner = Joiner::new(&id);
-                *held = holding;
+        let whole = with(|s| s.joins.add(who, msg));
+        let whole = match whole {
+            Ok(w) => w?,
+            Err(e) => {
+                debug(&e);
+                return None;
             }
-            let whole = joiner.add(&part);
-            match whole {
-                Ok(Some(bytes)) => s.joins.remove(&key).map(|(_, h)| (bytes, h)),
-                Ok(None) => None,
-                Err(e) => {
-                    s.joins.remove(&key);
-                    debug(&format!(
-                        "a keep part of {id} from {who} was refused: {e:?}"
-                    ));
-                    None
-                }
-            }
-        });
-        let (payload, holding) = whole?;
-        if let Some(keepers) = holding.as_ref().map(|h| h.keepers.clone()) {
+        };
+        if let Some(keepers) = whole.2.as_ref().map(|h| h.keepers.clone()) {
             if !keepers.is_empty() {
                 self.keeping_keepers(who, keepers);
             }
         }
         let root = keeping::root(&horadric_hooks::state_dir()?);
-        let store = store_of(&root, who, &id)?;
         let from = who.to_string();
         // The name this PC knows the brother by, not the one it claims.
         let from_name = name_of(who).unwrap_or_else(|| who.to_string());
         let caps = with(|s| s.book.caps());
         let awake = self.keeping_awake();
         Some(Box::new(move || {
-            let n = decode(&payload).map_or(0, |s| s.meta.n);
-            let _one = RECEIVING.lock();
-            let taken = store.receive(&payload).and_then(|_| match holding {
-                Some(h) => Holding {
-                    from,
-                    from_name,
-                    // The keeper's own word, which the owner never sends.
-                    seen: Holding::load(&store).and_then(|was| was.seen),
-                    ..h
-                }
-                .save(&store),
-                None => Ok(()),
-            });
-            let full = match &taken {
-                Err(e) if e == FULL => true,
-                Err(e) => {
-                    eprintln!("horadric: snapshot {n} of {id} not kept: {e}");
-                    false
-                }
-                Ok(()) if store.shelf().0 > caps.1 => {
-                    eprintln!("horadric: {id} outgrew the cap of one session, its snapshots go");
-                    if let Err(e) = store.mark_full() {
-                        eprintln!("horadric: cannot drop the snapshots of {id}: {e}");
-                    }
-                    true
-                }
-                Ok(()) => false,
-            };
-            fit(&root, caps.0, &awake);
-            if full {
-                full_message(&id, n)
-            } else {
-                kept_message(&id, n, taken.is_ok())
-            }
+            keeper::file(&root, &from, &from_name, whole, caps, &awake, &RECEIVING)
+                .unwrap_or(Value::Null)
         }))
     }
 
@@ -1027,36 +948,14 @@ impl App {
             due
         });
         for (from, session, store) in stores(&keeping::root(&dir)) {
-            let gone = match name_of(&from) {
-                Some(name) => {
-                    let key = (from.clone(), session.clone());
-                    let ready = self.far_presence(&from).is_some_and(|(_, r)| r);
-                    with(|s| {
-                        if listed.contains(&key) {
-                            // A tile shown from the store at start is not
-                            // the brother's word that it lists it.
-                            if ready {
-                                s.seen.insert(key.clone());
-                            }
-                            s.unlisted.remove(&key);
-                            None
-                        } else if !ready {
-                            s.unlisted.remove(&key);
-                            None
-                        } else if s.seen.remove(&key) {
-                            s.unlisted.remove(&key);
-                            Some(format!("{name} no longer lists {session}"))
-                        } else {
-                            let since = *s.unlisted.entry(key.clone()).or_insert(now);
-                            unlisted_gone(since, now).then(|| {
-                                s.unlisted.remove(&key);
-                                format!("{name} has not listed {session} for ten minutes")
-                            })
-                        }
-                    })
-                }
-                None => None,
-            };
+            let gone = name_of(&from).and_then(|name| {
+                let listed = listed.contains(&(from.clone(), session.clone()));
+                let ready = self.far_presence(&from).is_some_and(|(_, r)| r);
+                with(|s| {
+                    s.pruning
+                        .verdict(&from, &name, &session, listed, ready, now)
+                })
+            });
             let gone = gone.or_else(|| {
                 (age_due && too_old(store.shelf().1, now))
                     .then(|| format!("{session} of {from} was kept a month"))

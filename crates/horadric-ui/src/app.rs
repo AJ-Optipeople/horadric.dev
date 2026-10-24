@@ -1817,13 +1817,19 @@ fn tile_menu(id: &str) {
         items.push(Item::Separator);
         items.push(hand);
     }
-    if let Some(label) = with_app(|app| app.keeping_offer(id)).flatten() {
+    let here = with_app(|app| app.keeping_offer(id)).flatten();
+    let elsewhere = with_app(|app| app.keeping_offer_elsewhere(id)).flatten();
+    if let Some(label) = here.clone().or(elsewhere.map(|(_, l)| l)) {
         items.insert(0, Item::action(TAKE_OVER, label));
         items.insert(1, Item::Separator);
     }
     let picked = menu::popup(&items);
     if picked == Some(TAKE_OVER) {
-        with_app(|app| app.keeping_take_over(id));
+        if here.is_some() {
+            with_app(|app| app.keeping_take_over(id));
+        } else {
+            with_app(|app| app.keeping_ask_take_over(id));
+        }
         return;
     }
     if let Some(i) = picked {

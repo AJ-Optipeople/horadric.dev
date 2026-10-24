@@ -35,7 +35,7 @@ use horadric_core::worktree::Worktree;
 use horadric_core::{Agent, Phase};
 use serde_json::Value;
 
-use super::{lock, machine_name, node_state, resume, trust, wire, Event, Machine, Shared};
+use super::{lock, machine_name, node_state, relay, resume, trust, wire, Event, Machine, Shared};
 
 /// Where a project this node had no checkout of stands, by the session
 /// handed with it: the sender asks again every few seconds and hears it.
@@ -75,6 +75,11 @@ impl Machine {
         self.names.values().any(|n| n == to)
     }
 
+    /// Whether `who` names this node: its relay id or its name.
+    fn is_me(&self, who: &str) -> bool {
+        who == machine_name() || relay::me().is_some_and(|me| me == who)
+    }
+
     /// This node as the viewer named `who` calls it.
     fn called_by(&self, who: &str) -> String {
         let ch = self
@@ -90,6 +95,20 @@ impl Machine {
     /// Hands session `id` to the viewer named `to` once its turn ends, as
     /// a `handoff` from that viewer asks.
     pub(super) fn handoff_to(&mut self, id: &str, to: &str) -> Result<(), String> {
+        // A relay brother is asked for by its name or its id, and goes by
+        // its id here.
+        let to = self.kin.id_of(to).unwrap_or_else(|| to.to_string());
+        let to = to.as_str();
+        // A silent brother's session this node keeps, asked to come here:
+        // a takeover.
+        if lock(&self.node).registry.get(id).is_none() {
+            if let Some(from) = self.keeping_holder(id) {
+                if !self.is_me(to) {
+                    return Err("only this node can take it over from here".into());
+                }
+                return self.keeping_take_over(&from, id);
+            }
+        }
         {
             let n = lock(&self.node);
             let s = n.registry.get(id).ok_or("no such session here")?;
@@ -223,6 +242,7 @@ impl Machine {
                     model: model_of(n.args.get(id).map_or(&[][..], Vec::as_slice)),
                     from: from.clone(),
                     interrupted: !clean,
+                    n: self.keeping_number(id),
                     ..Record::default()
                 })
             })
@@ -262,8 +282,9 @@ impl Machine {
 
     /// The receiver runs it: the session, its console and its worktree go
     /// from here.
-    fn let_go(&mut self, id: &str, to: &str, _n: u64) {
+    fn let_go(&mut self, id: &str, to: &str, n: u64) {
         self.hand.out.remove(id);
+        self.keeping_handed(id, Some(to), n);
         let gone = {
             let mut n = lock(&self.node);
             if let Some(h) = n.hosted.remove(id) {
@@ -283,7 +304,7 @@ impl Machine {
             // Off this thread: git may take a while over a big tree.
             std::thread::spawn(move || discard(&w));
         }
-        eprintln!("horadric node: {id} runs on {to} now");
+        eprintln!("horadric node: {id} runs on {} now", self.shown(to));
     }
 
     /// Hears what a viewer answered about a handoff from here: `took` or
@@ -298,7 +319,8 @@ impl Machine {
         let step = match msg["t"].as_str() {
             Some("took") => o.heard_took(handing::heard_took(msg)),
             _ => Do::Fail(format!(
-                "{who} says {}",
+                "{} says {}",
+                self.shown(who),
                 msg["text"].as_str().unwrap_or("no")
             )),
         };
@@ -345,7 +367,7 @@ impl Machine {
         let node = Arc::clone(&self.node);
         let places = Arc::clone(&self.hand.places);
         // Named as each side knows the other, for the moved line.
-        let from = wire::known_as(Some(who), &package.record.from);
+        let from = wire::known_as(Some(&self.shown(who)), &package.record.from);
         let me = self.called_by(who);
         Some(Box::new(move || {
             let record = package.record.clone();
@@ -367,11 +389,14 @@ impl Machine {
                 Ok(l) => l,
                 Err(e) => return refused(&id, &format!("cannot land it: {e}")),
             };
-            match adopt(&node, &record, landed, &from, &me) {
+            let first = moved_line(&from, &me, &landed.worktree.path, !record.interrupted);
+            let shown = format!("moved here from {from}");
+            match adopt(&node, &record, landed, first, &shown) {
                 Ok(()) => {
                     places_of(&places).remove(&id);
                     let n = record.n.saturating_add(1);
                     lock(&node).took.insert(id.clone(), n);
+                    super::keeping::landed(&id, n);
                     took_message(&id, n)
                 }
                 Err(e) => refused(&id, &format!("cannot resume it: {e}")),
@@ -453,6 +478,7 @@ impl Machine {
                 Do::Wait
             }
             (_, false) if matches!(o.stage, handing::Stage::Bases(_)) || o.placing() => {
+                let who = self.shown(who);
                 Do::Fail(match msg["text"].as_str() {
                     Some(why) => format!("{who} says {why}"),
                     None => format!("{who} has no checkout of this project"),
@@ -498,7 +524,7 @@ fn git(dir: &Path, args: &[&str]) -> bool {
 
 /// This node's checkout of the repository `repo`: a folder a session works
 /// or worked in, or one in the home folder or a folder below it.
-fn checkout_of(node: &Shared, repo: &RepoId) -> Option<PathBuf> {
+pub(super) fn checkout_of(node: &Shared, repo: &RepoId) -> Option<PathBuf> {
     let mut folders: Vec<String> = {
         let n = lock(node);
         n.registry
@@ -545,15 +571,15 @@ fn repos_below(dir: &Path, depth: usize) -> Vec<String> {
     out
 }
 
-/// Takes in a handed off session that has landed: under its own id in its
-/// new worktree, resumed with its conversation, its next prompt told it
-/// moved.
-fn adopt(
+/// Takes in a handed off or taken over session that has landed: under its
+/// own id in its new worktree, resumed with its conversation, its next
+/// prompt opened by `first`, its tile reading `shown`.
+pub(super) fn adopt(
     node: &Shared,
     record: &Record,
     landed: Landed,
-    from: &str,
-    me: &str,
+    first: String,
+    shown: &str,
 ) -> Result<(), String> {
     let id = record.id.clone();
     let args: Vec<String> = record
@@ -562,7 +588,6 @@ fn adopt(
         .flat_map(|m| ["--model".to_string(), m.clone()])
         .collect();
     let cwd = landed.cwd.to_string_lossy().into_owned();
-    let first = moved_line(from, me, &landed.worktree.path, !record.interrupted);
     trust(&landed.cwd);
     let saved = SavedSession {
         id: id.clone(),
@@ -574,7 +599,7 @@ fn adopt(
         args: args.clone(),
         claude_session_id: Some(record.session.clone()),
         prompted: true,
-        last_line: format!("moved here from {from}"),
+        last_line: shown.to_string(),
         running: false,
         shell: false,
         ssh: None,

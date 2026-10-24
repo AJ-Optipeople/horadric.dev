@@ -201,6 +201,48 @@ pub fn live_exe(exe: &str) -> &str {
     exe.strip_suffix(" (deleted)").unwrap_or(exe)
 }
 
+/// The brother a human named in a terminal, among `among` as (id, name):
+/// by its id, else by its name in any case. Two of one name are told
+/// apart by their ids, which the error lists.
+pub fn pick_brother(name: &str, among: &[(String, String)]) -> Result<(String, String), String> {
+    let name = name.trim();
+    if let Some(b) = among.iter().find(|(id, _)| id == name) {
+        return Ok(b.clone());
+    }
+    let found: Vec<&(String, String)> = among
+        .iter()
+        .filter(|(_, n)| n.eq_ignore_ascii_case(name))
+        .collect();
+    match found.as_slice() {
+        [one] => Ok((*one).clone()),
+        [] => {
+            let names: Vec<&str> = among.iter().map(|(_, n)| n.as_str()).collect();
+            Err(if names.is_empty() {
+                format!("no brother called {name}")
+            } else {
+                format!("no brother called {name}; there are {}", names.join(", "))
+            })
+        }
+        many => {
+            let ids: Vec<&str> = many.iter().map(|(id, _)| id.as_str()).collect();
+            Err(format!(
+                "more than one brother is called {name}: name it by its id, one of {}",
+                ids.join(", ")
+            ))
+        }
+    }
+}
+
+/// The name a node gives itself: `HORADRIC_PC_NAME`, as a PC's, else
+/// its host name as `hostname` holds it, else "linux".
+pub fn node_name(env: Option<&str>, hostname: Option<&str>) -> String {
+    env.map(str::trim)
+        .filter(|n| !n.is_empty())
+        .or_else(|| hostname.map(str::trim).filter(|h| !h.is_empty()))
+        .unwrap_or("linux")
+        .to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -336,5 +378,37 @@ mod tests {
         assert_ne!(fresh_s(5, 1), fresh_s(5, 2));
         assert_ne!(fresh_s(5, 1), fresh_s(6, 1));
         assert_eq!(fresh_s(0, 0).len(), 32);
+    }
+
+    #[test]
+    fn a_brother_is_picked_by_id_or_by_name_in_any_case() {
+        let among = vec![
+            ("a1".to_string(), "Desk".to_string()),
+            ("b2".to_string(), "Laptop".to_string()),
+            ("c3".to_string(), "laptop".to_string()),
+        ];
+        assert_eq!(pick_brother("desk", &among), Ok(among[0].clone()));
+        assert_eq!(pick_brother(" c3 ", &among), Ok(among[2].clone()));
+        let two = pick_brother("LAPTOP", &among).unwrap_err();
+        assert!(two.contains("b2, c3"), "{two}");
+        let none = pick_brother("vps", &among).unwrap_err();
+        assert!(none.ends_with("there are Desk, Laptop, laptop"), "{none}");
+        assert_eq!(pick_brother("x", &[]), Err("no brother called x".into()));
+    }
+
+    #[test]
+    fn a_node_is_named_as_asked_else_by_its_host() {
+        assert_eq!(node_name(Some(" vps "), Some("h1")), "vps");
+        assert_eq!(
+            node_name(
+                Some(""),
+                Some(
+                    "h1
+"
+                )
+            ),
+            "h1"
+        );
+        assert_eq!(node_name(None, None), "linux");
     }
 }

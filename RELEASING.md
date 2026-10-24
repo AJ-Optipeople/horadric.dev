@@ -140,7 +140,18 @@ and only reloads this machine.
    there, an error frame saying so). A node that is installed is
    updated by copying the binary over `~/.local/bin/horadric` and
    running `systemctl --user restart horadric`; its sessions' hosts
-   keep running through the restart and are attached again.
+   keep running through the restart and are attached again, and it
+   links to its brothers over the relay with no new prompt.
+
+   `install.sh` ends by running `horadric node signin` when it has a
+   terminal (`HORADRIC_NO_SIGNIN=1` skips it): a code to confirm in a
+   browser, then a signed in brother asked to let the node in, with the
+   six digit code shown on both. To try a build's sign in without
+   touching a node in use, run it as a dev node beside it, as the
+   installed Horadric runs beside a dev PC: `systemd-run --user --unit
+   horadric-dev-node -p KillMode=process -E HORADRIC_DEV=1 <binary> node`,
+   then `HORADRIC_DEV=1 <binary> node signin`. A dev node signs in with
+   WorkOS's staging client, so it pairs with a Windows dev instance.
 
    To build the node on this machine without a release (to try a change
    on a server before tagging), cross build it with zig, since the node

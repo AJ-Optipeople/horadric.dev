@@ -11,7 +11,11 @@
 #
 # On Linux: puts `horadric` in ~/.local/bin and runs `horadric node
 # install`: a systemd user service, kept running logged out, and the
-# Claude Code hooks. A Windows Horadric then reaches it over ssh.
+# Claude Code hooks. Then, with a terminal to answer in, `horadric node
+# signin`: a code to confirm in any browser, and a brother of yours that
+# lets this node in, so it joins the brotherhood as a PC does. Without
+# one, run that later yourself. A Windows Horadric can also reach the
+# node over ssh.
 set -eu
 
 releases="https://github.com/Mopra/horadric.dev/releases/latest/download"
@@ -42,6 +46,13 @@ linux() {
 	*":$bin:"*) ;;
 	*) echo "$bin is not on your PATH yet. Add it, so \`ssh <this host> horadric node --stdio\` finds it." ;;
 	esac
+	# Piped into sh, stdin is the script: the questions go to the
+	# terminal itself, when there is one.
+	if [ -z "${HORADRIC_NO_SIGNIN:-}" ] && (: </dev/tty) 2>/dev/null; then
+		"$bin/horadric" node signin </dev/tty || echo "Not signed in yet: run \`horadric node signin\` when you are ready."
+	else
+		echo "To join your brotherhood, run \`horadric node signin\` in a terminal."
+	fi
 }
 
 case "$(uname -s)" in

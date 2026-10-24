@@ -24,6 +24,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
@@ -44,8 +45,18 @@ use serde_json::{json, Value};
 use crate::node_state;
 use crate::node_wire as wire;
 
+#[path = "node_control.rs"]
+mod control;
 #[path = "node_handing.rs"]
 mod handing;
+#[path = "node_keeping.rs"]
+mod keeping;
+#[path = "node_kin.rs"]
+mod kin;
+#[path = "node_relay.rs"]
+mod relay;
+#[path = "node_signin.rs"]
+mod signin;
 
 /// What a session keeps of its output for a viewer that attaches: the
 /// last MB, as docs/PORTAL.md promises.
@@ -68,15 +79,33 @@ const MODEL_REST: Duration = Duration::from_secs(10 * 60);
 /// loses little, seldom enough that a busy agent's hooks do not each write.
 const SAVE_EVERY: Duration = Duration::from_secs(2);
 
+/// How a node's commands are written, for a word it does not know.
+const USAGE: &str = "usage: horadric node [install | --stdio | signin [--to <name>] | signout | \
+                     let-in | brothers | cast-out <name> | view-only <name> [on|off] | \
+                     keeper [<name>|none] [--auto|--no-auto]]";
+
 pub fn run(args: &[String]) -> Result<(), String> {
+    let rest = args.get(1..).unwrap_or_default();
     match args.first().map(String::as_str) {
         None => serve(),
         Some("--stdio") => stdio(),
         Some("install") => install(),
-        Some(other) => Err(format!(
-            "unknown `node {other}`\nusage: horadric node [install|--stdio]"
-        )),
+        Some("signin") => control::signin_command(rest),
+        Some("signout") => control::signout_command(),
+        Some("let-in") => control::let_in_command(),
+        Some("brothers") => control::brothers_command(),
+        Some("cast-out") => control::cast_out_command(rest),
+        Some("view-only") => control::view_only_command(rest),
+        Some("keeper") => control::keeper_command(rest),
+        Some(other) => Err(format!("unknown `node {other}`\n{USAGE}")),
     }
+}
+
+/// Set by SIGTERM: the node tells its brothers it is leaving, then goes.
+static LEAVING: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn on_term(_: libc::c_int) {
+    LEAVING.store(true, Ordering::SeqCst);
 }
 
 /// The node's socket, beside the hosts' in the user's private folder. Not
@@ -137,6 +166,9 @@ struct Machine {
     /// The projects whose lore is shared, by repository, as the last
     /// brother's hello found them.
     lore: Lores,
+    /// The brothers linked over the relay, this node as their client.
+    kin: kin::Kin,
+    keep: keeping::Keeping,
 }
 
 impl Serve for Machine {
@@ -187,6 +219,10 @@ impl Serve for Machine {
     }
 
     fn resume(&mut self, id: &str) -> Result<(), String> {
+        // Taken over elsewhere while this node was away: it runs there.
+        if let Some(line) = self.keeping_fenced(id) {
+            return Err(line);
+        }
         resume(&self.node, id)
     }
 
@@ -320,6 +356,26 @@ impl Serve for Machine {
 
     fn lore_import(&mut self, project: &Value, b64: &str) {
         self.lore.import(project, b64, horadric_hooks::lore::now());
+    }
+
+    fn control(&self, who: &str, kind: horadric_core::portal::Kind) -> bool {
+        self.kin_control(who, kind)
+    }
+
+    fn roster(&self) -> Option<Value> {
+        self.kin_roster()
+    }
+
+    fn state(&self) -> &'static str {
+        if LEAVING.load(Ordering::SeqCst) {
+            "leaving"
+        } else {
+            "awake"
+        }
+    }
+
+    fn keeping(&mut self, who: &str, msg: &Value) -> Option<Job> {
+        self.keeping_serve(who, msg)
     }
 
     fn handing_answer(&mut self, who: &str, msg: &Value) {
@@ -493,6 +549,20 @@ fn serve() -> Result<(), String> {
         let events = events.clone();
         thread::spawn(move || viewers(first, events));
     }
+    // The secret, the keys and the sign in live in the state folder: its
+    // owner's alone.
+    if let Some(dir) = horadric_hooks::state_dir() {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+    }
+    if let Err(e) = control::serve() {
+        eprintln!("horadric node: {e}");
+    }
+    if let Err(e) = relay::start(machine_name(), events.clone()) {
+        eprintln!("horadric node: no relay link: {e}");
+    }
+    leave_on_term(&node);
     {
         let machine = Machine {
             node: Arc::clone(&node),
@@ -501,6 +571,8 @@ fn serve() -> Result<(), String> {
             called: HashMap::new(),
             hand: handing::Handing::default(),
             lore: Lores::default(),
+            kin: kin::Kin::default(),
+            keep: keeping::Keeping::default(),
         };
         thread::spawn(move || serving(machine, heard, events));
     }
@@ -555,6 +627,13 @@ fn serve() -> Result<(), String> {
         if t.horadric_id.is_empty() {
             continue;
         }
+        // A turn's end is when the keeper is sent the snapshot.
+        if t.agent == Agent::Claude
+            && t.event.hook_event_name == "Stop"
+            && t.event.agent_id.is_none()
+        {
+            keeping::turn_ended(&t.horadric_id, &t.event.transcript_path);
+        }
         let mut n = lock(&node);
         if n.registry
             .apply(&t.horadric_id, &t.event, SystemTime::now())
@@ -563,6 +642,26 @@ fn serve() -> Result<(), String> {
         }
     }
     Err("the hook listener stopped".into())
+}
+
+/// Goes on SIGTERM, as systemd stops the node: a round of serving first
+/// tells the brothers it is leaving, so its tiles there read so rather
+/// than silent, and what changed is written. The hosts outlive it.
+fn leave_on_term(node: &Shared) {
+    let handler = on_term as extern "C" fn(libc::c_int);
+    unsafe {
+        libc::signal(libc::SIGTERM, handler as libc::sighandler_t);
+    }
+    let node = Arc::clone(node);
+    thread::spawn(move || {
+        while !LEAVING.load(Ordering::SeqCst) {
+            thread::sleep(Duration::from_millis(100));
+        }
+        thread::sleep(Duration::from_millis(1500));
+        lock(&node).dirty = true;
+        save(&node);
+        std::process::exit(0);
+    });
 }
 
 /// Starts a session in a host of its own, as `horadric new` or a viewer's
@@ -783,6 +882,8 @@ enum Event {
     Answer(u32, Value),
     /// A session packed for a handoff, or why it could not be.
     Packed(String, Result<Vec<u8>, String>),
+    /// What the relay link says of a brother's channel.
+    Relay(relay::Said),
 }
 
 /// Takes viewers one after another on the node's socket, each read on a
@@ -857,11 +958,15 @@ fn viewer(ch: u32, pipe: Pipe, events: Sender<Event>) {
 /// [`Server`], and what it answers goes out to them, framed.
 fn serving(mut machine: Machine, heard: mpsc::Receiver<Event>, events: Sender<Event>) {
     let mut server = Server::default();
-    let mut links: HashMap<u32, Sender<Vec<u8>>> = HashMap::new();
-    let send = |links: &HashMap<u32, Sender<Vec<u8>>>, ch: u32, msg: &Value| {
-        if let Some(tx) = links.get(&ch) {
+    let mut links: HashMap<u32, Link> = HashMap::new();
+    let send = |links: &HashMap<u32, Link>, ch: u32, msg: &Value| match links.get(&ch) {
+        Some(Link::Pipe(tx)) => {
             let _ = tx.send(framing::encode(msg.to_string().as_bytes()));
         }
+        Some(Link::Relay(ch)) => {
+            relay::reply(*ch, msg);
+        }
+        None => {}
     };
     loop {
         let wait = if server.streaming() {
@@ -875,7 +980,11 @@ fn serving(mut machine: Machine, heard: mpsc::Receiver<Event>, events: Sender<Ev
             match next {
                 Ok(Event::Open(ch, tx)) => {
                     server.open(ch);
-                    links.insert(ch, tx);
+                    links.insert(ch, Link::Pipe(tx));
+                }
+                Ok(Event::Relay(said)) => {
+                    relayed(&mut machine, &mut server, &mut links, said);
+                    any = true;
                 }
                 Ok(Event::Heard(ch, msg)) => {
                     if msg["t"] == "hello" {
@@ -938,7 +1047,14 @@ fn serving(mut machine: Machine, heard: mpsc::Receiver<Event>, events: Sender<Ev
             });
         }
         machine.handing_tick();
+        machine.keeping_tick();
         for (to, msg) in std::mem::take(&mut machine.hand.outbox) {
+            // A brother over the relay hears it as an ask of its own
+            // server, stamped by this node's client of it.
+            if machine.kin.ready(&to) || relay::store().get(&to).is_some() {
+                machine.kin.tell(&to, msg);
+                continue;
+            }
             // The newest link of that name, should it be there twice.
             let ch = machine
                 .names
@@ -953,13 +1069,64 @@ fn serving(mut machine: Machine, heard: mpsc::Receiver<Event>, events: Sender<Ev
     }
 }
 
-/// What the node calls itself in its hello: the machine's host name.
+/// How the serving thread reaches a channel.
+enum Link {
+    /// A viewer on the unix socket, framed.
+    Pipe(Sender<Vec<u8>>),
+    /// A brother over the relay, on this relay channel, sealed.
+    Relay(u32),
+}
+
+/// What the relay link said of a brother's channel, done on the serving
+/// thread: a linked brother is served as a viewer is, and greeted as a
+/// brother by this node's client of it.
+fn relayed(
+    machine: &mut Machine,
+    server: &mut Server,
+    links: &mut HashMap<u32, Link>,
+    said: relay::Said,
+) {
+    match said {
+        relay::Said::Up { ch, id, name } => {
+            let ich = relay::inner(ch);
+            server.open(ich);
+            links.insert(ich, Link::Relay(ch));
+            machine.kin_up(ich, ch, &id, &name);
+        }
+        relay::Said::Asked { ch, id, mut msg } => {
+            let ich = relay::inner(ch);
+            // Only a brother's key opens this channel, whatever its hello
+            // says it is.
+            if msg["t"] == "hello" {
+                msg["kind"] = json!("brother");
+            }
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default();
+            let back = server.heard(ich, &id, &msg, now.as_micros() as u64, || {
+                wire::fresh_s(now.as_nanos(), ich)
+            });
+            for m in back {
+                relay::reply(ch, &m);
+            }
+        }
+        relay::Said::Heard { ch, msg } => machine.kin_heard(relay::inner(ch), &msg),
+        relay::Said::Down { ch } => {
+            let ich = relay::inner(ch);
+            server.close(ich);
+            links.remove(&ich);
+            machine.kin_down(ich);
+            machine.called.remove(&ich);
+        }
+    }
+}
+
+/// What the node calls itself in its hello and on the relay:
+/// `HORADRIC_PC_NAME`, as a PC's, else the machine's host name.
 fn machine_name() -> String {
-    std::fs::read_to_string("/proc/sys/kernel/hostname")
-        .ok()
-        .map(|h| h.trim().to_string())
-        .filter(|h| !h.is_empty())
-        .unwrap_or_else(|| "linux".into())
+    let env = std::env::var("HORADRIC_PC_NAME").ok();
+    let host = std::fs::read_to_string("/proc/sys/kernel/hostname").ok();
+    wire::node_name(env.as_deref(), host.as_deref())
 }
 
 /// `horadric node --stdio`: the preamble, then frames both ways between

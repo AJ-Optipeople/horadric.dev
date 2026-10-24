@@ -908,6 +908,58 @@ Each step is useful alone and each is verified before the next starts.
     `roster`, `control`, `state` and keeping served. Verified against
     `exit1-eu` with no SSH entry: sign in on the VPS, approve on this
     PC, a session started from the stage running there.
+
+    Done on 2026-10-25. The node's relay link is
+    `horadric/src/node_relay.rs` (`horadric-link`'s crypto and WebSocket
+    under core's `Brothers`, the ping, silence and backoff rules now in
+    `horadric-core/src/relaying.rs` for both machines), sign in
+    `node_signin.rs` (device code flow, `workos.json` owner only, refresh
+    under a lock and a file lock), the human `node_control.rs` (a control
+    socket the `signin`, `let-in`, `brothers`, `cast-out`, `view-only`
+    and `keeper` commands speak to; with no terminal attached a join is
+    refused), the node as a client of its brothers `node_kin.rs` (hello,
+    `lore` both ways, answers to its handoffs), and keeping
+    `node_keeping.rs`. What a PC and a node do alike moved to core: the
+    served roster (`rostering.rs`), joining keep parts, filing a
+    snapshot under the caps, cutting one, letting go and pruning
+    (`keeper.rs`). Secrets and keys are written owner only
+    (`portal::write_private`). Relay channels sit in the node's one
+    `Server` beside its viewers, so a PC cannot tell a node from a PC.
+    A PC's tile of a silent brother's session now also offers "Take over
+    on <keeper>" when another brother keeps it, sent to that keeper as a
+    `handoff`, since a node keeper has no tiles to click.
+
+    Seen with a dev node "vps17" (a transient systemd unit, its own state
+    folder) on `exit1-eu` and a dev instance "PC17" (scratch `APPDATA`),
+    no SSH entry, through `wss://portal.horadric.dev`: `horadric node
+    signin` printed the device link, confirmed in the browser pane with
+    the staging user's Google account; the node asked PC17, both showed
+    823 364, yes on both, and each kept the other. PC17 showed "demo17 ·
+    vps17" with its mark; "+" there started bash on the VPS in the
+    stage, typing reached it. Restarting either side relinked unasked; a
+    SIGTERM showed "leaving" first. A haiku session handed from PC17 to
+    vps17 by its tile landed in a worktree of the node's checkout, "on
+    vps17: moved here from PC17", and its next turn named the codeword
+    and edited there; handed back by "Hand off to ▸ This PC" it landed in
+    a Windows worktree with the Linux edits. Lore went both ways: a note
+    left on PC17 was recalled on vps17 and one left there recalled in a
+    new PC17 session. Each kept the other's snapshots (`kept ... true`),
+    and the node pruned its copy once the session left it. vps17 killed
+    with its hosts: two minutes on, PC17's tile read "vps17 silent since
+    01:07" with "Take over on PC17", which landed the node's session from
+    its snapshot; the node started again heard the owners, stopped its
+    copy with "taken over by PC17 at 23:09" (UTC) and kept a file written
+    after the snapshot on `horadric/orphaned/<session>`. Cast out from
+    PC17's tray (where vps17 sits under Brothers like a PC): the link
+    dropped, and the node relinking was closed unasked.
+
+    Not seen: a node keeper taking over, by itself or asked from a PC's
+    tile; a node with a terminal on `let-in` while a PC asks it. Found on
+    the way: a node started session (`horadric new`) still meets Claude
+    Code's trust prompt, which only landings and `create` answer. Left
+    for step 18: the node keeps a brother that cast it out until the
+    roster carries casting out; a node joined by SSH and by signing in
+    shows twice.
 18. **The mesh.** Introductions, received rosters merged, cast out and
     owners carried by the roster, an SSH node that signs in folded into
     its relay brother. Verified with two dev instances and the VPS: the

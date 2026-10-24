@@ -13,7 +13,8 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use horadric_core::portal::{frame, unframe, uri_encode};
+use horadric_core::portal::{frame, unframe};
+use horadric_core::relaying::{after_failure, after_link, pc_url, silent, PING_SECS};
 use horadric_core::release::split_url;
 use windows::core::{w, HSTRING, PCWSTR};
 use windows::Win32::Networking::WinHttp::{
@@ -28,7 +29,6 @@ use windows::Win32::Networking::WinHttp::{
     WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE,
 };
 
-use crate::joining;
 use crate::portal_crypto::seal;
 
 /// What the relay and the phones behind it say, as the UI thread drains it.
@@ -46,23 +46,6 @@ pub enum Incoming {
 
 /// The relay's frames are at most 1 MB.
 const MAX_FRAME: usize = 1 << 20;
-
-/// The longest wait between attempts to reach the relay, in seconds.
-const MAX_BACKOFF: u64 = 30;
-
-/// How often the PC pings the relay, so a dead connection shows, in
-/// seconds.
-const PING_SECS: u64 = 25;
-
-/// A connection that lasted this long, in seconds, was a good one: the
-/// next try after it waits only a second. One the relay closes sooner
-/// keeps backing off, so a refused token is not offered every second.
-const LIVED_SECS: u64 = 10;
-
-/// Silence from the relay this long, in seconds, means the connection is
-/// dead even if TCP has not said so: drop it and connect again. It also
-/// ends a send stuck on such a connection.
-const SILENT_SECS: u64 = 70;
 
 /// A frame for the writer: (is text, bytes).
 type Out = (bool, Vec<u8>);
@@ -242,25 +225,6 @@ pub fn renew() {
     SIGNED.fetch_add(1, Ordering::SeqCst);
 }
 
-/// The relay's `/pc` address. A signed in PC (`signed` is its access
-/// token and name) is a v3 PC the relay groups with its brothers; without
-/// it the PC is served as v2.
-pub fn pc_url(relay: &str, secret: &str, signed: Option<(&str, &str)>) -> String {
-    let mut url = format!(
-        "{}/pc?secret={}",
-        relay.trim_end_matches('/'),
-        uri_encode(secret)
-    );
-    if let Some((token, name)) = signed {
-        url.push_str(&format!(
-            "&token={}&name={}",
-            uri_encode(token),
-            uri_encode(name)
-        ));
-    }
-    url
-}
-
 fn ms(origin: Instant) -> u64 {
     origin.elapsed().as_millis() as u64
 }
@@ -310,11 +274,6 @@ fn ping_loop(
     }
 }
 
-/// Whether the relay has been quiet too long, both in milliseconds.
-fn silent(now: u64, heard: u64) -> bool {
-    now.saturating_sub(heard) > SILENT_SECS * 1000
-}
-
 fn read_loop(
     url: &dyn Fn() -> String,
     stop: &AtomicBool,
@@ -359,10 +318,7 @@ fn read_loop(
                 drop(socket);
                 crate::brothers::connected(generation, false);
                 deliver(Incoming::Connected(false));
-                if began.elapsed() >= Duration::from_secs(LIVED_SECS) {
-                    backoff = 1;
-                }
-                let (w, next, stale) = joining::after_close(code, backoff, MAX_BACKOFF);
+                let (w, next, stale) = after_link(began.elapsed().as_secs(), code, backoff);
                 if stale {
                     crate::workos::forget_access();
                 }
@@ -375,7 +331,7 @@ fn read_loop(
                 if debug {
                     eprintln!("portal: {e}");
                 }
-                (wait, backoff) = (backoff, (backoff * 2).min(MAX_BACKOFF));
+                (wait, backoff) = after_failure(backoff);
             }
         }
         // Sleep in small steps so a stop is not held up by the backoff.
@@ -589,25 +545,6 @@ impl Dialled {
 mod tests {
     use super::*;
     use horadric_core::portal::frame;
-
-    #[test]
-    fn a_quiet_relay_is_dead_after_seventy_seconds() {
-        assert!(!silent(70_000, 0));
-        assert!(silent(70_001, 0));
-        assert!(!silent(5, 10));
-    }
-
-    #[test]
-    fn a_signed_in_pc_brings_its_token_and_name() {
-        assert_eq!(
-            pc_url("wss://r.dev/", "s+1", None),
-            "wss://r.dev/pc?secret=s%2B1"
-        );
-        assert_eq!(
-            pc_url("wss://r.dev", "s", Some(("h.p.s", "Big PC"))),
-            "wss://r.dev/pc?secret=s&token=h.p.s&name=Big%20PC"
-        );
-    }
 
     #[test]
     fn relay_control_and_sealed_frames_read() {

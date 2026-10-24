@@ -504,6 +504,18 @@ A refused token closes the PC's socket with 4401: the PC drops its
 access token, refreshes it and tries again with the usual backoff. 4503
 waits 30 seconds.
 
+A Linux node joins the same way, through the same `/pc` with a secret
+of its own (in its `portal.json`, owner only, with `enabled` false since
+it pairs no phones) and its WorkOS access token, from AuthKit's device
+code flow (`horadric node signin`), its refresh token in `workos.json`.
+It runs the same handshake, link hellos and link frames, so a PC cannot
+tell it from a PC. Over a link it is a brother both ways: it serves the
+PC's asks, and as a client it says hello, `lore`, `takeover`, and its
+own `bases`, `bundle` and `keep`, stamped as any client's. A phone that
+opens a channel to a node is closed. Its human answers in a terminal
+(`horadric node signin`, `horadric node let-in`); with none attached a
+node refuses every join.
+
 ## Protocol v3: roster, state and lore
 
 Sent to a client whose hello said `"kind":"brother"`, and to every linked

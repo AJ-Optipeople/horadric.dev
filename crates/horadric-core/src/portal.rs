@@ -113,7 +113,7 @@ impl Config {
     pub fn save(&self, dir: &Path) -> io::Result<()> {
         std::fs::create_dir_all(dir)?;
         let text = serde_json::to_string_pretty(self).map_err(io::Error::other)?;
-        std::fs::write(dir.join(FILE), text)
+        write_private(&dir.join(FILE), text.as_bytes())
     }
 
     /// A new pairing code from 32 random bytes, replacing any before it.
@@ -409,6 +409,30 @@ pub fn page_origin(relay: &str) -> String {
     } else {
         relay.to_string()
     }
+}
+
+/// Writes a file only its owner may read where the system says who may
+/// (a node's secret and keys sit in a home folder others may list), by
+/// way of a file beside it, so a crash never leaves half of one.
+pub fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    use std::io::Write;
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let tmp = std::path::PathBuf::from(tmp);
+    // A mode is only given to a file being made, so a leftover goes first.
+    let _ = std::fs::remove_file(&tmp);
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut f = options.open(&tmp)?;
+    f.write_all(bytes)?;
+    f.sync_all()?;
+    drop(f);
+    std::fs::rename(&tmp, path)
 }
 
 /// A PC's id: the first 32 hex characters of the SHA-256 of its secret.
@@ -1178,5 +1202,23 @@ mod tests {
             size_message("s1", 80, 24),
             json!({"t": "size", "id": "s1", "cols": 80, "rows": 24})
         );
+    }
+
+    #[test]
+    fn a_private_file_is_written_whole_and_its_owners_alone() {
+        let dir = std::env::temp_dir().join(format!("horadric-private-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("secret.json");
+        write_private(&path, b"one").unwrap();
+        write_private(&path, b"two").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"two");
+        assert!(!dir.join("secret.json.tmp").exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
