@@ -40,7 +40,7 @@ use crate::favicon::{self, Favicon};
 use crate::frame::{Decoration, Frame, BOLD, ITALIC};
 use crate::render::{self, hwnd_target, Gpu};
 use crate::sky::SkyFrame;
-use crate::sparks::{self, Ash, Fx, Ink, Lit, Orbit, Ring};
+use crate::sparks::{self, Ash, Burn, Fx, Ink, Lit, Orbit, Ring};
 use crate::theme::{self, Color};
 use crate::{rain, summon, viewport};
 use horadric_core::sanctuary::Kind;
@@ -926,31 +926,45 @@ impl GridTarget {
             }
             let faces = font.faces.borrow();
             let mut advances: Vec<f32> = Vec::new();
+            // A letter still gathering is drawn only as its slices.
+            let gathering: Vec<(usize, usize)> = fx
+                .burns
+                .iter()
+                .filter(|b| b.gather < 1.0)
+                .map(|b| (b.row, b.col))
+                .collect();
+            let mut hidden: Vec<usize> = Vec::new();
             for r in &frame.runs {
                 advances.clear();
                 advances.resize(r.glyphs.len(), cell.w);
-                let run = DWRITE_GLYPH_RUN {
-                    fontFace: ManuallyDrop::new(Some(faces.faces[r.style as usize & 3].clone())),
-                    fontEmSize: font.size.get(),
-                    glyphCount: r.glyphs.len() as u32,
-                    glyphIndices: r.glyphs.as_ptr(),
-                    glyphAdvances: advances.as_ptr(),
-                    glyphOffsets: std::ptr::null(),
-                    isSideways: false.into(),
-                    bidiLevel: 0,
-                };
-                self.brush.SetColor(&color(r.color));
-                self.rt.DrawGlyphRun(
-                    Vector2 {
-                        X: x(r.col),
-                        Y: y(r.row) + cell.baseline,
-                    },
-                    &run,
-                    &self.brush,
-                    DWRITE_MEASURING_MODE_NATURAL,
-                );
-                let mut run = run;
-                ManuallyDrop::drop(&mut run.fontFace);
+                hidden.clear();
+                hidden.extend(gathering.iter().filter(|g| g.0 == r.row).map(|g| g.1));
+                for (from, count) in sparks::unhidden(r.col, r.glyphs.len(), &hidden) {
+                    let run = DWRITE_GLYPH_RUN {
+                        fontFace: ManuallyDrop::new(Some(
+                            faces.faces[r.style as usize & 3].clone(),
+                        )),
+                        fontEmSize: font.size.get(),
+                        glyphCount: count as u32,
+                        glyphIndices: r.glyphs[from..].as_ptr(),
+                        glyphAdvances: advances.as_ptr(),
+                        glyphOffsets: std::ptr::null(),
+                        isSideways: false.into(),
+                        bidiLevel: 0,
+                    };
+                    self.brush.SetColor(&color(r.color));
+                    self.rt.DrawGlyphRun(
+                        Vector2 {
+                            X: x(r.col + from),
+                            Y: y(r.row) + cell.baseline,
+                        },
+                        &run,
+                        &self.brush,
+                        DWRITE_MEASURING_MODE_NATURAL,
+                    );
+                    let mut run = run;
+                    ManuallyDrop::drop(&mut run.fontFace);
+                }
             }
 
             for l in &frame.loose {
@@ -1037,7 +1051,11 @@ impl GridTarget {
             }
             for b in &fx.burns {
                 let hot = sparks::heat_color(b.heat);
-                self.letter(font, cell, &b.ink, x(b.col), y(b.row), hot);
+                if b.gather < 1.0 {
+                    self.gathering(font, cell, b, x(b.col), y(b.row), hot);
+                } else {
+                    self.letter(font, cell, &b.ink, x(b.col), y(b.row), hot);
+                }
             }
             for a in &fx.ashes {
                 self.ash(font, cell, a, x(a.col), y(a.row));
@@ -1593,6 +1611,28 @@ impl GridTarget {
         );
         let mut run = run;
         ManuallyDrop::drop(&mut run.fontFace);
+    }
+
+    /// A typed letter coming together: the slices a deleted one breaks
+    /// into, settling back into its cell.
+    unsafe fn gathering(&self, font: &Font, cell: &CellSize, b: &Burn, x: f32, y: f32, c: Color) {
+        let band = cell.h / sparks::SHARDS as f32;
+        for s in 0..sparks::SHARDS {
+            let (dx, dy, solid) = sparks::gather(b.seed, s, b.gather);
+            let (sx, sy) = (x + dx * cell.w, y + dy * cell.h);
+            let top = sy + s as f32 * band;
+            self.rt.PushAxisAlignedClip(
+                &D2D_RECT_F {
+                    left: sx - 1.0,
+                    top,
+                    right: sx + cell.w + 1.0,
+                    bottom: top + band,
+                },
+                D2D1_ANTIALIAS_MODE_ALIASED,
+            );
+            self.letter(font, cell, &b.ink, sx, sy, c.with_alpha(c.a * solid));
+            self.rt.PopAxisAlignedClip();
+        }
     }
 
     /// A deleted letter coming apart: cut into slices that lift away and

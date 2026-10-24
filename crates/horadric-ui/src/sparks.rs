@@ -1,8 +1,8 @@
 //! The light that moves inside a terminal's glass. While its agent works
 //! the runes cut round the rim light one after another, going round, and
 //! a run of them flares gold at every tool the agent casts. A typed letter
-//! is burnt into the glass white hot and cools to its own colour, and a
-//! deleted one crumbles to ash. A turn ending sweeps the glass and seals the ring.
+//! gathers from slices settling into its cell white hot and cools to its
+//! own colour, and a deleted one crumbles to ash: the same, run backwards. A turn ending sweeps the glass and seals the ring.
 //!
 //! Like the rain, all of it is a function of the time alone, so a pane
 //! keeps no particles between frames, only when each burst began.
@@ -35,6 +35,9 @@ pub const RUNE_COOL: Duration = Duration::from_millis(2000);
 pub const SEAL: Duration = Duration::from_millis(1600);
 /// A typed letter cooling from white hot to its own colour.
 pub const BURN: Duration = Duration::from_millis(850);
+/// A typed letter's slices settling into its cell. Short: a letter still
+/// in pieces for long reads as a key that did not take.
+pub const GATHER: Duration = Duration::from_millis(240);
 /// A deleted letter falling apart.
 pub const ASH: Duration = Duration::from_millis(700);
 /// Between frames while only the ring turns. Runes only warm and cool, so
@@ -410,6 +413,35 @@ pub fn shard(seed: u64, slice: usize, t: f32) -> (f32, f32, f32) {
     (drift, -rise, left)
 }
 
+/// A slice of a letter gathering, `k` of the way there: ash run backwards,
+/// from a little of the way it would have drifted. It starts most of the
+/// way there and solid enough to read, since this is typing.
+pub fn gather(seed: u64, slice: usize, k: f32) -> (f32, f32, f32) {
+    let k = k.clamp(0.0, 1.0);
+    let (dx, dy, _) = shard(seed, slice, 1.0);
+    let far = 0.45 * (1.0 - motion::ease_out(k));
+    (dx * far, dy * far, 0.4 + 0.6 * motion::ease_out(k))
+}
+
+/// The stretches of a run of `len` cells starting at `col` left to draw
+/// once the cells in `hidden` are taken out, as (first index, count).
+pub fn unhidden(col: usize, len: usize, hidden: &[usize]) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    let mut from = 0;
+    for i in 0..len {
+        if hidden.contains(&(col + i)) {
+            if i > from {
+                out.push((from, i - from));
+            }
+            from = i + 1;
+        }
+    }
+    if len > from {
+        out.push((from, len - from));
+    }
+    out
+}
+
 /// The colour of ash `t` of the way through falling apart: the last of an
 /// ember, then grey.
 pub fn ash_color(t: f32) -> Color {
@@ -458,13 +490,16 @@ pub fn line(frame: &Frame, row: usize, cols: usize, blank: impl Fn(u8) -> u16) -
     cells
 }
 
-/// A letter being burnt in: where, what, and how hot.
+/// A letter being burnt in: where, what, how hot, how far its slices
+/// have gathered (1 when whole), and its seed.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Burn {
     pub row: usize,
     pub col: usize,
     pub ink: Ink,
     pub heat: f32,
+    pub gather: f32,
+    pub seed: u64,
 }
 
 /// A deleted letter falling apart: where it was, what it was, how far
@@ -666,6 +701,8 @@ impl Glass {
                     col,
                     ink,
                     heat: 1.0 - motion::progress(age(&s), BURN),
+                    gather: motion::progress(age(&s), GATHER),
+                    seed: hash(&[row as u64, col as u64, ink.glyph as u64]),
                 })
                 .collect(),
             ashes: self
@@ -1025,10 +1062,29 @@ mod tests {
         assert_eq!(fx.burns.len(), 1);
         let b = fx.burns[0];
         assert_eq!((b.row, b.col, b.ink.glyph), (1, 4, 'c' as u16));
-        assert!(b.heat > 0.9);
+        assert!(b.heat > 0.9 && b.gather < 0.2);
+        let fx2 = g.step(t0 + MS(20) + GATHER, 1, &typing(5, "abc", Some(t0)));
+        assert_eq!(fx2.burns[0].gather, 1.0);
         assert!(fx.caret.is_some() && fx.next_frame() == Some(motion::FRAME_FAST));
         let fx = g.step(t0 + MS(20) + BURN, 1, &typing(5, "abc", Some(t0)));
         assert_eq!(fx, Fx::default());
+    }
+
+    #[test]
+    fn a_gathering_letter_settles_into_its_cell() {
+        for s in 0..SHARDS {
+            let (dx, dy, a) = gather(7, s, 0.0);
+            assert!(dy < 0.0 && a >= 0.4 && dx.abs() < 0.5);
+            assert_eq!(gather(7, s, 1.0), (0.0, 0.0, 1.0));
+        }
+    }
+
+    #[test]
+    fn hidden_cells_split_a_run() {
+        assert_eq!(unhidden(3, 4, &[]), [(0, 4)]);
+        assert_eq!(unhidden(3, 4, &[4, 9]), [(0, 1), (2, 2)]);
+        assert_eq!(unhidden(3, 2, &[3, 4]), []);
+        assert_eq!(unhidden(3, 3, &[5]), [(0, 2)]);
     }
 
     #[test]
