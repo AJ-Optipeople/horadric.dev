@@ -117,13 +117,37 @@ and only reloads this machine.
    without `latest-macos.json` offers Macs nothing; one with a manifest
    but no archive offers an update that fails to download, so upload
    both before publishing.
-8. Try the build before publishing. Download the two binaries from the
+8. Check the Linux node. The tag also runs `release-linux.yml`, which
+   builds `horadric node` as one static musl binary, checks that it
+   links nothing shared and answers `--help`, packs it as
+   `Horadric-linux-x86_64.tar.gz` and uploads that to the draft (it
+   waits up to 30 minutes for the draft to exist, and otherwise leaves
+   the archive in the run's artifacts, to upload by hand with `gh
+   release upload v0.2.0 Horadric-linux-x86_64.tar.gz`). `install.sh`
+   downloads exactly that name from the latest release, so a release
+   published without it leaves new Linux installs on the old node. A
+   node has no updater and nothing is signed. See that it is on the
+   draft, then try it on a Linux machine you reach with ssh:
+
+   ```sh
+   gh release view v0.2.0 --json assets --jq '.assets[].name'
+   gh release download v0.2.0 --pattern Horadric-linux-x86_64.tar.gz --dir target/linux
+   scp target/linux/Horadric-linux-x86_64.tar.gz <host>:
+   ssh <host> 'tar -xzf Horadric-linux-x86_64.tar.gz && ./horadric node --stdio </dev/null | head -c 17'
+   ```
+
+   The last line prints `horadric-node 1` (and, with no node running
+   there, an error frame saying so). A node that is installed is
+   updated by copying the binary over `~/.local/bin/horadric` and
+   running `systemctl --user restart horadric`; its sessions' hosts
+   keep running through the restart and are attached again.
+9. Try the build before publishing. Download the two binaries from the
    draft, or use the ones in `target/release`, and run them as a dev
    instance (see CLAUDE.md). Tests prove it compiles and signs; they do
    not prove the tiles appear.
-9. Publish the draft (below).
-10. Bump the Chocolatey package (below).
-11. Deploy the Town Portal page (below).
+10. Publish the draft (below).
+11. Bump the Chocolatey package (below).
+12. Deploy the Town Portal page (below).
 
 ## 3. Publishing is shipping
 

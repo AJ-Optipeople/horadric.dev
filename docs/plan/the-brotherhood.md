@@ -648,6 +648,49 @@ Each step is useful alone and each is verified before the next starts.
 11. **Handoff to and from a Linux node.** The same over `--stdio`, and the
     path rewrite between Windows and Linux. Verified against the VPS both
     ways.
+
+    Done on 2026-10-24 (`horadric/src/node_handing.rs`, the node's state
+    in `node_state.rs`, the Windows half in `horadric-ui/src/node_asks.rs`).
+    A Windows PC reaches a node only as a viewer, so both ways go on that
+    one ssh link. The PC's hello to a node carries `"name"` (its PC name),
+    which is how the node knows whom a `handoff` is to; the node sends its
+    `bases` ask and `bundle` parts to that viewer, and the PC tells them
+    from answers by what they carry (`handing::asks_receiver`: a `bases`
+    with `repo`, or a `bundle`), serves them as a brother's and sends the
+    answers back stamped. `took` and a refusal reaching a server go to a
+    new `Serve::handing_answer`, which only the node implements. The node
+    lands in a worktree of its own checkout, found by repository identity
+    among the folders it knows and the git checkouts up to two folders
+    below home. It now keeps `node.json` (sessions with their names,
+    arguments, conversations and worktrees, and the recent folders) in
+    its state folder, so `resume`, `create` and `folders` work and a
+    restart brings sessions back; the unit has `KillMode=process`, since
+    systemd otherwise ended every session host with the node. Screens are
+    still not served: a node keeps no terminal grid.
+
+    Seen on screen with a dev instance ("L11PC", its own `APPDATA`)
+    against `exit1-eu`, haiku in a scratch repository cloned on both
+    sides from one bare remote under `agent`'s home: turn 1 on Windows
+    took the codeword QUARTZLYNX, changed `app.py` and left `notes.txt`
+    untracked; "Hand off to ▸ vps" moved it, the tile came back in
+    "l11repo.main-2 · vps" with "moved here from L11PC", the worktree held
+    both changes, every `cwd` read `/home/agent/l11/l11repo.main-2`, and
+    turn 2 there named the codeword, appended to `notes.txt`, edited
+    `app.py` and said it worked in the Linux folder, the moved line in
+    its prompt's context. "Hand off to ▸ This PC" on that tile brought it
+    back into a Windows worktree with the Linux edits, the node's
+    worktree and branch gone, and turn 3 on Windows named the codeword
+    and all three lines. A named session on the node kept its host and
+    its name through `systemctl --user restart horadric`.
+    Found on the way: under systemd the node's PATH lacks
+    `~/.local/bin`, where Claude Code installs itself, so the node now
+    looks there too; Claude Code 2.1.3 asks for trust in a folder below a
+    trusted one, on Windows and Linux alike, so trust is written for the
+    exact folder; a landing that cannot resume is undone, so the next try
+    is not refused as a duplicate. Not yet: the node does not ask where a
+    project goes when it has no checkout (it refuses), and it names
+    itself by host name in the moved line, not by the name the PC gave
+    it.
 12. **Keepers.** Turn end snapshots to the first keeper, kept in its
     state folder, pruned when the session ends or moves. Pure and tested:
     a snapshot's bundle against the last, applying a chain of them.
