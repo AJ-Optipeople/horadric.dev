@@ -186,6 +186,9 @@ fn read_loop(
                 });
                 let mut decoder = Decoder::client();
                 let mut up_at: Option<Instant> = None;
+                // What the node itself said was wrong, before it said hello.
+                let mut told: Option<String> = None;
+                let mut greeted = false;
                 let mut buf = vec![0u8; 64 * 1024];
                 if let Some(out) = stdout.as_mut() {
                     while let Ok(n) = out.read(&mut buf) {
@@ -202,6 +205,10 @@ fn read_loop(
                             heard(Said::Up);
                         }
                         for m in msgs {
+                            greeted |= m["t"] == "hello";
+                            if !greeted {
+                                told = nodes::told(&m).or(told);
+                            }
                             heard(Said::Heard(m));
                         }
                     }
@@ -228,7 +235,8 @@ fn read_loop(
                         heard(Said::Down);
                     }
                 }
-                let why = nodes::why(&said)
+                let why = told
+                    .or_else(|| nodes::why(&said))
                     .unwrap_or_else(|| format!("ssh ended ({})", code.unwrap_or(-1)));
                 if debug {
                     eprintln!("node {}: link ended: {why}", node.name);

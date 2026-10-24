@@ -165,6 +165,11 @@ pub trait Serve {
     fn handing(&mut self, _who: &str, _msg: &Value) -> Option<Job> {
         None
     }
+    /// A brother's answer to a handoff this machine sends it, `took` or a
+    /// refusal, heard on the link it serves. Only a Linux node hears them
+    /// here: it sends its handoffs on the one pipe its viewer reached it
+    /// by, where a Windows PC hears answers on its client side.
+    fn handing_answer(&mut self, _who: &str, _msg: &Value) {}
     /// A brother's `keep` part or `takeover`, from `who` (see
     /// `crate::keeping`): a job whose answer goes back, or None.
     fn keeping(&mut self, _who: &str, _msg: &Value) -> Option<Job> {
@@ -273,6 +278,8 @@ struct Asked {
     handoffs: Vec<(u32, String, String)>,
     /// A brother's `bases` and `bundle`: channel, who, the message.
     handing: Vec<(u32, String, Value)>,
+    /// Answers to this machine's own handoffs, by who sent them.
+    handed: Vec<(String, Value)>,
     /// A brother's `keep` and `takeover`: channel, who, the message.
     keeping: Vec<(u32, String, Value)>,
 }
@@ -485,6 +492,12 @@ impl Server {
             "bases" | "bundle" if c.kind == Kind::Brother => {
                 asked.handing.push((ch, c.who.clone(), msg.clone()));
             }
+            "took" if c.kind == Kind::Brother => {
+                asked.handed.push((c.who.clone(), msg.clone()));
+            }
+            "error" if c.kind == Kind::Brother && msg["for"] == "bundle" => {
+                asked.handed.push((c.who.clone(), msg.clone()));
+            }
             "keep" | "takeover" if c.kind == Kind::Brother => {
                 asked.keeping.push((ch, c.who.clone(), msg.clone()));
             }
@@ -585,6 +598,9 @@ impl Server {
             if let Some(job) = serve.handing(who, msg) {
                 out.later.push((*ch, job));
             }
+        }
+        for (who, msg) in &asked.handed {
+            serve.handing_answer(who, msg);
         }
         for (ch, who, msg) in &asked.keeping {
             if let Some(job) = serve.keeping(who, msg) {
@@ -953,6 +969,7 @@ mod tests {
         started: Vec<String>,
         resumed: Vec<String>,
         stage: Option<u64>,
+        answers: Vec<(String, Value)>,
         state: &'static str,
         imported: Vec<(String, String)>,
         pushed: Vec<String>,
@@ -1066,6 +1083,9 @@ mod tests {
             let id = msg["id"].clone();
             (msg["t"] == "bundle")
                 .then(|| -> Job { Box::new(move || json!({"t": "took", "id": id, "number": 2})) })
+        }
+        fn handing_answer(&mut self, who: &str, msg: &Value) {
+            self.answers.push((who.into(), msg.clone()));
         }
         fn keeping(&mut self, who: &str, msg: &Value) -> Option<Job> {
             self.kept.push((who.into(), msg.clone()));
@@ -1467,6 +1487,30 @@ mod tests {
             serve.imported,
             vec![("\"repo\"".to_string(), "eA".to_string())]
         );
+    }
+
+    #[test]
+    fn answers_to_the_machines_own_handoffs_reach_it_from_a_brother_only() {
+        let mut serve = Fake::default();
+        let hello = json!({"t": "hello", "v": 3, "kind": "brother"});
+        let (mut server, _) = greeted(&mut serve, "Desk", hello);
+        let took = json!({"t": "took", "id": "s1", "number": 3});
+        assert!(say(&mut server, &mut serve, 1, took, 0).is_empty());
+        let no = json!({"t": "error", "for": "bundle", "id": "s1", "text": "no"});
+        say(&mut server, &mut serve, 2, no, 0);
+        let other = json!({"t": "error", "for": "start", "text": "x"});
+        say(&mut server, &mut serve, 3, other, 0);
+        assert_eq!(serve.answers.len(), 2);
+        // `say` speaks as "phone", whatever the hello was.
+        assert_eq!(serve.answers[0].0, "phone");
+        assert_eq!(serve.answers[1].1["text"], "no");
+        assert!(serve.handing.is_empty());
+
+        let mut serve = Fake::default();
+        let (mut server, _) = greeted(&mut serve, "phone", json!({"t": "hello", "v": 3}));
+        let took = json!({"t": "took", "id": "s1", "number": 3});
+        say(&mut server, &mut serve, 1, took, 0);
+        assert!(serve.answers.is_empty());
     }
 
     #[test]

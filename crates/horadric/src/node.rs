@@ -10,8 +10,10 @@
 //! keys and the encryption. `horadric node install` makes it a systemd
 //! user service, with the hooks.
 //!
-//! A node keeps no saved state yet: a host that outlived it is attached
-//! again when it starts, under its id, and nothing more.
+//! It keeps its sessions and the folders they worked in on disk
+//! (`node_state`), so a restart attaches the hosts that outlived it under
+//! their names and brings the rest back paused, for `resume`. Sessions are
+//! handed to and from a Windows PC over the same link (`handing`).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{self, Read, Write};
@@ -22,7 +24,7 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use horadric_core::node::{self as framing, Decoder, PREAMBLE};
-use horadric_core::serving::{Out, Running, Serve, Server, LOOK_EVERY};
+use horadric_core::serving::{Job, Out, Running, Serve, Server, LOOK_EVERY};
 use horadric_core::{session_id, Agent, Phase, Registry, Session};
 use horadric_hooks::listener::{self, Command as Asked, NewSession, Tagged};
 use horadric_hooks::{OWNER_ENV, SESSION_ENV};
@@ -31,7 +33,11 @@ use horadric_pty::pipe::Pipe;
 use horadric_pty::wire::{job_name, pipe_name, pipe_prefix, Message, Ring};
 use serde_json::{json, Value};
 
+use crate::node_state;
 use crate::node_wire as wire;
+
+#[path = "node_handing.rs"]
+mod handing;
 
 /// What a session keeps of its output for a viewer that attaches: the
 /// last MB, as docs/PORTAL.md promises.
@@ -44,6 +50,10 @@ const ROWS: u16 = 40;
 /// How often the streams are looked at while a viewer streams one, quick
 /// enough that typing over `ssh` echoes at once.
 const STREAM_EVERY: Duration = Duration::from_millis(15);
+
+/// How often what changed is written to disk: often enough that a crash
+/// loses little, seldom enough that a busy agent's hooks do not each write.
+const SAVE_EVERY: Duration = Duration::from_secs(2);
 
 pub fn run(args: &[String]) -> Result<(), String> {
     match args.first().map(String::as_str) {
@@ -69,6 +79,18 @@ struct Node {
     /// Numbers each console a session gets, so a stream starts over with
     /// a replay when the session is in a new one.
     consoles: u64,
+    /// What each session was started with, `--model` and the like, so a
+    /// resume carries it on.
+    args: BTreeMap<String, Vec<String>>,
+    /// Folders sessions worked in, newest first.
+    recent: Vec<String>,
+    /// The line a session handed here starts its next prompt with.
+    first: HashMap<String, String>,
+    /// The roster's number of each session handed here, to say `took`
+    /// again to a sender whose link dropped before it heard it.
+    took: HashMap<String, u64>,
+    /// Something kept on disk changed since it was written.
+    dirty: bool,
 }
 
 /// A session whose console this node holds.
@@ -88,7 +110,15 @@ fn lock(node: &Shared) -> MutexGuard<'_, Node> {
 }
 
 /// This machine, as the [`Server`] serves it.
-struct Machine(Shared);
+struct Machine {
+    node: Shared,
+    /// Where packed sessions come back from their threads.
+    events: Sender<Event>,
+    /// The name each viewer gave in its hello, by channel: who a handoff
+    /// goes to and who one comes from.
+    names: HashMap<u32, String>,
+    hand: handing::Handing,
+}
 
 impl Serve for Machine {
     fn name(&self) -> String {
@@ -96,20 +126,28 @@ impl Serve for Machine {
     }
 
     fn sessions(&self) -> Value {
-        let n = lock(&self.0);
+        let n = lock(&self.node);
         wire::sessions(n.registry.all().map(|s| (s, n.hosted.contains_key(&s.id))))
     }
 
     fn projects(&self) -> Value {
-        wire::projects(lock(&self.0).registry.all())
+        let n = lock(&self.node);
+        wire::projects(n.registry.all(), &n.recent)
     }
 
     fn folders(&self) -> Value {
-        json!({ "t": "folders", "roots": [] })
+        let listed = folder_roots(&self.node)
+            .into_iter()
+            .map(|root| {
+                let list = subfolders(Path::new(&root));
+                (root, list)
+            })
+            .collect();
+        wire::folders_message(listed)
     }
 
     fn waiting(&self) -> HashSet<String> {
-        lock(&self.0)
+        lock(&self.node)
             .registry
             .all()
             .filter(|s| matches!(s.phase, Phase::Waiting(_)))
@@ -119,7 +157,7 @@ impl Serve for Machine {
 
     fn start(&mut self, project: &str) -> Result<String, String> {
         start(
-            &self.0,
+            &self.node,
             NewSession {
                 name: None,
                 cwd: project.to_string(),
@@ -129,23 +167,51 @@ impl Serve for Machine {
         )
     }
 
-    fn resume(&mut self, _id: &str) -> Result<(), String> {
-        Err("A node cannot resume a session yet.".into())
+    fn resume(&mut self, id: &str) -> Result<(), String> {
+        resume(&self.node, id)
     }
 
-    fn create(&mut self, _root: &str, _name: &str) -> Result<(String, String), String> {
-        Err("A node cannot make projects yet.".into())
+    /// A new folder in one of the roots `folders` offers, a git
+    /// repository, with a session in it.
+    fn create(&mut self, root: &str, name: &str) -> Result<(String, String), String> {
+        if let Some(why) = wire::bad_name(name) {
+            return Err(why.to_string());
+        }
+        let root = root.trim_end_matches('/');
+        if !folder_roots(&self.node).iter().any(|r| r == root) {
+            return Err(format!(
+                "{root} is not a folder this node's projects live in."
+            ));
+        }
+        let dir = Path::new(root).join(name);
+        if dir.exists() {
+            return Err(format!("{name} is there already."));
+        }
+        std::fs::create_dir(&dir).map_err(|e| format!("Could not make {name}: {e}"))?;
+        // A node without git still gets the folder and the session.
+        let _ = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&dir)
+            .status();
+        trust(&dir);
+        let project = dir.to_string_lossy().into_owned();
+        let id = self.start(&project)?;
+        Ok((project, id))
     }
 
     fn running(&self, id: &str) -> Running {
-        match lock(&self.0).hosted.get(id) {
-            Some(h) => Running::Here(h.console),
-            None => Running::Elsewhere,
+        let n = lock(&self.node);
+        if let Some(h) = n.hosted.get(id) {
+            return Running::Here(h.console);
+        }
+        match n.registry.get(id) {
+            Some(s) if s.phase == Phase::Paused => Running::Paused,
+            _ => Running::Elsewhere,
         }
     }
 
     fn input(&mut self, id: &str, data: &str) {
-        if let Some(h) = lock(&self.0).hosted.get(id) {
+        if let Some(h) = lock(&self.node).hosted.get(id) {
             h.remote.write(data.as_bytes().to_vec());
         }
     }
@@ -157,17 +223,17 @@ impl Serve for Machine {
     }
 
     fn size(&self, id: &str) -> Option<(u16, u16)> {
-        lock(&self.0).hosted.get(id).map(|h| h.size)
+        lock(&self.node).hosted.get(id).map(|h| h.size)
     }
 
     fn output_since(&self, id: &str, at: u64) -> Option<(Vec<u8>, u64)> {
-        let n = lock(&self.0);
+        let n = lock(&self.node);
         let h = n.hosted.get(id)?;
         h.ring.since(at).map(|bytes| (bytes, h.ring.end()))
     }
 
     fn output_replay(&self, id: &str) -> (u64, Vec<u8>) {
-        lock(&self.0)
+        lock(&self.node)
             .hosted
             .get(id)
             .map_or((0, Vec::new()), |h| h.ring.replay_at())
@@ -184,12 +250,146 @@ impl Serve for Machine {
         let Some((cols, rows)) = size else {
             return;
         };
-        if let Some(h) = lock(&self.0).hosted.get_mut(id) {
+        if let Some(h) = lock(&self.node).hosted.get_mut(id) {
             if h.size != (cols, rows) {
                 h.remote.resize(cols, rows);
                 h.size = (cols, rows);
             }
         }
+    }
+
+    fn rename(&mut self, id: &str, name: &str) -> Result<(), String> {
+        let mut n = lock(&self.node);
+        let s = n.registry.get_mut(id).ok_or("no such session here")?;
+        s.name = name.to_string();
+        s.renamed = true;
+        n.dirty = true;
+        Ok(())
+    }
+
+    /// Ends the session's program and forgets it, as closing its tile does.
+    fn stop(&mut self, id: &str) -> Result<(), String> {
+        let mut n = lock(&self.node);
+        if let Some(h) = n.hosted.remove(id) {
+            h.remote.kill();
+        }
+        n.registry.remove(id).ok_or("no such session here")?;
+        n.args.remove(id);
+        n.dirty = true;
+        Ok(())
+    }
+
+    fn handoff(&mut self, id: &str, to: &str) -> Result<(), String> {
+        self.handoff_to(id, to)
+    }
+
+    fn handing(&mut self, who: &str, msg: &Value) -> Option<Job> {
+        self.serve_handing(who, msg)
+    }
+
+    fn handing_answer(&mut self, who: &str, msg: &Value) {
+        self.heard_answer(who, msg);
+    }
+}
+
+/// Where a session may start or a project be made: home and the parents
+/// of the folders sessions work in.
+fn folder_roots(node: &Shared) -> Vec<String> {
+    let projects: Vec<String> = {
+        let n = lock(node);
+        n.registry
+            .all()
+            .map(|s| {
+                s.worktree
+                    .as_ref()
+                    .map_or_else(|| s.cwd.clone(), |w| w.main.clone())
+            })
+            .chain(n.recent.iter().cloned())
+            .collect()
+    };
+    wire::roots(&projects, horadric_hooks::home().as_deref())
+}
+
+/// The folders in `root`, for `folders`.
+fn subfolders(root: &Path) -> Vec<wire::Folder> {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+        .map(|e| {
+            let path = e.path();
+            let changed = e
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .map_or(0, |d| d.as_secs());
+            wire::Folder {
+                git: path.join(".git").exists(),
+                path: path.to_string_lossy().into_owned(),
+                name: e.file_name().to_string_lossy().into_owned(),
+                changed,
+            }
+        })
+        .collect()
+}
+
+/// Tells Claude Code it may trust `dir`, since nobody sits at a server to
+/// answer its trust prompt.
+fn trust(dir: &Path) {
+    let Some(home) = horadric_hooks::home() else {
+        return;
+    };
+    let path = Path::new(&home).join(".claude.json");
+    let mut config: Value = match std::fs::read(&path) {
+        Ok(bytes) => match serde_json::from_slice(&bytes) {
+            Ok(v) => v,
+            // Half written by Claude Code: not ours to replace with less.
+            Err(_) => return,
+        },
+        Err(_) => Value::Null,
+    };
+    let key = horadric_core::trust::project_key(&dir.to_string_lossy());
+    if horadric_core::trust::trust(&mut config, &key) {
+        let tmp = path.with_extension("json.horadric-tmp");
+        let text = serde_json::to_string_pretty(&config).unwrap_or_default();
+        if std::fs::write(&tmp, text).is_ok() {
+            let _ = std::fs::rename(&tmp, &path);
+        }
+    }
+}
+
+fn state_path() -> Option<PathBuf> {
+    horadric_hooks::state_dir().map(|d| d.join(node_state::FILE))
+}
+
+/// Writes what is kept, if it changed since it was last written.
+fn save(node: &Shared) {
+    let text = {
+        let mut n = lock(node);
+        if !n.dirty {
+            return;
+        }
+        n.dirty = false;
+        let state = node_state::snapshot(
+            n.registry.all().map(|s| (s, n.hosted.contains_key(&s.id))),
+            &n.args,
+            &n.recent,
+        );
+        node_state::to_text(&state)
+    };
+    let Some(path) = state_path() else {
+        return;
+    };
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let tmp = path.with_extension("json.tmp");
+    let written = std::fs::write(&tmp, text).and_then(|_| std::fs::rename(&tmp, &path));
+    if let Err(e) = written {
+        eprintln!("horadric node: cannot keep {}: {e}", path.display());
     }
 }
 
@@ -212,13 +412,38 @@ fn serve() -> Result<(), String> {
 
     let node: Shared = Arc::default();
     let instance = horadric_hooks::instance();
-    for id in horadric_pty::pipe::list(&pipe_prefix(&instance)) {
+    let alive = horadric_pty::pipe::list(&pipe_prefix(&instance));
+    let state = state_path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .map(|t| node_state::parse(&t))
+        .unwrap_or_default();
+    {
+        let mut n = lock(&node);
+        for s in node_state::restore(&state, &alive, SystemTime::now()) {
+            n.registry.add(s);
+        }
+        for saved in &state.sessions {
+            n.args.insert(saved.id.clone(), saved.args.clone());
+        }
+        n.recent = state.recent.clone();
+    }
+    for id in alive {
         match Remote::attach(&pipe_name(&instance, &id), &job_name(&instance, &id)) {
             Ok(attached) => {
-                lock(&node).registry.add(Session::new(&id, &id, ""));
+                {
+                    let mut n = lock(&node);
+                    if n.registry.get(&id).is_none() {
+                        n.registry.add(Session::new(&id, &id, ""));
+                    }
+                }
                 hold(&node, id, attached);
             }
-            Err(e) => eprintln!("horadric node: could not attach {id}: {e}"),
+            Err(e) => {
+                eprintln!("horadric node: could not attach {id}: {e}");
+                if let Some(s) = lock(&node).registry.get_mut(&id) {
+                    s.phase = Phase::Paused;
+                }
+            }
         }
     }
     let (events, heard) = mpsc::channel::<Event>();
@@ -227,19 +452,44 @@ fn serve() -> Result<(), String> {
         thread::spawn(move || viewers(first, events));
     }
     {
+        let machine = Machine {
+            node: Arc::clone(&node),
+            events: events.clone(),
+            names: HashMap::new(),
+            hand: handing::Handing::default(),
+        };
+        thread::spawn(move || serving(machine, heard, events));
+    }
+    {
         let node = Arc::clone(&node);
-        thread::spawn(move || serving(Machine(node), heard, events));
+        thread::spawn(move || loop {
+            thread::sleep(SAVE_EVERY);
+            save(&node);
+        });
     }
     {
         let node = Arc::clone(&node);
         thread::spawn(move || {
-            // The browser, the lore and the rest are the app's; a node only
-            // starts sessions so far.
+            // The browser and the lore are the app's; a node starts
+            // sessions, and tells one handed here that it moved.
             for asked in asked_rx {
-                if let Asked::New(asked) = asked {
-                    if let Err(e) = start(&node, asked) {
-                        eprintln!("horadric node: {e}");
+                match asked {
+                    Asked::New(asked) => {
+                        if let Err(e) = start(&node, asked) {
+                            eprintln!("horadric node: {e}");
+                        }
                     }
+                    Asked::Recall(call) => {
+                        let session = call.body["session"].as_str().unwrap_or("");
+                        let line = (call.body["prompt"] == json!(true))
+                            .then(|| lock(&node).first.remove(session))
+                            .flatten();
+                        // Dropped unanswered, the hook goes on with nothing.
+                        if let Some(line) = line {
+                            call.reply.send(json!({ "text": line }));
+                        }
+                    }
+                    _ => {}
                 }
             }
         });
@@ -253,9 +503,12 @@ fn serve() -> Result<(), String> {
         if t.horadric_id.is_empty() {
             continue;
         }
-        lock(&node)
-            .registry
-            .apply(&t.horadric_id, &t.event, SystemTime::now());
+        let mut n = lock(&node);
+        if n.registry
+            .apply(&t.horadric_id, &t.event, SystemTime::now())
+        {
+            n.dirty = true;
+        }
     }
     Err("the hook listener stopped".into())
 }
@@ -263,7 +516,6 @@ fn serve() -> Result<(), String> {
 /// Starts a session in a host of its own, as `horadric new` or a viewer's
 /// `start` asked. Answers its id.
 fn start(node: &Shared, asked: NewSession) -> Result<String, String> {
-    let instance = horadric_hooks::instance();
     let cwd = PathBuf::from(&asked.cwd);
     if !cwd.is_dir() {
         return Err(format!("{} is not a folder here", asked.cwd));
@@ -284,18 +536,40 @@ fn start(node: &Shared, asked: NewSession) -> Result<String, String> {
         }
         id
     };
-    let program = agent_program(asked.agent)
-        .ok_or_else(|| format!("`{}` is not on PATH", asked.agent.program()))?;
+    let line = asked.agent.line(&[], &asked.args);
+    let attached = launch(&id, cwd, asked.agent, line)?;
+    {
+        let mut n = lock(node);
+        let mut s = Session::new(&id, asked.name.unwrap_or(base), asked.cwd.clone());
+        s.agent = asked.agent;
+        n.registry.add(s);
+        n.args.insert(id.clone(), asked.args);
+        n.recent = node_state::with_recent(&n.recent, &asked.cwd);
+        n.dirty = true;
+    }
+    hold(node, id.clone(), attached);
+    Ok(id)
+}
+
+/// Runs `agent` with `args` in `cwd`, in a host of its own for session
+/// `id`.
+fn launch(id: &str, cwd: PathBuf, agent: Agent, args: Vec<String>) -> Result<Attached, String> {
+    let instance = horadric_hooks::instance();
+    if !cwd.is_dir() {
+        return Err(format!("{} is not a folder here", cwd.display()));
+    }
+    let program =
+        agent_program(agent).ok_or_else(|| format!("`{}` is not on PATH", agent.program()))?;
     let mut env_set = vec![
-        (SESSION_ENV.to_string(), id.clone()),
+        (SESSION_ENV.to_string(), id.to_string()),
         (OWNER_ENV.to_string(), horadric_hooks::port().to_string()),
     ];
-    env_set.extend(asked.agent.env());
+    env_set.extend(agent.env());
     let spec = Spec {
-        pipe: pipe_name(&instance, &id),
+        pipe: pipe_name(&instance, id),
         command: horadric_pty::Command {
             program,
-            args: asked.agent.line(&[], &asked.args),
+            args,
             cwd,
             env_set,
             env_remove: Vec::new(),
@@ -305,13 +579,38 @@ fn start(node: &Shared, asked: NewSession) -> Result<String, String> {
         },
     };
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    let attached = Remote::start(&exe, &spec, &job_name(&instance, &id))
-        .map_err(|e| format!("could not start {id}: {e}"))?;
-    lock(node)
-        .registry
-        .add(Session::new(&id, asked.name.unwrap_or(base), asked.cwd));
-    hold(node, id.clone(), attached);
-    Ok(id)
+    Remote::start(&exe, &spec, &job_name(&instance, id))
+        .map_err(|e| format!("could not start {id}: {e}"))
+}
+
+/// Carries a paused session on in its folder: its conversation resumed,
+/// with what it was started with.
+fn resume(node: &Shared, id: &str) -> Result<(), String> {
+    let (cwd, agent, carry) = {
+        let n = lock(node);
+        if n.hosted.contains_key(id) {
+            return Ok(());
+        }
+        let s = n.registry.get(id).ok_or("no such session here")?;
+        let conversation = s.claude_session_id.as_deref().filter(|_| s.prompted);
+        let args = n.args.get(id).cloned().unwrap_or_default();
+        (
+            PathBuf::from(&s.cwd),
+            s.agent,
+            s.agent.carry_on(conversation, &args),
+        )
+    };
+    let attached = launch(id, cwd, agent, agent.line(&[], &carry))?;
+    {
+        let mut n = lock(node);
+        if let Some(s) = n.registry.get_mut(id) {
+            s.phase = Phase::Idle;
+            s.since = SystemTime::now();
+        }
+        n.dirty = true;
+    }
+    hold(node, id.to_string(), attached);
+    Ok(())
 }
 
 /// The program for `agent`, `HORADRIC_AGENT` in Claude Code's place as in
@@ -324,8 +623,16 @@ fn agent_program(agent: Agent) -> Option<PathBuf> {
     if Path::new(&name).is_absolute() {
         return Some(PathBuf::from(name));
     }
-    let path = std::env::var_os("PATH").unwrap_or_default();
-    horadric_pty::find_program(&name, &path, horadric_pty::PROGRAM_EXTS, Path::is_file)
+    // systemd gives a user service a bare PATH, without the folders the
+    // agents' own installers put them in.
+    let path = std::env::var("PATH").unwrap_or_default();
+    let path = wire::search_path(&path, horadric_hooks::home().as_deref());
+    horadric_pty::find_program(
+        &name,
+        std::ffi::OsStr::new(&path),
+        horadric_pty::PROGRAM_EXTS,
+        Path::is_file,
+    )
 }
 
 /// Keeps a host's output for the viewers, on a thread of its own, until
@@ -337,7 +644,7 @@ fn hold(node: &Shared, id: String, attached: Attached) {
         cols,
         rows,
     } = attached;
-    {
+    let console = {
         let mut n = lock(node);
         n.consoles += 1;
         let console = n.consoles;
@@ -350,12 +657,14 @@ fn hold(node: &Shared, id: String, attached: Attached) {
                 console,
             },
         );
-    }
+        n.dirty = true;
+        console
+    };
     let node = Arc::clone(node);
     thread::spawn(move || {
         while let Some(m) = incoming.recv() {
             let mut n = lock(&node);
-            let Some(h) = n.hosted.get_mut(&id) else {
+            let Some(h) = n.hosted.get_mut(&id).filter(|h| h.console == console) else {
                 break;
             };
             match m {
@@ -366,10 +675,20 @@ fn hold(node: &Shared, id: String, attached: Attached) {
             }
         }
         let mut n = lock(&node);
+        // A console let go or replaced is not this thread's to end.
+        if n.hosted.get(&id).is_none_or(|h| h.console != console) {
+            return;
+        }
         n.hosted.remove(&id);
         if let Some(s) = n.registry.get_mut(&id) {
-            s.phase = Phase::Ended;
+            // With a conversation it can be resumed, as a stopped tile can.
+            s.phase = if s.prompted && s.claude_session_id.is_some() {
+                Phase::Paused
+            } else {
+                Phase::Ended
+            };
         }
+        n.dirty = true;
     });
 }
 
@@ -380,6 +699,8 @@ enum Event {
     Closed(u32),
     /// What a job answered, later, for one viewer.
     Answer(u32, Value),
+    /// A session packed for a handoff, or why it could not be.
+    Packed(String, Result<Vec<u8>, String>),
 }
 
 /// Takes viewers one after another on the node's socket, each read on a
@@ -475,10 +796,15 @@ fn serving(mut machine: Machine, heard: mpsc::Receiver<Event>, events: Sender<Ev
                     links.insert(ch, tx);
                 }
                 Ok(Event::Heard(ch, msg)) => {
+                    if msg["t"] == "hello" {
+                        let name = wire::hello_name(&msg).unwrap_or_default();
+                        machine.names.insert(ch, name);
+                    }
+                    let who = machine.names.get(&ch).cloned().unwrap_or_default();
                     let now = SystemTime::now()
                         .duration_since(UNIX_EPOCH)
                         .unwrap_or_default();
-                    let back = server.heard(ch, "", &msg, now.as_micros() as u64, || {
+                    let back = server.heard(ch, &who, &msg, now.as_micros() as u64, || {
                         wire::fresh_s(now.as_nanos(), ch)
                     });
                     for m in back {
@@ -489,8 +815,10 @@ fn serving(mut machine: Machine, heard: mpsc::Receiver<Event>, events: Sender<Ev
                 Ok(Event::Closed(ch)) => {
                     server.close(ch);
                     links.remove(&ch);
+                    machine.names.remove(&ch);
                 }
                 Ok(Event::Answer(ch, msg)) => send(&links, ch, &msg),
+                Ok(Event::Packed(id, packed)) => machine.packed(&id, packed),
                 Err(RecvTimeoutError::Timeout) => break,
                 Err(RecvTimeoutError::Disconnected) => return,
             }
@@ -515,6 +843,19 @@ fn serving(mut machine: Machine, heard: mpsc::Receiver<Event>, events: Sender<Ev
             thread::spawn(move || {
                 let _ = events.send(Event::Answer(ch, job()));
             });
+        }
+        machine.handing_tick();
+        for (to, msg) in std::mem::take(&mut machine.hand.outbox) {
+            // The newest link of that name, should it be there twice.
+            let ch = machine
+                .names
+                .iter()
+                .filter(|(_, n)| **n == to)
+                .map(|(ch, _)| *ch)
+                .max();
+            if let Some(ch) = ch {
+                send(&links, ch, &msg);
+            }
         }
     }
 }

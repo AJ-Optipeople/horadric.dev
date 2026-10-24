@@ -278,6 +278,7 @@ impl App {
         // Handoffs move on with what was heard, and with what their
         // threads handed back, which wakes this too.
         self.handing_tick();
+        self.node_answers();
         if changed {
             self.reconcile(true);
         }
@@ -379,7 +380,12 @@ impl App {
         });
         p.via = Some(via);
         p.streams.clear();
-        let hello = p.client.hello();
+        let mut hello = p.client.hello();
+        // A node knows its viewers only by what they call themselves, and
+        // a handoff from it names this PC so.
+        if let Via::Node(_) = via {
+            hello["name"] = json!(crate::portal_pair::pc_name());
+        }
         self.far_send(&name, hello);
         false
     }
@@ -462,6 +468,10 @@ impl App {
         let t = msg.get("t").and_then(Value::as_str).unwrap_or("");
         if t != "out" && std::env::var_os("HORADRIC_DEBUG").is_some() {
             eprintln!("far: {name} says {t}");
+        }
+        if matches!(via, Via::Node(_)) && horadric_core::handing::asks_receiver(msg) {
+            self.node_asked(&name, msg);
+            return false;
         }
         if self.handing_heard(&name, msg) {
             return false;
@@ -800,10 +810,10 @@ impl App {
 /// "Join a Linux node...": its SSH destination, picked from
 /// `~/.ssh/config` with the Fleets picker or typed. No login and no code:
 /// the trust is the SSH key. The link is dialled at the next check.
-pub(super) fn ask_node() {
-    let Some(dir) = horadric_hooks::state_dir() else {
-        return;
-    };
+/// Answers the node's name once joined, why not when it could not be, and
+/// None when the human thought better of it.
+pub(super) fn ask_node() -> Option<Result<String, String>> {
+    let dir = horadric_hooks::state_dir()?;
     let list = far_node::load(&dir);
     let mut offer = horadric_hooks::tasks::ssh_config_hosts();
     offer.retain(|h| !list.iter().any(|n| &n.ssh == h));
@@ -838,21 +848,18 @@ pub(super) fn ask_node() {
         secret: false,
         pick: (!offer.is_empty()).then_some(&pick),
     };
-    let Some(a) = super::ask_beside(None, &question) else {
-        return;
-    };
+    let a = super::ask_beside(None, &question)?;
     let list = far_node::load(&dir);
-    match horadric_core::nodes::with_node(&list, a.text.trim()) {
-        Some(list) => {
-            if let Err(e) = far_node::save(&dir, &list) {
-                eprintln!("horadric: cannot keep the node list: {e}");
-            }
-        }
-        None => eprintln!(
-            "horadric: {} is joined already or not one ssh destination",
-            a.text
-        ),
+    let Some(list) = horadric_core::nodes::with_node(&list, a.text.trim()) else {
+        return Some(Err(format!(
+            "{} is joined already or not one ssh destination.",
+            a.text.trim()
+        )));
+    };
+    if let Err(e) = far_node::save(&dir, &list) {
+        return Some(Err(format!("Cannot keep the node list: {e}")));
     }
+    list.last().map(|n| Ok(n.name.clone()))
 }
 
 /// "Forget": node `name` off the list. Its link and tiles go at the next

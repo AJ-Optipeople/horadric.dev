@@ -35,6 +35,7 @@ mod lore;
 mod mcp;
 #[cfg(target_os = "linux")]
 mod node;
+mod node_state;
 mod node_wire;
 #[cfg(windows)]
 mod portal;

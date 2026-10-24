@@ -131,7 +131,10 @@ fn exec_word(word: &str) -> String {
 }
 
 /// The systemd user unit that runs the node at `exe`. Restarted when it
-/// fails, never when it is stopped on purpose.
+/// fails, never when it is stopped on purpose. A stop or a restart ends
+/// the node alone, not the session hosts it started, which systemd counts
+/// as the unit's own: they outlive it on purpose, and the node attaches
+/// them again when it starts.
 pub fn unit_text(exe: &str) -> String {
     format!(
         "[Unit]\n\
@@ -143,6 +146,7 @@ pub fn unit_text(exe: &str) -> String {
          ExecStart={} node\n\
          Restart=on-failure\n\
          RestartSec=5\n\
+         KillMode=process\n\
          \n\
          [Install]\n\
          WantedBy=default.target\n",
@@ -232,6 +236,7 @@ mod tests {
         let text = unit_text("/home/m/.local/bin/horadric");
         assert!(text.contains("\nExecStart=/home/m/.local/bin/horadric node\n"));
         assert!(text.contains("\nRestart=on-failure\n"));
+        assert!(text.contains("\nKillMode=process\n"));
         assert!(text.contains("\nWantedBy=default.target\n"));
         assert!(text.starts_with("[Unit]\n"));
         assert!(unit_text("/opt/my apps/h%1").contains("ExecStart=\"/opt/my apps/h%%1\" node"));

@@ -174,6 +174,16 @@ impl Backoff {
     }
 }
 
+/// What a node said was wrong in an `error` frame before its hello, as
+/// `horadric node --stdio` does when no node runs: the tray's line then.
+pub fn told(msg: &Value) -> Option<String> {
+    if msg["t"] != "error" {
+        return None;
+    }
+    let text = msg["text"].as_str()?.trim();
+    (!text.is_empty()).then(|| text.chars().take(120).collect())
+}
+
 /// The last line `ssh` wrote to stderr that says something, for the
 /// tray's line about a node that is not linked.
 pub fn why(stderr: &str) -> Option<String> {
@@ -283,5 +293,16 @@ mod tests {
             Some("agent@1.2.3.4: Permission denied (publickey).")
         );
         assert_eq!(why("  \n"), None);
+    }
+
+    #[test]
+    fn a_nodes_own_error_is_its_words() {
+        let no = json!({"t": "error", "text": " no node runs here (start `horadric node`) "});
+        assert_eq!(
+            told(&no).as_deref(),
+            Some("no node runs here (start `horadric node`)")
+        );
+        assert_eq!(told(&json!({"t": "error", "text": ""})), None);
+        assert_eq!(told(&json!({"t": "hello", "text": "x"})), None);
     }
 }

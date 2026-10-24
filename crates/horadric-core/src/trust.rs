@@ -47,9 +47,19 @@ pub fn trusted(config: &Value, key: &str) -> bool {
 }
 
 /// Marks `key` trusted in `.claude.json`'s contents, the rest left as it
-/// was. False when it was trusted already, so nothing needs writing.
+/// was. False when it was trusted already, so nothing needs writing. Only
+/// the folder itself counts here: Claude Code 2.1.3 asked again in a
+/// worktree whose parent (or home folder) was trusted, on Windows and on
+/// Linux alike.
 pub fn trust(config: &mut Value, key: &str) -> bool {
-    if trusted(config, key) {
+    let accepted = config
+        .get("projects")
+        .and_then(Value::as_object)
+        .is_some_and(|p| {
+            p.iter()
+                .any(|(k, v)| k.eq_ignore_ascii_case(key) && v["hasTrustDialogAccepted"] == true)
+        });
+    if accepted {
         return false;
     }
     if !config.is_object() {
@@ -121,7 +131,18 @@ mod tests {
         assert_eq!(c["userID"], "u");
         assert_eq!(c["projects"]["C:/a"]["allowedTools"], json!(["x"]));
         assert_eq!(c["projects"]["C:/a"]["hasTrustDialogAccepted"], true);
-        assert!(!trust(&mut c, "C:/a/b"));
+        assert!(!trust(&mut c, "C:/a"));
+        assert!(!trust(&mut c, "c:/A"));
+    }
+
+    #[test]
+    fn a_folder_below_a_trusted_one_is_trusted_itself() {
+        let mut c = json!({"projects": {"/home/agent": {"hasTrustDialogAccepted": true}}});
+        assert!(trust(&mut c, "/home/agent/repo.main-2"));
+        assert_eq!(
+            c["projects"]["/home/agent/repo.main-2"]["hasTrustDialogAccepted"],
+            true
+        );
     }
 
     #[test]

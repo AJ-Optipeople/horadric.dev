@@ -36,11 +36,12 @@ pub fn sessions<'a>(all: impl Iterator<Item = (&'a Session, bool)>) -> Value {
     json!({ "t": "sessions", "list": list })
 }
 
-/// The `projects` message: every folder a session here works in, which
-/// is where `start` may put another.
-pub fn projects<'a>(all: impl Iterator<Item = &'a Session>) -> Value {
+/// The `projects` message: every folder a session here works in or worked
+/// in lately (`recent`), which is where `start` may put another.
+pub fn projects<'a>(all: impl Iterator<Item = &'a Session>, recent: &'a [String]) -> Value {
     let dirs: BTreeSet<&str> = all
         .map(|s| s.cwd.as_str())
+        .chain(recent.iter().map(String::as_str))
         .filter(|c| !c.is_empty())
         .collect();
     let list: Vec<(String, String)> = dirs
@@ -48,6 +49,110 @@ pub fn projects<'a>(all: impl Iterator<Item = &'a Session>) -> Value {
         .map(|d| (d.to_string(), project_name(d).to_string()))
         .collect();
     projects_message(&list)
+}
+
+/// The folders a new session may be started in or a project made in: the
+/// parents of the folders sessions worked in, and the home folder, once
+/// each. Never `/` or the temp folder, which hold no projects.
+pub fn roots(projects: &[String], home: Option<&str>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let parents = projects.iter().filter_map(|p| {
+        let p = p.trim_end_matches('/');
+        p.rfind('/').map(|i| &p[..i])
+    });
+    for root in home.into_iter().chain(parents) {
+        let root = root.trim_end_matches('/');
+        let skip = root.is_empty() || root == "/tmp" || root.starts_with("/tmp/");
+        if !skip && !out.iter().any(|o| o == root) {
+            out.push(root.to_string());
+        }
+    }
+    out
+}
+
+/// A folder in a root, as `folders` lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Folder {
+    pub path: String,
+    pub name: String,
+    pub git: bool,
+    /// Last changed, in seconds since 1970, for the order.
+    pub changed: u64,
+}
+
+/// At most this many folders a root.
+pub const FOLDERS_MAX: usize = 300;
+
+/// The `folders` message: each root with its folders newest first, hidden
+/// ones left out.
+pub fn folders_message(roots: Vec<(String, Vec<Folder>)>) -> Value {
+    let roots: Vec<Value> = roots
+        .into_iter()
+        .map(|(path, mut list)| {
+            list.retain(|f| !f.name.starts_with('.'));
+            list.sort_by(|a, b| b.changed.cmp(&a.changed).then_with(|| a.name.cmp(&b.name)));
+            list.truncate(FOLDERS_MAX);
+            let list: Vec<Value> = list
+                .iter()
+                .map(|f| json!({"path": f.path, "name": f.name, "git": f.git}))
+                .collect();
+            json!({"path": path, "name": project_name(&path), "list": list})
+        })
+        .collect();
+    json!({"t": "folders", "roots": roots})
+}
+
+/// Why a new project's folder name will not do, or None when it will: 1 to
+/// 64 letters, digits, spaces, dots, dashes and underscores, not starting
+/// with a dot or a space.
+pub fn bad_name(name: &str) -> Option<&'static str> {
+    if name.is_empty() || name.chars().count() > 64 {
+        return Some("The name must be 1 to 64 characters.");
+    }
+    if name.starts_with(['.', ' ']) {
+        return Some("The name cannot start with a dot or a space.");
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_alphanumeric() || matches!(c, ' ' | '.' | '-' | '_'))
+    {
+        return Some("Use letters, digits, spaces, dots, dashes and underscores.");
+    }
+    None
+}
+
+/// The name a viewer gave in its hello, which a handoff to it is asked by.
+pub fn hello_name(hello: &Value) -> Option<String> {
+    hello["name"]
+        .as_str()
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .map(str::to_string)
+}
+
+/// `path` with the folders agents install themselves into added after it:
+/// Claude Code's native installer and npm's user prefix under `home`, and
+/// `/usr/local/bin`. A node runs as a systemd user service, whose PATH
+/// has none of them.
+pub fn search_path(path: &str, home: Option<&str>) -> String {
+    let mut dirs: Vec<String> = path
+        .split(':')
+        .filter(|d| !d.is_empty())
+        .map(str::to_string)
+        .collect();
+    let home = home.map(|h| h.trim_end_matches('/'));
+    let extra = home
+        .into_iter()
+        .flat_map(|h| {
+            [".local/bin", ".claude/local", ".npm-global/bin"].map(|d| format!("{h}/{d}"))
+        })
+        .chain(["/usr/local/bin".to_string()]);
+    for d in extra {
+        if !dirs.contains(&d) {
+            dirs.push(d);
+        }
+    }
+    dirs.join(":")
 }
 
 /// A connection's `s`. The replay guard it feeds matters on the relay,
@@ -88,11 +193,75 @@ mod tests {
         let a = Session::new("a", "a", "/srv/app");
         let b = Session::new("b", "b", "/srv/app");
         let c = Session::new("c", "c", "");
-        let m = projects([&a, &b, &c].into_iter());
+        let m = projects([&a, &b, &c].into_iter(), &[]);
         assert_eq!(m["t"], "projects");
         assert_eq!(m["list"].as_array().unwrap().len(), 1);
+        let recent = vec!["/srv/old".to_string(), "/srv/app".to_string()];
+        let m = projects([&a].into_iter(), &recent);
+        assert_eq!(m["list"].as_array().unwrap().len(), 2);
         assert_eq!(m["list"][0]["path"], "/srv/app");
         assert_eq!(m["list"][0]["name"], "app");
+    }
+
+    #[test]
+    fn roots_are_home_and_the_parents_of_projects_once_each() {
+        let projects = vec![
+            "/home/a/work/x".to_string(),
+            "/home/a/work/y/".to_string(),
+            "/srv/z".to_string(),
+            "/top".to_string(),
+            "/tmp/scratch".to_string(),
+        ];
+        assert_eq!(
+            roots(&projects, Some("/home/a")),
+            vec!["/home/a", "/home/a/work", "/srv"]
+        );
+        assert!(roots(&[], None).is_empty());
+    }
+
+    #[test]
+    fn folders_go_newest_first_without_hidden_ones() {
+        let f = |name: &str, changed| Folder {
+            path: format!("/r/{name}"),
+            name: name.into(),
+            git: name == "b",
+            changed,
+        };
+        let m = folders_message(vec![("/r".into(), vec![f("a", 1), f(".x", 9), f("b", 5)])]);
+        assert_eq!(m["t"], "folders");
+        assert_eq!(m["roots"][0]["name"], "r");
+        let list = m["roots"][0]["list"].as_array().unwrap();
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0]["name"], "b");
+        assert_eq!(list[0]["git"], true);
+    }
+
+    #[test]
+    fn project_names_are_checked() {
+        assert_eq!(bad_name("my app-2_x.y"), None);
+        assert!(bad_name("").is_some());
+        assert!(bad_name(".hidden").is_some());
+        assert!(bad_name("a/b").is_some());
+        assert!(bad_name(&"x".repeat(65)).is_some());
+    }
+
+    #[test]
+    fn a_hello_names_its_viewer_or_not() {
+        assert_eq!(
+            hello_name(&json!({"name": " Desk "})).as_deref(),
+            Some("Desk")
+        );
+        assert_eq!(hello_name(&json!({"name": ""})), None);
+        assert_eq!(hello_name(&json!({})), None);
+    }
+
+    #[test]
+    fn the_agents_install_folders_are_searched_after_path() {
+        assert_eq!(
+            search_path("/usr/bin:/home/a/.local/bin", Some("/home/a/")),
+            "/usr/bin:/home/a/.local/bin:/home/a/.claude/local:/home/a/.npm-global/bin:/usr/local/bin"
+        );
+        assert_eq!(search_path("", None), "/usr/local/bin");
     }
 
     #[test]

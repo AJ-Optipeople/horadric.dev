@@ -161,6 +161,9 @@ mod far;
 #[path = "handing.rs"]
 mod handing;
 
+#[path = "node_asks.rs"]
+mod node_asks;
+
 #[path = "keeping.rs"]
 mod keeping;
 pub(crate) use handing::{leaving_menu, leaving_pick};
@@ -1540,7 +1543,22 @@ fn tray_menu(hwnd: HWND) {
         Some(Choice::Leave(to)) => {
             with_app(|app| app.leave_for(to));
         }
-        Some(Choice::AddNode) => far::ask_node(),
+        Some(Choice::AddNode) => match far::ask_node() {
+            Some(Ok(name)) => {
+                with_app(|app| {
+                    app.toasts.show(
+                        Kind::Done,
+                        &format!("Joined {name}"),
+                        "Dialling it over ssh. Its sessions show here once it answers; \
+                         the tray's Linux nodes menu says how the link stands.",
+                    )
+                });
+            }
+            Some(Err(why)) => {
+                with_app(|app| app.toasts.show(Kind::Failed, "Cannot join that node", &why));
+            }
+            None => {}
+        },
         Some(Choice::ForgetNode(name)) => far::forget_node(&name),
         Some(Choice::EndAll) => {
             if confirm_end(None) {

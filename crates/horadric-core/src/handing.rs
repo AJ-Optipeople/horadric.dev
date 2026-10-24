@@ -321,6 +321,19 @@ pub fn heard_bases(msg: &Value) -> (Vec<String>, bool) {
     (commits, msg["found"].as_bool().unwrap_or(false))
 }
 
+/// Whether `msg` asks the receiver of a handoff something (the `bases`
+/// ask, carrying `repo`, or a `bundle` part) rather than answering its
+/// sender (`bases` with `commits`, `took`, a refusal). Over a brother
+/// channel the link tells them apart; a Linux node speaks on one pipe both
+/// ways, so its messages are told apart by what they carry.
+pub fn asks_receiver(msg: &Value) -> bool {
+    match msg["t"].as_str() {
+        Some("bundle") => true,
+        Some("bases") => msg.get("repo").is_some(),
+        _ => false,
+    }
+}
+
 /// The receiver runs the session, as the roster's number `n`. Protocol
 /// v3 names it `n`, but `n` is every message's count on a link, and an
 /// answer carrying one is taken for an ask, so it goes as `number`.
@@ -582,6 +595,16 @@ mod tests {
         assert!(!between_turns(&Phase::Working));
         assert!(!between_turns(&Phase::Waiting(WaitReason::Permission)));
         assert!(!between_turns(&Phase::Waiting(WaitReason::Dialog)));
+    }
+
+    #[test]
+    fn asks_are_told_from_answers_by_what_they_carry() {
+        assert!(asks_receiver(&bases_ask("s", &RepoId::default())));
+        assert!(asks_receiver(&json!({"t": "bundle", "id": "s"})));
+        assert!(!asks_receiver(&bases_answer("s", Some(vec![]))));
+        assert!(!asks_receiver(&bases_answer("s", None)));
+        assert!(!asks_receiver(&took_message("s", 2)));
+        assert!(!asks_receiver(&refused("s", "no")));
     }
 
     #[test]
