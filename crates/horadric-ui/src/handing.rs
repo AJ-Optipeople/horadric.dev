@@ -640,6 +640,11 @@ impl App {
             loot: Default::default(),
             runeword: None,
         };
+        // No one may be at this PC to answer Claude Code's trust prompt
+        // for a folder it has never seen.
+        if let Err(e) = crate::accounts::trust(&landed.cwd) {
+            eprintln!("horadric: cannot trust {}: {e}", landed.cwd.display());
+        }
         if let Ok(mut r) = self.shared.registry.lock() {
             r.add(saved.to_session(SystemTime::now()));
         }

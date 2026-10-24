@@ -522,6 +522,42 @@ Each step is useful alone and each is verified before the next starts.
    Verified with two dev instances on this machine, then between this PC
    and the laptop: a session mid task handed over, its next turn
    continuing the work with the files in place.
+
+   Built on 2026-10-24: the steps in `horadric-core/src/handing.rs`
+   (the sender as a state machine, packing from the repository's top,
+   landing in a worktree beside the receiver's main tree on a branch
+   named after the sender's), the glue in `horadric-ui/src/handing.rs`.
+   On the wire, two changes to what is above: before cutting the bundle
+   the sender asks `{"t":"bases","id","repo"}` and the receiver answers
+   `{"t":"bases","id","commits","found"}`; and `took` carries the
+   roster's number as `number`, since an answer with `n` on a link is
+   taken for an ask. A refusal is `error` with `"for":"bundle"`. The
+   first line goes in as the `UserPromptSubmit` hook's
+   `additionalContext` of the session's next prompt. The memory skips
+   the turns of a transcript read at a new path that it already holds
+   dialogue of, by time, so a move indexes its old turns once.
+
+   Seen with "Alpha" and "Beta" through `wss://portal.horadric.dev` by
+   the phone door: a haiku session in a scratch repository, `app.py`
+   changed and `notes.txt` untracked, handed from Alpha's tile menu.
+   Beta answered `bases` and `took`, its worktree `repo-b.main-2` held
+   both changes unstaged, the transcript was filed under that folder's
+   key with every `cwd` moved, and `claude --resume` showed the
+   conversation there. Alpha's tile went and came back in "repo-b ·
+   Beta" with Beta's mark, "moved here from Alpha". The next prompt on
+   Beta carried the moved line as hook context. The account had hit its
+   session limit, so no model turn ran on either side: that the agent
+   answers from the moved conversation rests on step 7.
+
+   Not yet: the owner in the roster does not change on `took` (rosters
+   keep no session owners until step 8); a project the receiver lacks is
+   refused rather than cloned or asked for; a folder without git cannot
+   be handed off; a session handed from the main checkout rather than a
+   worktree leaves its changes there as well, since removing a human's
+   uncommitted work is not the handoff's to do; the tile does not keep
+   its place, it moves to the brother's cluster; `handoff` asked by a
+   brother over the wire is served but no UI sends it yet; a brother
+   channel was not tried, only the phone door.
 11. **Handoff to and from a Linux node.** The same over `--stdio`, and the
     path rewrite between Windows and Linux. Verified against the VPS both
     ways.
