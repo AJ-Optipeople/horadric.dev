@@ -155,6 +155,21 @@ pub trait Serve {
     }
     /// Takes in the entries a brother sent, `b64` as `entries` carries it.
     fn lore_import(&mut self, _project: &Value, _b64: &str) {}
+    /// `handoff`: hand session `id` to the brother named `to` once its
+    /// turn ends (see `crate::handing`).
+    fn handoff(&mut self, _id: &str, _to: &str) -> Result<(), String> {
+        Err("This machine cannot hand sessions off.".into())
+    }
+    /// A brother's `bases` ask or `bundle` part, from `who`: a job whose
+    /// answer goes back, or None while there is nothing to answer yet.
+    fn handing(&mut self, _who: &str, _msg: &Value) -> Option<Job> {
+        None
+    }
+    /// A brother's `keep` part or `takeover`, from `who` (see
+    /// `crate::keeping`): a job whose answer goes back, or None.
+    fn keeping(&mut self, _who: &str, _msg: &Value) -> Option<Job> {
+        None
+    }
 }
 
 /// What a server sends: messages now, and jobs whose answers go later.
@@ -254,6 +269,12 @@ struct Asked {
     lores: Vec<(u32, String)>,
     /// A brother's `entries`: project, b64.
     entries: Vec<(Value, String)>,
+    /// Channel, session, the brother to hand it to.
+    handoffs: Vec<(u32, String, String)>,
+    /// A brother's `bases` and `bundle`: channel, who, the message.
+    handing: Vec<(u32, String, Value)>,
+    /// A brother's `keep` and `takeover`: channel, who, the message.
+    keeping: Vec<(u32, String, Value)>,
 }
 
 /// Every connection one machine serves, and what was sent them.
@@ -456,6 +477,17 @@ impl Server {
                     asked.lores.push((ch, key));
                 }
             }
+            "handoff" => {
+                if let (Some(id), Some(to)) = (text("id"), text("to")) {
+                    asked.handoffs.push((ch, id, to));
+                }
+            }
+            "bases" | "bundle" if c.kind == Kind::Brother => {
+                asked.handing.push((ch, c.who.clone(), msg.clone()));
+            }
+            "keep" | "takeover" if c.kind == Kind::Brother => {
+                asked.keeping.push((ch, c.who.clone(), msg.clone()));
+            }
             "entries" if c.kind == Kind::Brother => {
                 if let (false, Some(b64)) = (msg["project"].is_null(), text("b64")) {
                     asked.entries.push((msg["project"].clone(), b64));
@@ -540,6 +572,24 @@ impl Server {
                 Err(e) => error(&e),
             };
             out.send(ch, reply);
+        }
+        for (ch, id, to) in asked.handoffs {
+            if let Err(e) = serve.handoff(&id, &to) {
+                out.send(
+                    ch,
+                    json!({"t": "error", "for": "handoff", "id": id, "text": e}),
+                );
+            }
+        }
+        for (ch, who, msg) in &asked.handing {
+            if let Some(job) = serve.handing(who, msg) {
+                out.later.push((*ch, job));
+            }
+        }
+        for (ch, who, msg) in &asked.keeping {
+            if let Some(job) = serve.keeping(who, msg) {
+                out.later.push((*ch, job));
+            }
         }
         for (project, b64) in &asked.entries {
             serve.lore_import(project, b64);
@@ -903,6 +953,8 @@ mod tests {
         imported: Vec<(String, String)>,
         pushed: Vec<String>,
         waiting: HashSet<String>,
+        handed: Vec<(String, String)>,
+        handing: Vec<(String, Value)>,
     }
 
     impl Serve for Fake {
@@ -994,6 +1046,19 @@ mod tests {
         }
         fn push(&mut self, id: &str, _waiting: usize) {
             self.pushed.push(id.into());
+        }
+        fn handoff(&mut self, id: &str, to: &str) -> Result<(), String> {
+            if id != "s1" {
+                return Err("not here".into());
+            }
+            self.handed.push((id.into(), to.into()));
+            Ok(())
+        }
+        fn handing(&mut self, who: &str, msg: &Value) -> Option<Job> {
+            self.handing.push((who.into(), msg.clone()));
+            let id = msg["id"].clone();
+            (msg["t"] == "bundle")
+                .then(|| -> Job { Box::new(move || json!({"t": "took", "id": id, "number": 2})) })
         }
     }
 
@@ -1388,6 +1453,31 @@ mod tests {
             serve.imported,
             vec![("\"repo\"".to_string(), "eA".to_string())]
         );
+    }
+
+    #[test]
+    fn a_handoff_is_asked_of_the_machine_and_only_a_brother_sends_bundles() {
+        let mut serve = Fake::default();
+        let hello = json!({"t": "hello", "v": 3, "kind": "brother"});
+        let (mut server, _) = greeted(&mut serve, "Laptop", hello);
+        let ask = json!({"t": "handoff", "id": "s1", "to": "Desk"});
+        assert!(say(&mut server, &mut serve, 1, ask, 0).is_empty());
+        assert_eq!(serve.handed, vec![("s1".to_string(), "Desk".to_string())]);
+        let ask = json!({"t": "handoff", "id": "p1", "to": "Desk"});
+        let msgs = say(&mut server, &mut serve, 2, ask, 0);
+        assert_eq!(of(&msgs, "error")[0]["for"], "handoff");
+        let bases = json!({"t": "bases", "id": "s1", "repo": {}});
+        assert!(say(&mut server, &mut serve, 3, bases, 0).is_empty());
+        let part = json!({"t": "bundle", "id": "s1", "part": 0, "of": 1, "b64": ""});
+        let msgs = say(&mut server, &mut serve, 4, part, 0);
+        assert_eq!(of(&msgs, "took")[0]["number"], 2);
+        assert_eq!(serve.handing.len(), 2);
+
+        let mut serve = Fake::default();
+        let (mut server, _) = greeted(&mut serve, "phone", json!({"t": "hello", "v": 3}));
+        let part = json!({"t": "bundle", "id": "s1", "part": 0, "of": 1, "b64": ""});
+        assert!(say(&mut server, &mut serve, 1, part, 0).is_empty());
+        assert!(serve.handing.is_empty());
     }
 
     #[test]

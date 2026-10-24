@@ -27,7 +27,9 @@ pub const VIEW_ONLY: &str = "view only";
 /// The messages that act on a brother rather than watch it. A view only
 /// link may send none of them: one stolen laptop must not type into every
 /// other machine's shells.
-pub const NEEDS_CONTROL: [&str; 6] = ["input", "start", "resume", "create", "handoff", "takeover"];
+pub const NEEDS_CONTROL: [&str; 7] = [
+    "input", "start", "resume", "create", "handoff", "bundle", "takeover",
+];
 
 /// How a brother is reached.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
