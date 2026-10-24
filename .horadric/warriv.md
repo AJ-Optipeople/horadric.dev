@@ -9,6 +9,7 @@
 - A [/] quest whose session a dev instance started (state in %APPDATA%\Horadric-dev) died with it: no tell reaches it, hand it to the human with "restart it" at once (lore #51).
 
 ## Lately
+- 2026-10-24 Round (quest landed, main at 8af1152): no code commit since the c0ffda6 ship (only my memory), the log was moved to tasks-done.md. hooks lib.rs and main.rs sit uncommitted with cargo running, a live session's. Nothing to ship, no aim. Nothing to do.
 - 2026-10-24 Round (hourly, main at 713c969, only my memory since the c0ffda6 ship): uncommitted brethren.rs, store.rs, heavy.rs, performance.md still a live session's. Log empty, no aim. Nothing to do.
 - 2026-10-24 Round (hourly, main at 71ead1c, only my memory since the c0ffda6 ship): uncommitted brethren.rs, store.rs, heavy.rs, performance.md still a live session's. Log empty, no aim. Nothing to do.
 - 2026-10-24 Round (hourly, main at fb9a7b4, only my memory since the c0ffda6 ship): uncommitted brethren.rs, store.rs, heavy.rs, performance.md still a live session's. Log empty, no aim. Nothing to do.
