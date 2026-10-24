@@ -50,6 +50,7 @@ one. The registry is an `Arc<Mutex<Registry>>`, each console's grid an
 
 ## Next
 
+- [Headless sessions and the Folio](plan/headless.md): Claude sessions driven headless over stream-json, no SDK, and drawn by Horadric as the Folio instead of a terminal.
 - [macOS](plan/macos.md): what is left of Horadric on a Mac: the browser pane, quests and Warriv, files, usage, Discord, Settings.
 - [Orchestration](plan/orchestration.md): a Warriv session restored after a restart, and which model Warriv runs on.
 - [Claude Code 2.1.287 to 2.1.296](plan/claude-code-2-1-287-to-2-1-296.md): cloud session tiles, waiting on `claude agents --json`.
