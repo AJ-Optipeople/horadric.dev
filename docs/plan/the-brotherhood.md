@@ -590,6 +590,32 @@ Each step is useful alone and each is verified before the next starts.
     a switch. Verified by pulling the network cable on the laptop mid
     quest: the desktop takes over from the last turn end, the laptop
     comes back and pauses its copy.
+
+    Steps 12 and 13 landed on 2026-10-24 (`horadric-core/src/keeping.rs`
+    for the book and the holding, `keepers.rs` for snapshots,
+    `horadric-ui/src/keeping.rs` for the glue). The keeper is picked in
+    the tray ("Keeps my sessions", and "Take over by itself after 10
+    minutes" once one is), kept in `keeping.json` beside `brothers.json`
+    and folded into the served roster. A takeover lands as a handoff
+    does (`handing::land`, `adopt_landed`): the keeper's bundle of the
+    keep ref has its header renamed to the conversation's handoff ref.
+    Seen with "Alpha" and "Beta" (dev, scratch `APPDATA`, the real
+    relay, haiku): three turns in a scratch repo on Alpha, Beta held
+    snapshot 3 (the first refused, the second whole, the third a 24 KB
+    chain link). Alpha killed with its hosts; two minutes on, Beta's tile
+    read "Alpha silent since 04:52" and offered "Take over on Beta",
+    which landed the work in a worktree of Beta's clone and resumed it:
+    its next turn named the codeword from Alpha's second turn and edited
+    the landed files, its prompt opened by the takeover line. Alpha
+    started again held the session, heard Beta's owners, kept it paused
+    with "taken over by Beta at 04:54" (on Beta's view of its tile too)
+    and its work, a file written after the last snapshot included, on
+    `horadric/orphaned/<session>`. Found on the way: a keeper's
+    repository deep in a long state folder passes 260 characters, so it
+    runs with `core.longpaths` and writes no ref of its own for a
+    takeover. Not yet seen: automatic takeover live (its rule is tested),
+    a second keeper on the list, the phone offering "Take over", pulling a
+    real cable between two PCs.
 14. **Later, each its own decision.** Teams: a WorkOS organization as a
     brotherhood of several people, each seeing the others' sessions view
     only by default, and the lore shared or not per project; Linux nodes

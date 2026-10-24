@@ -497,3 +497,25 @@ phone hears none of it, and its `lore` and `entries` are ignored.
   first commit.
 - A PC never serves on a session it only shows for a brother: not in
   `sessions`, not to `attach`, `watch`, `input` or `stop`.
+
+## Protocol v3: keepers and takeover
+
+Between linked brothers only; a phone's are ignored. Every ask carries
+the connection's count as `n`, so the numbers here travel in other
+fields.
+
+- `{"t":"keep","id","part","of","b64"}`: a turn end's snapshot of session
+  `id` from its owner to its first keeper (`keeping.json`'s `keepers`),
+  split as `bundle` parts are. Part 0 also carries `holding`: the
+  owner's name, its automatic takeover switch, and the session's record
+  as a handoff sends it. Joined, `b64` is `horadric_core::keepers`'
+  payload: a JSON line of the snapshot's meta (its number, the commit and
+  the commit it is cut against, where the transcript's growth starts),
+  the growth's length, the growth, then a `git bundle`.
+- `{"t":"kept","id","snapshot","ok"}`: the keeper's answer to a whole
+  snapshot. Not `ok`, the owner sends the next one whole.
+- `{"t":"takeover","sessions":{"<id>":{"n","brother","since"}}}`: owners.
+  Sent to every brother when a session is taken over, its number one
+  higher, and whenever a link comes up, with every owner the sender
+  knows. A brother whose session went elsewhere keeps it paused, its work
+  on `horadric/orphaned/<id>`. Needs control, as `takeover` always did.
