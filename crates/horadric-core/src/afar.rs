@@ -13,6 +13,7 @@ use std::time::{Duration, SystemTime};
 
 use serde_json::{json, Value};
 
+use crate::agent::Agent;
 use crate::session::{Phase, Session, WaitReason};
 
 /// What a cluster key of a brother's project starts with. A local key is
@@ -127,6 +128,9 @@ pub struct Entry {
     /// When it took its phase there, Unix seconds. None from a brother
     /// older than the field.
     pub since: Option<u64>,
+    /// The agent it runs, None for a plain shell, which cannot be handed
+    /// off. Claude Code from a brother older than the field.
+    pub agent: Option<Agent>,
 }
 
 /// What one message from a brother says.
@@ -274,6 +278,15 @@ fn entry(v: &Value) -> Option<Entry> {
         line: text("line"),
         paused,
         since: v.get("since").and_then(Value::as_u64).filter(|s| *s > 0),
+        agent: match v.get("shell").and_then(Value::as_bool) {
+            Some(true) => None,
+            _ => Some(
+                v.get("agent")
+                    .and_then(Value::as_str)
+                    .and_then(Agent::from_name)
+                    .unwrap_or_default(),
+            ),
+        },
     })
 }
 
@@ -382,6 +395,8 @@ pub fn session(brother: &OnBrother, e: &Entry, was: Option<&Session>, now: Syste
     });
     s.name = e.name.clone();
     s.renamed = true;
+    s.shell = e.agent.is_none();
+    s.agent = e.agent.unwrap_or_default();
     // A phone hears a finished turn as idle, so done here is idle there.
     let same = s.phase == e.phase || (s.phase == Phase::Done && e.phase == Phase::Idle);
     if !same {
@@ -562,6 +577,7 @@ mod tests {
             line: String::new(),
             paused: false,
             since: None,
+            agent: Some(Agent::Claude),
         };
         let t = SystemTime::UNIX_EPOCH;
         let (sa, sb) = (session(&a, &e, None, t), session(&b, &e, None, t));
@@ -578,6 +594,7 @@ mod tests {
             line: "Bash".into(),
             paused: false,
             since: None,
+            agent: Some(Agent::Claude),
         }
     }
 
@@ -647,6 +664,7 @@ mod tests {
             line: "Bash".into(),
             paused: false,
             since: None,
+            agent: Some(Agent::Claude),
         };
         let s = session(&desk, &e, None, t0);
         let b = s.brother.clone().unwrap();
@@ -823,6 +841,7 @@ mod tests {
             line: "Bash".into(),
             paused: false,
             since: None,
+            agent: Some(Agent::Claude),
         };
         let s = session(&on("vps"), &e, None, t0);
         assert_eq!(s.id, "a@vps");
@@ -859,6 +878,7 @@ mod tests {
             line: String::new(),
             paused: false,
             since: Some(400),
+            agent: Some(Agent::Claude),
         };
         // A client that just started still shows when the phase began.
         let s = session(&on("vps"), &e, None, t0);
@@ -867,6 +887,7 @@ mod tests {
         // A brother clock ahead of this one is held to now.
         let ahead = Entry {
             since: Some(5_000),
+            agent: Some(Agent::Claude),
             ..e.clone()
         };
         assert_eq!(session(&on("vps"), &ahead, None, t0).since, t0);
@@ -874,6 +895,7 @@ mod tests {
         let idle = Entry {
             phase: Phase::Idle,
             since: Some(900),
+            agent: Some(Agent::Claude),
             ..e.clone()
         };
         let done = session(&on("vps"), &idle, Some(&s), t0);
@@ -891,5 +913,34 @@ mod tests {
         assert_eq!(project_path(&p, "x"), Some("C:/a/x"));
         assert_eq!(project_path(&p, "y"), None);
         assert_eq!(project_path(&p, "z"), None);
+    }
+
+    #[test]
+    fn a_brother_says_which_tiles_run_claude_code() {
+        let list = json!({"t":"sessions","list":[
+            {"id":"a"},
+            {"id":"b","agent":"claude","shell":false},
+            {"id":"c","agent":"codex","shell":false},
+            {"id":"d","agent":"claude","shell":true}
+        ]});
+        let Heard::Sessions(l) = hear(&list) else {
+            panic!("not sessions");
+        };
+        let agents: Vec<_> = l.iter().map(|e| e.agent).collect();
+        assert_eq!(
+            agents,
+            [
+                Some(Agent::Claude),
+                Some(Agent::Claude),
+                Some(Agent::Codex),
+                None
+            ]
+        );
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+        let shell = session(&on("b"), &l[3], None, t0);
+        assert!(shell.shell);
+        let codex = session(&on("b"), &l[2], None, t0);
+        assert!(!codex.shell);
+        assert_eq!(codex.agent, Agent::Codex);
     }
 }

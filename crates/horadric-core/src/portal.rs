@@ -584,6 +584,9 @@ pub fn session_entry(s: &Session, project: &str, paused: bool) -> Value {
         // When it took its phase, Unix seconds, so a brother's tile keeps
         // its age when that brother's client starts again.
         "since": unix_secs(s.since),
+        // So a brother offers handoff only for a Claude Code session.
+        "agent": s.agent.program(),
+        "shell": s.shell,
     });
     if !paused && s.phase.asks() {
         let ask = s
@@ -1056,6 +1059,10 @@ mod tests {
         assert_eq!(e["phase"], "idle");
         assert_eq!(e["project"], "x");
         assert_eq!(e["since"], unix_secs(s.since));
+        assert_eq!(
+            (e["agent"].as_str(), e["shell"].as_bool()),
+            (Some("claude"), Some(false))
+        );
     }
 
     #[test]
