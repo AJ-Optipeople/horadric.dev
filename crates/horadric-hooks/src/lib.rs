@@ -135,6 +135,34 @@ pub fn instance() -> String {
     port().to_string()
 }
 
+/// Whether a dev instance listening on `port` must drop the owner it
+/// inherited. Started from a terminal of the installed Horadric, it holds
+/// that terminal's tag and owner port, and its sessions' hooks and lore
+/// calls would go to the installed app. An owner that is its own port was
+/// asked for (set by itself, or by `HORADRIC_PORT` pointing there).
+fn foreign_owner(dev: bool, owner: Option<&str>, session: bool, port: u16) -> bool {
+    if !dev {
+        return false;
+    }
+    match owner.map(str::trim).filter(|o| !o.is_empty()) {
+        Some(o) => o.parse::<u16>().ok() != Some(port),
+        // A tag with no owner is the installed one's, from before owners.
+        None => session,
+    }
+}
+
+/// Clears [`OWNER_ENV`] and [`SESSION_ENV`] when a dev instance inherited
+/// them from another Horadric, so neither it nor anything it starts talks
+/// to that one. Called first thing, before any thread could read them.
+pub fn forget_foreign_owner() {
+    let owner = std::env::var(OWNER_ENV).ok();
+    let session = std::env::var_os(SESSION_ENV).is_some_and(|s| !s.is_empty());
+    if foreign_owner(dev(), owner.as_deref(), session, port()) {
+        std::env::remove_var(OWNER_ENV);
+        std::env::remove_var(SESSION_ENV);
+    }
+}
+
 /// Where this Horadric keeps its state: `%APPDATA%\Horadric`, or
 /// `Horadric-dev` for a dev instance, which must never touch the real one.
 /// On a Mac the same names under `~/Library/Application Support`, on
@@ -244,6 +272,17 @@ mod tests {
         let r = refusal(4110, r"C:\b\Horadric-dev", r"C:\a\Horadric-dev");
         assert!(r.contains("port 4110"));
         assert!(r.contains(r"in C:\b\Horadric-dev, not C:\a\Horadric-dev"));
+    }
+
+    #[test]
+    fn a_dev_instance_drops_an_owner_that_is_not_itself() {
+        assert!(foreign_owner(true, Some("43117"), true, 43146));
+        assert!(foreign_owner(true, Some("junk"), false, 43146));
+        assert!(!foreign_owner(true, Some("43146"), true, 43146));
+        assert!(!foreign_owner(true, None, false, 43118));
+        assert!(foreign_owner(true, None, true, 43118));
+        assert!(foreign_owner(true, Some(" "), true, 43118));
+        assert!(!foreign_owner(false, Some("43117"), true, 43118));
     }
 
     #[test]

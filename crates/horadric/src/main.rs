@@ -168,6 +168,7 @@ fn main() -> ExitCode {
         // number, which is no command.
         .filter(|a| !a.starts_with("-psn_"))
         .collect();
+    horadric_hooks::forget_foreign_owner();
     if horadric_hooks::dev() && changes_machine(&args) {
         eprintln!(
             "horadric: HORADRIC_DEV is set, and `{}` would change the installed Horadric",
