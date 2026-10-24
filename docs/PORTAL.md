@@ -510,7 +510,10 @@ phone hears none of it, and its `lore` and `entries` are ignored.
 - `{"t":"roster","n",...}` after the hello, then whenever it changes: the
   roster's own fields (`brothers`, `sessions`, `outcast`) beside `t`.
   Until the mesh keeps one, it is this PC and the brothers in
-  `brothers.json`, `n` the latest join. A PC with no brothers sends none.
+  `brothers.json`, with who keeps it, the owners it knows and the
+  switches folded in. `n` rises with every change to any of that, past
+  the latest join, and an entry that changed carries the new number, so
+  the merge takes it. A PC with no brothers sends none.
   A brother may act (`input`, `start` and the rest) when the roster gives
   it control; one the roster does not know only watches.
 - `{"t":"state","state":"awake"|"sleeping"|"leaving"}` after the hello, at

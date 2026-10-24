@@ -134,6 +134,21 @@ pub enum Fence {
     Orphaned { branch: String, line: String },
 }
 
+/// What a roster carried when it was last served, so one put together
+/// afresh from its parts (the joined brothers, the keepers, the switches)
+/// gets numbers that only go up. Each part changes on its own, and none
+/// of them knows the roster's number.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Counted {
+    pub n: u64,
+    /// A hash of the sessions and outcast keys.
+    #[serde(default)]
+    pub rest: u64,
+    /// Each brother's number and a hash of its entry, by id.
+    #[serde(default)]
+    pub brothers: BTreeMap<String, (u64, u64)>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Roster {
     /// Raised by every change. The higher roster wins where two disagree
@@ -366,6 +381,38 @@ impl Roster {
         }
     }
 
+    /// Numbers this roster, put together afresh, against what was served
+    /// `last`: an entry that changed gets a number past every one before,
+    /// an unchanged one keeps its own, and the roster's number rises with
+    /// any change at all, so a brother hearing it takes the change by the
+    /// merge's rules. Gives what to keep for the next time.
+    pub fn count(&mut self, last: &Counted) -> Counted {
+        let next = last.n + 1;
+        let mut changed = false;
+        let mut brothers = BTreeMap::new();
+        for b in &mut self.brothers {
+            let entry = hash_json(&Brother { n: 0, ..b.clone() });
+            match last.brothers.get(&b.id) {
+                Some(&(n, was)) if was == entry => b.n = b.n.max(n),
+                _ => {
+                    b.n = b.n.max(next);
+                    changed = true;
+                }
+            }
+            brothers.insert(b.id.clone(), (b.n, entry));
+        }
+        changed |= last.brothers.keys().any(|id| !brothers.contains_key(id));
+        let rest = hash_json(&(&self.sessions, &self.outcast));
+        changed |= rest != last.rest;
+        let top = self.brothers.iter().map(|b| b.n).max().unwrap_or(0);
+        self.n = self.n.max(if changed { next } else { last.n }).max(top);
+        Counted {
+            n: self.n,
+            rest,
+            brothers,
+        }
+    }
+
     /// Whether `me` takes `silent`'s sessions over by itself now. Only
     /// when `silent` has the switch on and has been silent that long, and
     /// only the first keeper, or the next once every one before it has
@@ -422,6 +469,11 @@ pub fn keepers_turn<'a>(
 /// The branch a fenced session's work is kept on.
 pub fn orphan_branch(session: &str) -> String {
     format!("horadric/orphaned/{session}")
+}
+
+/// A hash of `v` as JSON, to tell whether a part changed.
+fn hash_json<T: Serialize>(v: &T) -> u64 {
+    crate::lore::hash(serde_json::to_string(v).unwrap_or_default().as_bytes())
 }
 
 /// Whether a message acts on this machine rather than watches it: one of
@@ -555,6 +607,48 @@ mod tests {
 
     fn heard(said: Said, last: u64, linked: bool) -> Heard {
         Heard { said, last, linked }
+    }
+
+    #[test]
+    fn a_roster_put_together_afresh_rises_with_every_change() {
+        let mut r = three();
+        r.n = 0;
+        for b in &mut r.brothers {
+            b.n = 0;
+        }
+        let built = r.clone();
+        let first = r.count(&Counted::default());
+        assert_eq!(r.n, 1);
+        assert!(r.brothers.iter().all(|b| b.n == 1));
+        // The same parts again: nothing moves.
+        let mut same = built.clone();
+        assert_eq!(same.count(&first), first);
+        assert_eq!(same.n, 1);
+        // A keeper named: that entry and the roster go past the last.
+        let mut keeps = built.clone();
+        keeps.brothers[0].keepers = vec!["laptop".into()];
+        let second = keeps.count(&first);
+        assert_eq!(
+            (keeps.n, keeps.brothers[0].n, keeps.brothers[1].n),
+            (2, 2, 1)
+        );
+        // Its entry wins a merge with the roster from before.
+        let merged = r.merge(&keeps);
+        assert_eq!(merged.brothers[0].keepers, ["laptop"]);
+        // A session claimed, then a brother gone: each raises it again.
+        let mut owned = keeps.clone();
+        owned.claim("s1", "desktop", T);
+        let third = owned.count(&second);
+        assert_eq!(owned.n, 3);
+        let mut fewer = owned.clone();
+        fewer.brothers.pop();
+        fewer.count(&third);
+        assert_eq!(fewer.n, 4);
+        // Parts numbered higher already (a join time) keep their number.
+        let mut joined = built.clone();
+        joined.brothers[2].n = 1_761_000_000;
+        joined.count(&Counted::default());
+        assert_eq!(joined.n, 1_761_000_000);
     }
 
     #[test]
