@@ -419,7 +419,7 @@ impl Brothers {
                         self.save();
                     }
                     debug(&format!("linked to {name} on channel {ch}"));
-                    tell_link(Link::Up { ch, name });
+                    tell_link(Link::Up { ch, id, name });
                 }
                 Out::Failed(why) => {
                     tell(&why);
@@ -484,9 +484,20 @@ fn show(text: &str, style: MESSAGEBOX_STYLE) -> i32 {
 /// brother's answers as they come, then down.
 #[derive(Debug, Clone)]
 pub enum Link {
-    Up { ch: u32, name: String },
-    Heard { ch: u32, msg: Value },
-    Down { ch: u32 },
+    /// `id` is the brother's PC id, which no other brother shares, as
+    /// two may share a name.
+    Up {
+        ch: u32,
+        id: String,
+        name: String,
+    },
+    Heard {
+        ch: u32,
+        msg: Value,
+    },
+    Down {
+        ch: u32,
+    },
 }
 
 type Listener = Box<dyn Fn(Link) + Send>;

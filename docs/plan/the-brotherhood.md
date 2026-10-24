@@ -581,9 +581,19 @@ Each step is useful alone and each is verified before the next starts.
    refused rather than cloned or asked for; a folder without git cannot
    be handed off; a session handed from the main checkout rather than a
    worktree leaves its changes there as well, since removing a human's
-   uncommitted work is not the handoff's to do; the tile does not keep
-   its place, it moves to the brother's cluster; `handoff` asked by a
+   uncommitted work is not the handoff's to do; `handoff` asked by a
    brother over the wire is served but no UI sends it yet.
+
+   The tile keeps its place since 2026-10-24 (`afar::Left`,
+   `far_sessions`): a tile that goes holds its cluster and slot for 180
+   seconds, and the same session id arriving on another brother takes
+   them, in whichever order the two lists come; its line reads "on
+   Alpha: ..." and it wears Alpha's mark. Seen with "Alpha" and "Beta"
+   (haiku, a scratch repository): handed from Beta to Alpha, Beta's tile
+   stayed second in "b-repo" with Alpha's mark. The place lives in
+   memory only, so a client started again shows it in the brother's own
+   cluster. Brothers are keyed by id on the client (a PC's relay id, a
+   node's `node-<name>`), shown by name, so two of one name keep apart.
 
    Seen with a model turn on 2026-10-24, "Alpha" and "Beta" over their
    linked brother channel, haiku in a scratch repository: turn 1 on

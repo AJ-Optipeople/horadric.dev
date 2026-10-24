@@ -187,7 +187,7 @@ pub(crate) fn leaving_menu() -> Option<Item> {
     let (takers, leaving) = LEAVING.lock().ok()?.clone();
     if let Some(to) = leaving {
         return Some(Item::Submenu(
-            format!("Leaving for {to}"),
+            format!("Leaving for {}", crate::project::brother_name(&to)),
             vec![Item::action(LEAVE, "Stay: hand off nothing more")],
         ));
     }
@@ -198,7 +198,7 @@ pub(crate) fn leaving_menu() -> Option<Item> {
         .iter()
         .take(99)
         .enumerate()
-        .map(|(i, name)| Item::action(LEAVE + 1 + i, name.clone()))
+        .map(|(i, key)| Item::action(LEAVE + 1 + i, crate::project::brother_name(key)))
         .collect();
     Some(Item::Submenu("Leaving: hand off to".into(), items))
 }
@@ -212,6 +212,12 @@ pub(crate) fn leaving_pick(id: usize) -> Option<Option<String>> {
     let i = id.checked_sub(LEAVE + 1).filter(|i| *i < 99)?;
     let takers = LEAVING.lock().ok()?.0.clone();
     takers.get(i).cloned().map(Some)
+}
+
+/// A handoff's line as shown: the brother by its name, not its key.
+fn shown_line(o: &Outgoing) -> String {
+    o.line()
+        .replace(&o.to, &crate::project::brother_name(&o.to))
 }
 
 /// Where a tile menu's handoff ids start: "Now", then a brother each.
@@ -245,7 +251,7 @@ pub(crate) fn far_targets(owner: &str, takers: &[String], me: &str) -> Vec<(Stri
     let mut out: Vec<(String, String)> = takers
         .iter()
         .filter(|t| *t != owner && *t != me)
-        .map(|t| (t.clone(), t.clone()))
+        .map(|t| (t.clone(), crate::project::brother_name(t)))
         .collect();
     out.push((me.to_string(), format!("This PC ({me})")));
     out
@@ -266,11 +272,14 @@ impl App {
     /// session that cannot be handed off.
     pub(super) fn handoff_menu(&self, id: &str) -> Option<Item> {
         if let Some(o) = with(|s| s.out.get(id).cloned()) {
-            let mut items = vec![Item::Disabled(o.line())];
+            let mut items = vec![Item::Disabled(shown_line(&o))];
             if !o.now && !o.stopped() {
                 items.push(Item::action(HANDOFF, "Now"));
             }
-            return Some(Item::Submenu(format!("Hand off to {}", o.to), items));
+            return Some(Item::Submenu(
+                format!("Hand off to {}", crate::project::brother_name(&o.to)),
+                items,
+            ));
         }
         self.handable(id).ok()?;
         let takers = self.far_takers();
@@ -281,7 +290,7 @@ impl App {
             .iter()
             .take(99)
             .enumerate()
-            .map(|(i, name)| Item::action(HANDOFF + 1 + i, name.clone()))
+            .map(|(i, key)| Item::action(HANDOFF + 1 + i, crate::project::brother_name(key)))
             .collect();
         Some(Item::Submenu("Hand off to".into(), items))
     }
@@ -339,8 +348,8 @@ impl App {
     fn far_owner(&self, id: &str) -> Option<String> {
         let r = self.shared.registry.lock().ok()?;
         let s = r.get(id)?;
-        let name = s.brother.as_ref()?.name.clone();
-        (!s.shell && s.agent == Agent::Claude).then_some(name)
+        let key = s.brother.as_ref()?.id.clone();
+        (!s.shell && s.agent == Agent::Claude).then_some(key)
     }
 
     /// Asks the owner of brother's tile `id` to hand it to `to`, or takes
@@ -356,7 +365,10 @@ impl App {
             return Ok(());
         }
         if !self.far_takers().contains(&owner) {
-            return Err(format!("{owner} is out of reach"));
+            return Err(format!(
+                "{} is out of reach",
+                crate::project::brother_name(&owner)
+            ));
         }
         let remote = horadric_core::afar::remote_id(id, &owner)
             .ok_or("not a brother's session")?
@@ -366,7 +378,11 @@ impl App {
         self.toasts.show(
             Kind::Done,
             "Handing off",
-            &format!("Asked {owner} to hand it to {to}."),
+            &format!(
+                "Asked {} to hand it to {}.",
+                crate::project::brother_name(&owner),
+                crate::project::brother_name(to)
+            ),
         );
         Ok(())
     }
@@ -434,9 +450,12 @@ impl App {
             return self.handoff_far(id, to);
         }
         self.handable(id)?;
+        // Asked over the wire by name, or by key from this PC's own menu.
+        let to = &self.far_key(to).unwrap_or_else(|| to.to_string());
         if !self.far_takers().iter().any(|t| t == to) {
             return Err(format!(
-                "{to} is not a brother this PC can hand sessions to"
+                "{} is not a brother this PC can hand sessions to",
+                crate::project::brother_name(to)
             ));
         }
         with(|s| {
@@ -496,7 +515,7 @@ impl App {
             };
             let linked = takers.contains(&o.to);
             let step = o.tick(between_turns(&phase), linked, now);
-            let line = o.line();
+            let line = shown_line(&o);
             with(|s| s.out.insert(id.clone(), o.clone()));
             self.handing_line(&id, &line);
             self.handing_do(&id, &o, step);
@@ -532,8 +551,11 @@ impl App {
                 } else {
                     format!("{} could not be handed off and stayed here.", stuck.len())
                 };
-                self.toasts
-                    .show(Kind::Done, &format!("Left for {to}"), &text);
+                self.toasts.show(
+                    Kind::Done,
+                    &format!("Left for {}", crate::project::brother_name(to)),
+                    &text,
+                );
             }
         }
     }
@@ -752,11 +774,14 @@ impl App {
             && dir.is_dir()
             && (handoff::repo_id(dir).is_none() || handoff::has_changes(dir)))
         .then_some(cwd.as_str());
-        let text = let_go_text(to, stays);
+        let text = let_go_text(&crate::project::brother_name(to), stays);
         if let Some(session) = session {
             handing::forget_ref(dir, &session);
         }
         with(|s| s.asks.remove(id));
+        // Its tile's place, for the session to come back into as the
+        // receiver's.
+        self.far_left(id);
         self.forget(id);
         if let Some(w) = tree {
             crate::worktree::discard(w);
@@ -765,9 +790,10 @@ impl App {
         self.toasts.show(Kind::Done, "Handed off", &text);
     }
 
-    /// Hears what a brother `name` answered about a handoff from here:
-    /// its commits, `took`, or why not. False for anything else.
-    pub(super) fn handing_heard(&mut self, name: &str, msg: &Value) -> bool {
+    /// Hears what the brother keyed `key` answered about a handoff from
+    /// here: its commits, `took`, or why not. False for anything else.
+    pub(super) fn handing_heard(&mut self, key: &str, msg: &Value) -> bool {
+        let name = &crate::project::brother_name(key);
         let t = msg["t"].as_str().unwrap_or("");
         let about = |f: &str| msg["for"] == f;
         if !(t == "bases" || t == "took" || (t == "error" && (about("bundle") || about("handoff"))))
@@ -778,19 +804,22 @@ impl App {
             return false;
         };
         // The owner of a brother's tile refused to hand it on as asked.
-        let tile = horadric_core::afar::local_id(name, &id);
+        let tile = horadric_core::afar::local_id(key, &id);
         if t == "error" && about("handoff") {
             if let Some(to) = with(|s| s.asked.remove(&tile)) {
                 let why = msg["text"].as_str().unwrap_or("no");
                 self.toasts.show(
                     Kind::Failed,
                     "Not handed off",
-                    &format!("{name} did not hand it to {to}: {why}"),
+                    &format!(
+                        "{name} did not hand it to {}: {why}",
+                        crate::project::brother_name(&to)
+                    ),
                 );
                 return true;
             }
         }
-        let Some(mut o) = with(|s| s.out.get(&id).cloned()).filter(|o| o.to == name) else {
+        let Some(mut o) = with(|s| s.out.get(&id).cloned()).filter(|o| o.to == key) else {
             return t != "error";
         };
         let step = match t {

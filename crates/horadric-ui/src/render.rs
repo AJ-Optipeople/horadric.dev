@@ -259,10 +259,10 @@ pub struct Scene<'a> {
     /// The cluster is Tristram's, drawn with the town's mark so it never
     /// reads as one more repository.
     pub town: bool,
-    /// The brother the project lives on, for a cluster of another PC's:
-    /// its mark goes on the frame, so a remote tile is never taken for a
-    /// local one.
-    pub brother: Option<&'a str>,
+    /// The brother the project lives on, for a cluster of another PC's,
+    /// by key and name: its mark goes on the frame, so a remote tile is
+    /// never taken for a local one.
+    pub brother: Option<(&'a str, &'a str)>,
     pub collapsed: bool,
     pub sessions: &'a [&'a Session],
     /// The browser's tabs, a tile each below the sessions'. Only the
@@ -2726,11 +2726,12 @@ impl Painter<'_> {
             );
             name_x += TOWN_MARK;
         }
-        if let Some(b) = scene.brother {
-            // The brother's mark: its initial on a chip in its own colour.
+        if let Some((key, name)) = scene.brother {
+            // The brother's mark: its initial on a chip in its own colour,
+            // the colour by key, so two of one name still differ.
             let chip = Rect::new(name_x - 2.0, cy - 8.0, 16.0, 16.0);
-            self.fill_rounded(&chip, 4.0, brother_ink(b).with_alpha(0.85));
-            let initial: String = b.chars().take(1).flat_map(char::to_uppercase).collect();
+            self.fill_rounded(&chip, 4.0, brother_ink(key).with_alpha(0.85));
+            let initial: String = name.chars().take(1).flat_map(char::to_uppercase).collect();
             self.text(&gpu.small_centre, theme::surface(), &initial, chip);
             name_x += TOWN_MARK;
         }
@@ -3303,7 +3304,7 @@ impl Painter<'_> {
         // Inside the corner DWM rounds the window to.
         let radius = m.window_radius - inset;
         match scene.brother {
-            Some(b) => {
+            Some((b, _)) => {
                 let ink = brother_ink(b).with_alpha(if scene.on_stage { 0.9 } else { 0.6 });
                 self.stroke_rounded(&r, radius, ink, 2.0);
             }
@@ -3455,6 +3456,16 @@ impl Painter<'_> {
         self.key(gpu, r, radius, face, depth, look.enter);
         if selected {
             self.latched(gpu, r, radius, look.enter);
+        }
+        // A session that runs on another brother than the cluster's (one
+        // handed off that kept its place) wears that brother's mark.
+        if let Some(b) = s
+            .brother
+            .as_ref()
+            .filter(|b| scene.brother.map(|(k, _)| k) != Some(b.id.as_str()))
+        {
+            let ink = brother_ink(&b.id).with_alpha(0.8 * look.enter * reach);
+            self.stroke_rounded(r, radius, ink, 2.0);
         }
 
         // The phase, as light. Waiting needs you, so it is the one that

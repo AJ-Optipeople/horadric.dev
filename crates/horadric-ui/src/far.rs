@@ -20,6 +20,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use horadric_core::afar::{self, Client, Fit, Heard, Streams};
 use horadric_core::brotherhood::{self, Said as State};
+use horadric_core::Registry;
 use serde_json::{json, Value};
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
@@ -29,6 +30,7 @@ use crate::brothers::{self, Link};
 use crate::console::{Console, FarAsk, GridSize};
 use crate::far_node::{self, NodeLink};
 use crate::far_phone::{self, PhoneLink, Said};
+use crate::menu::Item;
 use crate::project::project_key;
 
 /// How often the phone and node lists are read and out of reach tiles are aged.
@@ -47,7 +49,8 @@ enum Via {
 
 /// What a link did, as the UI thread drains it.
 enum Event {
-    Up(Via, String),
+    /// Up, with the brother's key and name when the link knows them.
+    Up(Via, String, String),
     Heard(Via, Value),
     Down(Via),
     Keyed(usize, String),
@@ -55,6 +58,8 @@ enum Event {
 
 /// One brother, kept while its link is down so its tiles stay.
 struct Peer {
+    /// What it is called, as shown. Its key is what it is kept by.
+    name: String,
     via: Option<Via>,
     client: Client,
     streams: Streams,
@@ -73,8 +78,10 @@ pub(super) struct Far {
     phones: Vec<(far_phone::Entry, PhoneLink)>,
     nodes: Vec<(horadric_core::nodes::Node, NodeLink)>,
     checked: Option<Instant>,
+    /// The brothers by key (see [`afar::OnBrother::id`]), never by name:
+    /// two may share one.
     peers: HashMap<String, Peer>,
-    /// Which brother each link is to, by name.
+    /// Which brother each link is to, by key.
     names: HashMap<Via, String>,
     /// Panes of brothers' sessions, by local id.
     pub(super) consoles: HashMap<String, Arc<Console>>,
@@ -86,6 +93,12 @@ pub(super) struct Far {
     /// Each brother's session's phase as last looked at, so a turn done
     /// there chimes here without being journaled here.
     pub(super) phases: HashMap<String, horadric_core::Phase>,
+    /// Tiles that went a moment ago, by their session's own id, so the
+    /// session arriving on another brother takes the same place.
+    left: HashMap<String, afar::Left>,
+    /// Brothers' tiles new a moment ago, by their session's own id: their
+    /// id here and when, for a tile elsewhere going just after.
+    arrived: HashMap<String, (String, SystemTime)>,
 }
 
 fn wake(notify: isize) {
@@ -106,7 +119,7 @@ impl Far {
         let to_app = Mutex::new(tx.clone());
         brothers::listen(Box::new(move |l| {
             let e = match l {
-                Link::Up { ch, name, .. } => Event::Up(Via::Channel(ch), name),
+                Link::Up { ch, id, name } => Event::Up(Via::Channel(ch), id, name),
                 Link::Heard { ch, msg } => Event::Heard(Via::Channel(ch), msg),
                 Link::Down { ch } => Event::Down(Via::Channel(ch)),
             };
@@ -126,6 +139,8 @@ impl Far {
             asks: Arc::default(),
             showing: HashSet::new(),
             phases: HashMap::new(),
+            left: HashMap::new(),
+            arrived: HashMap::new(),
         }
     }
 }
@@ -167,11 +182,14 @@ impl App {
         let notify = self.notify.0 as isize;
         let me = crate::portal_pair::pc_name();
         for (i, entry) in list.into_iter().enumerate() {
+            if let Some(t) = afar::ticket(&entry.link) {
+                crate::project::name_brother(&t.id, &entry.name);
+            }
             let tx = Mutex::new(self.far.tx.clone());
             let heard = Box::new(move |said: Said| {
                 let via = Via::Phone(i);
                 let e = match said {
-                    Said::Up => Event::Up(via, String::new()),
+                    Said::Up => Event::Up(via, String::new(), String::new()),
                     Said::Heard(m) => Event::Heard(via, m),
                     Said::Down => Event::Down(via),
                     Said::Keyed(k) => Event::Keyed(i, k),
@@ -203,7 +221,7 @@ impl App {
         }
         self.far.nodes.clear();
         for name in gone {
-            changed |= self.far_forget(&name);
+            changed |= self.far_forget(&afar::node_key(&name));
         }
         let Some(ssh) = crate::console::ssh_program() else {
             if !list.is_empty() {
@@ -213,11 +231,13 @@ impl App {
         };
         let notify = self.notify.0 as isize;
         for (i, node) in list.into_iter().enumerate() {
+            // Named before its link is up, so no menu shows its key.
+            crate::project::name_brother(&afar::node_key(&node.name), &node.name);
             let tx = Mutex::new(self.far.tx.clone());
             let heard = Box::new(move |said: far_node::Said| {
                 let via = Via::Node(i);
                 let e = match said {
-                    far_node::Said::Up => Event::Up(via, String::new()),
+                    far_node::Said::Up => Event::Up(via, String::new(), String::new()),
                     far_node::Said::Heard(m) => Event::Heard(via, m),
                     far_node::Said::Down => Event::Down(via),
                 };
@@ -234,20 +254,20 @@ impl App {
         }
     }
 
-    /// Drops brother `name` and its tiles and panes, for a node taken off
-    /// the list. True when any tile went.
-    fn far_forget(&mut self, name: &str) -> bool {
-        self.far.peers.remove(name);
-        self.far.names.retain(|_, n| n != name);
+    /// Drops the brother keyed `key` and its tiles and panes, for a node
+    /// taken off the list. True when any tile went.
+    fn far_forget(&mut self, key: &str) -> bool {
+        self.far.peers.remove(key);
+        self.far.names.retain(|_, n| n != key);
         self.far
             .consoles
-            .retain(|id, _| afar::remote_id(id, name).is_none());
+            .retain(|id, _| afar::remote_id(id, key).is_none());
         let Ok(mut r) = self.shared.registry.lock() else {
             return false;
         };
         let ids: Vec<String> = r
             .all()
-            .filter(|s| s.brother.as_ref().is_some_and(|b| b.name == name))
+            .filter(|s| s.brother.as_ref().is_some_and(|b| b.id == key))
             .map(|s| s.id.clone())
             .collect();
         for id in &ids {
@@ -266,7 +286,7 @@ impl App {
         let mut changed = false;
         for e in events {
             changed |= match e {
-                Event::Up(via, name) => self.far_up(via, name),
+                Event::Up(via, key, name) => self.far_up(via, key, name),
                 Event::Heard(via, msg) => self.far_heard(via, &msg),
                 Event::Down(via) => self.far_down(via),
                 Event::Keyed(i, key) => {
@@ -316,10 +336,10 @@ impl App {
         }
     }
 
-    /// Sends `msg` to the brother `name`, stamped as every message after
-    /// hello is.
-    fn far_send(&mut self, name: &str, msg: Value) {
-        let Some(p) = self.far.peers.get_mut(name) else {
+    /// Sends `msg` to the brother keyed `key`, stamped as every message
+    /// after hello is.
+    fn far_send(&mut self, key: &str, msg: Value) {
+        let Some(p) = self.far.peers.get_mut(key) else {
             return;
         };
         let Some(via) = p.via else {
@@ -343,29 +363,37 @@ impl App {
         }
     }
 
-    fn far_up(&mut self, via: Via, name: String) -> bool {
-        let name = match via {
+    fn far_up(&mut self, via: Via, key: String, name: String) -> bool {
+        // A phone door's ticket names the PC by its relay id, the same id
+        // its brother channel goes by, so one brother is one peer.
+        let (key, name) = match via {
             Via::Phone(i) => self
                 .far
                 .phones
                 .get(i)
-                .map(|(e, _)| e.name.clone())
-                .unwrap_or(name),
+                .map(|(e, _)| {
+                    let id = afar::ticket(&e.link).map(|t| t.id);
+                    (id.unwrap_or_else(|| e.name.clone()), e.name.clone())
+                })
+                .unwrap_or((key, name)),
             Via::Node(i) => self
                 .far
                 .nodes
                 .get(i)
-                .map(|(n, _)| n.name.clone())
-                .unwrap_or(name),
-            Via::Channel(_) => name,
+                .map(|(n, _)| (afar::node_key(&n.name), n.name.clone()))
+                .unwrap_or((key, name)),
+            Via::Channel(_) => (key, name),
         };
         let name = if name.is_empty() {
             "brother".to_string()
         } else {
             name
         };
-        self.far.names.insert(via, name.clone());
-        let p = self.far.peers.entry(name.clone()).or_insert_with(|| Peer {
+        let key = if key.is_empty() { name.clone() } else { key };
+        crate::project::name_brother(&key, &name);
+        self.far.names.insert(via, key.clone());
+        let p = self.far.peers.entry(key.clone()).or_insert_with(|| Peer {
+            name: name.clone(),
             via: None,
             client: Client::default(),
             streams: Streams::default(),
@@ -378,6 +406,7 @@ impl App {
             },
             list: Vec::new(),
         });
+        p.name = name;
         p.via = Some(via);
         p.streams.clear();
         let mut hello = p.client.hello();
@@ -386,7 +415,7 @@ impl App {
         if let Via::Node(_) = via {
             hello["name"] = json!(crate::portal_pair::pc_name());
         }
-        self.far_send(&name, hello);
+        self.far_send(&key, hello);
         false
     }
 
@@ -416,12 +445,12 @@ impl App {
             .far
             .peers
             .iter_mut()
-            .map(|(name, p)| {
+            .map(|(key, p)| {
                 if p.heard.linked {
                     p.heard.last = now;
                 }
-                let line = brotherhood::tile_line(name, p.heard.presence(now), offset);
-                (name.clone(), line)
+                let line = brotherhood::tile_line(&p.name, p.heard.presence(now), offset);
+                (key.clone(), line)
             })
             .collect();
         let Ok(mut r) = self.shared.registry.lock() else {
@@ -440,7 +469,7 @@ impl App {
             let Some(b) = s.brother.as_mut() else {
                 continue;
             };
-            let Some(line) = lines.get(&b.name) else {
+            let Some(line) = lines.get(&b.id) else {
                 continue;
             };
             let reach = line.is_none();
@@ -459,6 +488,7 @@ impl App {
     }
 
     fn far_heard(&mut self, via: Via, msg: &Value) -> bool {
+        // The brother's key, which is what the rest goes by.
         let Some(name) = self.far.names.get(&via).cloned() else {
             return false;
         };
@@ -482,7 +512,10 @@ impl App {
         match afar::hear(msg) {
             Heard::Hello { control, v, .. } => {
                 if v < afar::VERSION {
-                    eprintln!("horadric: {name} needs a newer Horadric to be a brother");
+                    eprintln!(
+                        "horadric: {} needs a newer Horadric to be a brother",
+                        crate::project::brother_name(&name)
+                    );
                     return false;
                 }
                 let Some(p) = self.far.peers.get_mut(&name) else {
@@ -569,7 +602,8 @@ impl App {
             }
             Heard::Error { id, text } => {
                 eprintln!(
-                    "horadric: {name} says {text}{}",
+                    "horadric: {} says {text}{}",
+                    crate::project::brother_name(&name),
                     id.map(|i| format!(" of {i}")).unwrap_or_default()
                 );
                 false
@@ -591,25 +625,64 @@ impl App {
                 self.far_lines() || listed
             }
             Heard::Unpaired => {
-                eprintln!("horadric: {name} forgot this PC");
+                eprintln!(
+                    "horadric: {} forgot this PC",
+                    crate::project::brother_name(&name)
+                );
                 false
             }
             Heard::Other => false,
         }
     }
 
-    /// Makes the registry hold exactly what brother `name` lists.
+    /// Makes the registry hold exactly what the brother keyed `name`
+    /// lists. A session new here whose tile went elsewhere a moment before
+    /// or after (a handoff) takes that tile's place.
     fn far_sessions(&mut self, name: &str, list: &[afar::Entry]) -> bool {
         let now = SystemTime::now();
         let mut changed = false;
         let mut gone = Vec::new();
+        let shown = self
+            .far
+            .peers
+            .get(name)
+            .map_or_else(|| crate::project::brother_name(name), |p| p.name.clone());
+        let mut placed: Vec<Placed> = Vec::new();
+        let fresh = |at: SystemTime| now.duration_since(at).map_or(true, |d| d < afar::LEFT_FOR);
+        self.far.left.retain(|_, l| fresh(l.at));
+        self.far.arrived.retain(|_, (_, at)| fresh(*at));
         if let Ok(mut r) = self.shared.registry.lock() {
             let listed: HashSet<String> =
                 list.iter().map(|e| afar::local_id(name, &e.id)).collect();
             for e in list {
                 let local = afar::local_id(name, &e.id);
                 let was = r.get(&local).cloned();
-                let s = afar::session(name, e, was.as_ref(), now);
+                let mut on = afar::OnBrother {
+                    id: name.to_string(),
+                    name: shown.clone(),
+                    project: e.project.clone(),
+                    reach: true,
+                    home: None,
+                };
+                let mut created = None;
+                if was.is_none() {
+                    match afar::place_of(&self.far.left, &e.id, now) {
+                        Some(l) => {
+                            on.home = Some(l.home.clone());
+                            created = Some(l.created);
+                            placed.push((local.clone(), l.home.clone(), l.slot, String::new()));
+                        }
+                        // Its tile elsewhere may go a moment later: the
+                        // handoff's two lists cross.
+                        None => {
+                            self.far.arrived.insert(e.id.clone(), (local.clone(), now));
+                        }
+                    }
+                }
+                let mut s = afar::session(&on, e, was.as_ref(), now);
+                if let Some(at) = created {
+                    s.created = at;
+                }
                 if was.as_ref() != Some(&s) {
                     r.add(s);
                     changed = true;
@@ -617,11 +690,30 @@ impl App {
             }
             gone = r
                 .all()
-                .filter(|s| s.brother.as_ref().is_some_and(|b| b.name == name))
+                .filter(|s| s.brother.as_ref().is_some_and(|b| b.id == name))
                 .filter(|s| !listed.contains(&s.id))
                 .map(|s| s.id.clone())
                 .collect();
             for id in &gone {
+                if let (Some(s), Some(remote)) = (r.get(id), afar::remote_id(id, name)) {
+                    let home = project_key(s);
+                    let slot = self.far_slot(&home, id);
+                    let left = afar::Left {
+                        home,
+                        slot,
+                        created: s.created,
+                        at: now,
+                    };
+                    let far = &mut self.far;
+                    placed.extend(went(
+                        &mut r,
+                        &mut far.arrived,
+                        &mut far.left,
+                        remote,
+                        id,
+                        left,
+                    ));
+                }
                 r.remove(id);
                 changed = true;
             }
@@ -641,7 +733,62 @@ impl App {
                 changed = true;
             }
         }
+        for (id, home, slot, old) in placed {
+            self.far_place(&home, &id, slot, &old);
+        }
         changed
+    }
+
+    /// Where tile `id` stands in its cluster `home`'s order.
+    fn far_slot(&self, home: &str, id: &str) -> Option<usize> {
+        let orders = self.shared.orders.borrow();
+        orders.get(home)?.iter().position(|s| s == id)
+    }
+
+    /// Puts tile `id` where tile `old` stood in cluster `home`, or at
+    /// `slot` once that one went.
+    fn far_place(&self, home: &str, id: &str, slot: Option<usize>, old: &str) {
+        let mut orders = self.shared.orders.borrow_mut();
+        let order = orders.entry(home.to_string()).or_default();
+        if order.iter().any(|s| s == id) {
+            return;
+        }
+        match order.iter().position(|s| s == old).or(slot) {
+            Some(at) => order.insert(at.min(order.len()), id.to_string()),
+            None => order.push(id.to_string()),
+        }
+    }
+
+    /// A session of this PC is about to go because it was handed to a
+    /// brother: its tile's place is kept for it to come back as that
+    /// brother's.
+    pub(super) fn far_left(&mut self, id: &str) {
+        let Some((home, created)) = self
+            .shared
+            .registry
+            .lock()
+            .ok()
+            .and_then(|r| r.get(id).map(|s| (project_key(s), s.created)))
+        else {
+            return;
+        };
+        let slot = self.far_slot(&home, id);
+        let left = afar::Left {
+            home,
+            slot,
+            created,
+            at: SystemTime::now(),
+        };
+        let placed = match self.shared.registry.lock() {
+            Ok(mut r) => {
+                let far = &mut self.far;
+                went(&mut r, &mut far.arrived, &mut far.left, id, id, left)
+            }
+            Err(_) => None,
+        };
+        if let Some((id, home, slot, old)) = placed {
+            self.far_place(&home, &id, slot, &old);
+        }
     }
 
     fn far_ask(&mut self, id: &str, ask: FarAsk) {
@@ -662,43 +809,58 @@ impl App {
         self.far_send(&name, msg);
     }
 
-    /// The brothers a session can be handed to now: linked, with control.
+    /// The brothers a session can be handed to now, by key: linked, with
+    /// control. In the order of their names.
     pub(super) fn far_takers(&self) -> Vec<String> {
-        let mut names: Vec<String> = self
+        let mut keys: Vec<(&str, &String)> = self
             .far
             .peers
             .iter()
             .filter(|(_, p)| p.via.is_some() && p.heard.linked && p.control)
-            .map(|(name, _)| name.clone())
+            .map(|(key, p)| (p.name.as_str(), key))
             .collect();
-        names.sort();
-        names
+        keys.sort();
+        keys.into_iter().map(|(_, key)| key.clone()).collect()
     }
 
-    /// Sends `msg` to the brother `name`, for a handoff.
-    pub(super) fn far_tell(&mut self, name: &str, msg: Value) {
-        self.far_send(name, msg);
+    /// The key of the brother `who` names: its key, or the name only one
+    /// brother has. A name two share names neither.
+    pub(super) fn far_key(&self, who: &str) -> Option<String> {
+        if self.far.peers.contains_key(who) {
+            return Some(who.to_string());
+        }
+        let mut named = self.far.peers.iter().filter(|(_, p)| p.name == who);
+        let (key, _) = named.next()?;
+        named.next().is_none().then(|| key.clone())
     }
 
-    /// What was last heard from brother `name`, and whether it answers
-    /// asks now, for keeping and takeover.
-    pub(super) fn far_presence(&self, name: &str) -> Option<(brotherhood::Heard, bool)> {
-        let p = self.far.peers.get(name)?;
+    /// Sends `msg` to the brother `who` (see [`App::far_key`]), for a
+    /// handoff.
+    pub(super) fn far_tell(&mut self, who: &str, msg: Value) {
+        if let Some(key) = self.far_key(who) {
+            self.far_send(&key, msg);
+        }
+    }
+
+    /// What was last heard from the brother `who` (see [`App::far_key`]),
+    /// and whether it answers asks now, for keeping and takeover.
+    pub(super) fn far_presence(&self, who: &str) -> Option<(brotherhood::Heard, bool)> {
+        let p = self.far.peers.get(&self.far_key(who)?)?;
         Some((p.heard, p.via.is_some() && p.client.ready()))
     }
 
-    /// Every brother known, and whether each answers asks now.
+    /// Every brother known by key, and whether each answers asks now.
     pub(super) fn far_peer_names(&self) -> Vec<(String, bool)> {
         self.far
             .peers
             .iter()
-            .map(|(name, p)| (name.clone(), p.via.is_some() && p.client.ready()))
+            .map(|(key, p)| (key.clone(), p.via.is_some() && p.client.ready()))
             .collect()
     }
 
     fn far_brother_of(&self, id: &str) -> Option<String> {
         let r = self.shared.registry.lock().ok()?;
-        Some(r.get(id)?.brother.as_ref()?.name.clone())
+        Some(r.get(id)?.brother.as_ref()?.id.clone())
     }
 
     /// A click on a brother's tile: its pane on the stage, the stream
@@ -709,7 +871,7 @@ impl App {
             let s = r.get(id)?;
             let b = s.brother.as_ref()?;
             Some((
-                b.name.clone(),
+                b.id.clone(),
                 project_key(s),
                 s.phase == horadric_core::Phase::Paused,
             ))
@@ -788,7 +950,59 @@ impl App {
                 let name = name.to_string();
                 self.far_send(&name, json!({"t": "start", "project": path}));
             }
-            None => eprintln!("horadric: {name} lists no one folder for {project}"),
+            None => eprintln!(
+                "horadric: {} lists no one folder for {project}",
+                crate::project::brother_name(name)
+            ),
+        }
+        true
+    }
+
+    /// The menu of brother's tile `id`, with `open` and `rename` the
+    /// tile menu's own ids for those: what the brother serves, and nothing
+    /// that needs this PC's disk (its folder, files, changes). None for a
+    /// tile of this PC's. More lines (a handoff) are the caller's to add.
+    pub(super) fn far_menu(&self, id: &str, open: usize, rename: usize) -> Option<Vec<Item>> {
+        let (key, paused) = {
+            let r = self.shared.registry.lock().ok()?;
+            let s = r.get(id)?;
+            (
+                s.brother.as_ref()?.id.clone(),
+                s.phase == horadric_core::Phase::Paused,
+            )
+        };
+        let p = self.far.peers.get(&key);
+        let can = Can {
+            up: p.is_some_and(|p| p.via.is_some() && p.client.ready()),
+            paused,
+            control: p.is_some_and(|p| p.control),
+        };
+        let name = p.map_or_else(|| crate::project::brother_name(&key), |p| p.name.clone());
+        Some(far_items(&name, can, open, rename))
+    }
+
+    /// Acts on a pick from [`App::far_menu`] that is its own; false for
+    /// any other.
+    pub(super) fn far_picked(&mut self, id: &str, picked: usize) -> bool {
+        if picked != FAR_END {
+            return false;
+        }
+        if let Some(key) = self.far_brother_of(id) {
+            if let Some(remote) = afar::remote_id(id, &key).map(str::to_string) {
+                self.far_send(&key, json!({"t": "stop", "id": remote}));
+            }
+        }
+        true
+    }
+
+    /// Renames brother's tile `id` where it runs, which lists it back
+    /// renamed. False for a tile of this PC's.
+    pub(super) fn far_rename(&mut self, id: &str, name: &str) -> bool {
+        let Some(key) = self.far_brother_of(id) else {
+            return false;
+        };
+        if let Some(remote) = afar::remote_id(id, &key).map(str::to_string) {
+            self.far_send(&key, json!({"t": "rename", "id": remote, "name": name}));
         }
         true
     }
@@ -805,6 +1019,75 @@ impl App {
             .map(|(id, c)| (c.serial, id.clone()))
             .collect()
     }
+}
+
+/// A tile to put in a cluster's order: its id, the cluster, the place it
+/// takes when nothing stands there, and the tile whose place it takes.
+type Placed = (String, String, Option<usize>, String);
+
+/// Tile `gone` (session `remote`) went, leaving `left`. When the same
+/// session arrived on another brother a moment before, that tile takes
+/// its place now, and says where to put it; else the place is kept for
+/// it to arrive.
+fn went(
+    r: &mut Registry,
+    arrived: &mut HashMap<String, (String, SystemTime)>,
+    kept: &mut HashMap<String, afar::Left>,
+    remote: &str,
+    gone: &str,
+    left: afar::Left,
+) -> Option<Placed> {
+    let early = arrived
+        .get(remote)
+        .filter(|(id, _)| id != gone)
+        .map(|(id, ..)| id.clone());
+    if let Some(s) = early.as_deref().and_then(|id| r.get_mut(id)) {
+        afar::take_place(s, &left);
+        arrived.remove(remote);
+        let home = left.home.clone();
+        return Some((s.id.clone(), home, left.slot, gone.to_string()));
+    }
+    kept.insert(remote.to_string(), left);
+    None
+}
+
+/// The tile menu's id for ending a brother's session there.
+const FAR_END: usize = 2400;
+
+/// What a brother's tile can do now.
+#[derive(Debug, Clone, Copy)]
+struct Can {
+    /// Its brother answers.
+    up: bool,
+    /// The session is paused there.
+    paused: bool,
+    /// This PC may act on that brother, not only watch.
+    control: bool,
+}
+
+/// A brother's tile's menu lines. Resuming, renaming and ending are asks
+/// the brother serves, and only with control; out of reach, nothing goes.
+fn far_items(name: &str, can: Can, open: usize, rename: usize) -> Vec<Item> {
+    let mut items = Vec::new();
+    if !can.up {
+        items.push(Item::Disabled(format!("{name} out of reach")));
+        return items;
+    }
+    match (can.paused, can.control) {
+        (false, _) => items.push(Item::action(open, "Show terminal")),
+        (true, true) => items.push(Item::action(open, format!("Resume on {name}"))),
+        (true, false) => {}
+    }
+    if !can.control {
+        items.push(Item::Disabled(format!(
+            "View only: {name} lets this PC watch"
+        )));
+        return items;
+    }
+    items.push(Item::action(rename, "Rename\u{2026}"));
+    items.push(Item::Separator);
+    items.push(Item::action(FAR_END, format!("End session on {name}")));
+    items
 }
 
 /// "Join a Linux node...": its SSH destination, picked from
@@ -872,5 +1155,100 @@ pub(super) fn forget_node(name: &str) {
     list.retain(|n| n.name != name);
     if let Err(e) = far_node::save(&dir, &list) {
         eprintln!("horadric: cannot keep the node list: {e}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn labels(items: &[Item]) -> Vec<String> {
+        items
+            .iter()
+            .map(|i| match i {
+                Item::Action { id, label, .. } => format!("{id} {label}"),
+                Item::Disabled(t) => format!("- {t}"),
+                Item::Separator => "|".into(),
+                Item::Submenu(t, _) => format!("> {t}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_tile_that_arrived_first_takes_the_place_of_the_one_that_went() {
+        let t = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+        let mut r = Registry::new();
+        let e = afar::Entry {
+            id: "s1".into(),
+            name: "fix".into(),
+            project: "app".into(),
+            phase: horadric_core::Phase::Idle,
+            line: String::new(),
+            paused: false,
+            since: None,
+        };
+        let beta = afar::OnBrother {
+            id: "b".into(),
+            name: "Beta".into(),
+            project: "app".into(),
+            reach: true,
+            home: None,
+        };
+        r.add(afar::session(&beta, &e, None, t));
+        let mut arrived = HashMap::from([("s1".to_string(), ("s1@b".to_string(), t))]);
+        let mut kept = HashMap::new();
+        let left = afar::Left {
+            home: "c:/work/app".into(),
+            slot: Some(1),
+            created: SystemTime::UNIX_EPOCH,
+            at: t,
+        };
+        let placed = went(&mut r, &mut arrived, &mut kept, "s1", "s1", left.clone());
+        assert_eq!(
+            placed,
+            Some(("s1@b".into(), "c:/work/app".into(), Some(1), "s1".into()))
+        );
+        assert_eq!(project_key(r.get("s1@b").unwrap()), "c:/work/app");
+        assert!(arrived.is_empty() && kept.is_empty());
+        // None arrived: the place is kept for it.
+        assert_eq!(
+            went(&mut r, &mut arrived, &mut kept, "s2", "s2", left),
+            None
+        );
+        assert!(kept.contains_key("s2"));
+    }
+
+    #[test]
+    fn a_brothers_tile_offers_what_its_brother_serves() {
+        let can = |up, paused, control| Can {
+            up,
+            paused,
+            control,
+        };
+        assert_eq!(
+            labels(&far_items("Beta", can(true, false, true), 1, 3)),
+            [
+                "1 Show terminal",
+                "3 Rename\u{2026}",
+                "|",
+                "2400 End session on Beta"
+            ]
+        );
+        assert_eq!(
+            labels(&far_items("Beta", can(true, true, true), 1, 3))[0],
+            "1 Resume on Beta"
+        );
+        assert_eq!(
+            labels(&far_items("Beta", can(true, false, false), 1, 3)),
+            ["1 Show terminal", "- View only: Beta lets this PC watch"]
+        );
+        assert_eq!(
+            labels(&far_items("Beta", can(true, true, false), 1, 3)),
+            ["- View only: Beta lets this PC watch"]
+        );
+        assert_eq!(
+            labels(&far_items("Beta", can(false, false, true), 1, 3)),
+            ["- Beta out of reach"]
+        );
     }
 }

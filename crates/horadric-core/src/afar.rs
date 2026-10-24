@@ -22,8 +22,9 @@ const KEY_PREFIX: &str = "brother:";
 /// The protocol this client speaks.
 pub const VERSION: u64 = 3;
 
-/// The cluster key of `project` on brother `brother`. Its own key even
-/// for a repository this PC has too: they are two working trees.
+/// The cluster key of `project` on the brother keyed `brother` (see
+/// [`OnBrother::id`]). Its own key even for a repository this PC has too:
+/// they are two working trees.
 pub fn key(brother: &str, project: &str) -> String {
     format!("{KEY_PREFIX}{}/{project}", brother.replace('/', " "))
 }
@@ -39,7 +40,7 @@ pub fn title(brother: &str, project: &str) -> String {
 }
 
 /// The id a brother's session has here. Its own id may be one a local
-/// session has too, so the brother is part of it.
+/// session has too, so the brother's key is part of it.
 pub fn local_id(brother: &str, id: &str) -> String {
     format!("{id}@{brother}")
 }
@@ -100,6 +101,13 @@ fn uri_decode(s: &str) -> Option<String> {
         }
     }
     String::from_utf8(out).ok()
+}
+
+/// The key a Linux node goes by here: its name, which `nodes.json` keeps
+/// unique, marked so it is never a PC's relay id, and without the `@` and
+/// `/` that ids and cluster keys are split at.
+pub fn node_key(name: &str) -> String {
+    format!("node-{}", name.replace(['@', '/'], "-"))
 }
 
 /// The URL a client dials for the PC with this id.
@@ -272,18 +280,94 @@ fn entry(v: &Value) -> Option<Entry> {
 /// Where a brother's session lives, on its tile.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OnBrother {
-    /// The brother's name, as it answered hello.
+    /// The brother, by the key this PC knows it by: a PC's relay id, or a
+    /// node's [`node_key`]. Two brothers may share a name, never a key, so
+    /// ids and clusters go by this.
+    pub id: String,
+    /// The brother's name, as shown.
     pub name: String,
     /// The project's name there, which is its cluster.
     pub project: String,
     /// Whether the brother answers now. Out of reach, its tiles keep
     /// their last phase, dimmed.
     pub reach: bool,
+    /// The cluster the tile keeps its place in when the session was handed
+    /// to this brother from where it was shown before: None for one shown
+    /// in the brother's own cluster.
+    pub home: Option<String>,
 }
 
-/// The session a brother's entry is, here. `was` is the tile as it stood,
-/// so a phase that did not change keeps its age and its unread mark.
-pub fn session(brother: &str, e: &Entry, was: Option<&Session>, now: SystemTime) -> Session {
+impl OnBrother {
+    /// The cluster the tile is in.
+    pub fn cluster(&self) -> String {
+        self.home
+            .clone()
+            .unwrap_or_else(|| key(&self.id, &self.project))
+    }
+}
+
+/// A tile that went, kept a while so the same session arriving on
+/// another brother takes its place rather than a new one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Left {
+    /// Its cluster.
+    pub home: String,
+    /// Its place in that cluster's order.
+    pub slot: Option<usize>,
+    pub created: SystemTime,
+    /// When it went.
+    pub at: SystemTime,
+}
+
+/// How long a tile that went holds its place for the session to arrive
+/// elsewhere, and how long one that arrived waits for the tile it was to
+/// go: a handoff's two lists cross within its own 180 second limit.
+pub const LEFT_FOR: Duration = Duration::from_secs(180);
+
+/// The place the session `remote`, new on a brother, takes: that of the
+/// tile it had until a moment ago, when one went within [`LEFT_FOR`]. Not
+/// by name as well: a handoff renames it (the receiver names it after its
+/// folder), and ids are only shared by sessions started in folders of one
+/// name in the same second, which then also have to go and come together.
+pub fn place_of<'a>(
+    left: &'a HashMap<String, Left>,
+    remote: &str,
+    now: SystemTime,
+) -> Option<&'a Left> {
+    left.get(remote)
+        .filter(|l| now.duration_since(l.at).is_ok_and(|d| d < LEFT_FOR))
+}
+
+/// Moves brother's tile `s`, which arrived a moment before the tile it
+/// was went, into that tile's place. Nothing for one back in its own
+/// brother's cluster.
+pub fn take_place(s: &mut Session, left: &Left) {
+    let Some(b) = s.brother.as_mut() else {
+        return;
+    };
+    if left.home == key(&b.id, &b.project) || b.home.is_some() {
+        return;
+    }
+    b.home = Some(left.home.clone());
+    s.last_line = placed_line(&b.name, &s.last_line);
+    s.created = left.created;
+}
+
+/// What a tile that kept its place says under its name: where the
+/// session runs now, then what it does.
+pub fn placed_line(name: &str, line: &str) -> String {
+    if line.is_empty() {
+        format!("on {name}")
+    } else {
+        format!("on {name}: {line}")
+    }
+}
+
+/// The session a brother's entry is, here. `brother` is where it lives,
+/// its `home` the place a tile that came from elsewhere keeps. `was` is
+/// the tile as it stood, so a phase that did not change keeps its age and
+/// its unread mark.
+pub fn session(brother: &OnBrother, e: &Entry, was: Option<&Session>, now: SystemTime) -> Session {
     // The brother's clock says when, so a tile keeps its age when this
     // client starts again. Never later than now: the clocks may differ.
     let since = e
@@ -291,7 +375,7 @@ pub fn session(brother: &str, e: &Entry, was: Option<&Session>, now: SystemTime)
         .map(|secs| (SystemTime::UNIX_EPOCH + Duration::from_secs(secs)).min(now))
         .unwrap_or(now);
     let mut s = was.cloned().unwrap_or_else(|| {
-        let mut s = Session::new(local_id(brother, &e.id), e.name.clone(), "");
+        let mut s = Session::new(local_id(&brother.id, &e.id), e.name.clone(), "");
         s.since = since;
         s.created = since;
         s
@@ -312,11 +396,21 @@ pub fn session(brother: &str, e: &Entry, was: Option<&Session>, now: SystemTime)
     } else if e.since.is_some() {
         s.since = since;
     }
-    s.last_line = e.line.clone();
+    let home = was
+        .and_then(|w| w.brother.as_ref())
+        .and_then(|b| b.home.clone())
+        .or_else(|| brother.home.clone())
+        // Back where it was first shown, it is the brother's own again.
+        .filter(|h| *h != key(&brother.id, &e.project));
+    s.last_line = match home {
+        Some(_) => placed_line(&brother.name, &e.line),
+        None => e.line.clone(),
+    };
     s.brother = Some(OnBrother {
-        name: brother.to_string(),
         project: e.project.clone(),
         reach: true,
+        home,
+        ..brother.clone()
     });
     s
 }
@@ -429,6 +523,154 @@ mod tests {
         assert_eq!(title("vps", "horadric.dev"), "horadric.dev \u{b7} vps");
         // A slash in a name cannot move the split.
         assert_eq!(split_key(&key("a/b", "p")), Some(("a b", "p")));
+    }
+
+    fn on(id: &str) -> OnBrother {
+        OnBrother {
+            id: id.into(),
+            name: id.to_uppercase(),
+            project: String::new(),
+            reach: true,
+            home: None,
+        }
+    }
+
+    #[test]
+    fn a_node_key_is_never_split() {
+        let k = node_key("agent@exit1/eu");
+        assert_eq!(k, "node-agent-exit1-eu");
+        let id = local_id(&k, "x-1");
+        assert_eq!(remote_id(&id, &k), Some("x-1"));
+        assert_eq!(split_key(&key(&k, "p")), Some((k.as_str(), "p")));
+    }
+
+    #[test]
+    fn two_brothers_of_one_name_keep_apart() {
+        let a = OnBrother {
+            name: "Alpha".into(),
+            ..on("a1")
+        };
+        let b = OnBrother {
+            name: "Alpha".into(),
+            ..on("b2")
+        };
+        let e = Entry {
+            id: "demo-1".into(),
+            name: "x".into(),
+            project: "demo".into(),
+            phase: Phase::Idle,
+            line: String::new(),
+            paused: false,
+            since: None,
+        };
+        let t = SystemTime::UNIX_EPOCH;
+        let (sa, sb) = (session(&a, &e, None, t), session(&b, &e, None, t));
+        assert_ne!(sa.id, sb.id);
+        assert_ne!(sa.brother.unwrap().cluster(), sb.brother.unwrap().cluster());
+    }
+
+    fn e0() -> Entry {
+        Entry {
+            id: "s1".into(),
+            name: "fix".into(),
+            project: "p".into(),
+            phase: Phase::Working,
+            line: "Bash".into(),
+            paused: false,
+            since: None,
+        }
+    }
+
+    #[test]
+    fn a_handed_off_tile_keeps_its_place() {
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+        let mut left = HashMap::new();
+        left.insert(
+            "s1".to_string(),
+            Left {
+                home: "c:/work/app".into(),
+                slot: Some(2),
+                created: SystemTime::UNIX_EPOCH,
+                at: t0,
+            },
+        );
+        assert_eq!(
+            place_of(&left, "s1", t0 + Duration::from_secs(5))
+                .unwrap()
+                .slot,
+            Some(2)
+        );
+        assert!(place_of(&left, "s1", t0 + LEFT_FOR).is_none());
+        assert!(place_of(&left, "s2", t0).is_none());
+        // Arrived before the tile it was went: it moves into its place.
+        let mut early = session(
+            &on("d1"),
+            &Entry {
+                project: "app".into(),
+                ..e0()
+            },
+            None,
+            t0,
+        );
+        take_place(&mut early, &left["s1"]);
+        assert_eq!(early.brother.as_ref().unwrap().cluster(), "c:/work/app");
+        assert_eq!(
+            (early.last_line.as_str(), early.created),
+            ("on D1: Bash", SystemTime::UNIX_EPOCH)
+        );
+        // Not when the place was its own brother's cluster.
+        let mut own = session(
+            &on("d1"),
+            &Entry {
+                project: "app".into(),
+                ..e0()
+            },
+            None,
+            t0,
+        );
+        let back = Left {
+            home: key("d1", "app"),
+            ..left["s1"].clone()
+        };
+        take_place(&mut own, &back);
+        assert_eq!(own.brother.unwrap().home, None);
+        let desk = OnBrother {
+            name: "Desktop".into(),
+            home: Some("c:/work/app".into()),
+            ..on("d1")
+        };
+        let e = Entry {
+            id: "s1".into(),
+            name: "fix".into(),
+            project: "app".into(),
+            phase: Phase::Working,
+            line: "Bash".into(),
+            paused: false,
+            since: None,
+        };
+        let s = session(&desk, &e, None, t0);
+        let b = s.brother.clone().unwrap();
+        assert_eq!(b.cluster(), "c:/work/app");
+        assert_eq!(s.last_line, "on Desktop: Bash");
+        // The place stays with the tile while it lists, whatever the
+        // caller passes next time.
+        let again = session(&on("d1"), &e, Some(&s), t0);
+        assert_eq!(again.brother.unwrap().cluster(), "c:/work/app");
+        // One that never moved is in its brother's own cluster.
+        let own = session(&on("d1"), &e, None, t0);
+        assert_eq!(own.brother.unwrap().cluster(), key("d1", "app"));
+        assert_eq!(own.last_line, "Bash");
+        assert_eq!(placed_line("vps", ""), "on vps");
+        // Handed back to the brother whose cluster it kept, it is its own.
+        let back = OnBrother {
+            home: Some(key("d1", "app")),
+            ..on("d1")
+        };
+        let home = session(&back, &e, None, t0);
+        assert_eq!(
+            (home.brother.unwrap().home, home.last_line.as_str()),
+            (None, "Bash")
+        );
     }
 
     #[test]
@@ -582,27 +824,27 @@ mod tests {
             paused: false,
             since: None,
         };
-        let s = session("vps", &e, None, t0);
+        let s = session(&on("vps"), &e, None, t0);
         assert_eq!(s.id, "a@vps");
         assert_eq!(s.cwd, "", "no folder here: it is the brother's");
         assert_eq!(s.label(), "A");
         assert_eq!(s.brother.as_ref().unwrap().project, "p");
         // The same phase keeps its age.
-        let again = session("vps", &e, Some(&s), t1);
+        let again = session(&on("vps"), &e, Some(&s), t1);
         assert_eq!(again.since, t0);
         // A turn that ended there is unread here.
         let idle = Entry {
             phase: Phase::Idle,
             ..e.clone()
         };
-        let done = session("vps", &idle, Some(&again), t1);
+        let done = session(&on("vps"), &idle, Some(&again), t1);
         assert_eq!(
             (done.phase.clone(), done.unseen, done.since),
             (Phase::Done, true, t1)
         );
         // And stays so while the brother says idle.
         let later = t1 + std::time::Duration::from_secs(5);
-        let still = session("vps", &idle, Some(&done), later);
+        let still = session(&on("vps"), &idle, Some(&done), later);
         assert_eq!((still.phase, still.since), (Phase::Done, t1));
     }
 
@@ -619,7 +861,7 @@ mod tests {
             since: Some(400),
         };
         // A client that just started still shows when the phase began.
-        let s = session("vps", &e, None, t0);
+        let s = session(&on("vps"), &e, None, t0);
         let at = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(400);
         assert_eq!((s.since, s.created), (at, at));
         // A brother clock ahead of this one is held to now.
@@ -627,14 +869,14 @@ mod tests {
             since: Some(5_000),
             ..e.clone()
         };
-        assert_eq!(session("vps", &ahead, None, t0).since, t0);
+        assert_eq!(session(&on("vps"), &ahead, None, t0).since, t0);
         // A phase that changed there takes the brother's time too.
         let idle = Entry {
             phase: Phase::Idle,
             since: Some(900),
             ..e.clone()
         };
-        let done = session("vps", &idle, Some(&s), t0);
+        let done = session(&on("vps"), &idle, Some(&s), t0);
         let at = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(900);
         assert_eq!((done.phase, done.since), (Phase::Done, at));
     }

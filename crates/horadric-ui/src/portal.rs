@@ -864,9 +864,11 @@ mod tests {
         let mut s = Session::new("a1", "fix", "C:/p/x");
         assert!(served(&s));
         s.brother = Some(horadric_core::afar::OnBrother {
+            id: "lap".into(),
             name: "Laptop".into(),
             project: "x".into(),
             reach: true,
+            home: None,
         });
         assert!(!served(&s));
     }

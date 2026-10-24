@@ -1131,11 +1131,13 @@ impl Cluster {
             *self.drawn.borrow_mut() = Some(self.still_of(sessions.clone(), items.clone()));
         }
         let parked = self.parked(&sessions);
+        let brother = horadric_core::afar::split_key(&self.key).map(|(b, _)| b);
+        let brother_name = brother.map(crate::project::brother_name);
         let scene = Scene {
             layout: &layout,
             name: &self.name,
             town: town::is(&self.key),
-            brother: horadric_core::afar::split_key(&self.key).map(|(b, _)| b),
+            brother: brother.zip(brother_name.as_deref()),
             collapsed: self.collapsed,
             sessions: &refs,
             pages: &pages,

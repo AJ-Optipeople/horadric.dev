@@ -178,10 +178,13 @@ fn joined() -> Vec<(String, String)> {
 
 /// A joined brother's id by the name its link goes by.
 fn id_of(name: &str) -> Option<String> {
-    joined()
-        .into_iter()
-        .find(|(_, n)| n == name)
-        .map(|(i, _)| i)
+    let joined = joined();
+    // A link goes by the brother's id, which is its key here; a name is
+    // what an older holding or the wire may give.
+    if joined.iter().any(|(i, _)| i == name) {
+        return Some(name.to_string());
+    }
+    joined.into_iter().find(|(_, n)| n == name).map(|(i, _)| i)
 }
 
 /// A joined brother's name by its id.
@@ -234,9 +237,9 @@ pub(crate) fn set_auto(on: bool) {
 /// The brother of a brother's tile and its own id there.
 fn remote_of(app: &App, id: &str) -> Option<(String, String)> {
     let r = app.shared.registry.lock().ok()?;
-    let name = r.get(id)?.brother.as_ref()?.name.clone();
-    let remote = horadric_core::afar::remote_id(id, &name)?.to_string();
-    Some((name, remote))
+    let key = r.get(id)?.brother.as_ref()?.id.clone();
+    let remote = horadric_core::afar::remote_id(id, &key)?.to_string();
+    Some((key, remote))
 }
 
 /// The keeper's store and holding of brother `from`'s session `remote`,
@@ -373,7 +376,7 @@ impl App {
     fn keeping_turn_for(&self, from: &str, after: u64) -> bool {
         let heard: HashMap<String, Heard> = joined()
             .into_iter()
-            .filter_map(|(id, name)| Some((id, self.far_presence(&name)?.0)))
+            .filter_map(|(id, _)| Some((id.clone(), self.far_presence(&id)?.0)))
             .collect();
         let now = unix_now();
         with(|s| {
@@ -481,7 +484,7 @@ impl App {
         else {
             return;
         };
-        if !self.far_presence(&name).is_some_and(|(_, ready)| ready) {
+        if !self.far_presence(&keeper).is_some_and(|(_, ready)| ready) {
             debug(&format!("{name} is not reached, no snapshot of {id}"));
             return;
         }
@@ -572,7 +575,7 @@ impl App {
                     msgs.len()
                 ));
                 for m in msgs {
-                    self.far_tell(&keeper.1, m);
+                    self.far_tell(&keeper.0, m);
                 }
                 with(|s| {
                     s.book.sent(id, &keeper.0, &c.meta, c.len);
@@ -736,8 +739,8 @@ impl App {
         let now = unix_now();
         joined()
             .into_iter()
-            .filter(|(_, name)| {
-                self.far_presence(name)
+            .filter(|(id, _)| {
+                self.far_presence(id)
                     .is_some_and(|(h, _)| h.presence(now) == Presence::Awake)
             })
             .map(|(id, _)| id)
@@ -876,9 +879,9 @@ impl App {
             Ok(r) => r
                 .all()
                 .filter_map(|s| {
-                    let name = s.brother.as_ref()?.name.clone();
-                    let remote = horadric_core::afar::remote_id(&s.id, &name)?.to_string();
-                    Some((name, remote))
+                    let key = s.brother.as_ref()?.id.clone();
+                    let remote = horadric_core::afar::remote_id(&s.id, &key)?.to_string();
+                    Some((key, remote))
                 })
                 .collect(),
             Err(_) => return,
@@ -906,8 +909,8 @@ impl App {
         for (from, session, store) in stores(&keeping::root(&dir)) {
             let gone = match name_of(&from) {
                 Some(name) => {
-                    let key = (name.clone(), session.clone());
-                    let ready = self.far_presence(&name).is_some_and(|(_, r)| r);
+                    let key = (from.clone(), session.clone());
+                    let ready = self.far_presence(&from).is_some_and(|(_, r)| r);
                     with(|s| {
                         if listed.contains(&key) {
                             s.seen.insert(key.clone());
@@ -970,11 +973,11 @@ impl App {
             .into_iter()
             .filter_map(|(from, session, store)| {
                 let h = Holding::load(&store)?;
-                let name = name_of(&from)?;
-                let (heard, _) = self.far_presence(&name)?;
+                name_of(&from)?;
+                let (heard, _) = self.far_presence(&from)?;
                 let after = h.auto_takeover?.max(SILENT_SECS);
                 (auto_due(heard, h.auto_takeover, now) && self.keeping_turn_for(&from, after))
-                    .then(|| horadric_core::afar::local_id(&name, &session))
+                    .then(|| horadric_core::afar::local_id(&from, &session))
             })
             .collect();
         for id in due {
@@ -992,7 +995,7 @@ impl App {
         landed: Result<horadric_core::handing::Landed, String>,
     ) {
         let record = holding.record.clone();
-        let tile = horadric_core::afar::local_id(&holding.from_name, &record.id);
+        let tile = horadric_core::afar::local_id(&holding.from, &record.id);
         let fail = |app: &mut App, why: &str| {
             eprintln!("horadric: cannot take {} over: {why}", record.name);
             app.toasts.show(Kind::Done, "Not taken over", why);
@@ -1006,7 +1009,7 @@ impl App {
             }
         };
         let since = self
-            .far_presence(&holding.from_name)
+            .far_presence(&holding.from)
             .map(|(h, _)| h.last)
             .unwrap_or_else(unix_now);
         let offset = crate::questlog::utc_offset(since);

@@ -2,7 +2,7 @@
 //! repository it was added to, so every worktree of a repository lands in
 //! one cluster instead of a cluster each.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
@@ -14,9 +14,29 @@ use horadric_core::{afar, Session};
 /// brother's project, never a local folder's.
 pub fn project_key(s: &Session) -> String {
     match &s.brother {
-        Some(b) => afar::key(&b.name, &b.project),
+        Some(b) => b.cluster(),
         None => folder_key(&s.cwd),
     }
+}
+
+/// The brothers' names by key, for their clusters' titles and marks: a
+/// key is an id, which no one wants to read.
+static BROTHERS: Mutex<BTreeMap<String, String>> = Mutex::new(BTreeMap::new());
+
+/// Names the brother keyed `key`, as its link says.
+pub fn name_brother(key: &str, name: &str) {
+    if let Ok(mut b) = BROTHERS.lock() {
+        b.insert(key.to_string(), name.to_string());
+    }
+}
+
+/// The name of the brother keyed `key`, the key until it is known.
+pub fn brother_name(key: &str) -> String {
+    BROTHERS
+        .lock()
+        .ok()
+        .and_then(|b| b.get(key).cloned())
+        .unwrap_or_else(|| key.to_string())
 }
 
 /// The project key of the project in this folder: the folder itself,
@@ -82,7 +102,7 @@ pub fn project_name(key: &str) -> String {
         return crate::town::NAME.to_string();
     }
     if let Some((brother, project)) = afar::split_key(key) {
-        return afar::title(brother, project);
+        return afar::title(&brother_name(brother), project);
     }
     key.rsplit('/')
         .next()
@@ -147,13 +167,18 @@ mod tests {
     fn a_brothers_session_is_in_its_own_project() {
         let mut s = Session::new("a@vps", "a", "");
         s.brother = Some(afar::OnBrother {
+            id: "node-vps".into(),
             name: "vps".into(),
             project: "horadric.dev".into(),
             reach: true,
+            home: None,
         });
         let key = project_key(&s);
-        assert_eq!(key, afar::key("vps", "horadric.dev"));
+        assert_eq!(key, afar::key("node-vps", "horadric.dev"));
+        assert_eq!(project_name(&key), "horadric.dev \u{b7} node-vps");
+        name_brother("node-vps", "vps");
         assert_eq!(project_name(&key), "horadric.dev \u{b7} vps");
+        assert_eq!(brother_name("node-vps"), "vps");
     }
 
     #[test]

@@ -1720,6 +1720,8 @@ enum TileKind {
     Elsewhere,
     /// A Claude Code background session no pane is attached to.
     Background,
+    /// A brother runs it: only what the brother serves.
+    Far,
 }
 
 fn tile_menu(id: &str) {
@@ -1770,6 +1772,9 @@ fn tile_menu(id: &str) {
             Item::action(END, "Remove terminal"),
         ],
         (TileKind::Elsewhere, _) => vec![rename, Item::action(END, "Remove tile")],
+        (TileKind::Far, _) => with_app(|app| app.far_menu(id, OPEN, RENAME))
+            .flatten()
+            .unwrap_or_default(),
         (TileKind::Background, _) => vec![
             Item::action(OPEN, "Attach"),
             rename,
@@ -1839,6 +1844,9 @@ fn tile_menu(id: &str) {
     }
     if let Some(i) = picked {
         if with_app(|app| app.handoff_picked(id, i)) == Some(true) {
+            return;
+        }
+        if with_app(|app| app.far_picked(id, i)) == Some(true) {
             return;
         }
     }
@@ -4102,12 +4110,14 @@ impl App {
 
     /// What a tile's menu offers, and whether it is a plain terminal.
     fn tile_kind(&self, id: &str) -> Option<(TileKind, bool)> {
-        let (shell, background) = {
+        let (shell, background, far) = {
             let r = self.shared.registry.lock().ok()?;
             let s = r.get(id)?;
-            (s.shell, s.background.is_some())
+            (s.shell, s.background.is_some(), s.brother.is_some())
         };
-        let kind = if self.paused.contains_key(id) {
+        let kind = if far {
+            TileKind::Far
+        } else if self.paused.contains_key(id) {
             TileKind::Paused
         } else if self
             .consoles
@@ -7373,6 +7383,9 @@ impl App {
     /// Names a session from its tile's menu. Its tile, pane and the stage's
     /// title follow.
     fn rename(&mut self, id: &str, name: &str) {
+        if self.far_rename(id, name) {
+            return;
+        }
         if let Ok(mut r) = self.shared.registry.lock() {
             if let Some(s) = r.get_mut(id) {
                 s.rename(Some(name));
@@ -8037,6 +8050,10 @@ impl App {
         self.closed.retain(|k| !projects.contains(k));
         self.open
             .extend(projects.iter().filter(|k| !k.is_empty()).cloned());
+        // A brother's project has no folder here to stay open by: its
+        // cluster goes with its last session.
+        self.open
+            .retain(|k| horadric_core::afar::split_key(k).is_none() || projects.contains(k));
         // A hidden town shows only while a session runs there.
         if self.town_hidden {
             self.open.retain(|k| !town::is(k));
