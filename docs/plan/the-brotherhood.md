@@ -135,7 +135,8 @@ screen. What it lacks:
   machine typing into every other machine's shells means one stolen
   laptop opens all of them.
 - **A six digit code proves no one sat between them** (built
-  2026-10-24, `horadric-ui/src/joining.rs` and `brothers.rs`). The
+  2026-10-24, in `horadric-core` since step 15: `joining.rs` and
+  `brothers.rs`). The
   relay carries the handshake, so it could swap keys. Each PC keeps one
   ECDH P-256 key pair; the asker sends a commitment (a hash of its
   public key and a nonce) first, the giver answers with its key and
@@ -851,6 +852,31 @@ Each step is useful alone and each is verified before the next starts.
 15. **The join logic in core.** `joining.rs` and the state machine of
     `brothers.rs` behind `Crypto` and `Human`, the Windows UI unchanged
     to its human. Verified by step 2's run again with two dev instances.
+
+    Done on 2026-10-24 (901f82b). `horadric-core/src/joining.rs` is the
+    handshake, the link sessions and `brothers.json`, taking a `Crypto`
+    (random, an ECDH pair as `x || y || d`, ECDH, `seal_bound` and
+    `open_bound`). `horadric-core/src/brothers.rs` is the state over
+    every channel of one relay link: `Brothers::new(id, name, dir,
+    Hands)`, fed `connected`, `text` and `binary` by the link, driven by
+    `ask`, `answer`, `cast_out` and `reply`, and working through `Hands`:
+    the `Crypto`, a `Relay` (text and framed binary out), a `Human`
+    (`let_in`, `confirm`, `tell`, answered later by `answer`) and a
+    `Listener` (`Up`, `Heard`, `Asked`, `Down`). `standing.rs` moved too,
+    for the cast out refusal. The UI keeps CNG, the message boxes and the
+    relay link's sender. The derivations are pinned by vectors worked out
+    in Python from `docs/PORTAL.md`, and a test runs the core handshake
+    on CNG. Seen with "Alpha" and "Beta" through
+    `wss://portal.horadric.dev`: the installed build joined them (656
+    118) and the new build relinked from that `brothers.json` with no
+    prompt; old and new relinked each way round; a fresh join on the new
+    build showed 161 762 on both, No the default, and both kept the same
+    key; after restarting both they relinked unasked and Beta showed
+    "demo · Alpha"; cast out on Beta dropped the link, and Alpha linking
+    again was closed with no prompt. Introductions (step 18) fit as one
+    more sealed message `Brothers` handles before routing, and a key
+    from static ECDH kept as a `Joined`, which the usual relink then
+    uses.
 16. **Lore on Linux.** `horadric-memory`, the code index and `horadric
     mcp` built for musl, CI's Linux job and the release building them,
     the node holding a lore and serving `lore_*`.
