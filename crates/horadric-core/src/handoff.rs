@@ -860,18 +860,37 @@ pub fn moved_plain_line(
 }
 
 /// The remotes of `dir`'s repository as `(name, url)`, as written, for a
-/// receiver that has to clone it.
+/// receiver that has to clone it. Read from the config rather than with
+/// `git remote get-url`, which applies this machine's `insteadOf`
+/// rewrites: the receiver has its own, and may not reach what ours point
+/// at.
 pub fn remote_urls(dir: &Path) -> Vec<(String, String)> {
-    git(dir, &["remote"], &[])
-        .unwrap_or_default()
-        .lines()
-        .map(str::trim)
-        .filter(|r| !r.is_empty())
-        .filter_map(|r| {
-            let url = git(dir, &["remote", "get-url", r], &[]).ok()?;
-            Some((r.to_string(), url.trim().to_string()))
-        })
-        .collect()
+    let listed =
+        git(dir, &["config", "--get-regexp", r"^remote\..*\.url$"], &[]).unwrap_or_default();
+    configured_urls(&listed)
+}
+
+/// `git config --get-regexp` lines (`remote.<name>.url <url>`) as
+/// `(name, url)`, the first URL of each remote, as `get-url` gives.
+fn configured_urls(listed: &str) -> Vec<(String, String)> {
+    let mut urls: Vec<(String, String)> = Vec::new();
+    for line in listed.lines() {
+        let Some((key, url)) = line.trim().split_once(' ') else {
+            continue;
+        };
+        let Some(name) = key
+            .strip_prefix("remote.")
+            .and_then(|k| k.strip_suffix(".url"))
+        else {
+            continue;
+        };
+        let url = url.trim();
+        if name.is_empty() || url.is_empty() || urls.iter().any(|(n, _)| n == name) {
+            continue;
+        }
+        urls.push((name.to_string(), url.to_string()));
+    }
+    urls
 }
 
 /// Whether `dir`'s working tree has changes, untracked files included.
@@ -1222,6 +1241,46 @@ pub(crate) mod tests {
         let id = repo_id(&r.0).unwrap();
         assert_eq!(id.remotes, ["github.com/A/b"]);
         assert_eq!(id.roots, [root]);
+    }
+
+    #[test]
+    fn config_lines_give_each_remotes_first_url() {
+        let listed = "remote.origin.url git@github.com:A/b.git\n\
+                      remote.my.fork.url https://x.org/c\n\
+                      remote.origin.url https://second\n\
+                      remote.bare.url\n\
+                      branch.main.remote origin\n";
+        assert_eq!(
+            configured_urls(listed),
+            [
+                ("origin".to_string(), "git@github.com:A/b.git".to_string()),
+                ("my.fork".to_string(), "https://x.org/c".to_string()),
+            ]
+        );
+        assert!(configured_urls("").is_empty());
+    }
+
+    #[test]
+    fn remote_urls_are_sent_as_written_not_as_rewritten_here() {
+        let r = Repo::new("insteadof");
+        r.git(&["remote", "add", "origin", "https://github.com/A/b.git"]);
+        r.git(&[
+            "config",
+            "url.git@github.com:.insteadOf",
+            "https://github.com/",
+        ]);
+        // The rewrite is in force here, which is what must not travel.
+        assert_eq!(
+            r.git(&["remote", "get-url", "origin"]).trim(),
+            "git@github.com:A/b.git"
+        );
+        assert_eq!(
+            remote_urls(&r.0),
+            [(
+                "origin".to_string(),
+                "https://github.com/A/b.git".to_string()
+            )]
+        );
     }
 
     #[test]
