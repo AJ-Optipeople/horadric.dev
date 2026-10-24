@@ -21,13 +21,22 @@ use crate::brotherhood::{
     keepers_turn, offers_takeover, Fence, Heard, Owner, Presence, Roster, SILENT_SECS,
 };
 use crate::handoff::{self, git, handoff_ref, Package, Part, Record, TranscriptFile};
-use crate::keepers::{self, Meta, Store};
+use crate::keepers::{self, Meta, Side, SideFolder, Store};
 
 /// What "Take over by itself after 10 minutes" sets.
 pub const AUTO_AFTER: u64 = 600;
 
 /// Where the owner keeps its book, in its state folder.
 pub const BOOK_FILE: &str = "keeping.json";
+
+/// What a keeper spends on disk for every brother's sessions together,
+/// unless `keep_cap_bytes` in the book says otherwise: 2 GB.
+pub const KEEP_CAP: u64 = 2 << 30;
+
+/// What one session may take of it, unless `session_cap_bytes` says
+/// otherwise: a long session's transcript is tens of MB, so this is one
+/// that has run away.
+pub const SESSION_CAP: u64 = 512 << 20;
 
 /// What the owner last sent a session's keeper.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -41,6 +50,13 @@ pub struct Sent {
     /// How much of the transcript the keeper holds.
     #[serde(default)]
     pub transcript: u64,
+    /// What the keeper holds of the side folder.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub side: Side,
+    /// The keeper said the session outgrew its cap there: nothing more
+    /// goes to that keeper.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub full: bool,
 }
 
 /// One brother's book of keeping.
@@ -66,6 +82,13 @@ pub struct Book {
     /// one brother cannot name another's keeper.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub keepers_of: BTreeMap<String, Vec<String>>,
+    /// The keeper's side: what it spends on disk at most, every session
+    /// together, [`KEEP_CAP`] when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keep_cap_bytes: Option<u64>,
+    /// And one session at most, [`SESSION_CAP`] when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_cap_bytes: Option<u64>,
 }
 
 /// What a snapshot about to be taken is cut against.
@@ -74,6 +97,8 @@ pub struct Next {
     pub n: u64,
     pub base: Option<String>,
     pub sent: u64,
+    /// What the keeper holds of the side folder, empty for a whole one.
+    pub side: Side,
     /// The session's roster number, for the record.
     pub owner_n: u64,
 }
@@ -128,19 +153,57 @@ impl Book {
                 n,
                 base: s.commit.clone(),
                 sent: if s.commit.is_some() { s.transcript } else { 0 },
+                side: if s.commit.is_some() {
+                    s.side.clone()
+                } else {
+                    Side::new()
+                },
                 owner_n,
             },
             None => Next {
                 n,
                 base: None,
                 sent: 0,
+                side: Side::new(),
                 owner_n,
             },
         }
     }
 
+    /// Whether `keeper` said `session` outgrew its cap, so no snapshot of
+    /// it goes there.
+    pub fn full(&self, session: &str, keeper: &str) -> bool {
+        self.sent
+            .get(session)
+            .is_some_and(|s| s.full && s.keeper == keeper)
+    }
+
+    /// `keeper` said `session` outgrew its cap.
+    pub fn filled(&mut self, session: &str, keeper: &str) {
+        let s = self.sent.entry(session.to_string()).or_default();
+        s.keeper = keeper.to_string();
+        s.full = true;
+        s.commit = None;
+        s.transcript = 0;
+        s.side.clear();
+    }
+
+    /// What a keeper spends at most: every session together and one
+    /// session, the second never more than the first.
+    pub fn caps(&self) -> (u64, u64) {
+        let total = self.keep_cap_bytes.unwrap_or(KEEP_CAP);
+        let one = self.session_cap_bytes.unwrap_or(SESSION_CAP).min(total);
+        (total, one)
+    }
+
     /// A snapshot went to `keeper`, holding the transcript up to `len`.
     pub fn sent(&mut self, session: &str, keeper: &str, meta: &Meta, len: u64) {
+        let held = self
+            .sent
+            .get(session)
+            .filter(|s| s.keeper == keeper)
+            .map(|s| s.side.clone())
+            .unwrap_or_default();
         self.sent.insert(
             session.to_string(),
             Sent {
@@ -148,6 +211,8 @@ impl Book {
                 n: meta.n,
                 commit: Some(meta.commit.clone()),
                 transcript: len,
+                side: keepers::side_after(&held, meta),
+                full: false,
             },
         );
     }
@@ -158,6 +223,7 @@ impl Book {
         if let Some(s) = self.sent.get_mut(session) {
             s.commit = None;
             s.transcript = 0;
+            s.side.clear();
         }
     }
 
@@ -407,6 +473,17 @@ pub fn kept_message(session: &str, n: u64, ok: bool) -> Value {
     json!({"t": "kept", "id": session, "snapshot": n, "ok": ok})
 }
 
+/// The keeper's answer to a snapshot of a session past its cap there:
+/// not taken, and none should follow.
+pub fn full_message(session: &str, n: u64) -> Value {
+    json!({"t": "kept", "id": session, "snapshot": n, "ok": false, "full": true})
+}
+
+/// Whether a `kept` answer says the session is past the keeper's cap.
+pub fn kept_full(msg: &Value) -> bool {
+    msg["t"] == "kept" && msg["full"] == true
+}
+
 /// A `kept` answer: the session, the snapshot, whether it was taken.
 pub fn kept_of(msg: &Value) -> Option<(String, u64, bool)> {
     if msg["t"] != "kept" {
@@ -476,12 +553,22 @@ pub fn package(store: &Store, holding: &Holding, session: &str) -> Result<Packag
         commit: Some(commit),
         ..holding.record.clone()
     };
+    let mut files = vec![TranscriptFile {
+        path: format!("{claude}.jsonl"),
+        bytes: transcript,
+    }];
+    // The side folder lands beside the transcript under Claude's id, as a
+    // handoff's does, so its paths in the transcript are moved with it.
+    for (path, file) in store.side_files() {
+        let bytes = std::fs::read(&file).map_err(|e| format!("{path}: {e}"))?;
+        files.push(TranscriptFile {
+            path: format!("{claude}/{path}"),
+            bytes,
+        });
+    }
     Ok(Package {
         record,
-        files: vec![TranscriptFile {
-            path: format!("{claude}.jsonl"),
-            bytes: transcript,
-        }],
+        files,
         work,
     })
 }
@@ -521,8 +608,19 @@ pub fn snapshot(
     transcript: &Path,
 ) -> Result<(Meta, Vec<u8>, u64), String> {
     let text = std::fs::read(transcript).map_err(|e| format!("the transcript: {e}"))?;
-    let (meta, payload) =
-        keepers::take(dir, session, next.n, next.base.as_deref(), &text, next.sent)?;
+    let side = keepers::side_dir(transcript);
+    let (meta, payload) = keepers::take(
+        dir,
+        session,
+        next.n,
+        next.base.as_deref(),
+        &text,
+        next.sent,
+        Some(SideFolder {
+            dir: &side,
+            held: &next.side,
+        }),
+    )?;
     Ok((meta, payload, text.len() as u64))
 }
 
@@ -591,6 +689,7 @@ mod tests {
             base: None,
             commit: commit.into(),
             from: 0,
+            side: Vec::new(),
         }
     }
 
@@ -624,6 +723,46 @@ mod tests {
         assert_eq!((again.n, again.base, again.sent), (2, None, 0));
         b.forget("s");
         assert!(b.sent.is_empty());
+    }
+
+    #[test]
+    fn the_side_folder_held_follows_each_snapshot_and_a_refusal_resets_it() {
+        let mut b = Book::default();
+        b.next("s", "desk", "lap", T);
+        let mut m = meta(1, "c1");
+        m.side = vec![("subagents/a.jsonl".into(), 4)];
+        b.sent("s", "desk", &m, 40);
+        let mut m2 = meta(2, "c2");
+        m2.base = Some("c1".into());
+        m2.side = vec![("tool-results/t.txt".into(), 9)];
+        b.sent("s", "desk", &m2, 50);
+        let next = b.next("s", "desk", "lap", T);
+        assert_eq!(next.side.len(), 2);
+        // Another keeper holds none of it.
+        assert!(b.next("s", "vps", "lap", T).side.is_empty());
+        b.refused("s");
+        assert!(b.next("s", "desk", "lap", T).side.is_empty());
+    }
+
+    #[test]
+    fn a_full_session_stops_going_to_that_keeper_and_caps_have_defaults() {
+        let mut b = Book::default();
+        assert!(!b.full("s", "desk"));
+        b.filled("s", "desk");
+        assert!(b.full("s", "desk"));
+        assert!(!b.full("s", "vps"));
+        assert_eq!(b.next("s", "desk", "lap", T).base, None);
+        // A snapshot taken by a new keeper clears it.
+        b.sent("s", "vps", &meta(2, "c2"), 1);
+        assert!(!b.full("s", "desk"));
+        assert_eq!(b.caps(), (KEEP_CAP, SESSION_CAP));
+        b.keep_cap_bytes = Some(1000);
+        assert_eq!(b.caps(), (1000, 1000));
+        b.session_cap_bytes = Some(10);
+        assert_eq!(b.caps(), (1000, 10));
+        assert!(kept_full(&full_message("s", 3)));
+        assert_eq!(kept_of(&full_message("s", 3)), Some(("s".into(), 3, false)));
+        assert!(!kept_full(&kept_message("s", 3, false)));
     }
 
     #[test]
@@ -881,9 +1020,17 @@ mod tests {
         lap.write("a.txt", "two\n");
         let transcript = lap.0.join("t.jsonl");
         std::fs::write(&transcript, "{\"a\":1}\n").unwrap();
+        // Its subagent's transcript, in the side folder Claude Code keeps
+        // beside the main one.
+        let agents = lap.0.join("t").join("subagents");
+        std::fs::create_dir_all(&agents).unwrap();
+        let out = lap.0.join("t").join("tool-results").join("r.txt");
+        let line = serde_json::json!({ "see": out.to_string_lossy() }).to_string();
+        std::fs::write(agents.join("agent-a.jsonl"), format!("{line}\n")).unwrap();
         let mut book = Book::default();
         let next = book.next("landing", "desk", "lap", T);
         let (meta, payload, len) = snapshot(&lap.0, "landing", &next, &transcript).unwrap();
+        assert_eq!(meta.side.len(), 1);
         book.sent("landing", "desk", &meta, len);
         let root = std::env::temp_dir().join(format!("horadric-keep-land-{}", std::process::id()));
         let store = store_of(&root, "lap", "landing").unwrap();
@@ -891,8 +1038,12 @@ mod tests {
         // A second turn, a chain on the keeper.
         lap.write("b.txt", "new\n");
         std::fs::write(&transcript, "{\"a\":1}\n{\"b\":2}\n").unwrap();
+        std::fs::create_dir_all(out.parent().unwrap()).unwrap();
+        std::fs::write(&out, "big").unwrap();
         let next = book.next("landing", "desk", "lap", T);
-        let (_, payload, _) = snapshot(&lap.0, "landing", &next, &transcript).unwrap();
+        let (m2, payload, _) = snapshot(&lap.0, "landing", &next, &transcript).unwrap();
+        // Only the new tool output goes the second time.
+        assert_eq!(m2.side, [("tool-results/r.txt".to_string(), 3)]);
         let kept: Kept = store.receive(&payload).unwrap();
         assert_eq!(kept.n, 2);
         let holding = Holding {
@@ -910,6 +1061,25 @@ mod tests {
         assert_eq!(p.files[0].path, "claude-1.jsonl");
         assert_eq!(p.files[0].bytes, b"{\"a\":1}\n{\"b\":2}\n");
         assert_eq!(p.record.commit, kept.commit);
+        let paths: Vec<&str> = p.files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            [
+                "claude-1.jsonl",
+                "claude-1/subagents/agent-a.jsonl",
+                "claude-1/tool-results/r.txt"
+            ]
+        );
+        // Filed on the receiver, the subagent's paths move with it.
+        let to = root.join("filed");
+        let from = lap.0.to_string_lossy().into_owned();
+        handoff::file_transcript(&p.files, &to, &from, "C:/x", "C:/y").unwrap();
+        let agent = std::fs::read_to_string(to.join("claude-1/subagents/agent-a.jsonl")).unwrap();
+        assert!(!agent.contains(&*from.replace('\\', "\\\\")), "{agent}");
+        assert_eq!(
+            std::fs::read_to_string(to.join("claude-1/tool-results/r.txt")).unwrap(),
+            "big"
+        );
         // The work lands in a worktree of another checkout of the project.
         let desk = Repo::new("keeping-desk");
         desk.git(&["fetch", "-q", &lap.0.to_string_lossy(), "HEAD"]);

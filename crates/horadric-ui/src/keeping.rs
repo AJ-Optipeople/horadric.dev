@@ -6,7 +6,9 @@
 //! and sends it to its first keeper in `keep` parts through
 //! [`App::far_tell`]. As keeper it joins the parts and files them in a
 //! [`Store`] under its state folder, pruned once the session ends or
-//! moves. When a brother has been silent two minutes its tiles offer
+//! moves, once its brother has not listed it for ten minutes while
+//! linked, once it is a month old, and oldest first past the disk cap in
+//! `keeping.json`. When a brother has been silent two minutes its tiles offer
 //! "Take over on <this PC>", which lands the kept snapshot as a handoff
 //! lands and resumes it told what happened; with the brother's switch on
 //! that happens by itself after ten. Whoever owns a session tells every
@@ -21,12 +23,12 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use horadric_core::brotherhood::{clock, orphan_branch, Heard, Roster, SILENT_SECS};
+use horadric_core::brotherhood::{clock, orphan_branch, Heard, Presence, Roster, SILENT_SECS};
 use horadric_core::handoff::{takeover_line, Joiner, Record};
-use horadric_core::keepers::{decode, Store};
+use horadric_core::keepers::{decode, over_cap, too_old, unlisted_gone, Shelf, Store, FULL};
 use horadric_core::keeping::{
-    self, auto_due, keep_messages, keep_part, kept_message, kept_of, owners_of, store_of, stores,
-    takeover_message, Book, Holding, Next,
+    self, auto_due, full_message, keep_messages, keep_part, kept_full, kept_message, kept_of,
+    owners_of, store_of, stores, takeover_message, Book, Holding, Next,
 };
 use horadric_core::serving::Job;
 use horadric_core::Phase;
@@ -90,6 +92,11 @@ struct State {
     /// Brothers' sessions this keeper holds that were seen listed, as
     /// (brother name, session), so one gone from the list is pruned.
     seen: HashSet<(String, String)>,
+    /// Kept sessions their linked brother does not list, since when, so
+    /// one never seen listed goes too once that has lasted.
+    unlisted: HashMap<(String, String), u64>,
+    /// When the stores were last looked at for their age.
+    aged: u64,
     /// Takeovers under way, by the brother's tile id.
     taking: HashSet<String>,
 }
@@ -267,6 +274,35 @@ fn let_go(from: &str) {
     }
 }
 
+/// Drops the oldest stores until what is kept under `root` fits in
+/// `cap` bytes, sparing those of brothers not in `awake`.
+fn fit(root: &Path, cap: u64, awake: &HashSet<String>) {
+    let all = stores(root);
+    let shelves: Vec<Shelf> = all
+        .iter()
+        .map(|(from, session, store)| {
+            let (bytes, at) = store.shelf();
+            Shelf {
+                from: from.clone(),
+                session: session.clone(),
+                bytes,
+                at,
+            }
+        })
+        .collect();
+    for s in over_cap(&shelves, cap, |s| !awake.contains(&s.from)) {
+        debug(&format!(
+            "past the cap, {} of {} goes ({} bytes)",
+            s.session, s.from, s.bytes
+        ));
+        if let Some((_, _, store)) = all.iter().find(|(f, n, _)| *f == s.from && *n == s.session) {
+            if let Err(e) = store.prune() {
+                eprintln!("horadric: cannot drop the snapshots of {}: {e}", s.session);
+            }
+        }
+    }
+}
+
 impl App {
     /// Whether session `id` waits at start for its keeper to say it was
     /// not taken over, rather than resuming by itself. A click still
@@ -433,7 +469,8 @@ impl App {
     fn keeping_turn(&mut self, id: &str, transcript: &str) {
         let Some((keeper, me)) = with(|s| {
             let k = s.book.keeper()?.to_string();
-            (s.book.fenced(id).is_none() && !s.me.is_empty()).then(|| (k, s.me.clone()))
+            let fits = !s.book.full(id, &k);
+            (fits && s.book.fenced(id).is_none() && !s.me.is_empty()).then(|| (k, s.me.clone()))
         }) else {
             return;
         };
@@ -560,6 +597,16 @@ impl App {
             return false;
         };
         debug(&format!("{name} kept snapshot {n} of {id}: {ok}"));
+        if kept_full(msg) {
+            if let Some(keeper) = id_of(name) {
+                eprintln!("horadric: {id} outgrew what {name} keeps of a session, no more snapshots of it go there");
+                with(|s| {
+                    s.book.filled(&id, &keeper);
+                    save(&s.book);
+                });
+            }
+            return true;
+        }
         if !ok {
             with(|s| {
                 s.book.refused(&id);
@@ -640,12 +687,15 @@ impl App {
                 self.keeping_keepers(who, keepers);
             }
         }
-        let store = store_of(&keeping::root(&horadric_hooks::state_dir()?), who, &id)?;
+        let root = keeping::root(&horadric_hooks::state_dir()?);
+        let store = store_of(&root, who, &id)?;
         let from = who.to_string();
         // The name this PC knows the brother by, not the one it claims.
         let from_name = name_of(who).unwrap_or_else(|| who.to_string());
+        let caps = with(|s| s.book.caps());
+        let awake = self.keeping_awake();
         Some(Box::new(move || {
-            let n = decode(&payload).map_or(0, |(m, _, _)| m.n);
+            let n = decode(&payload).map_or(0, |s| s.meta.n);
             let _one = RECEIVING.lock();
             let taken = store.receive(&payload).and_then(|_| match holding {
                 Some(h) => Holding {
@@ -656,11 +706,42 @@ impl App {
                 .save(&store),
                 None => Ok(()),
             });
-            if let Err(e) = &taken {
-                eprintln!("horadric: snapshot {n} of {id} not kept: {e}");
+            let full = match &taken {
+                Err(e) if e == FULL => true,
+                Err(e) => {
+                    eprintln!("horadric: snapshot {n} of {id} not kept: {e}");
+                    false
+                }
+                Ok(()) if store.shelf().0 > caps.1 => {
+                    eprintln!("horadric: {id} outgrew the cap of one session, its snapshots go");
+                    if let Err(e) = store.mark_full() {
+                        eprintln!("horadric: cannot drop the snapshots of {id}: {e}");
+                    }
+                    true
+                }
+                Ok(()) => false,
+            };
+            fit(&root, caps.0, &awake);
+            if full {
+                full_message(&id, n)
+            } else {
+                kept_message(&id, n, taken.is_ok())
             }
-            kept_message(&id, n, taken.is_ok())
         }))
+    }
+
+    /// The ids of the joined brothers awake right now. A keeper's cap
+    /// spares the sessions of every other, which may yet be taken over.
+    fn keeping_awake(&self) -> HashSet<String> {
+        let now = unix_now();
+        joined()
+            .into_iter()
+            .filter(|(_, name)| {
+                self.far_presence(name)
+                    .is_some_and(|(h, _)| h.presence(now) == Presence::Awake)
+            })
+            .map(|(id, _)| id)
+            .collect()
     }
 
     /// Owners a brother `who` told: sessions of this PC taken over
@@ -813,24 +894,48 @@ impl App {
                     .collect()
             })
             .unwrap_or_default();
+        let now = unix_now();
+        // Hourly: an age is days long, and it walks every store.
+        let age_due = with(|s| {
+            let due = now.saturating_sub(s.aged) >= 3600;
+            if due {
+                s.aged = now;
+            }
+            due
+        });
         for (from, session, store) in stores(&keeping::root(&dir)) {
-            let Some(name) = name_of(&from) else {
-                continue;
-            };
-            let key = (name.clone(), session.clone());
-            let ready = self.far_presence(&name).is_some_and(|(_, r)| r);
-            let gone = with(|s| {
-                if listed.contains(&key) {
-                    s.seen.insert(key.clone());
-                    false
-                } else {
-                    ready && s.seen.remove(&key)
+            let gone = match name_of(&from) {
+                Some(name) => {
+                    let key = (name.clone(), session.clone());
+                    let ready = self.far_presence(&name).is_some_and(|(_, r)| r);
+                    with(|s| {
+                        if listed.contains(&key) {
+                            s.seen.insert(key.clone());
+                            s.unlisted.remove(&key);
+                            None
+                        } else if !ready {
+                            s.unlisted.remove(&key);
+                            None
+                        } else if s.seen.remove(&key) {
+                            s.unlisted.remove(&key);
+                            Some(format!("{name} no longer lists {session}"))
+                        } else {
+                            let since = *s.unlisted.entry(key.clone()).or_insert(now);
+                            unlisted_gone(since, now).then(|| {
+                                s.unlisted.remove(&key);
+                                format!("{name} has not listed {session} for ten minutes")
+                            })
+                        }
+                    })
                 }
+                None => None,
+            };
+            let gone = gone.or_else(|| {
+                (age_due && too_old(store.shelf().1, now))
+                    .then(|| format!("{session} of {from} was kept a month"))
             });
-            if gone {
-                debug(&format!(
-                    "{name} no longer lists {session}, its snapshots go"
-                ));
+            if let Some(why) = gone {
+                debug(&format!("{why}, its snapshots go"));
                 if let Err(e) = store.prune() {
                     eprintln!("horadric: cannot drop the snapshots of {session}: {e}");
                 }

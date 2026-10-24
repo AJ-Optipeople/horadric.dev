@@ -639,6 +639,17 @@ Each step is useful alone and each is verified before the next starts.
     takeover. Not yet seen: automatic takeover live (its rule is tested),
     a second keeper on the list, the phone offering "Take over", pulling a
     real cable between two PCs.
+
+    Closed after: a snapshot carries the files of the session's side
+    folder (`<claude id>/subagents`, `<claude id>/tool-results`) that are
+    new or changed since the last one, whole, after the transcript's
+    growth; the owner's book remembers each file's length the keeper
+    holds, and a whole snapshot starts that over. The keeper files them
+    under `side/` in the store, and a takeover lands them beside the
+    transcript, so their paths are moved as a handoff's are. A store goes
+    too once its brother has been linked ten minutes without listing the
+    session (one the keeper never saw listed included), and any store a
+    month old. What a keeper spends on disk is capped (below).
 14. **Later, each its own decision.** Teams: a WorkOS organization as a
     brotherhood of several people, each seeing the others' sessions view
     only by default, and the lore shared or not per project; Linux nodes
@@ -671,9 +682,15 @@ brother given its `have`, matching a project by repository.
   it, or stay on the brother whose quest log it is in? Warriv on two
   brothers working the same repository would need to agree on who runs
   what.
-- How much disk does a keeper spend? A long session's transcript grows to
-  tens of MB; snapshots are pruned when the session ends, but a keeper
-  for five busy brothers may want a cap.
+- How much disk does a keeper spend? Answered: at most 2 GB for every
+  session together and 512 MB for one, `keep_cap_bytes` and
+  `session_cap_bytes` in the keeper's `keeping.json`. Past the total the
+  oldest stores go first (by their last snapshot), never one whose owner
+  is not awake right now, since that is the snapshot a takeover needs,
+  and never the one that just came. A session past its own cap is
+  dropped and marked full, and the keeper answers `kept` with
+  `"full":true`, so its owner stops sending it there rather than sending
+  it whole every turn.
 - Handing off a plain terminal: a shell has no transcript to resume, so
   probably never, only its folder.
 - In a team, should dialogue be shared at all? The lore holds
