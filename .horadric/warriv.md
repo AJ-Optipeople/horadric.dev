@@ -9,6 +9,7 @@
 - A [/] quest whose session a dev instance started (state in %APPDATA%\Horadric-dev) died with it: no tell reaches it, hand it to the human with "restart it" at once (lore #51).
 
 ## Lately
+- 2026-10-24 Round (human left, main at b07cc5a): the Brotherhood session is still live (commits to 02:37), 14 files plus keeping.rs uncommitted, app.rs among them, so "Land the picked thing branch" still waits with the human and "Ship Local" stays held. Nothing to do.
 - 2026-10-24 Stall wake (01:55, main at 8464211): only "Land the picked thing branch" open, waiting on its own condition (app.rs, console.rs, lib.rs clean). The far/Brotherhood session is live (edits and a commit at 01:50), so noted, no tell, no hand on.
 - 2026-10-24 "Hand a picked thing to the agent" finished but its fast-forward (89d8570..3004c17) was refused: another live session's uncommitted app.rs, console.rs and lib.rs. No session held the quest, so filed "Land the picked thing branch" (sonnet) to merge once those files are committed.
 - 2026-10-24 Round (human left, main at c45a8de): still unshipped commits since the 10-23 reload, but 19 files plus new afar.rs, far.rs and far_phone.rs sit uncommitted (live Brotherhood and far work), so held "Ship Local" again. "Hand a picked thing to the agent" under way. Nothing else to do.
