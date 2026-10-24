@@ -796,6 +796,10 @@ pub struct Record {
     /// The roster's number for the session, one higher once it runs here.
     #[serde(default)]
     pub n: u64,
+    /// Its last turn was interrupted for the move rather than ending by
+    /// itself, which its first line tells it.
+    #[serde(default)]
+    pub interrupted: bool,
 }
 
 /// The line a handed off session's next prompt starts with.

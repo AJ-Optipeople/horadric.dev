@@ -93,6 +93,8 @@ pub enum Choice {
     /// Sign in to WorkOS, so this PC finds its brothers.
     SignIn,
     SignOut,
+    /// Hand every session to this brother, or with None stop doing so.
+    Leave(Option<String>),
     /// Join a Linux node by its SSH destination.
     AddNode,
     /// Take this node off the list, by name.
@@ -377,6 +379,7 @@ pub fn menu(
                 brother_items(listed.as_deref()),
             ));
             brothers = listed.unwrap_or_default();
+            items.extend(crate::app::leaving_menu());
             items.push(Item::action(SIGN_OUT, "Sign out"));
         }
         None => items.push(Item::action(SIGN_IN, "Sign in\u{2026}")),
@@ -415,6 +418,9 @@ pub fn menu(
         STOP => Some(Choice::StopWarriv),
         SIGN_IN => Some(Choice::SignIn),
         SIGN_OUT => Some(Choice::SignOut),
+        i if crate::app::leaving_pick(i).is_some() => {
+            crate::app::leaving_pick(i).map(Choice::Leave)
+        }
         ADD_NODE => Some(Choice::AddNode),
         i if (NODE..BROTHER).contains(&i) => nodes
             .get(i - NODE)

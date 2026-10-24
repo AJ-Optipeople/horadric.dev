@@ -268,6 +268,9 @@ impl App {
                 }
             };
         }
+        // Handoffs move on with what was heard, and with what their
+        // threads handed back, which wakes this too.
+        self.handing_tick();
         if changed {
             self.reconcile(true);
         }
@@ -452,6 +455,9 @@ impl App {
         if t != "out" && std::env::var_os("HORADRIC_DEBUG").is_some() {
             eprintln!("far: {name} says {t}");
         }
+        if self.handing_heard(&name, msg) {
+            return false;
+        }
         match afar::hear(msg) {
             Heard::Hello { control, v, .. } => {
                 if v < afar::VERSION {
@@ -604,6 +610,24 @@ impl App {
             }
         };
         self.far_send(&name, msg);
+    }
+
+    /// The brothers a session can be handed to now: linked, with control.
+    pub(super) fn far_takers(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .far
+            .peers
+            .iter()
+            .filter(|(_, p)| p.via.is_some() && p.heard.linked && p.control)
+            .map(|(name, _)| name.clone())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// Sends `msg` to the brother `name`, for a handoff.
+    pub(super) fn far_tell(&mut self, name: &str, msg: Value) {
+        self.far_send(name, msg);
     }
 
     fn far_brother_of(&self, id: &str) -> Option<String> {

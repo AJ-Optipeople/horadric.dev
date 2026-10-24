@@ -53,6 +53,15 @@ pub fn last_reply(cwd: &str, id: &str) -> Option<String> {
     title::last_reply(&read_from(&mut file, len.saturating_sub(TAIL))?)
 }
 
+/// Where Claude Code keeps its transcripts on this machine, one folder
+/// per working directory: where a handed off session's is filed.
+pub fn projects() -> Option<PathBuf> {
+    projects_root(
+        std::env::var("CLAUDE_CONFIG_DIR").ok().as_deref(),
+        crate::home().as_deref(),
+    )
+}
+
 /// The transcript of the conversation `id` held in `cwd`, if it is on
 /// disk. A quest's worktree may be long gone, and with it the spelling of
 /// its folder, so failing that every folder is looked in.

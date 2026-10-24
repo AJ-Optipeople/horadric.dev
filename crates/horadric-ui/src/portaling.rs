@@ -827,6 +827,14 @@ impl Serve for Here<'_> {
         });
     }
 
+    fn handoff(&mut self, id: &str, to: &str) -> Result<(), String> {
+        self.0.handoff_to(id, to, false)
+    }
+
+    fn handing(&mut self, who: &str, msg: &Value) -> Option<Job> {
+        self.0.handing_serve(who, msg)
+    }
+
     fn hello(&self, answer: &mut Value) {
         if let Some(p) = &self.0.portal {
             answer["vapid"] = json!(p.config.vapid_pub);

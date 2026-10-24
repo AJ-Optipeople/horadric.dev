@@ -156,6 +156,10 @@ mod portaling;
 #[path = "far.rs"]
 mod far;
 
+#[path = "handing.rs"]
+mod handing;
+pub(crate) use handing::{leaving_menu, leaving_pick};
+
 pub use runner::ssh_prompt;
 
 /// Hook events changed the registry. What they did waits in [`EVENTS`].
@@ -1495,6 +1499,9 @@ fn tray_menu(hwnd: HWND) {
         }
         Some(Choice::SignIn) => crate::workos::sign_in_in_background(),
         Some(Choice::SignOut) => crate::workos::sign_out(),
+        Some(Choice::Leave(to)) => {
+            with_app(|app| app.leave_for(to));
+        }
         Some(Choice::AddNode) => far::ask_node(),
         Some(Choice::ForgetNode(name)) => far::forget_node(&name),
         Some(Choice::EndAll) => {
@@ -1748,7 +1755,18 @@ fn tile_menu(id: &str) {
         items.insert(0, Item::action(PICK, "Pick this tomb\u{2026}"));
         items.insert(1, Item::Separator);
     }
+    if let (Some(hand), Some(at)) = (
+        with_app(|app| app.handoff_menu(id)).flatten(),
+        items.iter().rposition(|i| matches!(i, Item::Separator)),
+    ) {
+        items.insert(at, hand);
+    }
     let picked = menu::popup(&items);
+    if let Some(i) = picked {
+        if with_app(|app| app.handoff_picked(id, i)) == Some(true) {
+            return;
+        }
+    }
     if let (Some(i), Some((w, diff))) = (picked, &tree) {
         let file = diff.as_ref().and_then(|d| match i {
             _ if (UNCOMMITTED..COMMITTED).contains(&i) => d.uncommitted.get(i - UNCOMMITTED),
@@ -3572,7 +3590,11 @@ impl App {
                         Command::Overlap(o) => self.overlapped(&o),
                         Command::Browser(call) => self.browser_call(call),
                         Command::Know(call) => self.know_call(call),
-                        Command::Recall(call) => crate::memory::ask(call),
+                        Command::Recall(call) => {
+                            if let Some(call) = self.handing_recall(call) {
+                                crate::memory::ask(call);
+                            }
+                        }
                     }
                 }
             }
@@ -3621,6 +3643,7 @@ impl App {
                 self.portal_check();
                 self.portal_show();
                 self.far_check();
+                self.handing_tick();
                 self.backup_tick();
                 if self
                     .last_check
