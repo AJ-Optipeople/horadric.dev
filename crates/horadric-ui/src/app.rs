@@ -244,6 +244,9 @@ const WM_HORADRIC_BACKUP: u32 = WM_APP + 42;
 const WM_HORADRIC_PORTAL: u32 = WM_APP + 40;
 /// A brother's link heard something, or one of its panes asked.
 const WM_HORADRIC_FAR: u32 = WM_APP + 50;
+/// A brother hands a session here whose project this PC has no checkout
+/// of: ask where it goes, outside the app's borrow.
+const WM_HORADRIC_PLACE: u32 = WM_APP + 51;
 /// Town Portal's key on the stage clicked: open it, or offer what can be
 /// done with it, outside the app's borrow since a menu runs a loop of its
 /// own.
@@ -1286,6 +1289,10 @@ unsafe extern "system" fn app_proc(
             usage_menu();
             return LRESULT(0);
         }
+        WM_HORADRIC_PLACE => {
+            handing::place_ask(hwnd);
+            return LRESULT(0);
+        }
         WM_HORADRIC_PORTAL_KEY => {
             portal_key();
             return LRESULT(0);
@@ -1798,6 +1805,10 @@ fn tile_menu(id: &str) {
         items.iter().rposition(|i| matches!(i, Item::Separator)),
     ) {
         items.insert(at, hand);
+    }
+    if let Some(hand) = with_app(|app| app.handoff_far_menu(id)).flatten() {
+        items.push(Item::Separator);
+        items.push(hand);
     }
     if let Some(label) = with_app(|app| app.keeping_offer(id)).flatten() {
         items.insert(0, Item::action(TAKE_OVER, label));

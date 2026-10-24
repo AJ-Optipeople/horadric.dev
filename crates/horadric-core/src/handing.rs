@@ -20,12 +20,14 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::handoff::{
     self, apply_bundle, commit_work, cut_bundle, file_transcript, gather_transcript, handoff_ref,
     pack, repo_id, transcript_folder, transcript_key, Joiner, Package, Part, Record, RepoId,
 };
+use crate::placing;
 use crate::session::{Phase, WaitReason};
 use crate::worktree::{self, Worktree};
 
@@ -37,6 +39,11 @@ pub const BASES_SECS: u64 = 30;
 /// How long the receiver gets from the last part to running the session:
 /// a worktree, the transcript and a `claude --resume`.
 pub const TOOK_SECS: u64 = 180;
+/// How long the receiver's human gets to say where a project it has no
+/// checkout of goes, the clone included.
+pub const PLACE_SECS: u64 = 900;
+/// How often the sender asks again while the receiver's human decides.
+pub const PLACE_POLL_SECS: u64 = 3;
 
 /// Whether a session in `phase` is between turns, so moving it cuts
 /// nothing: never started, finished, waiting on the human's answer, or
@@ -59,6 +66,9 @@ pub enum Stage {
     Stopping(u64),
     /// The receiver was asked for its commits at this time.
     Bases(u64),
+    /// The receiver has no checkout and asks its human where the project
+    /// goes, since the first time, asked again at the second.
+    Placing(u64, u64),
     /// Packing and sending, off the UI thread.
     Sending,
     /// Every part went at this time; waiting for `took`.
@@ -141,7 +151,14 @@ impl Outgoing {
                 self.stage = Stage::Bases(at);
                 Do::AskBases
             }
-            Stage::Bases(_) if !linked => self.fail("is out of reach"),
+            Stage::Bases(_) | Stage::Placing(..) if !linked => self.fail("is out of reach"),
+            Stage::Placing(since, _) if at.saturating_sub(since) >= PLACE_SECS => {
+                self.fail("was not told where the project goes")
+            }
+            Stage::Placing(since, last) if at.saturating_sub(last) >= PLACE_POLL_SECS => {
+                self.stage = Stage::Placing(since, at);
+                Do::AskBases
+            }
             Stage::Bases(since) if at.saturating_sub(since) >= BASES_SECS => {
                 self.fail("did not answer")
             }
@@ -169,7 +186,7 @@ impl Outgoing {
 
     /// The receiver's commits came.
     pub fn heard_bases(&mut self, known: Vec<String>) -> Do {
-        if !matches!(self.stage, Stage::Bases(_)) {
+        if !matches!(self.stage, Stage::Bases(_) | Stage::Placing(..)) {
             return Do::Wait;
         }
         self.stage = Stage::Sending;
@@ -177,6 +194,19 @@ impl Outgoing {
             known,
             clean: self.clean,
         }
+    }
+
+    /// The receiver has no checkout yet and asks its human, at `at`: wait
+    /// longer, asking again now and then.
+    pub fn heard_placing(&mut self, at: u64) {
+        if let Stage::Bases(_) = self.stage {
+            self.stage = Stage::Placing(at, at);
+        }
+    }
+
+    /// Whether the receiver is asking its human where the project goes.
+    pub fn placing(&self) -> bool {
+        matches!(self.stage, Stage::Placing(..))
     }
 
     /// Every part went at `at`.
@@ -192,7 +222,7 @@ impl Outgoing {
     /// not run.
     pub fn heard_took(&mut self, n: u64) -> Do {
         match self.stage {
-            Stage::Bases(_) | Stage::Sending | Stage::Took(_) => Do::LetGo(n),
+            Stage::Bases(_) | Stage::Placing(..) | Stage::Sending | Stage::Took(_) => Do::LetGo(n),
             _ => Do::Wait,
         }
     }
@@ -204,6 +234,7 @@ impl Outgoing {
             Stage::Turn => format!("hands off to {to} when this turn ends"),
             Stage::Stopping(_) => format!("stopping the turn to hand off to {to}"),
             Stage::Bases(_) | Stage::Sending => format!("handing off to {to}"),
+            Stage::Placing(..) => format!("waiting for {to} to say where it goes"),
             Stage::Took(_) => format!("waiting for {to} to take it"),
         }
     }
@@ -218,6 +249,56 @@ impl Outgoing {
 /// The ask for the receiver's commits.
 pub fn bases_ask(id: &str, repo: &RepoId) -> Value {
     json!({"t": "bases", "id": id, "repo": repo})
+}
+
+/// What a receiver without a checkout needs to ask its human where the
+/// project goes, sent with the ask for commits.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlaceAsk {
+    /// The URL to clone from, None without a remote.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// The session's name, to say which one comes.
+    #[serde(default)]
+    pub name: String,
+    /// The project's folder name on the sender, for a new folder.
+    #[serde(default)]
+    pub folder: String,
+    /// A folder without git, which travels as a plain copy.
+    #[serde(default)]
+    pub plain: bool,
+    /// The sender's name, which a link through the phone door does not
+    /// carry.
+    #[serde(default)]
+    pub from: String,
+}
+
+/// [`bases_ask`] with what a receiver without a checkout asks its human.
+pub fn bases_ask_placing(id: &str, repo: &RepoId, place: &PlaceAsk) -> Value {
+    let mut ask = bases_ask(id, repo);
+    ask["place"] = serde_json::to_value(place).unwrap_or(Value::Null);
+    ask
+}
+
+/// What a [`bases_ask_placing`] says about placing, None from an older
+/// sender that sent nothing.
+pub fn heard_place(msg: &Value) -> Option<PlaceAsk> {
+    serde_json::from_value(msg.get("place")?.clone()).ok()
+}
+
+/// The receiver's answer while its human decides where the project goes.
+pub fn bases_placing(id: &str) -> Value {
+    json!({"t": "bases", "id": id, "commits": [], "found": false, "placing": true})
+}
+
+/// The receiver's answer once its human said no, or the clone failed.
+pub fn bases_refused(id: &str, text: &str) -> Value {
+    json!({"t": "bases", "id": id, "commits": [], "found": false, "text": text})
+}
+
+/// Whether a `bases` answer says the receiver's human is deciding.
+pub fn heard_placing(msg: &Value) -> bool {
+    msg["placing"].as_bool().unwrap_or(false)
 }
 
 /// The receiver's answer: its commits of the repository, if it has it.
@@ -343,7 +424,18 @@ pub fn pack_session(
         .ok_or("Claude Code holds no transcript of this session")?;
     let files = gather_transcript(&folder, &record.session)?;
     record.transcripts = folder.to_string_lossy().into_owned();
-    record.repo = repo_id(cwd).ok_or("the session's folder is in no git repository")?;
+    let Some(repo) = repo_id(cwd) else {
+        // Without git the folder goes as a plain copy, whatever `known` is.
+        let (copy, left) = placing::gather_plain(cwd)?;
+        record.plain = true;
+        record.left = left;
+        return Ok(pack(&Package {
+            record: record.clone(),
+            files,
+            work: placing::pack_files(&copy),
+        }));
+    };
+    record.repo = repo;
     record.prefix = handoff::git(cwd, &["rev-parse", "--show-prefix"], &[])
         .map(|p| p.trim().trim_end_matches('/').to_string())
         .unwrap_or_default();
@@ -572,6 +664,108 @@ mod tests {
             Do::LetGo(7),
             "a receiver that already runs it answers the ask with took"
         );
+    }
+
+    #[test]
+    fn a_receiver_asking_its_human_is_waited_for_and_asked_again() {
+        let mut o = Outgoing::new("s1", "Desktop", false);
+        o.tick(true, true, 0);
+        o.heard_placing(1);
+        assert!(o.placing());
+        assert_eq!(o.line(), "waiting for Desktop to say where it goes");
+        assert_eq!(o.tick(true, true, PLACE_POLL_SECS), Do::Wait);
+        assert_eq!(o.tick(true, true, 1 + PLACE_POLL_SECS), Do::AskBases);
+        assert_eq!(o.tick(true, true, 2 + PLACE_POLL_SECS), Do::Wait);
+        o.heard_placing(2 + PLACE_POLL_SECS);
+        assert_eq!(
+            o.stage,
+            Stage::Placing(1, 1 + PLACE_POLL_SECS),
+            "since the first"
+        );
+        assert_eq!(
+            o.tick(true, true, BASES_SECS + 10),
+            Do::AskBases,
+            "no answer limit while it asks"
+        );
+        assert!(matches!(o.heard_bases(vec![]), Do::Pack { .. }));
+        let mut o = Outgoing::new("s1", "Desktop", false);
+        o.tick(true, true, 0);
+        o.heard_placing(1);
+        assert_eq!(
+            o.tick(true, true, 1 + PLACE_SECS),
+            Do::Fail("Desktop was not told where the project goes".into())
+        );
+        let mut o = Outgoing::new("s1", "Desktop", false);
+        o.tick(true, true, 0);
+        o.heard_placing(1);
+        assert!(matches!(o.tick(true, false, 2), Do::Fail(_)));
+        let mut o = Outgoing::new("s1", "Desktop", false);
+        o.heard_placing(1);
+        assert!(!o.placing(), "only once asked");
+    }
+
+    #[test]
+    fn what_to_ask_a_human_travels_with_the_ask() {
+        let place = PlaceAsk {
+            url: Some("git@h:a/b.git".into()),
+            name: "fix".into(),
+            folder: "b".into(),
+            plain: false,
+            from: "Laptop".into(),
+        };
+        let ask = bases_ask_placing("s1", &RepoId::default(), &place);
+        assert_eq!(heard_place(&ask), Some(place));
+        assert_eq!(heard_place(&bases_ask("s1", &RepoId::default())), None);
+        assert!(heard_placing(&bases_placing("s1")));
+        assert_eq!(heard_bases(&bases_placing("s1")), (vec![], false));
+        let no = bases_refused("s1", "the human said no");
+        assert!(!heard_placing(&no));
+        assert_eq!(no["text"], "the human said no");
+    }
+
+    #[test]
+    fn a_folder_without_git_travels_as_a_copy() {
+        let dir = std::env::temp_dir().join(format!("horadric-hand-plain-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("notes")).unwrap();
+        std::fs::write(dir.join("notes").join("a.md"), "one").unwrap();
+        let cwd_text = dir.to_string_lossy().into_owned();
+        let projects = dir.with_extension("projects");
+        let held = projects.join(transcript_key(&cwd_text));
+        std::fs::create_dir_all(&held).unwrap();
+        let line = json!({"type": "user", "cwd": cwd_text, "sessionId": "c1"});
+        std::fs::write(
+            held.join("c1.jsonl"),
+            format!(
+                "{line}
+"
+            ),
+        )
+        .unwrap();
+        let mut record = Record {
+            session: "c1".into(),
+            cwd: cwd_text.clone(),
+            ..Default::default()
+        };
+        let bytes = pack_session(&mut record, &dir, &projects, &[]).unwrap();
+        assert!(record.plain);
+        let package = handoff::unpack(&bytes).unwrap();
+
+        let to = dir.with_extension("to");
+        let theirs = dir.with_extension("theirs");
+        let cwd = placing::land_plain(&package, &to, &theirs).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(cwd.join("notes").join("a.md")).unwrap(),
+            "one"
+        );
+        let new_cwd = cwd.to_string_lossy().into_owned();
+        let filed = theirs.join(transcript_key(&new_cwd)).join("c1.jsonl");
+        let v: Value =
+            serde_json::from_str(std::fs::read_to_string(filed).unwrap().trim()).unwrap();
+        assert_eq!(v["cwd"], json!(new_cwd));
+        for d in [&dir, &projects, &to, &theirs] {
+            let _ = std::fs::remove_dir_all(d);
+        }
     }
 
     #[test]

@@ -39,6 +39,7 @@ pub mod node;
 pub mod nodes;
 pub mod overlap;
 pub mod pack;
+pub mod placing;
 pub mod portal;
 pub mod presence;
 pub mod program_status;

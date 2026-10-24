@@ -302,7 +302,9 @@ impl App {
                     .collect()
             })
             .unwrap_or_default();
-        json!({"t": "sessions", "list": list})
+        let mut message = json!({"t": "sessions", "list": list});
+        self.handing_takeable(&mut message);
+        message
     }
 
     /// The projects message: the tiles' projects, in their order.

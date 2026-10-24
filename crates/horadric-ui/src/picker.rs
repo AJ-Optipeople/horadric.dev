@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use windows::core::{w, HSTRING};
+use windows::core::HSTRING;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::System::Com::{CoCreateInstance, CoTaskMemFree, CLSCTX_INPROC_SERVER};
 use windows::Win32::UI::Shell::{
@@ -13,6 +13,17 @@ use windows::Win32::UI::Shell::{
 /// Asks for a folder, starting in `start`. None when cancelled. Runs a modal
 /// loop, so the caller must not hold anything the message handlers need.
 pub fn pick_folder(owner: HWND, start: Option<&Path>) -> Option<PathBuf> {
+    pick_folder_for(owner, start, "Start a Horadric session in", "Start session")
+}
+
+/// [`pick_folder`] with its own title and button, for a folder picked for
+/// something other than starting a session.
+pub fn pick_folder_for(
+    owner: HWND,
+    start: Option<&Path>,
+    title: &str,
+    button: &str,
+) -> Option<PathBuf> {
     unsafe {
         let dialog: IFileOpenDialog =
             CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER).ok()?;
@@ -20,8 +31,8 @@ pub fn pick_folder(owner: HWND, start: Option<&Path>) -> Option<PathBuf> {
         dialog
             .SetOptions(options | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM)
             .ok()?;
-        let _ = dialog.SetTitle(w!("Start a Horadric session in"));
-        let _ = dialog.SetOkButtonLabel(w!("Start session"));
+        let _ = dialog.SetTitle(&HSTRING::from(title));
+        let _ = dialog.SetOkButtonLabel(&HSTRING::from(button));
         if let Some(dir) = start.filter(|d| d.is_dir()) {
             let item: windows::core::Result<IShellItem> =
                 SHCreateItemFromParsingName(&HSTRING::from(dir.as_os_str()), None);

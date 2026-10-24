@@ -140,6 +140,9 @@ PC to phone:
   hello and whenever the list or a phase changes. `phase` is `working`,
   `waiting` (needs the human: a permission, a question), `idle` or
   `ended`. `line` is what it waits for or last did, may be empty.
+  A PC that keeps a silent brother adds `"take":[{"id","name","project",
+  "line","to"}]`, that brother's sessions it can take over; the phone's
+  "Take over" sends `{"t":"handoff","id","to"}` with them.
 - `{"t":"screen","id","cols","rows","lines":["..."],"styles":[[[n,fg,bg,f]]],"cursor":[row,col]}`:
   the watched session's text, up to 500 lines of scrollback first, then
   the visible screen, each line without trailing spaces. On watch and

@@ -804,6 +804,14 @@ pub struct Record {
     /// itself, which its first line tells it.
     #[serde(default)]
     pub interrupted: bool,
+    /// The work is a plain copy of a folder without git (see
+    /// [`crate::placing`]) rather than a bundle.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub plain: bool,
+    /// The files a plain copy left behind as too large, which its first
+    /// line names.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub left: Vec<String>,
 }
 
 /// The line a handed off session's next prompt starts with.
@@ -817,6 +825,58 @@ pub fn moved_line(from: &str, to: &str, worktree: &str, clean: bool) -> String {
         "Moved from {from} to {to}, the work is in this worktree ({worktree}), {ended}. \
          Paths you remember may be wrong now."
     )
+}
+
+/// The line a session handed off from a folder without git starts with:
+/// the folder is a copy, and what it left behind as too large.
+pub fn moved_plain_line(
+    from: &str,
+    to: &str,
+    folder: &str,
+    clean: bool,
+    left: &[String],
+) -> String {
+    let ended = if clean {
+        "the last turn ended cleanly"
+    } else {
+        "the last turn was interrupted"
+    };
+    let left = match left {
+        [] => String::new(),
+        _ if left.len() > 10 => format!(
+            " {} files were too large to copy and stayed on {from}, {} among them.",
+            left.len(),
+            left[..10].join(", ")
+        ),
+        _ => format!(
+            " Too large to copy, these stayed on {from}: {}.",
+            left.join(", ")
+        ),
+    };
+    format!(
+        "Moved from {from} to {to}, the work is a copy of the folder in this one ({folder}), \
+         {ended}.{left} Paths you remember may be wrong now."
+    )
+}
+
+/// The remotes of `dir`'s repository as `(name, url)`, as written, for a
+/// receiver that has to clone it.
+pub fn remote_urls(dir: &Path) -> Vec<(String, String)> {
+    git(dir, &["remote"], &[])
+        .unwrap_or_default()
+        .lines()
+        .map(str::trim)
+        .filter(|r| !r.is_empty())
+        .filter_map(|r| {
+            let url = git(dir, &["remote", "get-url", r], &[]).ok()?;
+            Some((r.to_string(), url.trim().to_string()))
+        })
+        .collect()
+}
+
+/// Whether `dir`'s working tree has changes, untracked files included.
+pub fn has_changes(dir: &Path) -> bool {
+    git(dir, &["status", "--porcelain"], &[]).is_ok_and(|s| !s.trim().is_empty())
 }
 
 /// The line a taken over session's first prompt starts with: the turn
@@ -1269,6 +1329,15 @@ pub(crate) mod tests {
              turn ended cleanly. Paths you remember may be wrong now."
         );
         assert!(moved_line("a", "b", "w", false).contains("interrupted"));
+        assert_eq!(
+            moved_plain_line("Laptop", "Desktop", r"C:\p", true, &[]),
+            "Moved from Laptop to Desktop, the work is a copy of the folder in this one (C:\\p), \
+             the last turn ended cleanly. Paths you remember may be wrong now."
+        );
+        let big = moved_plain_line("a", "b", "w", false, &["v.mp4".into()]);
+        assert!(big.contains("interrupted. Too large to copy, these stayed on a: v.mp4."));
+        let many: Vec<String> = (0..12).map(|i| format!("f{i}")).collect();
+        assert!(moved_plain_line("a", "b", "w", true, &many).contains("12 files were too large"));
         let t = takeover_line("Laptop", "Desktop", "/w", "14:02");
         assert!(t.starts_with("Taken over on Desktop from Laptop, which fell silent at 14:02."));
         assert!(t.contains("a push, a deploy, a file written"));

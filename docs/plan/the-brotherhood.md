@@ -602,6 +602,49 @@ Each step is useful alone and each is verified before the next starts.
    at 4 half sent bundles, quiet ones dropped after 10 minutes; a first
    part starts its bundle over; a `prefix` that leads out of the
    worktree lands at its top.
+
+   Gaps closed on 2026-10-24 (`horadric-core/src/placing.rs`, the
+   receiver's half in `horadric-ui/src/handing.rs`). The `bases` ask
+   carries `place` (the URL to clone, the folder's name, the sender's
+   name, whether it is a folder without git). A receiver without a
+   checkout answers `"placing":true` and asks its human: "Clone <url>
+   into <folder>?" beside where most of its recent projects are (else
+   `Documents\Github`, else the profile), or "Pick a folder"; with no
+   remote only a folder, and the bundle is then the whole history. The
+   sender waits up to 15 minutes, asking again every 3 seconds; a no
+   comes back as `bases` with `text`. A picked folder holding the
+   project is used, an empty one filled, any other gets a new folder
+   inside it, so nothing there is written over. A folder without git
+   travels as a plain copy of the whole folder rather than of the files
+   changed since the session started: the receiver has nothing of it,
+   files only read are as needed as those written, and a file's time
+   says little. It leaves out `node_modules`, `target`, `.venv` and the
+   like, carries at most 64 MB and 20000 files, leaves any file over 16
+   MB behind and names those in the first line. A session that ran in
+   the human's own checkout or a folder without git leaves its changes
+   there, and the sender's toast says "The changes stay in <folder>
+   too". A brother's tile offers "Hand off to ▸" another brother or
+   "This PC", which sends `handoff` to its owner; the same ask for a
+   silent brother's tile is a takeover by its keeper. The phone's
+   sessions message carries those as `take` beside `list` (so a brother
+   hearing the list does not take them for the PC's own), and the phone
+   shows them under "Silent brothers" with "Take over", sending
+   `handoff` to the PC.
+
+   Seen with "Alpha" and "Beta" linked by the phone door, cmd.exe
+   standing in for the agent and the hooks faked: on Beta's tile of
+   Alpha's session, "Hand off to ▸ This PC (Beta)"; Beta, with no
+   checkout, asked to clone the scratch remote into the folder beside
+   its project, cloned it, and the session landed in `remote.main-2`
+   with both changes, its tile "moved here from Alpha"; Alpha's
+   checkout kept them. A folder without git went from Alpha's tile menu
+   to Beta, picked as the scratch folder, and landed in a new
+   `plain-a-2` beside the original; handed back through Alpha's tile of
+   it, a dismissed question failed it on Beta as "Alpha says its human
+   said no" and left it paused there, and the next try landed in
+   `plain-a-2-2` with Beta's toast "It runs on Alpha now. The changes
+   stay in ...\plain-a-2 too." Not seen: the phone's "Take over", which
+   needs a keeper holding a silent brother's session.
 11. **Handoff to and from a Linux node.** The same over `--stdio`, and the
     path rewrite between Windows and Linux. Verified against the VPS both
     ways.
