@@ -237,6 +237,22 @@ impl App {
         }
     }
 
+    /// Each tile project this PC shares lore for and what it holds of it,
+    /// for its client of a brother to say, as the serving side does.
+    pub(super) fn portal_lore(&mut self) -> Vec<(Value, Value)> {
+        if self.portal.is_none() {
+            return Vec::new();
+        }
+        Here(self).lore_projects()
+    }
+
+    /// Takes in entries a brother sent this PC's client.
+    pub(super) fn portal_lore_take(&mut self, project: &Value, b64: &str) {
+        if self.portal.is_some() {
+            Here(self).lore_import(project, b64);
+        }
+    }
+
     /// Runs the server with the app to answer through, then sends what it
     /// says and paces the timer to whether anything streams raw.
     fn portal_serve(&mut self, f: impl FnOnce(&mut Server, &mut Here) -> Out) {

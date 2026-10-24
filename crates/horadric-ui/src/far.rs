@@ -489,6 +489,14 @@ impl App {
                 for a in attach {
                     self.far_send(&name, a);
                 }
+                // What this PC holds of each shared lore, so the brother
+                // sends what it lacks and then what is written after.
+                for (project, have) in self.portal_lore() {
+                    self.far_send(
+                        &name,
+                        json!({"t": "lore", "project": project, "have": have}),
+                    );
+                }
                 self.far_lines()
             }
             Heard::Sessions(list) => {
@@ -547,6 +555,10 @@ impl App {
                     "horadric: {name} says {text}{}",
                     id.map(|i| format!(" of {i}")).unwrap_or_default()
                 );
+                false
+            }
+            Heard::Entries { project, b64 } => {
+                self.portal_lore_take(&project, &b64);
                 false
             }
             Heard::State(said) => {
