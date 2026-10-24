@@ -344,12 +344,12 @@ impl App {
     }
 
     /// The brother that owns tile `id`, for a Claude Code session of
-    /// theirs.
+    /// theirs with a conversation to carry on.
     fn far_owner(&self, id: &str) -> Option<String> {
         let r = self.shared.registry.lock().ok()?;
         let s = r.get(id)?;
         let key = s.brother.as_ref()?.id.clone();
-        (!s.shell && s.agent == Agent::Claude).then_some(key)
+        (!s.shell && s.agent == Agent::Claude && s.prompted).then_some(key)
     }
 
     /// Asks the owner of brother's tile `id` to hand it to `to`, or takes

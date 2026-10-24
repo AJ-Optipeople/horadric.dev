@@ -587,6 +587,7 @@ pub fn session_entry(s: &Session, project: &str, paused: bool) -> Value {
         // So a brother offers handoff only for a Claude Code session.
         "agent": s.agent.program(),
         "shell": s.shell,
+        "talked": s.prompted && s.claude_session_id.is_some(),
     });
     if !paused && s.phase.asks() {
         let ask = s

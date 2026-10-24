@@ -1187,6 +1187,7 @@ mod tests {
             paused: false,
             since: None,
             agent: Some(horadric_core::Agent::Claude),
+            talked: true,
         };
         let beta = afar::OnBrother {
             id: "b".into(),

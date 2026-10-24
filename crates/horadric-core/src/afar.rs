@@ -131,6 +131,9 @@ pub struct Entry {
     /// The agent it runs, None for a plain shell, which cannot be handed
     /// off. Claude Code from a brother older than the field.
     pub agent: Option<Agent>,
+    /// Whether it has a conversation to carry on, which handing it off
+    /// needs. True from a brother older than the field.
+    pub talked: bool,
 }
 
 /// What one message from a brother says.
@@ -287,6 +290,7 @@ fn entry(v: &Value) -> Option<Entry> {
                     .unwrap_or_default(),
             ),
         },
+        talked: v.get("talked").and_then(Value::as_bool).unwrap_or(true),
     })
 }
 
@@ -397,6 +401,7 @@ pub fn session(brother: &OnBrother, e: &Entry, was: Option<&Session>, now: Syste
     s.renamed = true;
     s.shell = e.agent.is_none();
     s.agent = e.agent.unwrap_or_default();
+    s.prompted = e.talked;
     // A phone hears a finished turn as idle, so done here is idle there.
     let same = s.phase == e.phase || (s.phase == Phase::Done && e.phase == Phase::Idle);
     if !same {
@@ -578,6 +583,7 @@ mod tests {
             paused: false,
             since: None,
             agent: Some(Agent::Claude),
+            talked: true,
         };
         let t = SystemTime::UNIX_EPOCH;
         let (sa, sb) = (session(&a, &e, None, t), session(&b, &e, None, t));
@@ -595,6 +601,7 @@ mod tests {
             paused: false,
             since: None,
             agent: Some(Agent::Claude),
+            talked: true,
         }
     }
 
@@ -665,6 +672,7 @@ mod tests {
             paused: false,
             since: None,
             agent: Some(Agent::Claude),
+            talked: true,
         };
         let s = session(&desk, &e, None, t0);
         let b = s.brother.clone().unwrap();
@@ -842,6 +850,7 @@ mod tests {
             paused: false,
             since: None,
             agent: Some(Agent::Claude),
+            talked: true,
         };
         let s = session(&on("vps"), &e, None, t0);
         assert_eq!(s.id, "a@vps");
@@ -879,6 +888,7 @@ mod tests {
             paused: false,
             since: Some(400),
             agent: Some(Agent::Claude),
+            talked: true,
         };
         // A client that just started still shows when the phase began.
         let s = session(&on("vps"), &e, None, t0);
@@ -888,6 +898,7 @@ mod tests {
         let ahead = Entry {
             since: Some(5_000),
             agent: Some(Agent::Claude),
+            talked: true,
             ..e.clone()
         };
         assert_eq!(session(&on("vps"), &ahead, None, t0).since, t0);
@@ -896,6 +907,7 @@ mod tests {
             phase: Phase::Idle,
             since: Some(900),
             agent: Some(Agent::Claude),
+            talked: true,
             ..e.clone()
         };
         let done = session(&on("vps"), &idle, Some(&s), t0);
@@ -921,7 +933,8 @@ mod tests {
             {"id":"a"},
             {"id":"b","agent":"claude","shell":false},
             {"id":"c","agent":"codex","shell":false},
-            {"id":"d","agent":"claude","shell":true}
+            {"id":"d","agent":"claude","shell":true},
+            {"id":"e","agent":"claude","shell":false,"talked":false}
         ]});
         let Heard::Sessions(l) = hear(&list) else {
             panic!("not sessions");
@@ -933,14 +946,17 @@ mod tests {
                 Some(Agent::Claude),
                 Some(Agent::Claude),
                 Some(Agent::Codex),
-                None
+                None,
+                Some(Agent::Claude)
             ]
         );
+        assert!(l[0].talked && !l[4].talked);
         let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
         let shell = session(&on("b"), &l[3], None, t0);
         assert!(shell.shell);
         let codex = session(&on("b"), &l[2], None, t0);
         assert!(!codex.shell);
         assert_eq!(codex.agent, Agent::Codex);
+        assert!(!session(&on("b"), &l[4], None, t0).prompted);
     }
 }
