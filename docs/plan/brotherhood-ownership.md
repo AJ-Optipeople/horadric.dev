@@ -1,39 +1,50 @@
 # Who owns a session, and who is out: the specification
 
-This is what every brother computes about the brotherhood's sessions and
-its cast outs, written so each property can be checked. The code follows
-it: `crates/horadric-core/src/said.rs` holds the pure functions,
-`mesh.rs` keeps what a brother holds and signs this machine's own word,
-and `crates/horadric-core/src/brotherhood_sim.rs` checks the
-invariants below against an adversary. Where this and the code disagree,
-one of them is a bug.
+This is what every brother computes about the brotherhood: who is in
+it, under which key, whose each session is, and who is out, written so
+each property can be checked. The code follows it:
+`crates/horadric-core/src/said.rs` holds the words and the pure
+functions, `lineage.rs` the tree of who let whom in, `mesh.rs` keeps
+what a brother holds and signs this machine's own word, `brothers.rs`
+acts on it, and two simulations check the invariants below against an
+adversary: `brotherhood_sim.rs` over the pure functions, and
+`brotherhood_wired.rs` over the real state machine of each brother
+(`Brothers`, its files, its links through a relay). Where this and the
+code disagree, one of them is a bug.
 
-Four reviews in a row found holes in rules that were patched one finding
-at a time, and each round of patches opened new ones. The rules here are
-built so the invariants follow from their shape, not from case by case
-care:
+Five reviews in a row found holes in rules that were patched one finding
+at a time. The rules here are built so the invariants follow from their
+shape, not from case by case care:
 
 - Whose a session is depends on the words held on it and on nothing
   else: no entry, no clock, no arrival order. Every change of owner, and
   every change of who may take a session over, is a word in that
   session's own chain.
-- Who is out is computed from every cast out word held at once, by one
-  function of that set, never by which word came first.
+- Who is in the brotherhood, and under which key, is the tree of signed
+  admissions, from the brotherhood's first two machines down. A key
+  comes into it only by a word its admitter signed, and a brother's key
+  changes only on a human's word on each brother.
+- Who is out is computed from every cast out word held and that tree at
+  once, by one function of the two, never by which word came first.
+- Being out, contested or dropped is never stored: each brother works it
+  out afresh from the words whenever they change, so what one word did,
+  a later word can undo, everywhere alike.
 - What one brother can make another hold is cut to a fixed size by rules
   that keep the same words whatever order they came in.
 
 ## The parties
 
 - A **brother** is a machine with a relay id and an ECDSA P-256 key pair
-  (the ECDH pair it joined with). A brother holds a key for each brother
-  it joined or was introduced to (`brothers.json`), and remembers the
-  key it held before for a brother whose key was replaced or cast out
-  (`Store::cast`).
+  (the ECDH pair it joined with). It holds a key for each brother it
+  joined or was introduced to (`brothers.json`), and the key it held
+  before for a brother whose key a human replaced (`Store::cast`).
 - **Honest** brothers run this code. A **stolen** brother signs whatever
-  its thief likes with its own key; it cannot sign as another. The
-  **relay** passes frames between brothers: it can drop, delay, reorder,
-  duplicate and replay them, and read the routing, but cannot open what
-  two brothers seal for each other, nor sign.
+  its thief likes with its own key, and its thief can make **fakes**:
+  new keys it lets in itself, as many as it likes. It cannot sign under
+  another brother's key. The **relay** passes frames between brothers:
+  it can drop, delay, reorder, duplicate and replay them, read the
+  routing, and say who is connected, but cannot open what two brothers
+  seal for each other, nor sign.
 - A **human** sits at a PC. A Linux node has none.
 
 ## What a brother holds
@@ -46,18 +57,26 @@ care:
   number the owner holds it under (which only a change of owner raises,
   never a change of keepers), the keepers that owner names, and whether
   and how it ended. All of it is `resolve` of the words held on it, cached.
-- `outcast` and `contested`: `standing` of the cast out words held,
-  cached.
-- Notes for itself alone, never served and never consulted by `resolve`:
-  which brothers showed it they heard each ending (`acks`), when it first
-  saw each ending and each orphan (local clock), the sessions it let go
-  and when, the copies told to its human, the contests put to its human,
-  and the handoffs it signed that have not landed yet (`pending`).
+- `outcast` and `contested`: `standing` of the cast out words and the
+  tree, cached.
+- Notes for itself alone, never served and never consulted by `resolve`
+  or `standing`: which brothers showed it they heard each ending
+  (`acks`), when it first saw each ending and each orphan (local clock),
+  the sessions it let go and when, the copies told to its human, the
+  contests put to its human, and the handoffs it signed that have not
+  landed yet (`pending`, with when, by this machine's clock).
 - Each brother's own signed entry (name, link, keepers, the switch for
-  taking over by itself, whom it lets only watch, whom it let in). An
-  entry decides nothing about owners. It says whose turn it is among
-  keepers, whether a keeper takes over by itself, and whom an entry
-  introduces.
+  taking over by itself, whom it lets only watch, the root it stands on,
+  and which brothers it is linked to now). An entry decides nothing
+  about owners or about who is in. It says whose turn it is among
+  keepers, whether a keeper takes over by itself, and whether a brother
+  is reached by any other.
+
+`standing.json` holds the human's own switches (whom it lets only
+watch, whom it cast out, whom it let in by a code) and the **root**: the
+keys the brotherhood started from, as this machine pinned them (below).
+Nothing in it says this machine, or any brother, is out: that is worked
+out from the words each time.
 
 ## The words
 
@@ -73,16 +92,17 @@ compared with another clock), `sig` ECDSA P-256 over SHA-256, `r || s`.
 `after` is the signature of the word that made `by` the owner this word
 builds on (the session's first word, the handoff it acknowledged or the
 takeover it made); an acknowledgement names the handoff it
-acknowledges; a session's first word and a cast out name nothing. So a
-word signed on a handoff that was later taken back, or on a step that
-lost, builds on nothing, whatever number it carries: a brother that gets
-the same number again by a new word starts afresh.
+acknowledges; a session's first word, an admission and a cast out name
+nothing. So a word signed on a handoff that was later taken back, or on
+a step that lost, builds on nothing, whatever number it carries: a
+brother that gets the same number again by a new word starts afresh.
 
-The signature covers `"horadric said v4"`, then each part led by its
-length as a 4 byte big endian number: the kind, `by`, `under`, `n` and `at`
-(8 bytes big endian each), `after`, then for a session `origin` and
+The signature covers `"horadric said v5"`, then each part led by its
+length as a 4 byte big endian number: the kind, `by`, `under`, `n` and
+`at` (8 bytes big endian each), `after`, then for a session `origin` and
 `session`, then the kind's own fields in the order the table gives, a
-list as a 4 byte count and then each item led by its length.
+list as a 4 byte count and then each item led by its length, a flag as
+one byte.
 
 | kind | fields | says |
 |---|---|---|
@@ -91,17 +111,18 @@ list as a 4 byte count and then each item led by its length.
 | `recalls` | `origin`, `session`, `hand` | `by` takes back its `hands` at `n` whose `sig` is `hand`: it did not land |
 | `takes` | `origin`, `session`, `from`, `keepers` | `by`, a keeper of `from`, took it over from `from`'s `n` - 1, and names its own `keepers` |
 | `ended` | `origin`, `session` | `by`, the owner at `n`, ended it for good |
-| `cast_out` | `id`, `key` | `by`'s human cast out brother `id`, whose key was `key`; `n` is 0 |
+| `admits` | `id`, `key`, `name` | `by`'s human let brother `id` in under `key` by a code both humans saw; `n` is 0 |
+| `cast_out` | `id`, `key`, `retired` | `by`'s human cast out brother `id`, whose key was `key`; with `retired`, only that key goes, not those let in through it (the machine was set up anew); `n` is 0 |
 
 A word is **taken** by a brother when:
 
 - `under` is the key it holds for `by`, or the key it held for `by` before
-  (a key cast out or replaced). A key named only in some word is never
-  taken as anyone's: a thief cannot make its own key pass for another
-  brother's by casting it out.
+  (a key a human replaced). A key named only in some word is never taken
+  as anyone's: a thief cannot make its own key pass for another
+  brother's by naming it.
 - the signature verifies under `under`;
 - it is within bounds: every id and key at most 256 bytes, at most 16
-  keepers, `cast_out`'s `key` a P-256 point.
+  keepers, an admitted or cast out `key` a P-256 point.
 
 A word under a key that is out is taken like any other. What it counts
 for is `resolve`'s and `standing`'s to say, so two brothers that heard a
@@ -115,59 +136,161 @@ whom it lets only watch, change, for every session it owns, so a keeper
 it dropped or switched to view only is no keeper of those sessions from
 then on.
 
+## The tree: who is in, and through whom
+
+Input: every `admits` word held, and the **root**, a set of keys. Output:
+the **members** (keys), the id each goes by, and for each member key `X`
+its **line** `D(X)`: the members every admission path from the root to
+which passes through `X` (`X` among them).
+
+1. An admission `A admits (id, K)` is an edge from key `A` to key `K`.
+   Of one signer's admissions, only the 32 naming the lowest keys count.
+2. The members are the keys reached from the root along edges, the root's
+   own keys first, then by how many edges away, then by key: at most 256.
+3. `D(X)` is what `X` dominates: the members no longer reached from the
+   root once `X` is taken away. The lines nest: two lines either share
+   nothing or one holds the other.
+
+A thief's fakes are in its line whatever they sign: they were let in by
+the thief or by each other, and no honest brother signed their
+admission, so every path to them passes through the thief. An honest
+brother is in a thief's line only when it came in through the thief
+alone. Admissions a thief signs of honest brothers only add paths to
+them, never take one away, so they put nobody in its line.
+
+**The root** is pinned once by each machine in `standing.json` and only
+read after:
+
+- Two machines that join by a code when neither has any brother pin the
+  two of them: they are the brotherhood's first.
+- A machine that joins a brother that has a root (says so in its own
+  signed entry) when it had none pins that root.
+- A machine from before admissions (see "Upgrading") pins its own key and
+  every key it holds as it upgrades: every brother of a brotherhood that
+  upgrades together pins the same keys.
+
+Every honest brother of one brotherhood pins the same root, so all of
+them work out the same tree. A machine that came in through a thief may
+pin what the thief says (it is in the thief's line in any case).
+
+Every code join signs an `admits` on both sides, naming the other. A
+machine that had no brother names only its new brother; one that had
+brothers lets the new one into its tree. A human's yes to taking a key
+back (below) signs an `admits` too.
+
+## Keys: which key a brother goes by (I0)
+
+A brother `B` is held under one key. It changes only so:
+
+- **By a code here.** The human here joined `B` by a code, both humans
+  seeing the same code: the key it showed is held, and the one held
+  before goes into `Store::cast`.
+- **By a human's yes here.** A member key `K'` for `B`'s id comes in the
+  tree while the key held for `B` is out (cast out or retired). The
+  human here is asked, once per key, whether `B` was set up anew; yes
+  holds `K'` and signs `admits` of it. A node with no human keeps the key
+  it holds; joining it by a code is the way.
+
+So no brother's word, nor any entry, ever replaces a key held, and a
+thief that casts a brother's key out and lets in another under its id
+gains nothing: every brother asks its human, and says no unless the
+human set that machine up anew.
+
+A brother not held at all is **introduced**: its key is taken, with no
+code, when it is a member and in (not out, not contested), its id is not
+held under another key, and this machine's human never cast that id out
+(then the human is asked, as above). Introductions come only from the
+tree: never from what an entry says it holds.
+
 ## `standing`: who is out
 
-Input: every `cast_out` word held. Output: the keys **out** and the keys
-**contested**.
+Input: every `cast_out` word held, and the tree. Output: the keys
+**out** and the keys **contested**.
 
-1. Each word is an attack from its `under` key (the signer's) on the key
-   it names. A word naming its own signer's key is ignored. Of one
-   signer's words, only the 32 naming the lowest keys count.
-2. Two keys that attack each other are a **contest**. A key in contests
-   with more keys than each of its rivals has is out (a thief that cast
-   every brother out, answered by two of them, loses). Repeated until no
-   key loses so.
-3. A key still in a contest counts only against its rivals: a thief
-   answered by one brother casts out nobody else meanwhile.
-4. The grounded labelling of what is left: a key all of whose attackers
+1. A cast out counts only when its signer and the key it names are both
+   members, and the signer does not name itself. Of one signer's words
+   naming keys that are not members, only the 32 lowest are kept.
+2. **Covers.** `S` casting `X` out attacks every key of `D(X)`: a line is
+   cast out whole, and a fake made after the word was signed is in it
+   as soon as it is in the line. With `retired`, or when `S` is itself
+   in `D(X)` (a **rebel**, turning on the line it came through), it
+   attacks `X` alone.
+3. **Heads.** When `A` and `B` attack each other, the contest is between
+   two heads: the topmost key `B` named whose cover holds `A`, and the
+   topmost key `A` named whose cover holds `B`. So when a human casts out
+   a thief, every fake of the thief that cast that human's brother out
+   is answered by the same word, and is the thief's contest, not one of
+   its own: fakes count nothing.
+4. **Deciding a contest.** Each head's rivals are the heads it is in
+   contests with, and the rebels that cast it out without its answer
+   (each a rival of its own: a brother turning on its own line is no fake
+   of it). A head with more rivals than each of its rivals has is out (a
+   thief answered by humans on brothers of two lines loses, however many
+   fakes it has). Repeated until no head loses so.
+5. **Waiting.** A key in a contest, and every key in the line of a head
+   in one, counts only against the lines of that contest's rivals: a
+   thief answered by one brother casts out nobody else meanwhile, and
+   neither do its fakes. A rebel's word against the head of its own line
+   always counts.
+6. The grounded labelling of what is left: a key all of whose attackers
    are out is **in** (a key nobody attacks is in), a key attacked by a
-   key that is in is **out**, until nothing changes.
-5. A key out leaves its contests, so its rivals' other attacks count
-   again: steps 2 to 4 are worked out again until nothing more goes out.
-6. Every key neither in nor out is **contested**.
+   key that is in is **out**, until nothing changes. So a line cast out by
+   a brother in is out whole, and one cast out by a brother still in a
+   contest is contested whole.
+7. A key out leaves its contests, so its rivals' other attacks count
+   again: steps 3 to 6 are worked out again until nothing more goes out.
+8. Every key neither in nor out is **contested**.
 
 So:
 
 - A cast out by a brother that is out casts nobody out, whenever it was
   signed.
 - Two brothers that cast each other out, with nobody else deciding, are
-  both contested: neither acts on any brother until a human decides. A
-  human decides by casting one of them out from another brother: if that
-  brother is in and was never cast out by the one it casts out, the one
-  it casts is out; if the thief had cast it out too, the thief now has
-  more contests than any of its rivals and is out.
+  both contested, and so are their lines: none acts on any brother until
+  a human decides. A human decides by casting one of them out from a
+  brother of another line, or from a brother of the thief's own line: if
+  that brother is in and the one it casts never cast it out, the one it
+  casts is out; if the thief had cast it out too, the thief now has more
+  rivals than any of its own and is out.
 - A brother cast out by a key that is in is out whatever it signs before
-  or after.
+  or after, and so is its line: every key let in only through it.
+- A human casting out a brother this machine came in through is told
+  that this machine goes with it once another line casts it out too, and
+  is to be joined again from a brother in.
 - Whom a brother lets only watch it decides what that brother may do to
   it, not whether that brother's cast outs count: who is out must be the
   same on every brother (I1), and one brother's switch cannot be.
 
-Out and contested keys both lose control everywhere: no brother lets a
-link under one act on it (`Trust::control`, `Standing::contested`), and
-no owner names one as a keeper in its next keeper word. An out key's
-`takes` do not count (below), and it is dropped: its links close and its
-tiles go. A contested key keeps its links, so it hears how the contest
-ends, and the takeovers it made stand: which of the two is the thief is
-what the contest has not decided.
+## What being out does, worked out afresh
+
+Each time the words change, and at start, each brother works out from
+the roster held:
+
+- **A brother out** has no control here, its tiles go and its sessions'
+  copies are not offered, and it is named as no keeper. Its key stays
+  in `brothers.json`, and its link stays up, carrying only rosters and
+  signed word both ways: so the moment a later word puts it in again
+  (its human answered, a contest went its way), it is a brother again
+  everywhere, with nothing to undo.
+- **A brother contested** has no control anywhere and is named as no
+  keeper; its link stays as it is, so it hears how the contest ends, and
+  the takeovers it made stand: which of the two is the thief is what the
+  contest has not decided.
+- **This machine out**: it serves and hears nothing but rosters and
+  signed word on its links, and its human is asked whether to leave the
+  brotherhood. Leaving, and only that, lets every brother and its own
+  keys go. Restarted, it works the same out again from the words; a
+  later word that puts it back in puts it back in.
+- A plain `{"t":"cast_out"}` on a link is no word: it only says a roster
+  is worth asking for, and changes nothing by itself.
 
 ## `resolve`: whose a session is
 
 Input: the session's creator `origin`, every word held on it, and which
-keys are out. Output: its owner and number, the owner's keepers and
-how it came to own it, its ending if it ended, every
-brother that owned it along the chain, the words that can matter (the
-only ones kept), and the brothers that ran a copy whose word did not
-stand.
+keys are out. Output: its owner and number, the owner's keepers and how
+it came to own it, its ending if it ended, every brother that owned it
+along the chain, the words that can matter (the only ones kept), and the
+brothers that ran a copy whose word did not stand.
 
 1. **Genesis.** The chain starts at the creator's own `owns` with the
    lowest `n`, at most 1,000,000, naming nothing `after`. Nobody else
@@ -202,15 +325,16 @@ stand.
 7. **What is kept.** The genesis; at each number the owner's keeper word
    with the highest `v`; at each step the best two candidates of each
    rank (with the `owns` acknowledging each) and every recall by the
-   owner before it, eight at most (the lowest); the ending. Nothing else
+   owner before it, 32 at most (the lowest); the ending. Nothing else
    is kept nor passed on.
 8. **Copies.** A brother made owner by a candidate that lost, at rank 0
    or 1, other than the brother that won, ran a copy that does not stand.
 
 ## Holding and dropping (`believe`, `prune`)
 
-- A brother takes in new words, then works out `standing` and every
-  session the new words speak of, and keeps only what `resolve` kept.
+- A brother takes in new words, then works out the tree, `standing` and
+  every session the new words speak of, and keeps only what `resolve`
+  kept.
 - A session whose creator's genesis is not held yet is not held: its
   words wait in no queue, they come again with the next roster.
 - **Bounds per creator.** Of the sessions one creator started that this
@@ -220,7 +344,9 @@ stand.
   highest key down. Which sessions are kept depends only on the words
   held, never on their order.
 - A creator takes no word on a session it created that it does not hold:
-  it knows its own sessions, and one it let go stays gone.
+  it knows its own sessions, and one it let go stays gone. Nor does it
+  start one it let go afresh: a session let go here is not this
+  machine's to bring back under its id.
 - **Pruning.** An ended session's owner and words go once every brother
   that may hold a copy of it (each brother that owned it along the chain,
   and each keeper any of them named) showed it heard the ending, or
@@ -229,13 +355,17 @@ stand.
   machine first saw it. Days count on this machine's clock from when it
   first saw the ending, never from the word's `at`. A session whose owner
   is out, live or ended, goes thirty days after this machine first saw it
-  so, unless a keeper took it over meanwhile. A session let go is
-  refused, whatever anyone says of it, for ninety days, as long as any
-  brother may still hold it to pass on.
+  so, unless a keeper took it over meanwhile.
+- **Tombstones.** A session let go is refused, whatever anyone says of
+  it, for as long as any brother in good standing has not shown it heard
+  (its roster ends or lets it go): a brother that slept through the
+  ending for a year must not bring it back. The brothers' showing is
+  kept beside the tombstone. At most 4096 tombstones per creator are
+  kept (the oldest go first), and none past two years.
 - A session the brother that owns it here lists as let go (`let_go`),
   in a roster over its own link, is let go here too: only an owner that
   ended it lets it go, and so a brother that slept through the ending
-  does not keep it as live.
+  does not keep it as live, and shows it heard.
 - Pruning, the bounds and the notes are this machine's own. Two brothers
   that hold the same words agree; pruning only ever drops words, and
   what it drops was over.
@@ -245,12 +375,17 @@ stand.
 - **Starting** a session signs its genesis, naming this machine's keepers
   (its book's, less any it lets only watch and any out or contested).
 - **Handing** session `s` at `n` to `B` signs `hands` at `n` + 1, with an
-  `at` past any handoff of `s` it signed before, keeps it in `pending`,
-  and sends it in the bundle with every word held on `s`. Only when `B`
-  says it took it is the same word taken in here. A handoff that fails
-  is recalled by a `recalls` naming that very word; the next try is a new
-  word and counts. A `pending` handoff left from before this process
-  started (the process that drove it is gone) is recalled.
+  `at` past any handoff of `s` it signed before, keeps it in `pending`
+  with this machine's clock, and sends it in the bundle with every word
+  held on `s`. Only when `B` says it took it is the same word taken in
+  here. A handoff that fails is recalled by a `recalls` naming that very
+  word; the next try is a new word and counts.
+- **A handoff left by a process that is gone** (the app restarted, or
+  reloaded, while it was in flight) is settled from the words: once the
+  receiver's acknowledgement is held, the handoff is taken in, as if the
+  process had seen it land; while it is not, the handoff is recalled
+  only ten minutes after it was signed, so a bundle still landing is not
+  cut from under its receiver.
 - **Receiving** checks, before the bundle lands, that the handoff was not
   recalled and that no other brother acknowledged a handoff at that
   number, then signs `owns` at `n` + 1 with its own keepers.
@@ -259,21 +394,43 @@ stand.
   others.
 - **Taking over** from `O` at `n` signs `takes` at `n` + 1, only while
   `O` still owns the session under the number the snapshot was cut at,
-  names this machine among its keepers at that number, never ended it, and no brother linked now lists it.
+  names this machine among its keepers at that number, never ended it,
+  and no brother linked now lists it.
+- **Taking over by itself** (the owner's switch) needs more: positive
+  word that the owner is gone. The owner is silent on this machine's own
+  link past the switch's time, the relay does not list it connected,
+  and no brother linked here now says in its own signed entry that it is
+  linked to the owner. A relay that drops only the frames between the
+  owner and this keeper starts no takeover.
 - **Ending** signs `ended` at its number.
-- **Casting out** signs `cast_out`, and a human seeing a contest is asked
-  once whether to cast out one of the two.
+- **Joining** by a code signs `admits` of the other, and pins the root
+  (above). A key the brother joined under before is **retired**, not
+  cast out: the human set the machine up anew, so those let in through it
+  stay. The human is told that if the old machine may be in a thief's
+  hands, it is to be cast out instead, its line with it.
+- **Casting out** signs `cast_out`. A human is shown, before saying yes,
+  the brothers that go with it (its line), and told when this machine
+  came in through it. A human seeing a contest is asked once whether to
+  cast out one of the two: the head of the other line, never one that
+  would name this machine's own line's head on a thief's word.
 
 ## The invariants
 
-Each is checked by the simulator after every step, and each finding of
-the four reviews has a scenario of its own.
+Each is checked by the simulations after every step, and each finding of
+the five reviews has a scenario of its own.
 
+- **I0, identity.** The key every honest brother holds for an honest
+  brother is that brother's own key, unless that brother's human set it
+  up anew and a human here said yes to its new key. No word, no entry,
+  no relay, and no number of stolen brothers and fakes change it.
 - **I1, agreement.** Two honest brothers that hold the same keys and the
-  same words agree on every session's owner, number, keepers and
-  ending, and on the out and contested keys, whatever order the words
-  came in. Holds because `resolve` and `standing` are functions of the
-  word set, and what is kept is chosen by them alone.
+  same words, and pinned the same root, agree on every session's owner,
+  number, keepers and ending, on the members and their lines, and on the
+  out and contested keys (and so on whom each treats as dropped, and
+  whether each is itself out), whatever order the words came in. Holds
+  because the tree, `resolve` and `standing` are functions of the word
+  set and the root, what is kept is chosen by them alone, and nothing
+  that decides is stored apart from the words.
 - **I2, no fencing by those without the right.** A live session run by
   an honest owner never moves away from it by anything signed or replayed
   by a brother that is not its keeper at its number: one it never named,
@@ -283,25 +440,36 @@ the four reviews has a scenario of its own.
   `takes` by a keeper its newest keeper word names under a key that is not
   out, owners name no contested or out key, and words are signed. The one
   way an honest owner's session moves without its word is a takeover by a
-  keeper it names, which is what naming a keeper allows.
+  keeper it names, which is what naming a keeper allows; a keeper taking
+  over by itself does so only on positive word that the owner is gone.
 - **I3, one owner.** Every session held has exactly one owner, and no two
   honest brothers both run it acknowledged at the same time once they
   heard each other's words: the owner is one brother, and a brother whose
   copy lost is told. A session is never left with nobody able to run it
-  by a recalled or failed handoff: a recall puts it back on its sender.
-- **I4, cast out stays out.** Once a human on any honest brother that is
-  in casts brother `X` out, `X` has no control on any brother once they
-  hold that word, whatever `X` signed before or after: `X` is out, or
-  contested when it cast that brother out too.
+  by a recalled or failed handoff: a recall puts it back on its sender. A
+  restart never recalls a handoff that landed.
+- **I4, cast out stays out.** Once a human on an honest brother that is
+  in casts brother `X` out, `X` and every fake it let in have no control
+  on any honest brother once they hold that word, whatever `X` and its
+  fakes signed before or after: `X` is out, or contested when it cast
+  that brother out too, and then out once a human on a brother of a
+  second line casts it out as well.
 - **I5, bounded.** No brother can make an honest one hold more than the
   bounds above (sessions per creator, words per creator, words per
-  session, cast outs per signer), nor send a frame past 1 MB: rosters go
-  in parts of at most 256 KB, and no word is longer than a part.
+  session, admissions and cast outs per signer, members, tombstones), nor
+  send a frame past 1 MB: rosters go in parts of at most 256 KB, and no
+  word is longer than a part.
 - **I6, no honest dead end.** In honest use (many sessions, Warriv, failed
-  handoffs retried, brothers asleep, upgrades) nothing gets stuck: a
-  recalled handoff can be tried again to the same brother and lands, a
-  session can always be ended, and every ended session is pruned in the
-  end.
+  handoffs retried, brothers asleep for months, restarts and reloads
+  mid-handoff, upgrades) nothing gets stuck: a recalled handoff can be
+  tried again to the same brother and lands, a session can always be
+  ended, every ended session is pruned in the end, and no ended session
+  comes back.
+- **R, recovery.** Once the humans have answered every stolen brother
+  (cast it out from brothers of two lines), every honest brother not in
+  a stolen one's line is in, holds every other under its own key, links
+  to every other with control as its switches say, and nothing a
+  stolen brother or the relay did before is left in force.
 
 ## What is not promised
 
@@ -310,20 +478,45 @@ the four reviews has a scenario of its own.
 - An owner that changes its keepers while a keeper it drops is taking
   over decides that race for itself: the newest keeper word stands, so
   the takeover does not, and the taker's copy is told it ran twice.
-- A brother that rejoined with a new key is followed under the old key
-  only by brothers that held the old key. A brother that never held it
-  cannot check those words and does not follow sessions started under it.
-- A thief that casts out every brother before anyone casts it out puts
-  every brother out, and each drops the others, until a human acts:
-  casting the thief out from one machine makes the two contested and the
-  rest in again, from two the thief is out. Brothers already dropped come
-  back by joining again.
-- A thief with an accomplice it let in can keep a brother's word against
-  it from counting: the accomplice casts that brother out, and while the
-  two are contested that brother's other cast outs count no more. A
-  second human casting either of them out decides it.
-- A brother dropped here because its key was out comes back when its
-  human asks to join again.
+- A thief that casts out brothers before any human casts it out puts
+  them out until a human acts: casting the thief out from one machine
+  makes the two contested and the rest in again, from brothers of two
+  lines the thief is out.
+- **Lines are voices.** Brothers that came in through the same brother
+  are one voice against a thief that cast that brother out, as a
+  thief's fakes are one voice: from the words the two cannot be told
+  apart. So while one human has answered a thief, both of their lines
+  are contested; a second line (or a brother of the thief's own line)
+  decides. One of the brotherhood's first two machines stolen, with
+  nobody let in through it but its fakes and every honest brother let in
+  through the other, leaves no second line: every brother stays
+  contested until the brotherhood is set up anew. Joining some brother
+  through each of the first two gives that line.
+- **Two machines really stolen.** Two stolen brothers of two lines, each
+  let in by a human, are two voices: together they can hold a contest
+  against one honest line, or put an honest brother out that only one
+  line answers for, until a human on a third line decides.
+- A brother that came in only through a brother that is out goes with it,
+  honest or not: from the words it cannot be told from a fake. Its human
+  joins it again by a code from a brother in, which gives it a line of
+  its own.
+- A relay that hides an owner from a keeper entirely (drops every frame
+  between them, lists the owner as gone, and drops every brother's
+  roster that says it is linked to the owner) can make a keeper that
+  takes over by itself do so. A keeper the human asks to take over does
+  what the human says.
+- A brother whose key was replaced by a human is followed under its old
+  key only by brothers that held the old key. A brother that never held
+  it cannot check those words and does not follow sessions started under
+  it.
+- Two brotherhoods joined by a code between one brother of each are
+  linked through those two: each side's tree does not hold the other's
+  brothers, who join by codes of their own.
+- A machine joined by a code to a thief pins what the thief says is the
+  root, and is in the thief's line.
+- More than 256 members: the members furthest from the root are not
+  held. A thief can fill places as far from the root as its fakes are,
+  never closer.
 
 ## The relay and tokens
 
@@ -339,9 +532,13 @@ the four reviews has a scenario of its own.
 
 ## Upgrading
 
-The words changed in 0.35 (`"horadric said v4"`). No released Horadric
-ever held a roster (0.32 is the newest release; machines that ran 0.33
-and 0.34 builds were development machines, and none of them holds a
-`roster.json` today), so a `roster.json` from before is started anew:
-its words and owners go, and each machine signs a genesis for every
-session it runs. Brothers, keys, cast out keys and entries stay.
+The words changed in 0.35 (`"horadric said v5"`, which added admissions
+and `retired`). No released Horadric ever held a roster (0.32 is the
+newest release; machines that ran 0.33 and 0.34 builds, and 0.35 builds
+before admissions, were development machines). A `roster.json` from
+before is started anew: its words and owners go, and each machine signs
+a genesis for every session it runs. Brothers, keys, entries and the
+human's switches stay, and so does every cast out its human made: the
+machine signs each again (`standing.json` keeps them). A machine with
+brothers and no root pins its own key and every key it holds, and signs
+an `admits` of each brother its human let in.
