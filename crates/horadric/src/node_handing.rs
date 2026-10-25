@@ -210,6 +210,7 @@ impl Machine {
                         .unwrap_or_default(),
                     plain: repo.is_none() && dir.is_dir(),
                     from: self.called_by(&o.to),
+                    answer: None,
                 };
                 let ask = bases_ask_placing(id, &repo.unwrap_or_default(), &place);
                 self.hand.outbox.push((o.to.clone(), ask));

@@ -271,6 +271,30 @@ pub struct PlaceAsk {
     /// carry.
     #[serde(default)]
     pub from: String,
+    /// What the sender's human answered the receiver's [`Offer`], so no
+    /// one has to be at the receiver to answer it. A receiver from before
+    /// this ignores it and waits for its own human.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer: Option<Answer>,
+}
+
+/// The sender's human's answer to where a project goes on the receiver.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Answer {
+    /// Clone it where the receiver offered.
+    Clone,
+    /// Do not hand it off.
+    Refuse,
+}
+
+/// Where a receiver without a checkout would clone the project, sent back
+/// while its human decides, for the sender's human to answer instead.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Offer {
+    pub url: String,
+    /// The folder on the receiver the clone goes into.
+    pub dest: String,
 }
 
 /// [`bases_ask`] with what a receiver without a checkout asks its human.
@@ -297,6 +321,22 @@ pub fn asks_placing(msg: &Value) -> bool {
 /// The receiver's answer while its human decides where the project goes.
 pub fn bases_placing(id: &str) -> Value {
     json!({"t": "bases", "id": id, "commits": [], "found": false, "placing": true})
+}
+
+/// [`bases_placing`] with the clone the receiver's human is offered, for
+/// the sender's human to answer as well.
+pub fn bases_placing_offer(id: &str, offer: Option<&Offer>) -> Value {
+    let mut answer = bases_placing(id);
+    if let Some(offer) = offer {
+        answer["offer"] = serde_json::to_value(offer).unwrap_or(Value::Null);
+    }
+    answer
+}
+
+/// The clone a [`bases_placing_offer`] offers, None when the receiver's
+/// human is offered none, or is no longer asked.
+pub fn heard_offer(msg: &Value) -> Option<Offer> {
+    serde_json::from_value(msg.get("offer")?.clone()).ok()
 }
 
 /// The receiver's answer once its human said no, or the clone failed.
@@ -738,6 +778,36 @@ mod tests {
     }
 
     #[test]
+    fn the_senders_answer_travels_with_the_ask() {
+        let mut place = PlaceAsk {
+            url: Some("git@h:a/b.git".into()),
+            ..Default::default()
+        };
+        let ask = bases_ask_placing("s1", &RepoId::default(), &place);
+        assert!(ask["place"].get("answer").is_none());
+        place.answer = Some(Answer::Clone);
+        let ask = bases_ask_placing("s1", &RepoId::default(), &place);
+        assert_eq!(ask["place"]["answer"], "clone");
+        assert_eq!(heard_place(&ask).unwrap().answer, Some(Answer::Clone));
+        place.answer = Some(Answer::Refuse);
+        let ask = bases_ask_placing("s1", &RepoId::default(), &place);
+        assert_eq!(heard_place(&ask).unwrap().answer, Some(Answer::Refuse));
+    }
+
+    #[test]
+    fn the_receivers_offer_travels_with_its_placing_answer() {
+        let offer = Offer {
+            url: "git@h:a/b.git".into(),
+            dest: "/code/b".into(),
+        };
+        let answer = bases_placing_offer("s1", Some(&offer));
+        assert!(heard_placing(&answer));
+        assert_eq!(heard_offer(&answer), Some(offer));
+        assert_eq!(heard_offer(&bases_placing_offer("s1", None)), None);
+        assert_eq!(heard_offer(&bases_placing("s1")), None);
+    }
+
+    #[test]
     fn what_to_ask_a_human_travels_with_the_ask() {
         let place = PlaceAsk {
             url: Some("git@h:a/b.git".into()),
@@ -745,6 +815,7 @@ mod tests {
             folder: "b".into(),
             plain: false,
             from: "Laptop".into(),
+            answer: None,
         };
         let ask = bases_ask_placing("s1", &RepoId::default(), &place);
         assert_eq!(heard_place(&ask), Some(place));

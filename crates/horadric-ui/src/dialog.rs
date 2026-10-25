@@ -95,9 +95,21 @@ pub fn register_class() -> Result<()> {
 
 /// Asks, and returns the button pressed. None when dismissed.
 pub fn show(gpu: &Gpu, metrics: &Metrics, d: &Dialog) -> Option<usize> {
+    show_opened(gpu, metrics, d, |_| {})
+}
+
+/// [`show`], telling `opened` its window once it shows, for a caller that
+/// may have to close it from elsewhere with `WM_CLOSE`.
+pub fn show_opened(
+    gpu: &Gpu,
+    metrics: &Metrics,
+    d: &Dialog,
+    opened: impl FnOnce(HWND),
+) -> Option<usize> {
     let popup = Popup::open(gpu, metrics, d)
         .map_err(|e| eprintln!("horadric: cannot ask \"{}\": {e}", d.title))
         .ok()?;
+    opened(popup.hwnd.get());
     let mut msg = MSG::default();
     while popup.outcome.get().is_none() {
         let got = unsafe { GetMessageW(&mut msg, None, 0, 0) };

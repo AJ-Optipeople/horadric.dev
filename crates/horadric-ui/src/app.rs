@@ -2251,8 +2251,13 @@ fn offer_update(m: &Manifest) {
 /// Asks with buttons, outside the app's borrow: the dialog runs a modal
 /// loop that dispatches the app's messages. The button pressed, if one was.
 pub(crate) fn ask(d: &Dialog) -> Option<usize> {
+    ask_opened(d, |_| {})
+}
+
+/// [`ask`], telling `opened` the dialog's window once it shows.
+pub(crate) fn ask_opened(d: &Dialog, opened: impl FnOnce(HWND)) -> Option<usize> {
     let shared = with_app(|app| Rc::clone(&app.shared))?;
-    dialog::show(&shared.gpu, &shared.metrics, d)
+    dialog::show_opened(&shared.gpu, &shared.metrics, d, opened)
 }
 
 /// Asks beside the cluster of project `key`, outside the app's borrow: the

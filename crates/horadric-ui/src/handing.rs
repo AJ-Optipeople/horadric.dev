@@ -31,8 +31,8 @@ use std::sync::Mutex;
 use std::time::{Duration, SystemTime};
 
 use horadric_core::handing::{
-    self, bases_answer, bases_ask_placing, bases_placing, bases_refused, between_turns, refused,
-    took_message, Arriving, Do, Landed, Outgoing, PlaceAsk,
+    self, bases_answer, bases_ask_placing, bases_placing, bases_placing_offer, bases_refused,
+    between_turns, refused, took_message, Answer, Arriving, Do, Landed, Offer, Outgoing, PlaceAsk,
 };
 use horadric_core::handoff::{self, moved_line, moved_plain_line, split, Record, RepoId};
 use horadric_core::placing::{self, Placement};
@@ -42,7 +42,7 @@ use horadric_core::Agent;
 use horadric_hooks::listener::RecallCall;
 use serde_json::{json, Value};
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
-use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
+use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_CLOSE};
 
 use super::{unix_now, with_app, App, WM_HORADRIC_FAR, WM_HORADRIC_PLACE};
 use crate::dialog::{Dialog, Tone};
@@ -71,8 +71,11 @@ struct Landing {
 /// Where a project this PC has no checkout of goes, as its human said.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Place {
-    /// The human is asked, or the clone runs.
-    Asking,
+    /// The human is asked, offered this clone if a clone can be offered.
+    Asking(Option<Offer>),
+    /// A human answered, here or at the sender, and the clone runs or the
+    /// picked folder is readied.
+    Readying,
     /// It goes here: a checkout of the project, or for a plain copy a new
     /// or empty folder.
     Ready(PathBuf),
@@ -103,7 +106,9 @@ fn set_place(id: &str, place: Place) {
 /// How many places are being asked about or readied now.
 fn asking() -> usize {
     PLACING.lock().map_or(usize::MAX, |p| {
-        p.iter().filter(|(_, p, _)| *p == Place::Asking).count()
+        p.iter()
+            .filter(|(_, p, _)| matches!(p, Place::Asking(_) | Place::Readying))
+            .count()
     })
 }
 
@@ -120,6 +125,54 @@ struct Question {
     from: String,
     ask: PlaceAsk,
     repo: RepoId,
+    offer: Option<Offer>,
+}
+
+/// The same question on the sender, for its human to answer in place of
+/// the receiver's: clone where the receiver offered, or refuse.
+struct Offered {
+    id: String,
+    /// The receiver, by name.
+    to: String,
+    name: String,
+    offer: Offer,
+}
+
+/// Questions for the sender's human, waiting for the UI thread outside
+/// the app's borrow like [`QUESTIONS`].
+static OFFERED: Mutex<Vec<Offered>> = Mutex::new(Vec::new());
+
+/// The window of each place question on screen, by `in:` or `out:` and
+/// the session's id, so the side that did not answer can close its own
+/// once the other did. By window, not title: two sessions' questions can
+/// read the same.
+static ON_SCREEN: Mutex<Vec<(String, isize)>> = Mutex::new(Vec::new());
+
+/// Asks with `d`, kept in [`ON_SCREEN`] under `key` while it shows.
+fn ask_closable(key: &str, d: &Dialog) -> Option<usize> {
+    let pressed = super::ask_opened(d, |hwnd| {
+        if let Ok(mut s) = ON_SCREEN.lock() {
+            s.push((key.to_string(), hwnd.0 as isize));
+        }
+    });
+    if let Ok(mut s) = ON_SCREEN.lock() {
+        s.retain(|(k, _)| k != key);
+    }
+    pressed
+}
+
+/// Closes the place question under `key` if it is on screen, as Esc
+/// would. Its asker then sees the place already answered and lets it be.
+fn close_question(key: &str) {
+    let hwnd = ON_SCREEN
+        .lock()
+        .ok()
+        .and_then(|s| s.iter().find(|(k, _)| k == key).map(|(_, h)| *h));
+    if let Some(hwnd) = hwnd {
+        unsafe {
+            let _ = PostMessageW(Some(HWND(hwnd as *mut _)), WM_CLOSE, WPARAM(0), LPARAM(0));
+        }
+    }
 }
 
 /// Questions waiting for the UI thread outside the app's borrow, since a
@@ -161,6 +214,9 @@ struct State {
     /// Each outgoing session's ask for commits, made once since the
     /// sender asks again and again while the receiver's human decides.
     asks: HashMap<String, Value>,
+    /// Outgoing sessions whose receiver's clone offer this PC's human was
+    /// asked about, so it is asked once.
+    offered: HashSet<String>,
     /// Brothers' sessions this PC asked their owner to hand on, by the
     /// tile's id here, to say why when the owner refuses.
     asked: HashMap<String, String>,
@@ -588,6 +644,11 @@ impl App {
     }
 
     fn handing_do(&mut self, id: &str, o: &Outgoing, step: Do) {
+        if matches!(step, Do::Pack { .. } | Do::LetGo(_) | Do::Fail(_))
+            && with(|s| s.offered.remove(id))
+        {
+            close_question(&format!("out:{id}"));
+        }
         match step {
             Do::Wait => {}
             // Esc stops a turn in Claude Code, as the human would.
@@ -662,6 +723,7 @@ impl App {
             folder,
             plain: repo.is_none() && dir.is_dir(),
             from: crate::portal_pair::pc_name(),
+            answer: None,
         };
         bases_ask_placing(id, &repo.unwrap_or_default(), &place)
     }
@@ -847,6 +909,7 @@ impl App {
                 (known, true) => o.heard_bases(known),
                 _ if handing::heard_placing(msg) => {
                     o.heard_placing(unix_now());
+                    self.heard_offer(&id, name, handing::heard_offer(msg));
                     Do::Wait
                 }
                 (_, false) if matches!(o.stage, handing::Stage::Bases(_)) || o.placing() => {
@@ -868,6 +931,56 @@ impl App {
         with(|s| s.out.insert(id.clone(), o.clone()));
         self.handing_do(&id, &o, step);
         true
+    }
+
+    /// The receiver of session `id`, `to` by name, offers to clone its
+    /// project: asks this PC's human too, once, so no one has to be at
+    /// the receiver. No offer any more means a human answered there, and
+    /// the question here goes.
+    fn heard_offer(&mut self, id: &str, to: &str, offer: Option<Offer>) {
+        let Some(offer) = offer else {
+            if with(|s| s.offered.contains(id)) {
+                close_question(&format!("out:{id}"));
+            }
+            return;
+        };
+        if !with(|s| s.offered.insert(id.to_string())) {
+            return;
+        }
+        let name = with(|s| s.asks.get(id).map(|a| a["place"]["name"].clone()))
+            .and_then(|n| n.as_str().map(str::to_string))
+            .unwrap_or_default();
+        if let Ok(mut o) = OFFERED.lock() {
+            o.push(Offered {
+                id: id.to_string(),
+                to: to.to_string(),
+                name,
+                offer,
+            });
+        }
+        unsafe {
+            let _ = PostMessageW(Some(self.notify), WM_HORADRIC_PLACE, WPARAM(0), LPARAM(0));
+        }
+    }
+
+    /// This PC's human answered the receiver's question about session
+    /// `id`: the answer goes with the ask at once and every time after.
+    /// Refused, the handoff ends here as well.
+    fn answer_offer(&mut self, id: &str, answer: Answer) {
+        let Some(o) = with(|s| s.out.get(id).cloned()).filter(Outgoing::placing) else {
+            return;
+        };
+        let Some(ask) = with(|s| {
+            let ask = s.asks.get_mut(id)?;
+            ask["place"]["answer"] = serde_json::to_value(answer).ok()?;
+            Some(ask.clone())
+        }) else {
+            return;
+        };
+        self.far_tell(&o.to, ask);
+        if answer == Answer::Refuse {
+            self.handing_do(id, &o, Do::Fail("refused here".into()));
+        }
     }
 
     /// Serves a brother's `bases` ask or `bundle` part from `who`: a job
@@ -1024,28 +1137,84 @@ impl App {
                 drop_place(&id);
                 Box::new(move || bases_refused(&id, &why))
             }
-            Some(Place::Asking) => Box::new(move || bases_placing(&id)),
+            // The sender's human answered for this one.
+            Some(Place::Asking(offer)) if ask.answer.is_some() => {
+                let key = format!("in:{id}");
+                let unasked = |id: &str| {
+                    if let Ok(mut q) = QUESTIONS.lock() {
+                        q.retain(|q| q.id != id);
+                    }
+                    close_question(&key);
+                };
+                match (ask.answer, offer) {
+                    (Some(Answer::Clone), Some(offer)) => {
+                        set_place(&id, Place::Readying);
+                        unasked(&id);
+                        let said = Said::Clone(offer.url.clone(), PathBuf::from(&offer.dest));
+                        let q = Question {
+                            id: id.clone(),
+                            from: who.to_string(),
+                            ask,
+                            repo,
+                            offer: Some(offer),
+                        };
+                        place_on_thread(q, said, self.notify.0 as isize);
+                        Box::new(move || bases_placing(&id))
+                    }
+                    (Some(Answer::Refuse), _) => {
+                        drop_place(&id);
+                        unasked(&id);
+                        Box::new(move || bases_refused(&id, "its sender said no"))
+                    }
+                    // A clone this PC never offered: its own human decides.
+                    (_, offer) => Box::new(move || bases_placing_offer(&id, offer.as_ref())),
+                }
+            }
+            Some(Place::Asking(offer)) => {
+                Box::new(move || bases_placing_offer(&id, offer.as_ref()))
+            }
+            Some(Place::Readying) => Box::new(move || bases_placing(&id)),
             // As many questions as the human can answer at once: the
             // sender asks again every few seconds, so one more waits its
             // turn rather than piling a dialog on the screen.
             None if asking() >= placing::MOST_PLACING => Box::new(move || bases_placing(&id)),
             None => {
-                set_place(&id, Place::Asking);
+                let offer = self.clone_offer(&ask);
+                set_place(&id, Place::Asking(offer.clone()));
+                let answer = bases_placing_offer(&id, offer.as_ref());
                 if let Ok(mut q) = QUESTIONS.lock() {
                     q.push(Question {
                         id: id.clone(),
                         from: who.to_string(),
                         ask,
                         repo,
+                        offer,
                     });
                 }
                 unsafe {
                     let _ =
                         PostMessageW(Some(self.notify), WM_HORADRIC_PLACE, WPARAM(0), LPARAM(0));
                 }
-                Box::new(move || bases_placing(&id))
+                Box::new(move || answer)
             }
         }
+    }
+
+    /// Where this PC would clone the project `ask` places: beside its
+    /// other checkouts, in a folder named for the clone. None for a plain
+    /// folder, without a remote that may be cloned, or with nowhere to
+    /// put it.
+    fn clone_offer(&self, ask: &PlaceAsk) -> Option<Offer> {
+        let url = ask
+            .url
+            .as_ref()
+            .filter(|u| !ask.plain && placing::cloneable(u))?;
+        let parent = checkouts_parent(&self.recent)?;
+        let dest = placing::free_folder(&parent, &name_for(ask), |f| Path::new(f).exists());
+        Some(Offer {
+            url: url.clone(),
+            dest,
+        })
     }
 
     /// Takes in a handed off or taken over session that has landed: a
@@ -1138,22 +1307,64 @@ enum Said {
     Clone(String, PathBuf),
     Folder(PathBuf),
     No,
+    /// The sender's human answered first.
+    Elsewhere,
 }
 
 /// Asks the human where each arriving project goes, outside the app's
 /// borrow: clone it beside the other checkouts, or pick a folder; with no
 /// remote, only a folder. Then clones, starts or makes it on a thread and
-/// says it is ready, which the sender's next ask hears.
+/// says it is ready, which the sender's next ask hears. Asks the sender's
+/// human too, offered the same clone.
 pub(super) fn place_ask(hwnd: HWND) {
     let questions = QUESTIONS
         .lock()
         .map(|mut q| std::mem::take(&mut *q))
         .unwrap_or_default();
     for q in questions {
-        match ask_place(hwnd, &q) {
-            Said::No => set_place(&q.id, Place::No("its human said no".into())),
-            said => place_on_thread(q, said),
+        // Answered at the sender while an earlier question was showing.
+        if !matches!(place_of(&q.id), Some(Place::Asking(_))) {
+            continue;
         }
+        match ask_place(hwnd, &q) {
+            Said::Elsewhere => {}
+            Said::No => set_place(&q.id, Place::No("its human said no".into())),
+            said => place_on_thread(q, said, hwnd.0 as isize),
+        }
+    }
+    let offered = OFFERED
+        .lock()
+        .map(|mut o| std::mem::take(&mut *o))
+        .unwrap_or_default();
+    for o in offered {
+        let answer = match ask_offered(&o) {
+            Some(0) => Answer::Clone,
+            Some(2) => Answer::Refuse,
+            Some(_) => continue,
+            // Gone without an answer, as a click elsewhere does: asked
+            // again while the receiver still offers it, and not once it
+            // has answered there.
+            None => {
+                with(|s| s.offered.remove(&o.id));
+                continue;
+            }
+        };
+        with_app(|app| app.answer_offer(&o.id, answer));
+    }
+}
+
+/// Takes the question of session `id` for an answer given here, unless
+/// the sender's human answered it first.
+fn claim(id: &str) -> bool {
+    let Ok(mut p) = PLACING.lock() else {
+        return false;
+    };
+    match p.iter_mut().find(|(i, _, _)| i == id) {
+        Some(entry) if matches!(entry.1, Place::Asking(_)) => {
+            entry.1 = Place::Readying;
+            true
+        }
+        _ => false,
     }
 }
 
@@ -1166,48 +1377,57 @@ fn name_for(ask: &PlaceAsk) -> String {
         .unwrap_or_else(|| placing::folder_name(&ask.folder))
 }
 
-fn ask_place(hwnd: HWND, q: &Question) -> Said {
-    let recent = with_app(|app| app.recent.clone()).unwrap_or_default();
+/// The folder this PC's checkouts are in, where a clone goes beside them.
+fn checkouts_parent(recent: &[String]) -> Option<String> {
     let recent: Vec<String> = recent
-        .into_iter()
+        .iter()
         .filter(|r| Path::new(r).is_dir())
+        .cloned()
         .collect();
     let home = std::env::var("USERPROFILE").ok();
-    let parent = placing::checkouts_parent(&recent, home.as_deref(), |p| Path::new(p).is_dir());
-    let session = if q.ask.name.is_empty() {
+    placing::checkouts_parent(&recent, home.as_deref(), |p| Path::new(p).is_dir())
+}
+
+/// How a place question names the session that comes.
+fn session_named(name: &str) -> String {
+    if name.is_empty() {
         "a session".to_string()
     } else {
-        format!("\u{201C}{}\u{201D}", q.ask.name)
-    };
+        format!("\u{201C}{name}\u{201D}")
+    }
+}
+
+fn ask_place(hwnd: HWND, q: &Question) -> Said {
+    let recent = with_app(|app| app.recent.clone()).unwrap_or_default();
+    let start = checkouts_parent(&recent).map(PathBuf::from);
     let from = if q.ask.from.is_empty() {
         &q.from
     } else {
         &q.ask.from
     };
-    let title = format!("{from} hands {session} to this PC");
-    let start = parent.clone().map(PathBuf::from);
-    match (&q.ask.url, &parent) {
-        (Some(url), Some(parent)) if !q.ask.plain && placing::cloneable(url) => {
-            let dest = placing::free_folder(parent, &name_for(&q.ask), |f| Path::new(f).exists());
+    let title = format!("{from} hands {} to this PC", session_named(&q.ask.name));
+    let key = format!("in:{}", q.id);
+    let (pressed, picks) = match &q.offer {
+        Some(offer) => {
             let text = format!(
-                "This PC has no checkout of its project. Clone {url} into {dest}?\n\n\
-                 Or pick a folder: one that holds the project already, or where it should go."
+                "This PC has no checkout of its project. Clone {} into {}?\n\n\
+                 Or pick a folder: one that holds the project already, or where it should go.",
+                offer.url, offer.dest
             );
-            let pressed = super::ask(&Dialog {
-                tone: Tone::Question,
-                title: &title,
-                text: &text,
-                buttons: &["Clone", "Pick a folder", "Refuse"],
-                default: 0,
-                check: None,
-            });
-            match pressed {
-                Some(0) => Said::Clone(url.clone(), PathBuf::from(dest)),
-                Some(1) => pick(hwnd, start.as_deref()),
-                _ => Said::No,
-            }
+            let pressed = ask_closable(
+                &key,
+                &Dialog {
+                    tone: Tone::Question,
+                    title: &title,
+                    text: &text,
+                    buttons: &["Clone", "Pick a folder", "Refuse"],
+                    default: 0,
+                    check: None,
+                },
+            );
+            (pressed, 1)
         }
-        _ => {
+        None => {
             let text = if q.ask.plain {
                 "Its folder has no git, so it comes as a copy of the folder's files. \
                  Pick a folder to put it in: an empty one, or one it gets a new folder inside."
@@ -1216,20 +1436,52 @@ fn ask_place(hwnd: HWND, q: &Question) -> Said {
                  clone. Pick a folder: one that holds the project already, or where its \
                  history should go."
             };
-            let pressed = super::ask(&Dialog {
-                tone: Tone::Question,
-                title: &title,
-                text,
-                buttons: &["Pick a folder", "Refuse"],
-                default: 0,
-                check: None,
-            });
-            match pressed {
-                Some(0) => pick(hwnd, start.as_deref()),
-                _ => Said::No,
-            }
+            let pressed = ask_closable(
+                &key,
+                &Dialog {
+                    tone: Tone::Question,
+                    title: &title,
+                    text,
+                    buttons: &["Pick a folder", "Refuse"],
+                    default: 0,
+                    check: None,
+                },
+            );
+            (pressed, 0)
         }
+    };
+    if !claim(&q.id) {
+        return Said::Elsewhere;
     }
+    match (pressed, &q.offer) {
+        (Some(0), Some(offer)) => Said::Clone(offer.url.clone(), PathBuf::from(&offer.dest)),
+        (Some(p), _) if p == picks => pick(hwnd, start.as_deref()),
+        _ => Said::No,
+    }
+}
+
+/// Asks the sender's human the receiver's question: clone the project
+/// where the receiver offered, or refuse. The button pressed, if one was.
+fn ask_offered(o: &Offered) -> Option<usize> {
+    let title = format!("{} has no checkout of {}", o.to, session_named(&o.name));
+    let text = format!(
+        "{to} is asking where its project goes. Clone {} into {} on {to}?\n\n\
+         Or leave it to someone at {to}, who can pick a folder there.",
+        o.offer.url,
+        o.offer.dest,
+        to = o.to
+    );
+    ask_closable(
+        &format!("out:{}", o.id),
+        &Dialog {
+            tone: Tone::Question,
+            title: &title,
+            text: &text,
+            buttons: &["Clone there", "Leave it", "Refuse"],
+            default: 0,
+            check: None,
+        },
+    )
 }
 
 fn pick(hwnd: HWND, start: Option<&Path>) -> Said {
@@ -1239,8 +1491,9 @@ fn pick(hwnd: HWND, start: Option<&Path>) -> Said {
 
 /// Readies the place the human chose on a thread, since a clone takes as
 /// long as the repository is large.
-fn place_on_thread(q: Question, said: Said) {
-    let notify = with_app(|app| app.notify.0 as isize).unwrap_or(0);
+/// `notify` is the app's window, passed in since this runs both inside
+/// the app's borrow and outside it.
+fn place_on_thread(q: Question, said: Said, notify: isize) {
     std::thread::spawn(move || {
         let place = match ready_place(&q, said) {
             Ok(dir) => Place::Ready(dir),
@@ -1258,7 +1511,7 @@ fn ready_place(q: &Question, said: Said) -> Result<PathBuf, String> {
             return Ok(dest);
         }
         Said::Folder(dir) => dir,
-        Said::No => return Err("its human said no".into()),
+        Said::No | Said::Elsewhere => return Err("its human said no".into()),
     };
     let wanted = (!q.ask.plain).then_some(&q.repo);
     let holds = placing::picked(&picked, wanted);
