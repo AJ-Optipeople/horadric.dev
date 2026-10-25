@@ -59,6 +59,7 @@ one. The registry is an `Arc<Mutex<Registry>>`, each console's grid an
 - [Performance](plan/performance.md): what is left of the UI thread performance pass.
 - [The agent's cursor](plan/the-agent-s-cursor.md): agents testing without taking the human's mouse. Proposed.
 - [The Brotherhood](plan/the-brotherhood.md): every machine with Horadric as one brotherhood, joined by a WorkOS login: each sees every session, hands sessions to another, takes over from one that falls silent, and shares one lore.
+- [Who owns a session](plan/brotherhood-ownership.md): the specification of the brotherhood's signed word, whose a session is and who is out, with the invariants its simulation checks.
 - [Secrets](plan/secrets.md): tokens for quests that push, call APIs or deploy.
 - [Identities](plan/identities.md): each project's gh, git, npm and Vercel logins, so no session switches another's account.
 - [Signals](plan/signals.md): what is left of the status line JSON, OpenTelemetry export, and OSC 9;4 progress from the agents.
