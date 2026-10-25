@@ -15,6 +15,8 @@ pub mod bench;
 pub mod brotherhood;
 #[cfg(test)]
 mod brotherhood_sim;
+#[cfg(test)]
+mod brotherhood_wired;
 pub mod brothers;
 pub mod checkpoint;
 pub mod chronicle;
