@@ -873,6 +873,19 @@ impl App {
                 );
                 false
             }
+            // A roster may say a session another lists is not its own any
+            // more: every brother's tiles are looked at again.
+            Heard::Other if msg["t"] == "roster" => {
+                let lists: Vec<(String, Vec<afar::Entry>)> = self
+                    .far
+                    .peers
+                    .iter()
+                    .map(|(k, p)| (k.clone(), p.list.clone()))
+                    .collect();
+                lists.into_iter().fold(false, |changed, (k, l)| {
+                    self.far_sessions(&k, &l) || changed
+                })
+            }
             Heard::Other => false,
         }
     }
@@ -881,6 +894,14 @@ impl App {
     /// lists. A session new here whose tile went elsewhere a moment before
     /// or after (a handoff) takes that tile's place.
     fn far_sessions(&mut self, name: &str, list: &[afar::Entry]) -> bool {
+        // What the roster says another owns now is shown there alone.
+        let (owners, held) = horadric_hooks::state_dir()
+            .map(|d| {
+                let held = crate::joining::Store::load(&d).is_some_and(|s| s.get(name).is_some());
+                (horadric_core::mesh::owners(&d), held)
+            })
+            .unwrap_or_default();
+        let list = &afar::shown_list(list, name, &owners, held);
         let now = SystemTime::now();
         let mut changed = false;
         let mut gone = Vec::new();

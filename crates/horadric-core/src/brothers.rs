@@ -493,8 +493,8 @@ impl Brothers {
         }
         let by = by.unwrap_or_else(|| "A brother".to_string());
         self.hands.human.tell(&format!(
-            "{by} cast this machine out of the brotherhood, and every brother refuses it now. \
-             To come back, join one of them again."
+            "{by} says this machine was cast out of the brotherhood, and every brother \
+             refuses it now. It comes back only when a brother asks it to join again."
         ));
     }
 
@@ -1380,7 +1380,7 @@ mod tests {
         let told = net.take_told();
         assert_eq!(told.len(), 1);
         assert!(
-            told[0].1.starts_with("Beta cast this machine out"),
+            told[0].1.starts_with("Beta says this machine was cast out"),
             "{told:?}"
         );
         assert!(net.sides[0].store().brothers.is_empty());

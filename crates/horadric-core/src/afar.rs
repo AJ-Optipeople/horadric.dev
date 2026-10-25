@@ -125,6 +125,23 @@ pub fn folds_into(
     (!key.is_empty() && held.get(id).map(String::as_str) == Some(key)).then(|| id.to_string())
 }
 
+/// What brother `peer` lists that is its to show: a session the roster says
+/// another brother owns now (taken over or handed on while `peer` was
+/// silent, its last list still kept) is shown there and not here too.
+/// `relay` says `peer` is a brother of the roster at all; a node reached
+/// only over `ssh` is not, and its list stands as it is.
+pub fn shown_list(
+    list: &[Entry],
+    peer: &str,
+    owners: &crate::brotherhood::Owners,
+    relay: bool,
+) -> Vec<Entry> {
+    list.iter()
+        .filter(|e| !relay || owners.get(&e.id).is_none_or(|o| o.brother == peer))
+        .cloned()
+        .collect()
+}
+
 /// The names to show for brothers, `(key, name)`, so two that share a name
 /// are told apart: each of those gets the start of its key beside it.
 pub fn distinct_names(named: &[(String, String)]) -> Vec<(String, String)> {
@@ -602,6 +619,35 @@ mod tests {
         assert_eq!(folds_into(&hello("r2", "K1"), &held), None);
         assert_eq!(folds_into(&hello("r1", ""), &held), None);
         assert_eq!(folds_into(&json!({"t": "hello"}), &held), None);
+    }
+
+    #[test]
+    fn a_session_another_brother_owns_now_is_shown_there_alone() {
+        let entry = |id: &str| Entry {
+            id: id.into(),
+            name: id.into(),
+            project: "p".into(),
+            phase: Phase::Idle,
+            line: String::new(),
+            paused: false,
+            since: None,
+            agent: None,
+            talked: true,
+        };
+        let list = vec![entry("s1"), entry("s2"), entry("s3")];
+        let owner = |b: &str| crate::brotherhood::Owner {
+            n: 2,
+            brother: b.into(),
+            since: 0,
+        };
+        let owners = crate::brotherhood::Owners::from([
+            ("s1".to_string(), owner("vps")),
+            ("s2".to_string(), owner("lap")),
+        ]);
+        let ids = |l: Vec<Entry>| l.into_iter().map(|e| e.id).collect::<Vec<_>>();
+        assert_eq!(ids(shown_list(&list, "lap", &owners, true)), ["s2", "s3"]);
+        // A node over ssh alone is no brother of the roster: all of it.
+        assert_eq!(ids(shown_list(&list, "node-x", &owners, false)).len(), 3);
     }
 
     #[test]

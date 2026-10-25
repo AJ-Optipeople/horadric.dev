@@ -176,8 +176,13 @@ pub fn start(secret: &str, send: Sender) -> u64 {
 /// The relay link went for good.
 pub fn stop(generation: u64) {
     let mut held = STATE.lock().unwrap_or_else(|e| e.into_inner());
-    if held.as_ref().is_some_and(|(g, _)| *g == generation) {
-        *held = None;
+    if let Some((g, b)) = held.as_mut() {
+        if *g == generation {
+            // Its links go with it, told as down: the reader's own word
+            // comes after this and finds no brothers to tell.
+            b.connected(false);
+            *held = None;
+        }
     }
 }
 

@@ -1134,7 +1134,10 @@ fn relayed(
             machine.called.remove(&ich);
         }
         relay::Said::Gone { id } => {
-            eprintln!("horadric node: {} was cast out", machine.shown(&id));
+            eprintln!(
+                "horadric node: {} is no brother of this node now",
+                machine.shown(&id)
+            );
             machine.kin.heard.remove(&id);
         }
         relay::Said::Moved { owners } => machine.keeping_moved(owners),
