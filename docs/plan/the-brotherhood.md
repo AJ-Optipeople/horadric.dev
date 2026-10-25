@@ -824,6 +824,21 @@ Each step is useful alone and each is verified before the next starts.
     too once its brother has been linked ten minutes without listing the
     session (one the keeper never saw listed included), and any store a
     month old. What a keeper spends on disk is capped (below).
+
+    Guarded since 56931e8: a keeper takes over only while its snapshot
+    is still the session's newest word in the roster
+    (`keeping::takeable`): its owner is the snapshot's brother under no
+    higher number, or another under a lower one. A store that outlived a
+    handoff (the keeper was restarting, or the owner fell silent within
+    the prune look) is refused and dropped, by the tile, by the
+    automatic takeover and by a node asked to take over, and asked
+    again after landing and in the same change that takes the number,
+    so a stale copy never fences the brother the session runs on now.
+    A brother told `takeover` takes it only from the session's owner or
+    a keeper that owner named (`mesh::may_claim`). Not yet guarded: a
+    claim arriving in a served roster's sessions, which the merge still
+    takes at the higher number. `horadric node keeper` asks the running
+    node to change its book, so only one process writes `keeping.json`.
 14. **The portable link.** `horadric-link`: ECDH, AES-GCM, random, the
     TLS WebSocket and HTTPS client, and a Windows test that CNG and it
     agree on keys, codes and sealed frames both ways.
