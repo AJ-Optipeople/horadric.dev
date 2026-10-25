@@ -1520,8 +1520,14 @@ fn tray_menu(hwnd: HWND) {
         Some(Choice::AutoTakeover(on)) => set_auto_takeover(on),
         Some(Choice::Control(id, on)) => set_control(&id, on),
         Some(Choice::CastOut(id, name)) => {
-            if confirm_cast_out(&name) {
+            let behind = crate::brothers::behind_only(&id);
+            if let Some(also) = confirm_cast_out(&name, &behind) {
                 cast_out(&id);
+                if also {
+                    for (b, _) in &behind {
+                        cast_out(b);
+                    }
+                }
             }
         }
         Some(Choice::Leave(to)) => {
@@ -3235,23 +3241,41 @@ fn set_control(id: &str, on: bool) {
 }
 
 /// Casting out cannot be undone, so it is asked first, Cancel the default.
-fn confirm_cast_out(name: &str) -> bool {
-    let text = format!(
-        "{name} will be refused from now on, by this PC and by every brother: \
-         it can no longer see or control any of them, and asking to join again \
-         is refused without a prompt.\n\n\
-         This cannot be undone. Only a brother asking {name} to join again \
-         lets it back in, with a new key."
-    );
+/// `behind` are the brothers only `name` stands behind, which a stolen
+/// machine could have let in: offered too, ticked, since a thief's
+/// brothers are its own. Gives whether to cast those out with it.
+fn confirm_cast_out(name: &str, behind: &[(String, String)]) -> Option<bool> {
+    let text = cast_out_text(name, behind);
+    let also = Cell::new(true);
     let pressed = ask(&Dialog {
         tone: Tone::Warning,
         title: &format!("Cast out {name}"),
         text: &text,
         buttons: &["Cast out", "Cancel"],
         default: 1,
-        check: None,
+        check: (!behind.is_empty()).then_some(("Cast them out too", &also)),
     });
-    pressed == Some(0)
+    (pressed == Some(0)).then(|| also.get() && !behind.is_empty())
+}
+
+/// What the cast out asks, naming the brothers only `name` stands behind.
+fn cast_out_text(name: &str, behind: &[(String, String)]) -> String {
+    let mut text = format!(
+        "{name} will be refused from now on, by this PC and by every brother: \
+         it can no longer see or control any of them, and asking to join again \
+         is refused without a prompt.\n\n\
+         This cannot be undone. Only a brother asking {name} to join again \
+         lets it back in, with a new key."
+    );
+    if !behind.is_empty() {
+        let names: Vec<&str> = behind.iter().map(|(_, n)| n.as_str()).collect();
+        text.push_str(&format!(
+            "\n\n{name} let in {}, which no other brother's human let in. \
+             If {name} was stolen, so may they be.",
+            names.join(", ")
+        ));
+    }
+    text
 }
 
 /// Casts the brother out: the brothers' state writes it where it lasts
@@ -6729,6 +6753,7 @@ impl App {
     /// updating the windows.
     fn forget(&mut self, id: &str) {
         // Every way a session goes for good comes through here.
+        self.keeping_ended(id);
         self.drop_turns(id);
         if let Some(c) = self.consoles.remove(id) {
             if c.exit_code().is_none() {
@@ -9551,6 +9576,19 @@ fn known(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_cast_out_names_the_brothers_only_the_outcast_let_in() {
+        let alone = cast_out_text("Laptop", &[]);
+        assert!(alone.starts_with("Laptop will be refused from now on"));
+        assert!(!alone.contains("let in"));
+        let behind = [
+            ("g".to_string(), "Ghost".to_string()),
+            ("v".to_string(), "vps".to_string()),
+        ];
+        let text = cast_out_text("Laptop", &behind);
+        assert!(text.contains("Laptop let in Ghost, vps, which no other brother's human let in."));
+    }
 
     #[test]
     fn the_mod_is_told_the_quest_and_files_shared_with_live_sessions() {

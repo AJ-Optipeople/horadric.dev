@@ -24,6 +24,15 @@ pub struct Standing {
     /// casting out cannot be undone, only a new PC joins again.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub outcast: BTreeMap<String, String>,
+    /// Brothers this PC's own human let in by a code, id to the key each
+    /// joined with. Never shrinks: who vouched for whom is what a cast out
+    /// later needs to know (see [`crate::brotherhood::Roster::behind_only`]).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub vouched: BTreeMap<String, String>,
+    /// Brothers this PC took a key for by introduction, id to the brother
+    /// whose word it took.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub took: BTreeMap<String, String>,
 }
 
 impl Standing {
@@ -35,12 +44,35 @@ impl Standing {
             .unwrap_or_default()
     }
 
+    /// Written whole and synced before it replaces the old one: a cast out
+    /// half written would let the outcast back.
     pub fn save(&self, dir: &Path) -> io::Result<()> {
         std::fs::create_dir_all(dir)?;
         let text = serde_json::to_string_pretty(self).map_err(io::Error::other)?;
-        let tmp = dir.join(format!("{FILE}.tmp"));
-        std::fs::write(&tmp, text)?;
-        std::fs::rename(tmp, dir.join(FILE))
+        crate::portal::write_private(&dir.join(FILE), text.as_bytes())
+    }
+
+    /// This PC's human let brother `id` in by a code, with `key`.
+    pub fn vouch(&mut self, id: &str, key: &str) {
+        self.vouched.insert(id.to_string(), key.to_string());
+        self.took.remove(id);
+    }
+
+    /// Brother `id`'s `key` was replaced by a new one a human let in: the
+    /// old key is refused from now on, the id is not.
+    pub fn replaced(&mut self, id: &str, key: &str) {
+        if !key.is_empty() {
+            self.outcast.insert(format!("{id}:{key}"), key.to_string());
+        }
+    }
+
+    /// The ids cast out, as the human or a brother with control did it.
+    pub fn outcast_ids(&self) -> BTreeSet<String> {
+        self.outcast
+            .keys()
+            .filter(|id| !id.contains(':'))
+            .cloned()
+            .collect()
     }
 
     /// The tray's "Can control this PC" tick for brother `id`.

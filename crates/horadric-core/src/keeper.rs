@@ -21,32 +21,51 @@ use crate::keeping::{
 };
 
 /// `keep` parts on their way, by (brother, session), with the holding the
-/// first part carried.
+/// first part carried and when the first part came.
 #[derive(Default)]
-pub struct Joins(HashMap<(String, String), (Joiner, Option<Holding>)>);
+pub struct Joins(HashMap<(String, String), (Joiner, Option<Holding>, u64)>);
+
+/// How many snapshots one brother may have on their way at once. An owner
+/// sends one session's at a time, so a few is plenty; more is a brother
+/// filling this machine's memory with parts it never finishes.
+pub const JOINS_PER_BROTHER: usize = 4;
+
+/// How long a snapshot may take to arrive whole before its parts go.
+pub const JOIN_SECS: u64 = 600;
 
 /// A whole snapshot: the session, its payload, and the holding its first
 /// part carried.
 pub type Whole = (String, Vec<u8>, Option<Holding>);
 
 impl Joins {
-    /// Takes one `keep` part from brother `who`. Gives the whole snapshot
-    /// once its last part is in; a first part starts it over, and one that
-    /// does not fit drops what came before it.
-    pub fn add(&mut self, who: &str, msg: &Value) -> Result<Option<Whole>, String> {
+    /// Takes one `keep` part from brother `who` at `now`. Gives the whole
+    /// snapshot once its last part is in; a first part starts it over, and
+    /// one that does not fit drops what came before it. What did not come
+    /// whole in [`JOIN_SECS`] goes, and a brother with
+    /// [`JOINS_PER_BROTHER`] on their way starts no other.
+    pub fn add(&mut self, who: &str, msg: &Value, now: u64) -> Result<Option<Whole>, String> {
         let (part, holding) = keep_part(msg).ok_or("not a keep part")?;
+        self.0
+            .retain(|_, (_, _, at)| now.saturating_sub(*at) < JOIN_SECS);
         let id = part.id.clone();
         let key = (who.to_string(), id.clone());
-        let (joiner, held) = self
+        let busy = self.0.keys().filter(|(w, _)| w == who).count();
+        if !self.0.contains_key(&key) && busy >= JOINS_PER_BROTHER {
+            return Err(format!(
+                "{who} has {busy} snapshots on their way already: {id} refused"
+            ));
+        }
+        let (joiner, held, at) = self
             .0
             .entry(key.clone())
-            .or_insert_with(|| (Joiner::new(&id), None));
+            .or_insert_with(|| (Joiner::new(&id), None, now));
         if part.part == 0 {
             *joiner = Joiner::new(&id);
             *held = holding;
+            *at = now;
         }
         match joiner.add(&part) {
-            Ok(Some(bytes)) => Ok(self.0.remove(&key).map(|(_, h)| (id, bytes, h))),
+            Ok(Some(bytes)) => Ok(self.0.remove(&key).map(|(_, h, _)| (id, bytes, h))),
             Ok(None) => Ok(None),
             Err(e) => {
                 self.0.remove(&key);
@@ -262,14 +281,16 @@ mod tests {
         assert!(msgs.len() > 1);
         let mut joins = Joins::default();
         for m in &msgs[..msgs.len() - 1] {
-            assert_eq!(joins.add("a", m), Ok(None));
+            assert_eq!(joins.add("a", m, 0), Ok(None));
         }
         // Another brother's parts of the same session never mix in.
-        assert_eq!(joins.add("b", &msgs[1]), Ok(None));
-        let (id, bytes, held) = joins.add("a", msgs.last().unwrap()).unwrap().unwrap();
+        assert_eq!(joins.add("b", &msgs[1], 0), Ok(None));
+        let (id, bytes, held) = joins.add("a", msgs.last().unwrap(), 0).unwrap().unwrap();
         assert_eq!((id.as_str(), bytes == payload), ("s1", true));
         assert_eq!(held.unwrap().from_name, "Laptop");
-        assert!(joins.add("a", &serde_json::json!({"t": "keep"})).is_err());
+        assert!(joins
+            .add("a", &serde_json::json!({"t": "keep"}), 0)
+            .is_err());
     }
 
     #[test]
@@ -278,12 +299,31 @@ mod tests {
         let payload = vec![7u8; 2_000_000];
         let msgs = keep_messages("s1", &holding, &payload);
         let mut joins = Joins::default();
-        assert_eq!(joins.add("a", &msgs[0]), Ok(None));
+        assert_eq!(joins.add("a", &msgs[0], 0), Ok(None));
         let mut rest = Ok(None);
         for m in &msgs {
-            rest = joins.add("a", m);
+            rest = joins.add("a", m, 0);
         }
         assert_eq!(rest.unwrap().unwrap().1, payload);
+    }
+
+    #[test]
+    fn a_brother_has_only_a_few_snapshots_on_their_way_and_not_for_long() {
+        let holding = Holding::default();
+        let payload = vec![7u8; 2_000_000];
+        let first = |s: &str| keep_messages(s, &holding, &payload).remove(0);
+        let mut joins = Joins::default();
+        for i in 0..JOINS_PER_BROTHER {
+            assert_eq!(joins.add("a", &first(&format!("s{i}")), 0), Ok(None));
+        }
+        // One more from the same brother is refused; another's is not.
+        assert!(joins.add("a", &first("more"), 1).is_err());
+        assert_eq!(joins.add("b", &first("more"), 1), Ok(None));
+        // A part of one on its way still goes in.
+        assert_eq!(joins.add("a", &first("s0"), 2), Ok(None));
+        // Unfinished past the time allowed, they go, and room is made.
+        assert_eq!(joins.add("a", &first("more"), 1 + JOIN_SECS), Ok(None));
+        assert_eq!(joins.0.keys().filter(|(w, _)| w == "a").count(), 2);
     }
 
     #[test]

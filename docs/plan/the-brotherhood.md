@@ -1063,11 +1063,62 @@ Each step is useful alone and each is verified before the next starts.
     Found on the way: Town Portal turned off left brother links counted
     up (the reader's down came after the brothers were gone); a node
     whose agent is a stand-in cannot resume a Claude session, so takeover
-    tests run without `HORADRIC_AGENT`. Left open: a brother let in by one
-    later cast out stays, when others met it meanwhile (cast it out too);
-    a brother that lost `brothers.json` but kept its secret rejoins with a
-    new key under its old id, and brothers holding its old key keep it
-    until it is cast out; roster owners are never pruned.
+    tests run without `HORADRIC_AGENT`. Left open then, closed the same
+    day for 0.34 together with a review that found the roster believed
+    any brother about every other: a brother let in by one later cast out
+    stayed; a brother that lost `brothers.json` but kept its secret came
+    back under its old id while brothers holding its old key kept it; roster
+    owners were never pruned.
+
+    Closed on 2026-10-25. Rosters carry no signatures, so a brother now
+    believes nothing about another but its own word over its own link
+    (`mesh::merged`): its entry under the key held for it, never another's
+    whatever its number; cast outs (and its `cast_out`) only from a
+    brother with control; owners by `brotherhood::accept_owner` (a claim
+    of its own, an owner handing its own on one higher, a keeper the owner
+    named taking it exactly one higher while it has not ended, nothing past
+    `LEAP`). Introductions go along the joins humans approved
+    (`Roster::introductions`): an entry's `held` gives each key and whether
+    its human let that one in by a code, and a brother takes a key only
+    from one with control that let the newcomer in, or from where its own
+    human let it in. Who vouched is kept (`Standing::vouched`, `took`), so
+    "Cast out Laptop..." and `horadric node cast-out` name the brothers only
+    the outcast stands behind and cast them out too, ticked by default (a
+    stolen machine can let in machines of its own). An id this machine
+    cast out comes back only on its human's word (`Human::readmit`). A key
+    changes only by a join a human approves: the prompt says "This replaces
+    Cedar's key", the old key is refused, written to `outcast` and its links
+    closed (`Brothers::kept`), and every brother with that brother's
+    control replaces it on that word alone (`replace_key`). A session ended
+    for good on its owner (`mesh::end`, from the PC's `forget` and the
+    node's `stop`) travels as `ended`; each brother drops the owner once
+    every brother showed it ended, or after `HORIZON` (thirty days) for
+    bystanders only: a former owner, or a keeper of one, is waited for as
+    long as it stays a brother, since its paused copy is fenced only by the
+    higher number (`mesh::prune`). A join's answer carries a token, so a
+    relay reusing a channel cannot land a yes on another handshake, and a
+    void question is withdrawn. `roster.json`, `standing.json` and
+    `roster-counted.json` are written whole and synced; an unreadable
+    `roster.json` is moved aside. A brother has four snapshots on their way
+    at most, for ten minutes (`keeper::Joins`). The wire is in
+    `docs/PORTAL.md`, "the roster" and "introductions".
+
+    Seen with three dev instances, "Ash", "Birch" and "Cedar" (scratch
+    `APPDATA`, ports 43150 to 43152), through `wss://portal.horadric.dev`:
+    Cedar asked Ash (641 969) and Birch asked Ash (867 379), and Birch and
+    Cedar met through Ash and linked, nobody asked. Cedar lost
+    `brothers.json` and asked Ash again: Ash's question said "This replaces
+    Cedar's key" (912 533). Birch first took the old key's refusal as a
+    cast out, since Ash refused the old key before keeping the new one;
+    fixed by keeping the new key first, and Birch's human was asked "Take
+    Cedar back?" and Birch took it with the new key. Cedar lost its keys
+    again and asked Birch this time (831 694): Ash replaced the key on
+    Birch's word alone, "let in again with a new key", and linked to
+    Cedar; both refused the old key by key, not the id. "Cast out Birch..."
+    on Ash then said "Birch let in Cedar, which no other brother's human
+    let in", "Cast them out too" ticked; Cast out told both, and each let
+    every brother and its key go. Not seen live: a forged roster and a
+    reused channel, which `brothers.rs` and `mesh.rs` tests play.
 
     Hardened on 2026-10-25 after a security review, for 0.33. Relink
     hellos and the link's key are bound to both ends (relay ids and

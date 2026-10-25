@@ -19,6 +19,7 @@ use std::sync::{Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use horadric_core::brothers::Asking;
 use horadric_core::joining::Store;
 use horadric_core::keeping::Book;
 use horadric_core::standing::Standing;
@@ -42,8 +43,9 @@ struct Ctl {
     approver: Option<u64>,
     /// The terminal that asked a brother to let this node in.
     asker: Option<u64>,
-    /// Codes shown and not yet answered: the channel, to the terminal.
-    prompts: HashMap<u32, u64>,
+    /// Codes shown and not yet answered: the channel, to the terminal
+    /// and the question's token, which its answer must bring back.
+    prompts: HashMap<u32, (u64, u64)>,
 }
 
 static CTL: Mutex<Option<Ctl>> = Mutex::new(None);
@@ -56,9 +58,9 @@ fn ctl() -> MutexGuard<'static, Option<Ctl>> {
 
 /// Says no on channel `ch`, from a thread of its own, since the brothers
 /// ask with their lock held and take the answer under it.
-fn no_later(ch: u32) {
+fn no_later(ch: u32, token: u64) {
     thread::spawn(move || {
-        relay::with(|b| b.answer(ch, false));
+        relay::with(|b| b.answer(ch, token, false));
     });
 }
 
@@ -66,7 +68,7 @@ fn no_later(ch: u32) {
 pub(super) struct Human;
 
 impl Human {
-    fn show(&self, ch: u32, to: Option<u64>, msg: Value) -> bool {
+    fn show(&self, ch: u32, token: u64, to: Option<u64>, msg: Value) -> bool {
         let mut held = ctl();
         let Some(c) = held.as_mut() else {
             return false;
@@ -74,30 +76,56 @@ impl Human {
         let Some(conn) = to.filter(|t| c.conns.contains_key(t)) else {
             return false;
         };
-        c.prompts.insert(ch, conn);
+        c.prompts.insert(ch, (conn, token));
         c.conns.get(&conn).is_some_and(|tx| tx.send(msg).is_ok())
     }
 }
 
+/// What a terminal is sent to ask its human about a join.
+fn asking(ev: &str, a: &Asking) -> Value {
+    json!({
+        "ev": ev, "ch": a.ch, "token": a.token, "name": a.name, "code": a.code,
+        "replaces": a.replaces,
+    })
+}
+
 impl horadric_core::brothers::Human for Human {
-    fn let_in(&self, ch: u32, name: &str, code: &str) {
+    fn let_in(&self, a: Asking) {
         let approver = ctl().as_ref().and_then(|c| c.approver);
-        let msg = json!({"ev": "let_in", "ch": ch, "name": name, "code": code});
-        if !self.show(ch, approver, msg) {
+        if !self.show(a.ch, a.token, approver, asking("let_in", &a)) {
             eprintln!(
-                "horadric node: {name} asked to join, and no one is at a terminal to say yes \
-                 (`horadric node let-in`): refused"
+                "horadric node: {} asked to join, and no one is at a terminal to say yes \
+                 (`horadric node let-in`): refused",
+                a.name
             );
-            no_later(ch);
+            no_later(a.ch, a.token);
         }
     }
 
-    fn confirm(&self, ch: u32, name: &str, code: &str) {
+    fn confirm(&self, a: Asking) {
         let asker = ctl().as_ref().and_then(|c| c.asker);
-        let msg = json!({"ev": "confirm", "ch": ch, "name": name, "code": code});
-        if !self.show(ch, asker, msg) {
-            eprintln!("horadric node: {name} showed a code, and no one is here to compare it");
-            no_later(ch);
+        if !self.show(a.ch, a.token, asker, asking("confirm", &a)) {
+            eprintln!(
+                "horadric node: {} showed a code, and no one is here to compare it",
+                a.name
+            );
+            no_later(a.ch, a.token);
+        }
+    }
+
+    /// The question is void: the terminal shown it is told, and its
+    /// answer, refused for its token anyway, is not waited for.
+    fn withdraw(&self, ch: u32, token: u64) {
+        let mut held = ctl();
+        let Some(c) = held.as_mut() else {
+            return;
+        };
+        if c.prompts.get(&ch).is_some_and(|(_, t)| *t == token) {
+            if let Some((conn, _)) = c.prompts.remove(&ch) {
+                if let Some(tx) = c.conns.get(&conn) {
+                    let _ = tx.send(json!({"ev": "withdrawn", "ch": ch, "token": token}));
+                }
+            }
         }
     }
 
@@ -163,7 +191,7 @@ fn attached(stream: UnixStream) {
         }
     }
     // Gone: what it was shown is answered no.
-    let shown: Vec<u32> = {
+    let shown: Vec<(u32, u64)> = {
         let mut held = ctl();
         let Some(c) = held.as_mut() else {
             return;
@@ -178,14 +206,14 @@ fn attached(stream: UnixStream) {
         let shown = c
             .prompts
             .iter()
-            .filter(|(_, t)| **t == conn)
-            .map(|(ch, _)| *ch)
+            .filter(|(_, (t, _))| *t == conn)
+            .map(|(ch, (_, token))| (*ch, *token))
             .collect();
-        c.prompts.retain(|_, t| *t != conn);
+        c.prompts.retain(|_, (t, _)| *t != conn);
         shown
     };
-    for ch in shown {
-        no_later(ch);
+    for (ch, token) in shown {
+        no_later(ch, token);
     }
 }
 
@@ -224,12 +252,18 @@ fn request(conn: u64, req: &Value) -> Value {
         }
         "answer" => {
             let ch = req["ch"].as_u64().unwrap_or(0) as u32;
-            let mine = ctl()
-                .as_mut()
-                .is_some_and(|c| c.prompts.remove(&ch) == Some(conn));
+            let token = req["token"].as_u64().unwrap_or(0);
+            // Only the very question this terminal was shown.
+            let mine = ctl().as_mut().is_some_and(|c| {
+                let shown = c.prompts.get(&ch) == Some(&(conn, token));
+                if shown {
+                    c.prompts.remove(&ch);
+                }
+                shown
+            });
             if mine {
                 let yes = req["yes"] == true;
-                relay::with(|b| b.answer(ch, yes));
+                relay::with(|b| b.answer(ch, token, yes));
             }
             json!({"re": "answer"})
         }
@@ -383,13 +417,26 @@ impl Line {
 
 /// Asks the human at this terminal, No unless they say yes.
 fn yes(question: &str) -> bool {
-    print!("{question} [y/N] ");
+    yes_default(question, false)
+}
+
+/// Asks in the terminal, an empty answer being `default`.
+fn yes_default(question: &str, default: bool) -> bool {
+    print!("{question} {} ", if default { "[Y/n]" } else { "[y/N]" });
     let _ = io::stdout().flush();
     let mut answer = String::new();
     if io::stdin().read_line(&mut answer).is_err() {
         return false;
     }
-    matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+    said_yes(&answer, default)
+}
+
+/// Whether a terminal's answer is yes, an empty one being `default`.
+fn said_yes(answer: &str, default: bool) -> bool {
+    match answer.trim().to_ascii_lowercase().as_str() {
+        "" => default,
+        a => matches!(a, "y" | "yes"),
+    }
 }
 
 /// `horadric node signin [--to <name>]`: signs in, then asks a signed in
@@ -501,8 +548,15 @@ fn ask_and_follow(line: &mut Line, id: &str, name: &str) -> Result<(), String> {
                 println!("Say yes only if {name}'s screen shows exactly this code. If it shows");
                 println!("another, or none, something between the two may be pretending to be");
                 println!("{name}: say no.");
+                if ev["replaces"] == true {
+                    println!();
+                    println!("This replaces {name}'s key: {name} is a brother already under");
+                    println!("another key, which every brother refuses once you say yes.");
+                }
                 let ok = yes(&format!("Does {name} show {code}?"));
-                line.send(json!({"do": "answer", "ch": ev["ch"], "yes": ok}))?;
+                let answer =
+                    json!({"do": "answer", "ch": ev["ch"], "token": ev["token"], "yes": ok});
+                line.send(answer)?;
                 if !ok {
                     return Err("not joined: the codes did not match".into());
                 }
@@ -546,8 +600,16 @@ pub(super) fn let_in_command() -> Result<(), String> {
                 println!();
                 println!("Say yes only if {name} shows exactly this code. A brother sees this");
                 println!("node's sessions and can type into them.");
+                if ev["replaces"] == true {
+                    println!();
+                    println!("This replaces {name}'s key: {name} is a brother already under");
+                    println!("another key, which every brother refuses once you say yes. Say");
+                    println!("yes only if {name} was set up anew and you set it up yourself.");
+                }
                 let ok = yes(&format!("Let {name} in?"));
-                line.send(json!({"do": "answer", "ch": ev["ch"], "yes": ok}))?;
+                let answer =
+                    json!({"do": "answer", "ch": ev["ch"], "token": ev["token"], "yes": ok});
+                line.send(answer)?;
                 if !ok {
                     println!("Not let in.");
                     return Ok(());
@@ -622,7 +684,9 @@ pub(super) fn brothers_command() -> Result<(), String> {
     Ok(())
 }
 
-/// `horadric node cast-out <name>`: refuses a brother from now on.
+/// `horadric node cast-out <name>`: refuses a brother from now on, and,
+/// asked with yes the default, every brother only it stands behind, which
+/// a stolen machine could have let in.
 pub(super) fn cast_out_command(args: &[String]) -> Result<(), String> {
     let name = args.first().ok_or("usage: horadric node cast-out <name>")?;
     let (id, name) = by_name(name, &joined_pairs())?;
@@ -632,13 +696,37 @@ pub(super) fn cast_out_command(args: &[String]) -> Result<(), String> {
     )) {
         return Ok(());
     }
-    match Line::open() {
-        Ok(mut line) => {
-            line.ask(json!({"do": "cast-out", "id": id}))?;
+    let behind = horadric_hooks::state_dir()
+        .and_then(|dir| {
+            let me = horadric_core::portal::Config::load(&dir)?;
+            let me = horadric_core::portal::id(&me.secret);
+            Some(horadric_core::brothers::behind_only(&dir, &me, &id))
+        })
+        .unwrap_or_default();
+    let mut out = vec![(id, name)];
+    if !behind.is_empty() {
+        let names: Vec<&str> = behind.iter().map(|(_, n)| n.as_str()).collect();
+        println!(
+            "{} let in {}, which no other brother's human let in. If {} was stolen, so may \
+             they be.",
+            out[0].1,
+            names.join(", "),
+            out[0].1
+        );
+        if yes_default(&format!("Cast {} out too?", names.join(", ")), true) {
+            out.extend(behind);
         }
-        Err(_) => cast_out(&id)?,
     }
-    println!("{name} is cast out.");
+    let mut line = Line::open().ok();
+    for (id, name) in out {
+        match line.as_mut() {
+            Some(line) => {
+                line.ask(json!({"do": "cast-out", "id": id}))?;
+            }
+            None => cast_out(&id)?,
+        }
+        println!("{name} is cast out.");
+    }
     Ok(())
 }
 
@@ -814,4 +902,19 @@ fn flag(args: &[String], name: &str) -> Option<String> {
     args.iter()
         .position(|a| a == name)
         .and_then(|i| args.get(i + 1).cloned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_empty_answer_is_the_default_and_only_yes_is_yes() {
+        assert!(said_yes("\n", true));
+        assert!(!said_yes("\n", false));
+        assert!(said_yes(" Y\n", false));
+        assert!(said_yes("yes", false));
+        assert!(!said_yes("n\n", true));
+        assert!(!said_yes("sure", true));
+    }
 }

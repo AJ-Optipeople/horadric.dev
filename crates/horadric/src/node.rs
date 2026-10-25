@@ -331,6 +331,8 @@ impl Serve for Machine {
         n.registry.remove(id).ok_or("no such session here")?;
         n.args.remove(id);
         n.dirty = true;
+        drop(n);
+        keeping::ended(id);
         Ok(())
     }
 

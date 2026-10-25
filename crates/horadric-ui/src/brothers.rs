@@ -12,15 +12,18 @@ use std::sync::Mutex;
 
 use horadric_core::brotherhood::Owner;
 use horadric_core::brothers::{
-    cast_out_offline, confirm_text, let_in_text, Brothers, Event, Hands, Human, Listener, Relay,
+    cast_out_offline, confirm_text, let_in_text, Asking, Brothers, Event, Hands, Human, Listener,
+    Relay,
 };
 use horadric_core::joining::{Crypto, Listed};
 use horadric_core::portal::id;
 use serde_json::Value;
-use windows::core::HSTRING;
+use windows::core::{BOOL, HSTRING};
+use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::WindowsAndMessaging::{
-    MessageBoxW, IDYES, MB_DEFBUTTON2, MB_ICONINFORMATION, MB_ICONQUESTION, MB_OK,
-    MB_SETFOREGROUND, MB_TOPMOST, MB_YESNO, MESSAGEBOX_STYLE,
+    EnumThreadWindows, MessageBoxW, PostMessageW, IDNO, IDYES, MB_DEFBUTTON2, MB_ICONINFORMATION,
+    MB_ICONQUESTION, MB_OK, MB_SETFOREGROUND, MB_TOPMOST, MB_YESNO, MESSAGEBOX_STYLE, WM_COMMAND,
 };
 
 use crate::portal_crypto::{open_bound, random, seal_bound};
@@ -74,26 +77,75 @@ struct Boxes {
     generation: u64,
 }
 
+/// The thread of each question box still open, by its token, so a
+/// question gone void can be taken off the screen.
+static OPEN: Mutex<Vec<(u64, u32)>> = Mutex::new(Vec::new());
+
 impl Boxes {
-    fn ask(&self, ch: u32, text: String) {
+    /// Asks on a thread of its own; `answer` takes the human's yes or no.
+    fn ask(&self, token: u64, text: String, answer: fn(&mut Brothers, u64, bool)) {
         let generation = self.generation;
         std::thread::Builder::new()
             .name("brother-join".into())
             .spawn(move || {
+                let me = unsafe { GetCurrentThreadId() };
+                OPEN.lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push((token, me));
                 let yes = show(&text, MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) == IDYES.0;
-                with(generation, |b| b.answer(ch, yes));
+                OPEN.lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .retain(|(t, _)| *t != token);
+                with(generation, |b| answer(b, token, yes));
             })
             .ok();
     }
 }
 
+/// Presses No on every window of thread `thread`: its question box.
+fn dismiss(thread: u32) {
+    unsafe extern "system" fn no(hwnd: HWND, _: LPARAM) -> BOOL {
+        let _ = PostMessageW(Some(hwnd), WM_COMMAND, WPARAM(IDNO.0 as usize), LPARAM(0));
+        true.into()
+    }
+    unsafe {
+        let _ = EnumThreadWindows(thread, Some(no), LPARAM(0));
+    }
+}
+
 impl Human for Boxes {
-    fn let_in(&self, ch: u32, name: &str, code: &str) {
-        self.ask(ch, let_in_text(name, code));
+    fn let_in(&self, a: Asking) {
+        self.ask(a.token, let_in_text(&a), |b, t, yes| b.answer_for(t, yes));
     }
 
-    fn confirm(&self, ch: u32, name: &str, code: &str) {
-        self.ask(ch, confirm_text(name, code));
+    fn confirm(&self, a: Asking) {
+        self.ask(a.token, confirm_text(&a), |b, t, yes| b.answer_for(t, yes));
+    }
+
+    /// The question is void: its box goes, and its answer, already
+    /// refused for its token, with it.
+    fn withdraw(&self, _: u32, token: u64) {
+        let open = OPEN.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        for (t, thread) in open {
+            if t == token {
+                dismiss(thread);
+            }
+        }
+    }
+
+    fn note(&self, text: &str) {
+        tell_link(Link::Note {
+            text: text.to_string(),
+        });
+    }
+
+    fn readmit(&self, token: u64, name: &str, by: &str) {
+        let text = format!(
+            "{by} let {name} in again, which was cast out here.\n\n\
+             Take {name} back? Say yes only if you set {name} up anew yourself, \
+             or know who did. Otherwise it stays refused here."
+        );
+        self.ask(token, text, |b, t, yes| b.readmit(t, yes));
     }
 
     fn tell(&self, text: &str) {
@@ -218,6 +270,19 @@ pub fn ask(brother: &str) {
     }
 }
 
+/// The brothers this PC holds that only brother `id` stands behind, id
+/// and name: those it let in, or this PC took on its word alone, that no
+/// other brother's human let in. Offered to be cast out with it.
+pub fn behind_only(id: &str) -> Vec<(String, String)> {
+    let Some(dir) = horadric_hooks::state_dir() else {
+        return Vec::new();
+    };
+    let Some(me) = horadric_core::portal::Config::load(&dir).map(|c| self::id(&c.secret)) else {
+        return Vec::new();
+    };
+    horadric_core::brothers::behind_only(&dir, &me, id)
+}
+
 /// Casts out the brother with this id: refused from then on here and, by
 /// the roster, on every brother; told so if linked; its key gone and every
 /// channel to it closed.
@@ -264,6 +329,10 @@ pub enum Link {
     /// Sessions of this PC that a roster says another owns now.
     Moved {
         owners: Vec<(String, Owner)>,
+    },
+    /// Something for the human to glance at: who let whom in.
+    Note {
+        text: String,
     },
 }
 

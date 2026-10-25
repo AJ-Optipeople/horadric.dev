@@ -695,17 +695,23 @@ impl Handshake {
         }
     }
 
-    /// The giving side, waiting with no key for the brother asking, now
-    /// holds one: an introduction came in while its hello was on the way.
+    /// The giving side, waiting for the brother asking, now holds a key
+    /// for it: an introduction came in while its hello was on the way, or
+    /// a human let it in again with a new key in place of the one held.
     /// True when it was waiting so, and so the hello can be heard again.
     pub fn know(&mut self, held: Held) -> bool {
         match &mut self.state {
-            State::Waiting { known, .. } if known.is_none() => {
+            State::Waiting { known, .. } => {
                 *known = Some(held);
                 true
             }
             _ => false,
         }
+    }
+
+    /// Whether this is the giving side, still waiting for a first word.
+    pub fn giving(&self) -> bool {
+        matches!(self.state, State::Waiting { .. })
     }
 
     /// Whether this is the giving side waiting with no key, where a sealed
@@ -1918,8 +1924,10 @@ mod tests {
         // Unknown yet: the hello does not open and nothing moves.
         assert_eq!(giver.sealed(&F, &sealed, 0), (None, vec![]));
         assert!(giver.know(held(link, 1)));
-        assert!(!giver.know(held(link, 1)));
-        assert!(!giver.keyless());
+        // Still waiting, a key held is replaced by the one given last: a
+        // brother let in again with a new key.
+        assert!(giver.know(held(link, 1)));
+        assert!(giver.giving() && !giver.keyless());
         let (_, answer) = giver.sealed(&F, &sealed, 0);
         let (_, ready) = asker.sealed(&F, &sealed_bytes(&answer)[0], 0);
         assert!(asker.linked());
@@ -1928,6 +1936,8 @@ mod tests {
         assert!(giver.linked());
         assert_eq!(up, vec![Out::Linked("a".into())]);
         assert_eq!(giver.peer_key(), None);
+        // Linked, no key given later changes it.
+        assert!(!giver.know(held([8; 32], 1)));
     }
 
     #[test]

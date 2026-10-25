@@ -9,12 +9,12 @@
 //! it what the relay says, by [`Brothers::connected`], [`Brothers::text`]
 //! and [`Brothers::binary`]. The messages are in `docs/PORTAL.md`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
-use crate::brotherhood::{Owner, Roster};
+use crate::brotherhood::{Introduction, Mine, Owner, Roster};
 use crate::joining::{self, Crypto, Handshake, Held, Identity, Joined, Listed, Me, Out, Store};
 use crate::portal::{b64url, frame, unb64url};
 use crate::standing::Standing;
@@ -29,21 +29,56 @@ pub trait Relay: Send {
     fn binary(&self, frame: Vec<u8>);
 }
 
+/// One question to the human about a join: on which channel, and the
+/// token its answer must carry back, so a yes given to one brother's code
+/// never lands on another handshake the relay put on the same channel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Asking {
+    pub ch: u32,
+    pub token: u64,
+    pub name: String,
+    pub code: String,
+    /// The brother is held here, or known to the roster, under another
+    /// key, which saying yes replaces everywhere.
+    pub replaces: bool,
+}
+
 /// The human at this machine, asked whether a code matches. Both asks
-/// are answered later by [`Brothers::answer`] with the same channel, and
-/// never from inside the call: a PC shows a message box on a thread of
-/// its own, a node asks in its terminal. No must be the default, since a
-/// brother kept can type into this machine's sessions.
+/// are answered later by [`Brothers::answer`] with the same channel and
+/// token, and never from inside the call: a PC shows a message box on a
+/// thread of its own, a node asks in its terminal. No must be the
+/// default, since a brother kept can type into this machine's sessions.
 pub trait Human: Send {
     /// The giving side: `name` asks to join and shows `code`. See
     /// [`let_in_text`] for what a PC says.
-    fn let_in(&self, ch: u32, name: &str, code: &str);
+    fn let_in(&self, a: Asking);
     /// The asking side: does `name`, the brother asked, show `code`? See
     /// [`confirm_text`].
-    fn confirm(&self, ch: u32, name: &str, code: &str);
+    fn confirm(&self, a: Asking);
     /// Tells the human something that needs no answer: a brother joined,
     /// a join failed, and why.
     fn tell(&self, text: &str);
+    /// The question with this token is void: its channel closed, the relay
+    /// went, or the relay put another handshake on its channel. An answer
+    /// to it does nothing; a human still looking at it may be told so.
+    fn withdraw(&self, ch: u32, token: u64) {
+        let _ = (ch, token);
+    }
+    /// Something worth a glance that needs no answer, a toast on a PC:
+    /// who let whom in.
+    fn note(&self, text: &str) {
+        self.tell(text);
+    }
+    /// Brother `by`'s human let `name` in again, which was cast out here:
+    /// may it come back? Answered by [`Brothers::readmit`] with the same
+    /// token, No the default. Where no human can be asked it stays out.
+    fn readmit(&self, token: u64, name: &str, by: &str) {
+        let _ = token;
+        self.tell(&format!(
+            "{by} let {name} in again, which was cast out here, so it stays out. \
+             To take it back, ask {name} to join from here."
+        ));
+    }
 }
 
 /// What a linked brother channel does.
@@ -122,6 +157,14 @@ pub struct Brothers {
     /// Channels to a brother cast out that came back under its old key:
     /// once its hello proves it, it is told so, sealed, and closed.
     farewell: HashSet<u32>,
+    /// The question open on each channel, by its token.
+    prompts: HashMap<u32, u64>,
+    /// The last token given out.
+    token: u64,
+    /// Brothers cast out here that another's human let in again, asked
+    /// about once each: (id, key) by token while unanswered.
+    readmits: HashMap<u64, (String, String)>,
+    asked_back: HashSet<(String, String)>,
     hands: Hands,
 }
 
@@ -142,6 +185,10 @@ impl Brothers {
             tried: HashSet::new(),
             early: HashMap::new(),
             farewell: HashSet::new(),
+            prompts: HashMap::new(),
+            token: 0,
+            readmits: HashMap::new(),
+            asked_back: HashSet::new(),
             hands,
         };
         b.settle();
@@ -164,6 +211,9 @@ impl Brothers {
             .collect();
         for ch in linked {
             self.down(ch);
+        }
+        for (ch, token) in std::mem::take(&mut self.prompts) {
+            self.hands.human.withdraw(ch, token);
         }
         self.up = up;
         self.listed.clear();
@@ -210,6 +260,7 @@ impl Brothers {
             let ch = ch as u32;
             self.early.remove(&ch);
             self.farewell.remove(&ch);
+            self.void(ch);
             if let Some(h) = self.chans.remove(&ch) {
                 self.tried.remove(h.peer());
                 if h.linked() {
@@ -266,7 +317,10 @@ impl Brothers {
             let keyless = h.keyless();
             let peer = h.peer().to_string();
             let (msg, out) = h.sealed_among(&*self.hands.crypto, payload, now, &mine);
-            if keyless {
+            // Kept too when it does not open under the key held: the brother
+            // may have been let in again with a new key, which this machine
+            // takes once the brother that let it in says so.
+            if keyless || (msg.is_none() && out.is_empty() && h.giving()) {
                 self.early.insert(ch, payload.to_vec());
             }
             if let Some(msg) = msg {
@@ -284,16 +338,18 @@ impl Brothers {
     /// that this machine was cast out. Then it goes on as any other.
     fn opened(&mut self, ch: u32, peer: &str, msg: Value) {
         let t = msg.get("t").and_then(Value::as_str).unwrap_or("");
-        let held = self.store.get(peer).is_some();
+        let held = self.store.get(peer).map(|b| b.public.clone());
+        // Casting out acts on this machine: a brother that may only watch
+        // it cannot, nor wipe what it holds.
         if t == "cast_out" && !asks(&msg) {
-            if held {
+            if held.is_some() && self.controls(peer) {
                 self.cast_out_here(peer);
             }
             return;
         }
-        if t == "roster" && held && !asks(&msg) {
+        if let (true, Some(key)) = (t == "roster" && !asks(&msg), held) {
             if let Ok(roster) = serde_json::from_value::<Roster>(msg.clone()) {
-                self.heard_roster(&roster);
+                self.heard_roster(peer, &key, &roster);
             }
             // Cast out meanwhile, this machine has nobody to tell.
             if self.store.get(peer).is_none() {
@@ -312,13 +368,21 @@ impl Brothers {
         self.hands.listener.event(e);
     }
 
-    /// Takes in a roster a brother served: merged into what is held, then
-    /// whatever it says of the brothers this machine holds acted on.
-    fn heard_roster(&mut self, theirs: &Roster) {
+    /// Takes in a roster brother `peer`, held under `key`, served: what it
+    /// may say merged into what is held (see [`crate::mesh::merged`]), then
+    /// acted on.
+    fn heard_roster(&mut self, peer: &str, key: &str, theirs: &Roster) {
         let Some(dir) = self.dir.clone() else {
             return;
         };
-        let heard = crate::mesh::hear(&dir, &self.me, theirs);
+        let from = crate::mesh::Peer {
+            id: peer,
+            key,
+            control: self.controls(peer),
+        };
+        let keepers = crate::keeping::Book::load(&dir).keepers;
+        let now = (self.hands.clock)();
+        let heard = crate::mesh::hear(&dir, &self.me, from, theirs, &keepers, now);
         if heard.changed {
             debug(&format!("the roster is at {} now", heard.roster.n));
         }
@@ -326,6 +390,16 @@ impl Brothers {
             let owners = heard.moved;
             self.hands.listener.event(Event::Moved { owners });
         }
+    }
+
+    /// Whether brother `id` may act on this machine: held, and not
+    /// switched to view only nor cast out here.
+    fn controls(&self, id: &str) -> bool {
+        self.store.get(id).is_some()
+            && self
+                .dir
+                .as_deref()
+                .is_none_or(|d| Standing::load(d).controls(id))
     }
 
     /// Acts on the roster held, as at start and whenever the relay is
@@ -337,85 +411,195 @@ impl Brothers {
         }
     }
 
+    /// What this machine stands by, for judging what brothers say.
+    fn judged(&self, roster: &Roster) -> (Vec<Introduction>, Vec<Introduction>) {
+        let standing = self.dir.as_deref().map(Standing::load).unwrap_or_default();
+        let held = self.store.held();
+        let had: BTreeSet<String> = self.store.cast.iter().map(|b| b.id.clone()).collect();
+        let outcast = standing.outcast_ids();
+        let control = |id: &str| standing.controls(id);
+        roster.introductions(&Mine {
+            me: &self.me,
+            held: &held,
+            vouched: &standing.vouched,
+            had: &had,
+            outcast: &outcast,
+            control: &control,
+        })
+    }
+
     /// Acts on what `roster` says of the brothers this machine holds:
-    /// this machine itself cast out, brothers cast out, and brothers to be
-    /// introduced to. False when this machine was cast out, and so holds
-    /// nothing any more.
+    /// this machine itself cast out, brothers cast out, keys replaced by
+    /// a human approved join, and brothers to be introduced to. False when
+    /// this machine was cast out, and so holds nothing any more.
     fn settle_on(&mut self, roster: &Roster) -> bool {
         let mine = self.store.me.as_ref().map(|m| m.public.clone());
         if mine.is_some_and(|k| roster.refuses(&k)) {
             self.cast_out_here("");
             return false;
         }
+        let (intros, refused) = self.judged(roster);
+        let replaced = |id: &str| intros.iter().any(|i| i.id == id && i.replaces.is_some());
         for id in roster.cast_out_of(&self.store.held()) {
+            if replaced(&id) {
+                continue;
+            }
             debug(&format!("the roster says {id} was cast out"));
             self.drop_brother(&id);
         }
-        self.introduce(roster);
+        for i in intros.iter().filter(|i| i.replaces.is_some()) {
+            self.replace_key(&i.id);
+        }
+        self.introduce(intros);
+        for r in refused {
+            self.ask_back(r);
+        }
         true
     }
 
-    /// Takes a link key for each brother the roster introduces (see
-    /// [`Roster::introduced`]) and keeps it as a brother joined, so the
+    /// Brother `id` was let in again with a new key, its human having seen
+    /// the code on a brother with control here: the key held for it goes,
+    /// refused from now on, and any link under it closes. Not a cast out:
+    /// the id stands, and channels waiting on it stay open for the new key.
+    fn replace_key(&mut self, id: &str) {
+        let Some(old) = self.store.get(id).cloned() else {
+            return;
+        };
+        debug(&format!("{id} was let in again with a new key"));
+        if let Some(dir) = self.dir.clone() {
+            let mut standing = Standing::load(&dir);
+            standing.replaced(id, &old.public);
+            if let Err(e) = standing.save(&dir) {
+                eprintln!("horadric: cannot keep the key replaced: {e}");
+            }
+            crate::mesh::update(&dir, |r| r.cast_out_key(id, &old.name, &old.public));
+        }
+        let gone: Vec<(u32, bool)> = self
+            .chans
+            .iter()
+            .filter(|(_, h)| h.peer() == id && !h.giving())
+            .map(|(ch, h)| (*ch, h.linked()))
+            .collect();
+        for (ch, linked) in gone {
+            if linked {
+                self.reply(ch, &json!({"t": "cast_out"}));
+            }
+            self.close(ch);
+        }
+        self.store.cast_out(id);
+        self.save();
+        self.wanted.remove(id);
+        self.tried.remove(id);
+    }
+
+    /// Asks the human, once per key, whether a brother cast out here that
+    /// another brother's human let in again may come back.
+    fn ask_back(&mut self, i: Introduction) {
+        if !self.asked_back.insert((i.id.clone(), i.key.clone())) {
+            return;
+        }
+        self.token += 1;
+        let token = self.token;
+        let name = if i.name.is_empty() {
+            i.id.clone()
+        } else {
+            i.name.clone()
+        };
+        let by = self.name_of_held(&i.by);
+        self.readmits.insert(token, (i.id, i.key));
+        self.hands.human.readmit(token, &name, &by);
+    }
+
+    /// The human's answer to [`Human::readmit`]: yes lifts the cast out of
+    /// that brother here, so the brother that let it in again introduces
+    /// it as any other. Its old key stays refused.
+    pub fn readmit(&mut self, token: u64, yes: bool) {
+        let Some((id, _)) = self.readmits.remove(&token) else {
+            return;
+        };
+        if !yes {
+            return;
+        }
+        if let Some(dir) = self.dir.clone() {
+            let mut standing = Standing::load(&dir);
+            if standing.joined_again(&id) {
+                if let Err(e) = standing.save(&dir) {
+                    eprintln!("horadric: cannot keep who was cast out: {e}");
+                }
+            }
+        }
+        self.settle();
+    }
+
+    /// What this machine calls a brother it holds.
+    fn name_of_held(&self, id: &str) -> String {
+        self.store
+            .get(id)
+            .map(|b| b.name.clone())
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| self.name_of(id))
+    }
+
+    /// Takes a link key for each brother introduced (see
+    /// [`Roster::introductions`]) and keeps it as a brother joined, so the
     /// usual relinking takes it from there: no code, since each key came
-    /// sealed from a brother the human vouched for. A channel already
-    /// waiting on such a brother hears its hello again.
-    fn introduce(&mut self, roster: &Roster) {
-        if roster.introduced(&self.me, &self.store.held()).is_empty() {
+    /// sealed from a brother the human vouched for. The human is told on
+    /// whose word. A channel already waiting on such a brother hears its
+    /// hello again.
+    fn introduce(&mut self, intros: Vec<Introduction>) {
+        if intros.is_empty() {
             return;
         }
         let Some((public, private)) = self.identity() else {
             return;
         };
-        let mut skip: HashSet<String> = HashSet::new();
         let mut got = Vec::new();
-        loop {
-            let held = self.store.held();
-            let due: Vec<(String, String, String)> = roster
-                .introduced(&self.me, &held)
-                .into_iter()
-                .filter(|b| !skip.contains(&b.id))
-                .map(|b| (b.id.clone(), b.name.clone(), b.key.clone()))
-                .collect();
-            if due.is_empty() {
-                break;
+        for i in intros {
+            if self.store.get(&i.id).is_some_and(|b| b.public == i.key) {
+                continue;
             }
-            for (id, name, key) in due {
-                let theirs = unb64url(&key).filter(|p| p.len() == 65 && p[0] == 4);
-                let shared = theirs
-                    .as_ref()
-                    .and_then(|t| self.hands.crypto.ecdh(&private, t));
-                let (Some(theirs), Some(shared)) = (theirs, shared) else {
-                    skip.insert(id);
-                    continue;
-                };
-                let link = joining::introduced_key(&shared, (&self.me, &public), (&id, &theirs));
-                debug(&format!("{name} was introduced"));
-                self.store.keep(Joined {
-                    id: id.clone(),
-                    name,
-                    public: key,
-                    key: b64url(&link),
-                    joined: (self.hands.clock)(),
-                    seen: 0,
-                });
-                got.push((id, link));
-            }
+            let theirs = unb64url(&i.key).filter(|p| p.len() == 65 && p[0] == 4);
+            let shared = theirs
+                .as_ref()
+                .and_then(|t| self.hands.crypto.ecdh(&private, t));
+            let (Some(theirs), Some(shared)) = (theirs, shared) else {
+                continue;
+            };
+            let link = joining::introduced_key(&shared, (&self.me, &public), (&i.id, &theirs));
+            let name = if i.name.is_empty() {
+                self.name_of(&i.id)
+            } else {
+                i.name.clone()
+            };
+            let by = self.name_of_held(&i.by);
+            debug(&format!("{name} was introduced by {by}"));
+            self.hands.human.note(&if i.replaces.is_some() {
+                format!("{by} let {name} in again, with a new key. Its old key is refused now.")
+            } else if i.vouched {
+                format!("{by} let {name} in, so it is this machine's brother too.")
+            } else {
+                format!("{name} is this machine's brother too, as {by} says.")
+            });
+            self.store.keep(Joined {
+                id: i.id.clone(),
+                name,
+                public: i.key.clone(),
+                key: b64url(&link),
+                joined: (self.hands.clock)(),
+                seen: 0,
+            });
+            got.push((i.id, i.by));
         }
         if got.is_empty() {
             return;
         }
-        // One cast out and let in again by a brother comes back with a new
-        // key, and stands here as that brother vouched.
         if let Some(dir) = &self.dir {
             let mut standing = Standing::load(dir);
-            let again = got
-                .iter()
-                .fold(false, |any, (id, _)| standing.joined_again(id) || any);
-            if again {
-                if let Err(e) = standing.save(dir) {
-                    eprintln!("horadric: cannot keep who was cast out: {e}");
-                }
+            for (id, by) in &got {
+                standing.took.insert(id.clone(), by.clone());
+            }
+            if let Err(e) = standing.save(dir) {
+                eprintln!("horadric: cannot keep who introduced whom: {e}");
             }
         }
         self.store
@@ -433,6 +617,7 @@ impl Brothers {
                 .filter_map(|(ch, h)| h.know(held.clone()).then_some(*ch))
                 .collect();
             for ch in waiting {
+                self.farewell.remove(&ch);
                 if let Some(hello) = self.early.remove(&ch) {
                     self.binary(ch, &hello);
                 }
@@ -543,9 +728,32 @@ impl Brothers {
     }
 
     /// The human's answer to what [`Human::let_in`] or
-    /// [`Human::confirm`] asked on channel `ch`. One that comes late, or
-    /// twice, does nothing.
-    pub fn answer(&mut self, ch: u32, yes: bool) {
+    /// [`Human::confirm`] asked on channel `ch` with `token`. One that
+    /// comes late, twice, or for a question gone void (its channel closed
+    /// or given to another handshake), does nothing.
+    pub fn answer(&mut self, ch: u32, token: u64, yes: bool) {
+        if self.prompts.get(&ch) != Some(&token) {
+            return;
+        }
+        self.prompts.remove(&ch);
+        self.decide(ch, yes);
+    }
+
+    /// [`Brothers::answer`] for the question with `token`, wherever it is.
+    pub fn answer_for(&mut self, token: u64, yes: bool) {
+        let ch = self
+            .prompts
+            .iter()
+            .find(|(_, t)| **t == token)
+            .map(|(c, _)| *c);
+        if let Some(ch) = ch {
+            self.answer(ch, token, yes);
+        }
+    }
+
+    /// Answers the question open on `ch`, the human's word or this
+    /// machine's own no.
+    fn decide(&mut self, ch: u32, yes: bool) {
         let now = (self.hands.clock)();
         let out = match self.chans.get_mut(&ch) {
             Some(h) if h.asking() => h.answer(&*self.hands.crypto, yes, now),
@@ -582,9 +790,29 @@ impl Brothers {
         true
     }
 
+    /// The question open on `ch`, if any, is void.
+    fn void(&mut self, ch: u32) {
+        if let Some(token) = self.prompts.remove(&ch) {
+            self.hands.human.withdraw(ch, token);
+        }
+    }
+
+    /// The relay gave a channel this machine already holds: it reuses a
+    /// number only once the old one closed, so this is a relay changing
+    /// what a question was about. Whatever was on it goes, the new one too.
+    fn reused(&mut self, ch: u32) -> bool {
+        if !self.chans.contains_key(&ch) {
+            return false;
+        }
+        debug(&format!("the relay gave channel {ch} again: both go"));
+        self.close(ch);
+        true
+    }
+
     fn close(&mut self, ch: u32) {
         self.early.remove(&ch);
         self.farewell.remove(&ch);
+        self.void(ch);
         if let Some(h) = self.chans.remove(&ch) {
             self.tried.remove(h.peer());
             if h.linked() {
@@ -658,6 +886,9 @@ impl Brothers {
     /// holds that key. It comes back only when a brother asks it to join,
     /// with a new key.
     fn given(&mut self, ch: u32, id: &str, name: &str) {
+        if self.reused(ch) {
+            return;
+        }
         let Some((public, _)) = self.identity() else {
             return;
         };
@@ -700,6 +931,9 @@ impl Brothers {
 
     /// The relay gave the channel this machine asked for.
     fn linking(&mut self, ch: u32, id: &str, name: &str) {
+        if self.reused(ch) {
+            return;
+        }
         let (Some(intent), Some((public, _))) = (self.wanted.remove(id), self.identity()) else {
             self.hands.relay.text(&json!({"close": ch}));
             return;
@@ -743,6 +977,117 @@ impl Brothers {
         nonce
     }
 
+    /// A question about the join on `ch`, with a token of its own its
+    /// answer must bring back.
+    fn asking(&mut self, ch: u32, name: String, code: String) -> Asking {
+        self.void(ch);
+        self.token += 1;
+        self.prompts.insert(ch, self.token);
+        Asking {
+            ch,
+            token: self.token,
+            replaces: self.replaces(ch),
+            name,
+            code,
+        }
+    }
+
+    /// Whether the brother joining on `ch` is held here, or known to the
+    /// roster in good standing, under a key other than the one it shows.
+    fn replaces(&self, ch: u32) -> bool {
+        let Some(h) = self.chans.get(&ch) else {
+            return false;
+        };
+        let Some(key) = h.peer_key().map(b64url) else {
+            return false;
+        };
+        let id = h.peer();
+        let held = self.store.get(id).is_some_and(|b| b.public != key);
+        held || self.dir.as_deref().is_some_and(|d| {
+            let r = crate::mesh::load(d);
+            r.brothers
+                .iter()
+                .any(|b| b.id == id && b.key != key && !b.cast_out && !r.refuses(&b.key))
+        })
+    }
+
+    /// Both humans said yes on `ch`: the brother is kept, vouched for by
+    /// this machine's human. Any other key it had, held here or known to
+    /// the roster, is replaced: refused from now on, here and, by the
+    /// roster, by every brother this machine has control of, and any link
+    /// under it closes. That is the only way a brother's key changes, so a
+    /// machine that kept its relay secret and lost its keys comes back
+    /// whole, and one that stole only the secret needs a human's yes.
+    fn kept(&mut self, ch: u32, joined: Joined) {
+        let id = joined.id.clone();
+        let new = joined.public.clone();
+        let mut old: BTreeSet<String> = self
+            .store
+            .get(&id)
+            .map(|b| b.public.clone())
+            .filter(|k| *k != new)
+            .into_iter()
+            .collect();
+        if let Some(dir) = &self.dir {
+            let r = crate::mesh::load(dir);
+            old.extend(
+                r.brothers
+                    .iter()
+                    .filter(|b| b.id == id && b.key != new && !b.key.is_empty())
+                    .filter(|b| !r.refuses(&b.key))
+                    .map(|b| b.key.clone()),
+            );
+        }
+        let others: Vec<(u32, bool)> = self
+            .chans
+            .iter()
+            .filter(|(c, h)| **c != ch && h.peer() == id)
+            .map(|(c, h)| (*c, h.linked()))
+            .collect();
+        for (c, linked) in others {
+            if linked {
+                self.reply(c, &json!({"t": "cast_out"}));
+            }
+            self.close(c);
+        }
+        let name = joined.name.clone();
+        // The new key is kept before the old one is refused anywhere: a
+        // roster served in between must never refuse the old key without
+        // saying in the same breath that this machine's human let the new
+        // one in, or a brother hearing it would take the brother as cast
+        // out rather than as let in again.
+        self.store.cast.retain(|c| c.id != id);
+        self.store.keep(joined);
+        self.save();
+        if let Some(dir) = self.dir.clone() {
+            let mut standing = Standing::load(&dir);
+            standing.joined_again(&id);
+            standing.vouch(&id, &new);
+            for k in &old {
+                standing.replaced(&id, k);
+            }
+            if let Err(e) = standing.save(&dir) {
+                eprintln!("horadric: cannot keep who was let in: {e}");
+            }
+            if !old.is_empty() {
+                crate::mesh::update(&dir, |r| {
+                    for k in &old {
+                        r.cast_out_key(&id, &name, k);
+                    }
+                });
+            }
+        }
+        let text = if old.is_empty() {
+            format!("{name} and this PC are brothers now.")
+        } else {
+            format!(
+                "{name} and this PC are brothers again, with {name}'s new key. Its old key \
+                 is refused from now on, here and by every brother."
+            )
+        };
+        self.hands.human.tell(&text);
+    }
+
     /// Does what a handshake step said, on channel `ch`.
     fn run(&mut self, ch: u32, out: Vec<Out>) {
         for o in out {
@@ -752,10 +1097,11 @@ impl Brothers {
                 Out::Prompt { name, code } => {
                     if self.refused(ch, true) {
                         debug(&format!("{name} asks with a key cast out: refused unasked"));
-                        self.answer(ch, false);
+                        self.decide(ch, false);
                         return;
                     }
-                    self.hands.human.let_in(ch, &name, &code)
+                    let a = self.asking(ch, name, code);
+                    self.hands.human.let_in(a)
                 }
                 Out::Confirm { name, code } => {
                     if self.refused(ch, false) {
@@ -764,26 +1110,13 @@ impl Brothers {
                              Set it up anew, then ask again."
                         );
                         self.hands.human.tell(&text);
-                        self.answer(ch, false);
+                        self.decide(ch, false);
                         return;
                     }
-                    self.hands.human.confirm(ch, &name, &code)
+                    let a = self.asking(ch, name, code);
+                    self.hands.human.confirm(a)
                 }
-                Out::Keep(joined) => {
-                    let text = format!("{} and this PC are brothers now.", joined.name);
-                    if let Some(dir) = &self.dir {
-                        let mut standing = Standing::load(dir);
-                        if standing.joined_again(&joined.id) {
-                            if let Err(e) = standing.save(dir) {
-                                eprintln!("horadric: cannot keep who was cast out: {e}");
-                            }
-                        }
-                    }
-                    self.store.cast.retain(|c| c.id != joined.id);
-                    self.store.keep(joined);
-                    self.save();
-                    self.hands.human.tell(&text);
-                }
+                Out::Keep(joined) => self.kept(ch, joined),
                 Out::Linked(id) if self.farewell.remove(&ch) => {
                     debug(&format!("{id}, cast out, came back: told so"));
                     self.reply(ch, &json!({"t": "cast_out"}));
@@ -842,25 +1175,74 @@ fn debug(what: &str) {
 }
 
 /// What the giving side asks its human: never automatic, a stolen login
-/// must not let anyone in.
-pub fn let_in_text(name: &str, code: &str) -> String {
-    format!(
+/// must not let anyone in. Said plainly when it replaces a key, since a
+/// machine that stole only the relay secret comes this way.
+pub fn let_in_text(a: &Asking) -> String {
+    let (name, code) = (&a.name, &a.code);
+    let mut text = format!(
         "{name} wants to join. Let it in?\n\n\
          Say yes only if {name} shows the code {code}. \
          A brother sees this PC's sessions and can type into them."
-    )
+    );
+    if a.replaces {
+        text.push_str(&replaces_text(name));
+    }
+    text
 }
 
 /// What the asking side asks its human: the relay could play the brother
 /// asked, and a brother kept here can type into this machine's sessions
 /// too.
-pub fn confirm_text(name: &str, code: &str) -> String {
-    format!(
+pub fn confirm_text(a: &Asking) -> String {
+    let (name, code) = (&a.name, &a.code);
+    let mut text = format!(
         "Does {name} show the code {code}?\n\n\
          Say yes only if {name}'s screen shows exactly this code. \
          If it shows another, or none, something between the two PCs \
          may be pretending to be {name}: say no."
+    );
+    if a.replaces {
+        text.push_str(&replaces_text(name));
+    }
+    text
+}
+
+/// Said when a yes replaces a brother's key.
+fn replaces_text(name: &str) -> String {
+    format!(
+        "\n\nThis replaces {name}'s key. {name} is a brother already under another \
+         key, which every brother refuses once you say yes. Say yes only if {name} \
+         was set up anew (its keys lost) and you set it up yourself."
     )
+}
+
+/// The brothers this machine, `me`, holds that only `id` stands behind
+/// (see [`Roster::behind_only`]), id and name: what to offer to cast out
+/// with it, from the files in `dir`.
+pub fn behind_only(dir: &Path, me: &str, id: &str) -> Vec<(String, String)> {
+    let store = Store::load(dir).unwrap_or_default();
+    let standing = Standing::load(dir);
+    let roster = crate::mesh::load(dir);
+    let held = store.held();
+    let had = BTreeSet::new();
+    let outcast = standing.outcast_ids();
+    let control = |_: &str| true;
+    let mine = Mine {
+        me,
+        held: &held,
+        vouched: &standing.vouched,
+        had: &had,
+        outcast: &outcast,
+        control: &control,
+    };
+    roster
+        .behind_only(id, &mine, &standing.took)
+        .into_iter()
+        .map(|b| {
+            let name = store.get(&b).map_or_else(|| b.clone(), |j| j.name.clone());
+            (b, name)
+        })
+        .collect()
 }
 
 /// Both brothers ask and answer on one channel. What a client sends is
@@ -887,7 +1269,14 @@ mod tests {
         sent: Vec<(usize, bool, Vec<u8>)>,
         /// The humans asked: (side, ch, "let in" or "confirm", name, code).
         asked: Vec<(usize, u32, &'static str, String, String)>,
+        /// The token of each question asked, by side and channel, and
+        /// whether it said a key is replaced.
+        tokens: HashMap<(usize, u32), (u64, bool)>,
+        withdrawn: Vec<(usize, u32, u64)>,
+        /// Asked whether one cast out may come back: (side, token, name, by).
+        readmits: Vec<(usize, u64, String, String)>,
         told: Vec<(usize, String)>,
+        noted: Vec<(usize, String)>,
         events: Vec<(usize, Event)>,
     }
 
@@ -907,17 +1296,33 @@ mod tests {
         }
     }
 
-    impl Human for H {
-        fn let_in(&self, ch: u32, name: &str, code: &str) {
-            let a = (self.0, ch, "let in", name.into(), code.into());
-            self.1.lock().unwrap().asked.push(a);
+    impl H {
+        fn ask(&self, a: Asking, what: &'static str) {
+            let mut w = self.1.lock().unwrap();
+            w.tokens.insert((self.0, a.ch), (a.token, a.replaces));
+            w.asked.push((self.0, a.ch, what, a.name, a.code));
         }
-        fn confirm(&self, ch: u32, name: &str, code: &str) {
-            let a = (self.0, ch, "confirm", name.into(), code.into());
-            self.1.lock().unwrap().asked.push(a);
+    }
+
+    impl Human for H {
+        fn let_in(&self, a: Asking) {
+            self.ask(a, "let in");
+        }
+        fn confirm(&self, a: Asking) {
+            self.ask(a, "confirm");
         }
         fn tell(&self, text: &str) {
             self.1.lock().unwrap().told.push((self.0, text.into()));
+        }
+        fn withdraw(&self, ch: u32, token: u64) {
+            self.1.lock().unwrap().withdrawn.push((self.0, ch, token));
+        }
+        fn note(&self, text: &str) {
+            self.1.lock().unwrap().noted.push((self.0, text.into()));
+        }
+        fn readmit(&self, token: u64, name: &str, by: &str) {
+            let r = (self.0, token, name.into(), by.into());
+            self.1.lock().unwrap().readmits.push(r);
         }
     }
 
@@ -1117,6 +1522,18 @@ mod tests {
             std::mem::take(&mut self.wire.lock().unwrap().asked)
         }
 
+        /// The human on `side` answers the question open on `ch`.
+        fn answer(&mut self, side: usize, ch: u32, yes: bool) {
+            let token = self
+                .wire
+                .lock()
+                .unwrap()
+                .tokens
+                .get(&(side, ch))
+                .map(|t| t.0);
+            self.sides[side].answer(ch, token.unwrap_or(0), yes);
+        }
+
         fn take_told(&self) -> Vec<(usize, String)> {
             std::mem::take(&mut self.wire.lock().unwrap().told)
         }
@@ -1157,9 +1574,9 @@ mod tests {
             let ((ach, acode), (bch, bcode)) = self.asks(a, b);
             assert_eq!(acode, bcode);
             assert_eq!(ach, bch);
-            self.sides[b].answer(bch, true);
+            self.answer(b, bch, true);
             self.pump();
-            self.sides[a].answer(ach, true);
+            self.answer(a, ach, true);
             self.pump();
             ach
         }
@@ -1335,7 +1752,7 @@ mod tests {
     fn a_giver_saying_no_keeps_nothing_and_tells_the_asker() {
         let mut net = Net::new("no");
         let (_, (bch, _)) = net.up_to_the_prompts();
-        net.sides[1].answer(bch, false);
+        net.answer(1, bch, false);
         net.pump();
         assert_eq!(
             net.take_told(),
@@ -1345,7 +1762,7 @@ mod tests {
         assert!(net.sides[1].store().brothers.is_empty());
         assert!(ups(&net.take_events()).is_empty());
         // A second click on a prompt that is gone does nothing.
-        net.sides[1].answer(bch, true);
+        net.answer(1, bch, true);
         net.pump();
         assert!(net.take_told().is_empty());
     }
@@ -1354,9 +1771,9 @@ mod tests {
     fn an_asker_seeing_another_code_keeps_nothing_on_either_side() {
         let mut net = Net::new("mismatch");
         let ((ach, _), (bch, _)) = net.up_to_the_prompts();
-        net.sides[1].answer(bch, true);
+        net.answer(1, bch, true);
         net.pump();
-        net.sides[0].answer(ach, false);
+        net.answer(0, ach, false);
         net.pump();
         assert_eq!(
             net.take_told(),
@@ -1538,11 +1955,25 @@ mod tests {
         net.restart(5);
         assert!(net.take_asked().is_empty());
         assert!(net.linked_to(2).is_empty());
-        // Alpha's human asks Gamma back in: Beta takes it from Alpha, new
-        // key and all.
+        // Alpha's human asks Gamma back in. Beta, whose own human cast it
+        // out, takes it back only once its human says so.
         net.join_pair(0, 2);
         net.gossip();
         assert!(net.take_asked().is_empty());
+        assert_eq!(net.linked_to(2), ["a"]);
+        let asked = std::mem::take(&mut net.wire.lock().unwrap().readmits);
+        assert_eq!(asked.len(), 1, "{asked:?}");
+        assert_eq!(asked[0].0, 1);
+        assert_eq!(
+            (asked[0].2.as_str(), asked[0].3.as_str()),
+            ("Gamma", "Alpha")
+        );
+        // Heard again, it is not asked again.
+        net.gossip();
+        assert!(net.wire.lock().unwrap().readmits.is_empty());
+        net.sides[1].readmit(asked[0].1, true);
+        net.pump();
+        net.gossip();
         assert_eq!(net.linked_to(2), ["a", "b"]);
         assert!(Standing::load(&net.dirs[1]).controls("c"));
         for i in 0..3 {
@@ -1646,6 +2077,15 @@ mod tests {
         crate::mesh::update(&net.dirs[0], |r| {
             crate::mesh::take_over(&mut r.sessions, "s1", 1, "a", 2);
         });
+        // Alpha is not Beta's keeper: its takeover is not believed.
+        net.serve_roster(0);
+        let events = net.take_events();
+        assert!(!events.iter().any(|(_, e)| matches!(e, Event::Moved { .. })));
+        assert_eq!(crate::mesh::owners(&net.dirs[1])["s1"].brother, "b");
+        // Beta named Alpha its keeper: now it is.
+        let mut book = crate::keeping::Book::default();
+        book.set_keeper(Some("a"));
+        book.save(&net.dirs[1]).unwrap();
         net.serve_roster(0);
         let events = net.take_events();
         let moved: Vec<&Event> = events
@@ -1661,6 +2101,152 @@ mod tests {
         // The roster still went on to Beta's client.
         assert!(events.iter().any(|(s, e)| *s == 1
             && matches!(e, Event::Heard { ch: c, msg } if *c == ch && msg["t"] == "roster")));
+    }
+
+    #[test]
+    fn a_yes_lands_only_on_the_question_it_answers() {
+        // The relay gives the channel of an open question again: what was
+        // on it goes, and the question with it.
+        let mut net = Net::new("token");
+        let (_, (bch, _)) = net.up_to_the_prompts();
+        let old = net.wire.lock().unwrap().tokens[&(1, bch)].0;
+        assert!(net.sides[1].text(&json!({"join": bch, "id": "a", "name": "Alpha"})));
+        assert!(net.wire.lock().unwrap().withdrawn.contains(&(1, bch, old)));
+        assert!(!net.sides[1].chans.contains_key(&bch));
+        net.sides[1].answer(bch, old, true);
+        net.pump();
+        assert!(net.sides[1].store().brothers.is_empty());
+        // Closed, then the same number for another join: the yes given to
+        // the first code does not let the second in.
+        let mut net = Net::new("token-again");
+        let (_, (bch, _)) = net.up_to_the_prompts();
+        let old = net.wire.lock().unwrap().tokens[&(1, bch)].0;
+        net.sides[0].text(&json!({"close": bch}));
+        net.sides[1].text(&json!({"close": bch}));
+        net.take_asked();
+        net.next = bch;
+        net.sides[0].ask("b");
+        net.pump();
+        assert_eq!(net.take_asked().len(), 2);
+        let new = net.wire.lock().unwrap().tokens[&(1, bch)].0;
+        assert_ne!(new, old);
+        net.sides[1].answer(bch, old, true);
+        net.pump();
+        assert!(net.sides[1].chans[&bch].asking());
+        assert!(net.sides[1].store().brothers.is_empty());
+        // The relay dropping out withdraws every question.
+        let mut net = Net::new("token-gone");
+        let (_, (bch, _)) = net.up_to_the_prompts();
+        net.sides[1].connected(false);
+        assert_eq!(net.wire.lock().unwrap().withdrawn.len(), 1);
+        net.answer(1, bch, true);
+        assert!(net.sides[1].store().brothers.is_empty());
+    }
+
+    /// The channel side `i` holds linked to brother `to`.
+    fn chan_to(net: &Net, i: usize, to: &str) -> u32 {
+        net.linked(i)
+            .into_iter()
+            .find(|ch| net.sides[i].chans[ch].peer() == to)
+            .unwrap()
+    }
+
+    #[test]
+    fn a_brother_that_only_watches_casts_out_nobody() {
+        let mut net = Net::of("watch", 3);
+        net.connect();
+        net.join_pair(1, 0);
+        net.join_pair(2, 0);
+        net.gossip();
+        net.take_events();
+        net.take_told();
+        let gamma = net.sides[2].store().me.clone().unwrap().public;
+        // Alpha lets Beta only watch it.
+        let mut standing = Standing::load(&net.dirs[0]);
+        standing.set_control("b", false);
+        standing.save(&net.dirs[0]).unwrap();
+        // Beta says Alpha is cast out, then serves a roster casting out
+        // Gamma: Alpha keeps everything.
+        let ch = chan_to(&net, 1, "a");
+        net.sides[1].reply(ch, &json!({"t": "cast_out"}));
+        net.pump();
+        assert!(net.sides[0].store().me.is_some());
+        assert!(net.sides[0].store().get("b").is_some());
+        crate::mesh::update(&net.dirs[1], |r| {
+            r.outcast.insert(gamma.clone());
+        });
+        let roster = crate::rostering::served(&net.dirs[1], "b", "Beta").unwrap();
+        net.sides[1].reply(ch, &crate::rostering::roster_message(&roster));
+        net.pump();
+        assert!(net.sides[0].store().get("c").is_some());
+        assert_eq!(net.linked_to(0), ["b", "c"]);
+        assert!(!crate::mesh::load(&net.dirs[0]).refuses(&gamma));
+    }
+
+    #[test]
+    fn a_brother_that_lost_its_keys_comes_back_and_its_old_key_goes_everywhere() {
+        let mut net = Net::of("lost", 3);
+        net.connect();
+        net.join_pair(1, 0);
+        net.join_pair(2, 0);
+        net.gossip();
+        assert_eq!(net.linked_to(1), ["a", "c"]);
+        let old = net.sides[2].store().me.clone().unwrap().public;
+        net.take_events();
+        net.take_told();
+        // Gamma loses brothers.json but keeps its relay secret, so its id.
+        net.stop(2);
+        std::fs::remove_file(net.dirs[2].join("brothers.json")).unwrap();
+        net.start(2);
+        net.gossip();
+        // Nobody takes a new key for it by itself.
+        assert_eq!(net.sides[1].store().get("c").unwrap().public, old);
+        assert!(net.linked_to(2).is_empty());
+        // Gamma asks Alpha, whose human is told plainly this replaces
+        // Gamma's key, and says yes.
+        let ((ach, _), (bch, _)) = net.asks(2, 0);
+        assert!(net.wire.lock().unwrap().tokens[&(0, bch)].1);
+        net.answer(0, bch, true);
+        net.pump();
+        net.answer(2, ach, true);
+        net.pump();
+        let new = net.sides[2].store().me.clone().unwrap().public;
+        assert_ne!(new, old);
+        net.gossip();
+        // Beta took the new key on the word of Alpha, whose human let it
+        // in, and linked; the old key is refused on both, the id is not.
+        assert_eq!(net.sides[1].store().get("c").unwrap().public, new);
+        assert_eq!(net.linked_to(2), ["a", "b"]);
+        assert!(net.take_asked().is_empty());
+        for i in 0..2 {
+            let standing = Standing::load(&net.dirs[i]);
+            assert!(standing.refuses("anyone", Some(&old)), "{i}");
+            assert!(!standing.refuses("c", None), "{i}");
+            assert!(crate::mesh::load(&net.dirs[i]).refuses(&old), "{i}");
+        }
+        let noted = std::mem::take(&mut net.wire.lock().unwrap().noted);
+        assert!(
+            noted
+                .iter()
+                .any(|(s, t)| *s == 1 && t.contains("let Gamma in again")),
+            "{noted:?}"
+        );
+    }
+
+    #[test]
+    fn casting_out_a_brother_names_those_only_it_let_in() {
+        let mut net = Net::of("behind", 3);
+        net.connect();
+        net.join_pair(1, 0);
+        net.join_pair(2, 1);
+        net.gossip();
+        // Alpha met Gamma only through Beta.
+        assert!(net.sides[0].store().get("c").is_some());
+        let behind = behind_only(&net.dirs[0], "a", "b");
+        assert_eq!(behind, vec![("c".to_string(), "Gamma".to_string())]);
+        assert!(behind_only(&net.dirs[0], "a", "c").is_empty());
+        // On Beta, whose own human let both in, nobody hangs on Alpha.
+        assert!(behind_only(&net.dirs[1], "b", "a").is_empty());
     }
 
     #[test]
@@ -1737,11 +2323,27 @@ mod tests {
 
     #[test]
     fn both_questions_name_the_brother_and_the_code() {
-        let l = let_in_text("Laptop", "587 941");
+        let mut a = Asking {
+            ch: 1,
+            token: 1,
+            name: "Laptop".into(),
+            code: "587 941".into(),
+            replaces: false,
+        };
+        let l = let_in_text(&a);
         assert!(l.starts_with("Laptop wants to join. Let it in?"));
         assert!(l.contains("shows the code 587 941."));
-        let c = confirm_text("Desktop", "587 941");
+        assert!(!l.contains("replaces"));
+        a.replaces = true;
+        assert!(let_in_text(&a).contains("This replaces Laptop's key."));
+        a.name = "Desktop".into();
+        let c = confirm_text(&a);
         assert!(c.starts_with("Does Desktop show the code 587 941?"));
         assert!(c.contains("pretending to be Desktop: say no."));
+        assert!(c.contains("This replaces Desktop's key."));
+        // Lines run on, never broken by the source's indent.
+        for t in [l, c] {
+            assert!(!t.contains("  "), "{t}");
+        }
     }
 }

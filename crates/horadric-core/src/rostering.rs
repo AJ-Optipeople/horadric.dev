@@ -6,11 +6,12 @@
 //! (`standing.json`). A Windows PC and a Linux node serve it alike, so it
 //! lives here rather than in either.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use serde_json::{json, Value};
 
-use crate::brotherhood::{Brother, Counted, Link, Roster};
+use crate::brotherhood::{Brother, Counted, Kin, Link, Roster};
 use crate::joining::Store;
 use crate::keeping::Book;
 use crate::standing::Standing;
@@ -28,7 +29,7 @@ pub fn joined_roster(me: &str, name: &str, store: &Store) -> Roster {
         n,
         brothers: vec![Brother {
             n,
-            ..own(me, name, store)
+            ..own(me, name, store, &BTreeMap::new())
         }],
         ..Roster::default()
     };
@@ -41,11 +42,26 @@ pub fn joined_roster(me: &str, name: &str, store: &Store) -> Roster {
     roster
 }
 
-/// This machine's own entry as its files say, before it is numbered.
-fn own(me: &str, name: &str, store: &Store) -> Brother {
+/// This machine's own entry as its files say, before it is numbered:
+/// every brother it holds, with its key, and whether this machine's human
+/// let that one in by a code (`vouched`, id to key).
+fn own(me: &str, name: &str, store: &Store, vouched: &BTreeMap<String, String>) -> Brother {
     let key = store.me.as_ref().map_or("", |m| m.public.as_str());
+    let held = store
+        .brothers
+        .iter()
+        .map(|b| {
+            let kin = Kin {
+                key: b.public.clone(),
+                name: b.name.clone(),
+                vouched: vouched.get(&b.id) == Some(&b.public),
+            };
+            (b.id.clone(), kin)
+        })
+        .collect();
     Brother {
         holds: store.brothers.iter().map(|b| b.id.clone()).collect(),
+        held,
         ..Brother::new(me, name, key, Link::Relay)
     }
 }
@@ -89,7 +105,7 @@ pub fn served(dir: &Path, me: &str, name: &str) -> Option<Roster> {
     let now = mine.count(&floor);
     if now != last {
         let text = serde_json::to_vec(&now).unwrap_or_default();
-        if let Err(e) = std::fs::write(&path, text) {
+        if let Err(e) = crate::portal::write_private(&path, &text) {
             eprintln!("horadric: cannot keep the roster's number: {e}");
         }
     }
@@ -101,8 +117,9 @@ pub fn served(dir: &Path, me: &str, name: &str) -> Option<Roster> {
 /// numbered or written.
 pub fn known(dir: &Path, me: &str, name: &str) -> Roster {
     let store = Store::load(dir).unwrap_or_default();
+    let vouched = Standing::load(dir).vouched;
     let mine = Roster {
-        brothers: vec![own(me, name, &store)],
+        brothers: vec![own(me, name, &store, &vouched)],
         ..Roster::default()
     };
     crate::mesh::load(dir)
@@ -116,7 +133,7 @@ pub fn known(dir: &Path, me: &str, name: &str) -> Roster {
 /// switch, who may control it, and the keys it cast out.
 pub fn assemble(me: &str, name: &str, store: &Store, book: &Book, standing: &Standing) -> Roster {
     let mut roster = Roster {
-        brothers: vec![own(me, name, store)],
+        brothers: vec![own(me, name, store, &standing.vouched)],
         ..Roster::default()
     };
     book.fold(&mut roster, me);
@@ -240,10 +257,16 @@ mod tests {
             },
         );
         theirs.n = 900;
-        crate::mesh::hear(&dir, "a", &theirs);
+        let from = crate::mesh::Peer {
+            id: "b",
+            key: "b-key",
+            control: true,
+        };
+        crate::mesh::hear(&dir, "a", from, &theirs, &[], 1);
         let r = served(&dir, "a", "Alpha").unwrap();
         assert_eq!(r.brother("b").unwrap().name, "Beta");
-        assert_eq!(r.brother("c").unwrap().name, "Gamma");
+        // What B says of C is not C's word: C is not taken from it.
+        assert!(r.brother("c").is_none());
         assert_eq!(r.brother("a").unwrap().name, "Alpha");
         assert!(r.brothers.iter().all(|b| b.name != "Forged"));
         assert_eq!(r.owner("s").unwrap().brother, "b");
@@ -252,8 +275,16 @@ mod tests {
         assert!(r.brother("a").unwrap().n > 900);
         // B's placeholder here never outranks B's own word.
         assert_eq!(r.brothers.iter().filter(|b| b.id == "b").count(), 1);
+        // Its own entry says whom it holds, with keys and who its human
+        // let in.
+        let mut standing = Standing::default();
+        standing.vouch("b", "b-key");
+        standing.save(&dir).unwrap();
+        let r = served(&dir, "a", "Alpha").unwrap();
+        let kin = &r.brother("a").unwrap().held["b"];
+        assert_eq!((kin.key.as_str(), kin.vouched), ("b-key", true));
         let known = known(&dir, "a", "Alpha");
-        assert_eq!(known.name("c"), "Gamma");
+        assert_eq!(known.name("b"), "Beta");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

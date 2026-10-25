@@ -102,6 +102,8 @@ struct State {
     restored: bool,
     /// When the keeper's word of its owners was last written.
     noted: u64,
+    /// Sessions handed to another, which go from here without ending.
+    handed: HashSet<String>,
 }
 
 thread_local! {
@@ -318,6 +320,20 @@ impl App {
         })
     }
 
+    /// Session `id` went for good here. Where the roster has it as this
+    /// PC's own, its brothers hear it ended, so its owner can go from every
+    /// roster once all have heard. One handed on is another's by now, and
+    /// a brother's tile owns nothing here: neither changes anything.
+    pub(super) fn keeping_ended(&mut self, id: &str) {
+        let Some(dir) = horadric_hooks::state_dir() else {
+            return;
+        };
+        let (me, handed) = with(|s| (s.me.clone(), s.handed.remove(id)));
+        if !handed && !me.is_empty() && mesh::end(&dir, id, &me, unix_now()) {
+            debug(&format!("{id} ended for good"));
+        }
+    }
+
     /// The roster number session `id` is handed off under, so the
     /// receiver owns it one higher.
     pub(super) fn keeping_number(&self, id: &str) -> u64 {
@@ -330,6 +346,9 @@ impl App {
     /// would beat its own `took` to the sender and fence the session it
     /// is letting go. They hear it when their links next come up.
     pub(super) fn keeping_handed(&mut self, id: &str, to: Option<&str>, n: u64) {
+        if to.is_some() {
+            with(|s| s.handed.insert(id.to_string()));
+        }
         let to = match to {
             Some(name) => match id_of(name) {
                 Some(b) => b,
@@ -786,7 +805,7 @@ impl App {
             self.keeping_owners(who, &owners_of(msg));
             return None;
         }
-        let whole = with(|s| s.joins.add(who, msg));
+        let whole = with(|s| s.joins.add(who, msg, unix_now()));
         let whole = match whole {
             Ok(w) => w?,
             Err(e) => {

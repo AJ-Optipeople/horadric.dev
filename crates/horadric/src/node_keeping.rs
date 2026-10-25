@@ -123,6 +123,18 @@ pub(super) fn turn_ended(id: &str, transcript: &str) {
     }
 }
 
+/// Session `id` was stopped here for good. Where the roster has it as
+/// this node's own, its brothers hear it ended, so its owner can go from
+/// every roster once all have heard (see `horadric_core::mesh`).
+pub(super) fn ended(id: &str) {
+    let (Some(dir), Some(me)) = (horadric_hooks::state_dir(), relay::me()) else {
+        return;
+    };
+    if mesh::end(&dir, id, &me, relay::now()) {
+        debug(&format!("{id} ended for good"));
+    }
+}
+
 /// Sessions handed here that run now, with the roster number they run
 /// under, from the landing's thread.
 static LANDED: Mutex<Vec<(String, u64)>> = Mutex::new(Vec::new());
@@ -413,7 +425,7 @@ impl Machine {
             self.keeping_owners(who, &owners_of(msg));
             return None;
         }
-        let whole = match self.keep.joins.add(who, msg) {
+        let whole = match self.keep.joins.add(who, msg, relay::now()) {
             Ok(w) => w?,
             Err(e) => {
                 debug(&e);

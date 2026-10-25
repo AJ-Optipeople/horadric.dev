@@ -67,6 +67,8 @@ enum Event {
     Gone(String),
     /// Sessions of this PC that a roster says another owns now.
     Moved(Vec<(String, brotherhood::Owner)>),
+    /// A word for the human, shown as a toast.
+    Note(String),
 }
 
 /// One brother, kept while its link is down so its tiles stay.
@@ -160,6 +162,7 @@ impl Far {
                 Link::Down { ch } => Event::Down(Via::Channel(ch)),
                 Link::Gone { id } => Event::Gone(id),
                 Link::Moved { owners } => Event::Moved(owners),
+                Link::Note { text } => Event::Note(text),
             };
             if to_app.lock().is_ok_and(|t| t.send(e).is_ok()) {
                 wake(notify);
@@ -349,6 +352,11 @@ impl App {
                 }
                 Event::Moved(owners) => {
                     self.keeping_moved(owners);
+                    false
+                }
+                Event::Note(text) => {
+                    self.toasts
+                        .show(crate::toast::Kind::Info, "Brothers", &text);
                     false
                 }
             };
