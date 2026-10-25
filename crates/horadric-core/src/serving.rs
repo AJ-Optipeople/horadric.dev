@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-use crate::brotherhood::{gate, HEARTBEAT_SECS};
+use crate::brotherhood::{gate, HEARTBEAT_SECS, VIEW_ONLY};
 use crate::portal::{
     answer_version, asked_size, fingerprint, fresh_message, newly_waiting, out_messages,
     session_name, size_message, size_owner, Kind, Viewer,
@@ -371,6 +371,9 @@ impl Server {
         let t = msg["t"].as_str().unwrap_or_default();
         if let Err(why) = gate(msg, c.control) {
             return vec![json!({"t": "error", "text": why, "for": t})];
+        }
+        if !c.control && crate::handing::asks_placing(msg) {
+            return vec![json!({"t": "error", "text": VIEW_ONLY, "for": t})];
         }
         match t {
             "watch" => {
@@ -1629,6 +1632,29 @@ mod tests {
         let msgs = say(&mut server, &mut serve, 1, takeover, 0);
         assert_eq!(of(&msgs, "error")[0]["text"], crate::brotherhood::VIEW_ONLY);
         assert!(serve.kept.is_empty());
+    }
+
+    /// A `bases` ask that carries a place makes a node clone and a PC ask
+    /// its human: a view only brother may ask for commits, never that.
+    #[test]
+    fn a_view_only_brother_cannot_make_this_machine_place_a_project() {
+        let place =
+            json!({"t": "bases", "id": "s1", "repo": {}, "place": {"url": "https://x/y.git"}});
+        let commits = json!({"t": "bases", "id": "s1", "repo": {}});
+        let hello = json!({"t": "hello", "v": 3, "kind": "brother"});
+        let mut serve = Fake::default();
+        let (mut server, _) = greeted(&mut serve, "viewer", hello.clone());
+        let msgs = say(&mut server, &mut serve, 1, place.clone(), 0);
+        assert_eq!(of(&msgs, "error")[0]["text"], crate::brotherhood::VIEW_ONLY);
+        assert_eq!(of(&msgs, "error")[0]["for"], "bases");
+        assert!(serve.handing.is_empty());
+        say(&mut server, &mut serve, 2, commits, 0);
+        assert_eq!(serve.handing.len(), 1);
+
+        let mut serve = Fake::default();
+        let (mut server, _) = greeted(&mut serve, "Laptop", hello);
+        say(&mut server, &mut serve, 1, place, 0);
+        assert_eq!(serve.handing.len(), 1);
     }
 
     #[test]

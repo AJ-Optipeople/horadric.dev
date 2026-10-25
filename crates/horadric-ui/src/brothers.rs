@@ -329,7 +329,7 @@ fn tell_link(l: Link) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use horadric_core::joining::{public_of, Handshake, Out};
+    use horadric_core::joining::{public_of, Handshake, Me, Out};
     use serde_json::json;
 
     /// Hands what one side says to the other, as the relay would, with
@@ -360,8 +360,18 @@ mod tests {
         let (mut nonce_a, mut nonce_g) = ([0u8; 16], [0u8; 16]);
         Cng.random(&mut nonce_a);
         Cng.random(&mut nonce_g);
-        let (mut a, join) = Handshake::ask(("Laptop", &lap_pub), ("d", "Desktop"), nonce_a);
-        let mut g = Handshake::give(("Desktop", &desk_pub), ("l", "Laptop"), None, nonce_g);
+        let lap_me = Me {
+            id: "l",
+            name: "Laptop",
+            public: &lap_pub,
+        };
+        let desk_me = Me {
+            id: "d",
+            name: "Desktop",
+            public: &desk_pub,
+        };
+        let (mut a, join) = Handshake::ask(lap_me, ("d", "Desktop"), nonce_a);
+        let mut g = Handshake::give(desk_me, ("l", "Laptop"), None, nonce_g);
         let offer = pass(&join, &mut g, &desk);
         let reveal = pass(&offer, &mut a, &lap);
         let prompt = pass(&reveal, &mut g, &desk);

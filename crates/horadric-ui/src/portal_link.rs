@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use horadric_core::portal::{frame, unframe};
-use horadric_core::relaying::{after_failure, after_link, pc_url, silent, PING_SECS};
+use horadric_core::relaying::{after_failure, after_link, pc_dial, silent, Dial, PING_SECS};
 use horadric_core::release::split_url;
 use windows::core::{w, HSTRING, PCWSTR};
 use windows::Win32::Networking::WinHttp::{
@@ -132,7 +132,7 @@ impl Link {
         let url = move || {
             let token = crate::workos::access_token().ok();
             let name = crate::portal_pair::pc_name();
-            pc_url(
+            pc_dial(
                 &relay,
                 &secret,
                 token.as_deref().map(|t| (t, name.as_str())),
@@ -275,7 +275,7 @@ fn ping_loop(
 }
 
 fn read_loop(
-    url: &dyn Fn() -> String,
+    url: &dyn Fn() -> Dial,
     stop: &AtomicBool,
     slot: &Slot,
     tx: &Sender<Incoming>,
@@ -292,7 +292,8 @@ fn read_loop(
     let mut backoff = 1;
     while !stop.load(Ordering::SeqCst) {
         let wait;
-        match connect(&url()) {
+        let dial = url();
+        match connect(&dial.url, &dial.headers) {
             Ok(socket) => {
                 let socket = Arc::new(socket);
                 *slot.lock().unwrap() = Some(socket.clone());
@@ -409,9 +410,10 @@ fn receive(s: &Socket) -> Option<(bool, Vec<u8>)> {
     }
 }
 
-/// Opens the WebSocket. `ws://` and `wss://` as WinHTTP's `http` and
-/// `https`, since the upgrade starts as a plain request.
-fn connect(url: &str) -> Result<Socket, String> {
+/// Opens the WebSocket, with `headers` on the upgrade request. `ws://` and
+/// `wss://` as WinHTTP's `http` and `https`, since the upgrade starts as
+/// a plain request.
+fn connect(url: &str, headers: &[(&str, String)]) -> Result<Socket, String> {
     let http = if let Some(r) = url.strip_prefix("wss://") {
         format!("https://{r}")
     } else if let Some(r) = url.strip_prefix("ws://") {
@@ -464,7 +466,12 @@ fn connect(url: &str) -> Result<Socket, String> {
         )?;
         WinHttpSetOption(Some(request.0), WINHTTP_OPTION_UPGRADE_TO_WEB_SOCKET, None)
             .map_err(|e| format!("cannot ask for a WebSocket: {e}"))?;
-        WinHttpSendRequest(request.0, None, None, 0, 0, 0)
+        // What proves this PC goes in headers, never in the URL, which a
+        // proxy in front of the relay logs.
+        let lines = header_lines(headers)?;
+        let lines: Vec<u16> = lines.encode_utf16().collect();
+        let lines = (!lines.is_empty()).then_some(lines.as_slice());
+        WinHttpSendRequest(request.0, lines, None, 0, 0, 0)
             .map_err(|e| format!("cannot reach {}: {e}", parts.host))?;
         WinHttpReceiveResponse(request.0, std::ptr::null_mut())
             .map_err(|e| format!("no answer from {}: {e}", parts.host))?;
@@ -499,6 +506,20 @@ fn connect(url: &str) -> Result<Socket, String> {
     }
 }
 
+/// Request headers as WinHTTP takes them, one `Name: value` line each.
+/// A name or value that could end its line and start another is refused.
+fn header_lines(headers: &[(&str, String)]) -> Result<String, String> {
+    let mut lines = String::new();
+    for (name, value) in headers {
+        let bad = |s: &str| s.chars().any(|c| c.is_control());
+        if name.is_empty() || bad(name) || name.contains([':', ' ']) || bad(value) {
+            return Err(format!("header {name} cannot be sent"));
+        }
+        lines.push_str(&format!("{name}: {value}\r\n"));
+    }
+    Ok(lines)
+}
+
 fn handle(raw: *mut c_void, what: &str) -> Result<Raw, String> {
     if raw.is_null() {
         Err(format!("{what}: {}", windows::core::Error::from_thread()))
@@ -515,7 +536,7 @@ pub struct Dialled(Arc<Socket>);
 
 impl Dialled {
     pub fn dial(url: &str) -> Result<Dialled, String> {
-        connect(url).map(|s| Dialled(Arc::new(s)))
+        connect(url, &[]).map(|s| Dialled(Arc::new(s)))
     }
 
     /// One whole message, (is text, bytes), or None once it closed.
@@ -545,6 +566,27 @@ impl Dialled {
 mod tests {
     use super::*;
     use horadric_core::portal::frame;
+
+    #[test]
+    fn headers_are_lines_and_none_can_start_another() {
+        let ok = header_lines(&[
+            ("X-Horadric-Secret", "abc".into()),
+            ("Authorization", "Bearer h.p.s".into()),
+        ]);
+        assert_eq!(
+            ok.unwrap(),
+            "X-Horadric-Secret: abc\r\nAuthorization: Bearer h.p.s\r\n"
+        );
+        assert_eq!(header_lines(&[]).unwrap(), "");
+        for bad in [
+            ("X", "a\r\nHost: evil".to_string()),
+            ("X: Y", "a".into()),
+            ("", "a".into()),
+            ("X\n", "a".into()),
+        ] {
+            assert!(header_lines(&[bad]).is_err());
+        }
+    }
 
     #[test]
     fn relay_control_and_sealed_frames_read() {

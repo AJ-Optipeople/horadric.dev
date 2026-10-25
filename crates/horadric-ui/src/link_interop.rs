@@ -5,9 +5,102 @@
 
 use horadric_link::ecdh;
 
-use crate::joining::{agree, frame_aad, session_key, Way};
+use serde_json::json;
+
+use crate::brothers::Cng;
+use crate::joining::{agree, frame_aad, join_session_key, Crypto, Handshake, Held, Me, Out, Way};
 use crate::portal_crypto as cng;
 use crate::portal_push::{ecdh as cng_ecdh, ecdh_pair as cng_pair};
+
+/// The crypto a Linux node joins with, as `horadric node` wires it.
+struct Link;
+
+impl Crypto for Link {
+    fn random(&self, buf: &mut [u8]) {
+        horadric_link::random(buf);
+    }
+
+    fn pair(&self) -> Option<[u8; 96]> {
+        Some(ecdh::pair())
+    }
+
+    fn ecdh(&self, private: &[u8; 96], peer: &[u8]) -> Option<[u8; 32]> {
+        ecdh::agree(private, peer).ok()
+    }
+
+    fn seal_bound(&self, key: &[u8; 32], plain: &[u8], aad: &[u8]) -> Vec<u8> {
+        horadric_link::seal_bound(key, plain, aad)
+    }
+
+    fn open_bound(&self, key: &[u8; 32], sealed: &[u8], aad: &[u8]) -> Option<Vec<u8>> {
+        horadric_link::open_bound(key, sealed, aad)
+    }
+}
+
+/// The sealed frames among what a handshake step says.
+fn sealed(out: &[Out]) -> Vec<Vec<u8>> {
+    out.iter()
+        .filter_map(|o| match o {
+            Out::Sealed(b) => Some(b.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Passes what one side sealed to the other, as the relay would.
+fn pass(out: &[Out], c: &dyn Crypto, to: &mut Handshake) -> Vec<Out> {
+    sealed(out)
+        .iter()
+        .flat_map(|b| to.sealed(c, b, 0).1)
+        .collect()
+}
+
+/// A PC and a node link again under the hellos bound to both ends, each
+/// side on its own crypto, both ways round; and on either crypto, a
+/// machine handed its own hello by the relay answers nothing.
+#[test]
+fn a_pc_and_a_node_relink_bound_to_both_ends() {
+    let mut link = [0u8; 32];
+    horadric_link::random(&mut link);
+    let pc = cng_public(&cng_pair().unwrap());
+    let node = ecdh::public(&ecdh::pair()).to_vec();
+    let sides: [(&dyn Crypto, &str, &[u8]); 2] = [(&Cng, "pc", &pc), (&Link, "node", &node)];
+    for (asker, giver) in [(0, 1), (1, 0)] {
+        let (ac, aid, apub) = sides[asker];
+        let (gc, gid, gpub) = sides[giver];
+        let me_a = Me {
+            id: aid,
+            name: aid,
+            public: apub,
+        };
+        let me_g = Me {
+            id: gid,
+            name: gid,
+            public: gpub,
+        };
+        let held = |public: &[u8]| Held {
+            link,
+            public: public.to_vec(),
+        };
+        let (mut a, hello) = Handshake::link(ac, me_a, (gid, gid), held(gpub), [1; 16]);
+        let mut g = Handshake::give(me_g, (aid, aid), Some(held(apub)), [2; 16]);
+        let answer = pass(&hello, gc, &mut g);
+        let ready = pass(&answer, ac, &mut a);
+        assert!(a.linked(), "{aid} asking {gid}");
+        pass(&ready, gc, &mut g);
+        assert!(g.linked(), "{gid} giving to {aid}");
+        let f = a.seal(ac, &json!({"t": "x"})).unwrap();
+        assert_eq!(g.sealed(gc, &f, 0).0, Some(json!({"t": "x"})));
+        let f = g.seal(gc, &json!({"t": "y"})).unwrap();
+        assert_eq!(a.sealed(ac, &f, 0).0, Some(json!({"t": "y"})));
+
+        // The relay hands the asker its own hello, as if from its brother.
+        let (_, hello) = Handshake::link(ac, me_a, (gid, gid), held(gpub), [3; 16]);
+        let mut fake = Handshake::give(me_a, (gid, gid), Some(held(gpub)), [4; 16]);
+        assert!(pass(&hello, ac, &mut fake).is_empty());
+        assert!(!fake.linked());
+    }
+}
 
 /// `04 || x || y` of a key CNG made, read from its `x || y || d`.
 fn cng_public(private: &[u8; 96]) -> Vec<u8> {
@@ -85,7 +178,7 @@ fn frames_sealed_on_one_open_on_the_other() {
         horadric_link::random(&mut k);
         k
     };
-    let key = session_key(&link, &[1; 16], &[2; 16]);
+    let key = join_session_key(&link, &[1; 16], &[2; 16]);
     let aad = frame_aad(Way::FromAsker, 41);
     let plain = br#"{"t":"roster","brothers":[]}"#;
 

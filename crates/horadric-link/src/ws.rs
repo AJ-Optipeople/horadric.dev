@@ -61,6 +61,12 @@ impl Socket {
     /// finishes the upgrade. An answer other than 101 is an error naming
     /// its status.
     pub fn connect(url: &str) -> Result<Socket, String> {
+        Socket::connect_with(url, &[])
+    }
+
+    /// [`Socket::connect`], with these request headers on the upgrade:
+    /// what proves who connects goes there, not in the URL.
+    pub fn connect_with(url: &str, headers: &[(&str, &str)]) -> Result<Socket, String> {
         let http = if let Some(r) = url.strip_prefix("wss://") {
             format!("https://{r}")
         } else if let Some(r) = url.strip_prefix("ws://") {
@@ -84,6 +90,13 @@ impl Socket {
         let agent = format!("Horadric/{}", env!("CARGO_PKG_VERSION"));
         if let Ok(v) = agent.parse() {
             request.headers_mut().insert("User-Agent", v);
+        }
+        for (name, value) in headers {
+            let name = tungstenite::http::HeaderName::from_bytes(name.as_bytes())
+                .map_err(|e| format!("header {name}: {e}"))?;
+            let value = tungstenite::http::HeaderValue::from_str(value)
+                .map_err(|e| format!("header {name}: {e}"))?;
+            request.headers_mut().insert(name, value);
         }
         let config = WebSocketConfig::default()
             .max_message_size(Some(MAX_MESSAGE))
@@ -312,6 +325,44 @@ mod tests {
         s.close();
         assert!(!s.send(true, b"late"));
         assert_eq!(s.receive(), None);
+    }
+
+    #[test]
+    fn headers_go_on_the_upgrade() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let (tcp, _) = listener.accept().unwrap();
+            // tungstenite's own callback type, whose error is its response.
+            #[allow(clippy::result_large_err)]
+            let look = |req: &tungstenite::handshake::server::Request,
+                        res: tungstenite::handshake::server::Response| {
+                let h = req.headers();
+                let get = |n: &str| h.get(n).and_then(|v| v.to_str().ok()).map(str::to_string);
+                tx.send((
+                    req.uri().to_string(),
+                    get("x-horadric-secret"),
+                    get("authorization"),
+                ))
+                .unwrap();
+                Ok(res)
+            };
+            let mut ws = tungstenite::accept_hdr(tcp, look).unwrap();
+            while ws.read().is_ok() {}
+        });
+        let url = format!("ws://127.0.0.1:{port}/pc?name=node");
+        let s = Socket::connect_with(
+            &url,
+            &[("X-Horadric-Secret", "abc"), ("Authorization", "Bearer t")],
+        )
+        .unwrap();
+        let (uri, secret, auth) = rx.recv().unwrap();
+        assert_eq!(uri, "/pc?name=node");
+        assert_eq!(secret.as_deref(), Some("abc"));
+        assert_eq!(auth.as_deref(), Some("Bearer t"));
+        s.close();
+        assert!(Socket::connect_with(&url, &[("bad\nname", "x")]).is_err());
     }
 
     #[test]

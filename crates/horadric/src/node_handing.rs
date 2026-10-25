@@ -428,6 +428,16 @@ impl Machine {
             }
             Some(Place::Cloning) => Box::new(move || bases_placing(&id)),
             None if id.is_empty() => Box::new(move || bases_answer(&id, None)),
+            // A clone at a time or two: one more waits for the sender's
+            // next ask rather than filling the disk and the network.
+            None if places_of(&self.hand.places)
+                .values()
+                .filter(|p| matches!(p, Place::Cloning))
+                .count()
+                >= placing::MOST_PLACING =>
+            {
+                Box::new(move || bases_placing(&id))
+            }
             None => {
                 let recent: Vec<String> = lock(&self.node)
                     .recent

@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 use horadric_core::brothers::{Brothers, Event as Link, Hands, Listener, Relay};
 use horadric_core::joining::{Crypto, Listed, Store};
 use horadric_core::portal::{unframe, Config};
-use horadric_core::relaying::{after_failure, after_link, pc_url, PING_SECS, SILENT_SECS};
+use horadric_core::relaying::{after_failure, after_link, pc_dial, PING_SECS, SILENT_SECS};
 use horadric_link::ws::Socket;
 use serde_json::{json, Value};
 
@@ -266,8 +266,8 @@ fn read_loop(relay: &str, secret: &str, name: &str, slot: &Slot) {
             wait_for_sign_in(signed);
             continue;
         }
-        let url = match signin::access_token() {
-            Ok(token) => pc_url(relay, secret, Some((&token, name))),
+        let dial = match signin::access_token() {
+            Ok(token) => pc_dial(relay, secret, Some((&token, name))),
             Err(e) => {
                 eprintln!("horadric node: {e}");
                 let (wait, next) = after_failure(backoff.max(5));
@@ -276,7 +276,9 @@ fn read_loop(relay: &str, secret: &str, name: &str, slot: &Slot) {
                 continue;
             }
         };
-        let wait = match Socket::connect(&url) {
+        let headers: Vec<(&str, &str)> =
+            dial.headers.iter().map(|(n, v)| (*n, v.as_str())).collect();
+        let wait = match Socket::connect_with(&dial.url, &headers) {
             Ok(socket) => {
                 *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some((socket.clone(), signed));
                 let began = Instant::now();

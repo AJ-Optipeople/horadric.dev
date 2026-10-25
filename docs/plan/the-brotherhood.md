@@ -163,7 +163,15 @@ screen. What it lacks:
   relay cannot echo a frame back, play one again, or bring one from an
   earlier link (a stale `state` heartbeat, an old `took`). The
   roster (`horadric-core/src/brotherhood.rs`) takes over from this file
-  in step 3.
+  in step 3. The hellos and that key are bound to both ends, each
+  machine's relay id and public key in asker and giver order (fixed
+  2026-10-25, for 0.33): a link key is one per pair and the same both
+  ways, so the relay could open a channel to a machine as if from its
+  brother, hand it its own hello, and the machine linked to itself,
+  showing its own sessions as the brother's and filing the brother's
+  snapshots at home. A brother on 0.32 binds neither end; it is never
+  linked to and shows as "needs a newer Horadric" (PORTAL.md says how
+  each side tells).
 
 ### Seeing
 
@@ -371,8 +379,9 @@ key set up from every PC and cannot reach a home server behind a router.
 Added to PORTAL.md when built. A v2 phone or PC keeps working; a brother
 that answers `v` 2 shows as "needs a newer Horadric".
 
-- The relay's `/pc` takes `token=<WorkOS access token>` beside the
-  secret, and tells a signed in PC which of its user's brothers are
+- The relay's `/pc` takes the WorkOS access token beside the secret,
+  both in headers (`Authorization: Bearer`, `X-Horadric-Secret`) since
+  0.33 so no proxy log keeps them, and tells a signed in PC which of its user's brothers are
   connected (`{"brothers":[...]}`) and when one asks to join
   (`{"join":<ch>,"name"}`). A PC without a token is a v2 PC, served as
   today.
@@ -399,9 +408,15 @@ that answers `v` 2 shows as "needs a newer Horadric".
   brother's session to its keeper.
 - `{"t":"lore","project","have":{"<brother>":n,...}}` on connect, then
   `{"t":"entries","project","b64"}` with what the other lacks, and the
-  same for each new entry as it is written.
+  same for each new entry as it is written. Both sides say `lore` again
+  when their projects change, so a project opened after the link came
+  up is shared on it. Entries are taken only from a brother that may
+  control the machine taking them: they land in a lore its agents read
+  with full rights.
 - `input`, `start`, `resume`, `create`, `handoff` and `takeover` are
-  refused with `error` "view only" on a link without control.
+  refused with `error` "view only" on a link without control, and so is
+  a `bases` ask that carries `place` (a node would clone, a PC would ask
+  its human).
 
 ## Steps
 
@@ -1053,6 +1068,29 @@ Each step is useful alone and each is verified before the next starts.
     a brother that lost `brothers.json` but kept its secret rejoins with a
     new key under its old id, and brothers holding its old key keep it
     until it is cast out; roster owners are never pruned.
+
+    Hardened on 2026-10-25 after a security review, for 0.33. Relink
+    hellos and the link's key are bound to both ends (relay ids and
+    public keys, asker first), so the relay can no longer hand a machine
+    its own hello and have it link to itself; a 0.32 brother is told
+    apart and shows "needs a newer Horadric" (`joining::Ends`, `Held`,
+    `Me`). Lore `entries` are taken only from a brother that may
+    control the machine (`afar::takes_entries`), on a PC and a node
+    alike, and both sides say `lore` again when projects change, so a
+    project opened after the link came up is shared on it. A `bases` ask
+    carrying `place` needs control; a receiver clones only https and ssh
+    remotes with git told to allow no other protocol, at most two
+    placings at once (`placing::cloneable`, `MOST_PLACING`). The secret
+    and access token go to the relay in headers, not the `/pc` address
+    (`relaying::pc_dial`); the relay takes the old query until
+    2027-01-01 and caps a user at 16 machines and an address at 32 PCs.
+    Seen with two dev instances on the deployed relay, their state seeded
+    as joined: they relinked on the binding; Beta's note in a project
+    both opened after the link reached Alpha, and once Alpha switched
+    Beta to view only, Beta's next note was refused ("lore from Beta is
+    not taken"); with Beta on a 0.32 build Alpha's Brothers menu read
+    "Beta needs a newer Horadric", and the other way round Beta's read
+    "Alpha needs a newer Horadric".
 19. **Later, each its own decision.** Teams: a WorkOS organization as a
     brotherhood of several people, each seeing the others' sessions view
     only by default, and the lore shared or not per project; catching

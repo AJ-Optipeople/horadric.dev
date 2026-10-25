@@ -100,6 +100,13 @@ fn set_place(id: &str, place: Place) {
     }
 }
 
+/// How many places are being asked about or readied now.
+fn asking() -> usize {
+    PLACING.lock().map_or(usize::MAX, |p| {
+        p.iter().filter(|(_, p, _)| *p == Place::Asking).count()
+    })
+}
+
 fn drop_place(id: &str) {
     if let Ok(mut p) = PLACING.lock() {
         p.retain(|(i, _, _)| i != id);
@@ -1007,6 +1014,10 @@ impl App {
                 Box::new(move || bases_refused(&id, &why))
             }
             Some(Place::Asking) => Box::new(move || bases_placing(&id)),
+            // As many questions as the human can answer at once: the
+            // sender asks again every few seconds, so one more waits its
+            // turn rather than piling a dialog on the screen.
+            None if asking() >= placing::MOST_PLACING => Box::new(move || bases_placing(&id)),
             None => {
                 set_place(&id, Place::Asking);
                 if let Ok(mut q) = QUESTIONS.lock() {
@@ -1165,7 +1176,7 @@ fn ask_place(hwnd: HWND, q: &Question) -> Said {
     let title = format!("{from} hands {session} to this PC");
     let start = parent.clone().map(PathBuf::from);
     match (&q.ask.url, &parent) {
-        (Some(url), Some(parent)) if !q.ask.plain => {
+        (Some(url), Some(parent)) if !q.ask.plain && placing::cloneable(url) => {
             let dest = placing::free_folder(parent, &name_for(&q.ask), |f| Path::new(f).exists());
             let text = format!(
                 "This PC has no checkout of its project. Clone {url} into {dest}?\n\n\

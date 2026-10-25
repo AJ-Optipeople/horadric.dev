@@ -262,7 +262,7 @@ fn status() -> Value {
     let listed: Vec<Value> = relay::listed()
         .unwrap_or_default()
         .into_iter()
-        .map(|l| json!({"id": l.id, "name": l.name, "joined": l.joined, "linked": l.linked}))
+        .map(|l| json!({"id": l.id, "name": l.name, "joined": l.joined, "linked": l.linked, "old": l.old}))
         .collect();
     let dir = horadric_hooks::state_dir();
     let standing = dir.as_deref().map(Standing::load).unwrap_or_default();
@@ -589,7 +589,13 @@ pub(super) fn brothers_command() -> Result<(), String> {
     for b in status["joined"].as_array().cloned().unwrap_or_default() {
         let id = b["id"].as_str().unwrap_or_default();
         let linked = listed.iter().any(|l| l["id"] == id && l["linked"] == true);
-        let mut state = if linked { "linked" } else { "out of reach" }.to_string();
+        let old = listed.iter().any(|l| l["id"] == id && l["old"] == true);
+        let mut state = match (linked, old) {
+            (true, _) => "linked",
+            (false, true) => "needs a newer Horadric",
+            (false, false) => "out of reach",
+        }
+        .to_string();
         if b["control"] == false {
             state.push_str(", view only");
         }

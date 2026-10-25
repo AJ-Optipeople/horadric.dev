@@ -779,12 +779,14 @@ mod tests {
                 name: "Desktop".into(),
                 joined: true,
                 linked: true,
+                old: false,
             },
             joining::Listed {
                 id: "n".into(),
                 name: "New".into(),
                 joined: false,
                 linked: false,
+                old: false,
             },
         ];
         let joined = vec![

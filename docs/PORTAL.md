@@ -74,8 +74,13 @@ ignores that key, so its phones pair again.
 
 WebSocket endpoints, both on the relay's address:
 
-- `/pc?secret=<secret>`: a PC. The relay computes its id. A second PC
-  connection with the same id replaces the first (a reconnect).
+- `/pc`, with the header `X-Horadric-Secret: <secret>`: a PC. The relay
+  computes its id. A second PC connection with the same id replaces the
+  first (a reconnect). The secret never goes in the address, where a
+  proxy's access log keeps it; 0.32 and older send `/pc?secret=<secret>`,
+  which the relay takes until 2027-01-01 when no header came. One address
+  may hold 32 PCs open (429 past that). A phone's id is a hash of the
+  secret, no credential, so `/phone?id=` keeps it in the address.
 - `/phone?id=<id>`: a phone. It may connect while the PC is offline and
   waits.
 
@@ -400,7 +405,12 @@ exactly as before.
 - `input`, `start`, `resume`, `create`, `handoff` and `takeover` on a
   link without control answer `{"t":"error","text":"view only","for":"<t>"}`
   and do nothing. Every link has control for now; a switch per brother
-  comes with joining.
+  comes with joining. (Since 0.33 the list is `NEEDS_CONTROL` in
+  `horadric-core/src/brotherhood.rs`, and a `bases` ask carrying `place`
+  is one too: it makes a node clone and a PC ask its human. A receiver
+  clones only `https://`, `ssh://` and `user@host:path` remotes, with
+  git told to allow no other protocol, and places at most two projects
+  at once; one more is answered "placing" and asked again.)
 - `{"t":"attach","id","cols","rows"}`, without `data` (with `data` it is
   the photo of 0.24): stream this session raw. The PC sends
   `{"t":"size","id","cols","rows"}`, the size the session's pseudo
@@ -435,8 +445,10 @@ exactly as before.
 
 ## Protocol v3: joining a brother
 
-A PC signed in with WorkOS (`/pc?secret=..&token=..&name=..`, see the
-relay's README, "Brothers") is told which of the human's other PCs are
+A PC signed in with WorkOS (`/pc?name=..` with the headers
+`X-Horadric-Secret` and `Authorization: Bearer <access token>`, see the
+relay's README, "Brothers"; one user may have 16 machines connected, and
+one more is closed with 4429 and tries again later) is told which of the human's other PCs are
 connected, and asks the relay for a channel to one with
 `{"join":{"to":"<pc id>"}}`. The relay answers `{"link":<ch>,"id","name"}`
 on the asker's side and `{"join":<ch>,"id","name"}` on the other's. The
@@ -479,22 +491,46 @@ On a brother channel, until there is a key, frames are plain UTF-8 JSON:
   welcome opened; until then any other sealed frame is dropped. On no:
   plain `{"t":"refused"}`, and it closes.
 
-A brother that joined before links again. The asker sends
-`{"t":"hello","v":3,"kind":"brother","name","nonce"}` sealed with the
-long term key and the additional data `"horadric link hello v1"`,
-`"a"`. The giver answers with its own hello, a fresh `nonce`, sealed
-with the additional data `"horadric link hello v1"`, `"g"`, then the
-asker's nonce, so an old answer does not open for a new hello. The
-asker then sends `{"t":"ready"}` as the link's first frame, and the
-giver counts the link up only once that opens: a hello played again
-gets an answer and nothing more. Of two joined brothers the one with
-the lower id asks for the channel when it sees the other in
-`brothers`.
+A brother that joined before (or was introduced) links again. The ends
+of the link are the asker's relay id and public key and the giver's, as
+each side names them: its own, and the brother's as `brothers.json`
+keeps it under the relay's id for it. The asker sends
+`{"t":"hello","v":4,"kind":"brother","name","nonce"}` sealed with the
+long term key and the additional data `"horadric link hello v2"`, `"a"`,
+then, each led by its length as a 4 byte big endian number, the asker's
+id, the asker's public key, the giver's id, the giver's public key and
+an empty asker nonce. The giver answers with its own hello, a fresh
+`nonce`, sealed with the same but `"g"` and the asker's nonce, so an old
+answer does not open for a new hello. The asker then sends
+`{"t":"ready"}` as the link's first frame, and the giver counts the link
+up only once that opens: a hello played again gets an answer and nothing
+more. A link key is one per pair and the same both ways, so without the
+ends the relay could open a channel to a machine as if from its brother
+and hand it its own hello: it would link to itself. Bound to the ends,
+that hello does not open on the giving side (the ends come the other way
+round), and a hello carrying a nonce the machine drew on any of its own
+channels is not heard either. Of two joined brothers the one with the
+lower id asks for the channel when it sees the other in `brothers`.
 
-Link frames, after the hellos or the welcomes, are sealed with the
-link's own key, SHA-256 of `"horadric link session v1"` over the long
-term key, the asker's nonce and the giver's, length led as above, so
-nothing from an earlier link opens. A frame is its number, 8 bytes big
+Up to 0.32 the hellos were `"v":3`, bound only to the way and the
+asker's nonce (`"horadric link hello v1"`, the way byte, the nonce).
+Nothing links on those any more. An asker on 0.33 sends that hello
+first, then the bound one: a 0.32 giver can open only the first, and its
+answer (which a 0.33 giver never sends) tells the asker the brother needs
+a newer Horadric. A 0.33 giver that opens a 0.32 hello and no bound one
+after it says the same. Either way the channel stays open and unlinked,
+so it is not asked again and again, and the brother shows as "needs a
+newer Horadric" in the tray's Brothers menu and in `horadric node
+brothers`, until it updates.
+
+Link frames, after the hellos, are sealed with the link's own key,
+SHA-256 of `"horadric link session v2"` over the long term key, the
+asker's id and public key, the giver's id and public key, the asker's
+nonce and the giver's, length led as above, so nothing from an earlier
+link, or from a link between other ends, opens. After a join's welcomes
+they are sealed with SHA-256 of `"horadric link session v1"` over the
+link key the join agreed and the two join nonces: that key already
+binds both public keys in asker and giver order. A frame is its number, 8 bytes big
 endian, then the AES-256-GCM payload as phone frames are, with the
 additional data `"horadric link frame v1"`, the way (`"a"` from the
 asker, `"g"` from the giver) and the number, 8 bytes big endian. Each
@@ -542,10 +578,20 @@ phone hears none of it, and its `lore` and `entries` are ignored.
   brother. A brother answers with its own `lore`; the PC then sends
   `{"t":"entries","project","b64"}` with what that `have` lacks, in as many
   messages as keep each under 384 KB of packed entries, and after that
-  what is written as it is written. `entries` from a brother go into the
-  PC's copy of the project's lore. A project is the brother's when either
+  what is written as it is written. A project is the brother's when either
   repository names a remote of the other, or, with no remote, the same
-  first commit.
+  first commit. A server sends its `lore` again when its projects change;
+  a client that hears it says its own `lore` again, and so does a client
+  whose own projects change, so a project opened after the link came up
+  is shared on that link (a server shares only what its client named).
+- `entries` from a brother go into the machine's copy of the project's
+  lore, which its agents read with full rights: so only from a brother
+  that may control this machine (added in 0.33). A relay brother counts
+  while this machine holds its key and its own "Can control this PC"
+  switch for it is on; a PC reached through the phone door that it holds
+  no key for never does; a node reached over `ssh` alone is the human's
+  own by their ssh key and does. A client does not send `lore` to a
+  brother whose entries it would not take, and drops any that come.
 - A PC never serves on a session it only shows for a brother: not in
   `sessions`, not to `attach`, `watch`, `input` or `stop`.
 

@@ -286,6 +286,14 @@ pub fn heard_place(msg: &Value) -> Option<PlaceAsk> {
     serde_json::from_value(msg.get("place")?.clone()).ok()
 }
 
+/// Whether `msg` is a `bases` ask carrying what to place: on a receiver
+/// without a checkout it starts a clone (a node, unattended) or asks the
+/// human where the project goes (a PC), so it acts on that machine, and a
+/// view only link may not send it. One without only asks for commits.
+pub fn asks_placing(msg: &Value) -> bool {
+    msg["t"] == "bases" && msg.get("place").is_some_and(|p| !p.is_null())
+}
+
 /// The receiver's answer while its human decides where the project goes.
 pub fn bases_placing(id: &str) -> Value {
     json!({"t": "bases", "id": id, "commits": [], "found": false, "placing": true})

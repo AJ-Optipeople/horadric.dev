@@ -87,6 +87,9 @@ struct Peer {
     /// the project and what this PC knows it holds, as `Lores::export`
     /// keeps it.
     lore: HashMap<String, (Value, Value)>,
+    /// A relay brother said its lore changed: this PC says again what it
+    /// holds, at the next check.
+    lore_due: bool,
 }
 
 pub(super) struct Far {
@@ -120,6 +123,8 @@ pub(super) struct Far {
     /// were found in, so a project opened since is shared at once.
     lore: Lores,
     lore_dirs: Vec<PathBuf>,
+    /// The tiles' project folders the relay brothers were last told of.
+    relay_dirs: Vec<PathBuf>,
     /// A node's `ssh` link kept ready, by the relay brother it is the same
     /// machine as, while that brother is reached over the relay: the relay
     /// link is preferred, and this takes over when it drops.
@@ -176,6 +181,7 @@ impl Far {
             arrived: HashMap::new(),
             lore: Lores::default(),
             lore_dirs: Vec::new(),
+            relay_dirs: Vec::new(),
             standby: HashMap::new(),
         }
     }
@@ -209,6 +215,7 @@ impl App {
             }
         }
         self.far_lore(None);
+        self.far_lore_relayed();
         if self.far_lines() {
             self.reconcile(true);
         }
@@ -436,6 +443,54 @@ impl App {
         }
     }
 
+    /// Whether this PC takes in the lore entries brother `key` sends on
+    /// `via`: see [`afar::takes_entries`] for the rule.
+    fn far_takes_lore(&self, via: Via, key: &str) -> bool {
+        let Some(dir) = horadric_hooks::state_dir() else {
+            return false;
+        };
+        let held = crate::joining::Store::load(&dir).is_some_and(|s| s.get(key).is_some());
+        let controls = horadric_core::standing::Standing::load(&dir).controls(key);
+        afar::takes_entries(matches!(via, Via::Node(_)), held, controls)
+    }
+
+    /// Tells brother `key`, reached through the relay, what this PC holds
+    /// of each lore it shares, so its server sends what this PC lacks of
+    /// the projects both have: at hello, when the brother says its own
+    /// changed, and when this PC's projects do. Not to a brother whose
+    /// entries this PC would not take.
+    fn far_lore_ask(&mut self, key: &str) {
+        let Some(via) = self.far.peers.get(key).and_then(|p| p.via) else {
+            return;
+        };
+        if !self.far_takes_lore(via, key) {
+            return;
+        }
+        for (project, have) in self.portal_lore() {
+            self.far_send(key, json!({"t": "lore", "project": project, "have": have}));
+        }
+    }
+
+    /// When the tiles' projects changed, tells every brother linked
+    /// through the relay again, as [`App::far_lore`] does the nodes: a
+    /// server shares only the projects its client named. Tells one whose
+    /// own lore changed again too.
+    fn far_lore_relayed(&mut self) {
+        let dirs = self.tile_dirs();
+        let changed = dirs != self.far.relay_dirs;
+        self.far.relay_dirs = dirs;
+        let linked: Vec<String> = self
+            .far
+            .peers
+            .iter_mut()
+            .filter(|(_, p)| p.heard.linked && p.via.is_some_and(|v| !matches!(v, Via::Node(_))))
+            .filter_map(|(k, p)| (std::mem::take(&mut p.lore_due) || changed).then(|| k.clone()))
+            .collect();
+        for key in linked {
+            self.far_lore_ask(&key);
+        }
+    }
+
     /// Finds the tiles' projects whose lore the nodes share, by
     /// repository.
     fn far_lore_find(&mut self) {
@@ -526,6 +581,7 @@ impl App {
             },
             list: Vec::new(),
             lore: HashMap::new(),
+            lore_due: false,
         });
         p.name = name;
         // A node reached over `ssh` that is this brother too waits, ready,
@@ -599,6 +655,7 @@ impl App {
                 },
                 list: Vec::new(),
                 lore: HashMap::new(),
+                lore_due: false,
             });
         p.via = Some(via);
         p.client = client.unwrap_or_default();
@@ -761,17 +818,18 @@ impl App {
                 }
                 // What this PC holds of each shared lore, so the brother
                 // sends what it lacks and then what is written after.
-                let told = if matches!(via, Via::Node(_)) {
+                if matches!(via, Via::Node(_)) {
                     self.far_lore_find();
-                    self.far.lore.told()
+                    if self.far_takes_lore(via, &name) {
+                        for (project, have) in self.far.lore.told() {
+                            self.far_send(
+                                &name,
+                                json!({"t": "lore", "project": project, "have": have}),
+                            );
+                        }
+                    }
                 } else {
-                    self.portal_lore()
-                };
-                for (project, have) in told {
-                    self.far_send(
-                        &name,
-                        json!({"t": "lore", "project": project, "have": have}),
-                    );
+                    self.far_lore_ask(&name);
                 }
                 self.far_lines()
             }
@@ -835,6 +893,13 @@ impl App {
                 false
             }
             Heard::Entries { project, b64 } => {
+                if !self.far_takes_lore(via, &name) {
+                    eprintln!(
+                        "horadric: lore from {} is not taken: it may not control this PC",
+                        crate::project::brother_name(&name)
+                    );
+                    return false;
+                }
                 if matches!(via, Via::Node(_)) {
                     self.far.lore.import(&project, &b64, unix_now());
                 } else {
@@ -843,9 +908,17 @@ impl App {
                 false
             }
             Heard::Lore { project, have } => {
-                // A brother PC's own server sends it this PC's lore; a
-                // node has no link of its own to send it on.
+                // A brother PC's own server sends it this PC's lore, so
+                // here it only says its lore changed (a project opened
+                // there): this PC says again what it holds, so a project
+                // both have now is caught up without waiting for the next
+                // link. A node has no link of its own to send it on.
+                // Each project comes as a message of its own, so this is
+                // done once for them all, at the next check.
                 if !matches!(via, Via::Node(_)) {
+                    if let Some(p) = self.far.peers.get_mut(&name) {
+                        p.lore_due = true;
+                    }
                     return false;
                 }
                 if let Some(p) = self.far.peers.get_mut(&name) {
@@ -1139,6 +1212,7 @@ impl App {
                 heard,
                 list: list.clone(),
                 lore: HashMap::new(),
+                lore_due: false,
             },
         );
         let listed = self.far_sessions(key, &list);

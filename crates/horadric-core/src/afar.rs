@@ -593,9 +593,40 @@ impl Streams {
     }
 }
 
+/// Whether this machine takes in the lore entries a brother sent its
+/// client. Entries are written into this machine's lore, which its agents
+/// read with full rights, so taking them is acting on this machine, not
+/// watching it: the rule is this machine's own control switch for that
+/// brother, the one that lets it type here. A relay brother this machine
+/// holds a key for counts only while it may control this machine, `held`
+/// and `controls`; one it holds no key for (a PC through the phone door)
+/// never does. A node reached over `ssh` and nothing else is the human's
+/// own machine by their own ssh key, as trusted as a viewer is over its
+/// own socket, and has no switch to read.
+pub fn takes_entries(over_ssh: bool, held: bool, controls: bool) -> bool {
+    if held {
+        controls
+    } else {
+        over_ssh
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lore_is_taken_only_from_a_brother_that_may_control_this_machine() {
+        // A relay brother, held, with control and without.
+        assert!(takes_entries(false, true, true));
+        assert!(!takes_entries(false, true, false));
+        // The same brother reached over ssh too is still its switch.
+        assert!(!takes_entries(true, true, false));
+        // Through the phone door, held by nobody here.
+        assert!(!takes_entries(false, false, true));
+        // A node over ssh alone.
+        assert!(takes_entries(true, false, false));
+    }
 
     #[test]
     fn a_brothers_project_has_a_key_of_its_own() {

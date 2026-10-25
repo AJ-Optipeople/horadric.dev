@@ -38,6 +38,9 @@ pub(super) struct Peer {
     /// It listed its sessions at least once on this link, so what it does
     /// not list is its word.
     pub(super) heard_list: bool,
+    /// It said its lore changed: this node says again what it holds, at
+    /// the next tick, once for all the projects it named.
+    lore_due: bool,
 }
 
 /// Every linked brother, and what was last heard of each, linked or not.
@@ -46,6 +49,8 @@ pub(super) struct Kin {
     pub(super) peers: HashMap<u32, Peer>,
     /// By brother id: what it last said of itself and when it was heard.
     pub(super) heard: HashMap<String, Heard>,
+    /// The project folders the brothers were last told of, sorted.
+    lore_dirs: Vec<String>,
 }
 
 impl Kin {
@@ -147,6 +152,7 @@ impl Machine {
                 pending: Vec::new(),
                 listed: HashSet::new(),
                 heard_list: false,
+                lore_due: false,
             },
         );
         self.kin.heard.insert(
@@ -229,7 +235,22 @@ impl Machine {
                     h.said = said;
                 }
             }
+            // The brother's server says its lore changed, a project opened
+            // there: what this node holds is said again, so a project both
+            // have now is caught up without waiting days for a relink.
+            "lore" => {
+                if let Some(p) = self.kin.peers.get_mut(&ich) {
+                    p.lore_due = true;
+                }
+            }
             "entries" => {
+                if !self.kin_takes_lore(&id) {
+                    eprintln!(
+                        "horadric node: lore from {} is not taken: it may not control this node",
+                        self.shown(&id)
+                    );
+                    return;
+                }
                 if let (false, Some(b64)) = (msg["project"].is_null(), msg["b64"].as_str()) {
                     let project = msg["project"].clone();
                     self.lore.import(&project, b64, horadric_hooks::lore::now());
@@ -260,12 +281,53 @@ impl Machine {
             let m = p.client.stamp(m);
             relay::reply(ch, &m);
         }
-        let told = self.lore_projects();
-        for (project, have) in told {
+        self.kin_lore_ask(id);
+        self.keeping_linked(id);
+    }
+
+    /// Whether this node takes in the lore entries brother `id` sends: only
+    /// from one it may be controlled by (see `afar::takes_entries`).
+    fn kin_takes_lore(&self, id: &str) -> bool {
+        let Some(dir) = horadric_hooks::state_dir() else {
+            return false;
+        };
+        let held = relay::store().get(id).is_some();
+        afar::takes_entries(false, held, Standing::load(&dir).controls(id))
+    }
+
+    /// Tells brother `id` what this node holds of each shared lore, so it
+    /// sends what this node lacks: not to one whose entries are not taken.
+    fn kin_lore_ask(&mut self, id: &str) {
+        if !self.kin_takes_lore(id) {
+            return;
+        }
+        for (project, have) in self.lore_projects() {
             self.kin
                 .tell(id, json!({"t": "lore", "project": project, "have": have}));
         }
-        self.keeping_linked(id);
+    }
+
+    /// Says again what this node holds to each brother whose lore changed,
+    /// and to every one when this node's projects did: a brother's server
+    /// shares only the projects this node named.
+    pub(super) fn kin_lore_tick(&mut self) {
+        let mut dirs = super::project_dirs(&self.node);
+        dirs.sort();
+        dirs.dedup();
+        let changed = dirs != self.kin.lore_dirs;
+        self.kin.lore_dirs = dirs;
+        let mut due: Vec<String> = self
+            .kin
+            .peers
+            .values_mut()
+            .filter(|p| p.client.ready())
+            .filter_map(|p| (std::mem::take(&mut p.lore_due) || changed).then(|| p.id.clone()))
+            .collect();
+        due.sort();
+        due.dedup();
+        for id in due {
+            self.kin_lore_ask(&id);
+        }
     }
 
     /// Whether brother `who` may type, start and resume here, or only

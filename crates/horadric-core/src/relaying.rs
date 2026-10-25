@@ -23,23 +23,30 @@ pub const LIVED_SECS: u64 = 10;
 /// ends a send stuck on such a connection.
 pub const SILENT_SECS: u64 = 70;
 
-/// The relay's `/pc` address. A signed in machine (`signed` is its access
-/// token and name) is a v3 brother the relay groups with the rest of its
-/// human's; without it the machine is served as a v2 PC.
-pub fn pc_url(relay: &str, secret: &str, signed: Option<(&str, &str)>) -> String {
-    let mut url = format!(
-        "{}/pc?secret={}",
-        relay.trim_end_matches('/'),
-        uri_encode(secret)
-    );
+/// How a machine reaches the relay's `/pc`: the address, which carries
+/// only its name, and the request headers, which carry what proves it.
+/// The secret and the access token never go in the address, where a proxy
+/// in front of the relay would write them to its access log.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Dial {
+    pub url: String,
+    pub headers: Vec<(&'static str, String)>,
+}
+
+/// The header that carries a machine's relay secret.
+pub const SECRET_HEADER: &str = "X-Horadric-Secret";
+
+/// How to dial the relay's `/pc`. A signed in machine (`signed` is its
+/// access token and name) is a v3 brother the relay groups with the rest
+/// of its human's; without it the machine is served as a v2 PC.
+pub fn pc_dial(relay: &str, secret: &str, signed: Option<(&str, &str)>) -> Dial {
+    let mut url = format!("{}/pc", relay.trim_end_matches('/'));
+    let mut headers = vec![(SECRET_HEADER, secret.to_string())];
     if let Some((token, name)) = signed {
-        url.push_str(&format!(
-            "&token={}&name={}",
-            uri_encode(token),
-            uri_encode(name)
-        ));
+        url.push_str(&format!("?name={}", uri_encode(name)));
+        headers.push(("Authorization", format!("Bearer {token}")));
     }
-    url
+    Dial { url, headers }
 }
 
 /// Whether the relay has been quiet too long, both in milliseconds.
@@ -76,13 +83,24 @@ mod tests {
     #[test]
     fn a_signed_in_machine_brings_its_token_and_name() {
         assert_eq!(
-            pc_url("wss://r.dev/", "s+1", None),
-            "wss://r.dev/pc?secret=s%2B1"
+            pc_dial("wss://r.dev/", "s+1", None),
+            Dial {
+                url: "wss://r.dev/pc".into(),
+                headers: vec![("X-Horadric-Secret", "s+1".into())],
+            }
         );
+        let signed = pc_dial("wss://r.dev", "s", Some(("h.p.s", "Big PC")));
+        assert_eq!(signed.url, "wss://r.dev/pc?name=Big%20PC");
         assert_eq!(
-            pc_url("wss://r.dev", "s", Some(("h.p.s", "Big PC"))),
-            "wss://r.dev/pc?secret=s&token=h.p.s&name=Big%20PC"
+            signed.headers,
+            vec![
+                ("X-Horadric-Secret", "s".to_string()),
+                ("Authorization", "Bearer h.p.s".to_string()),
+            ]
         );
+        // Nothing that proves the machine is in the address, which a
+        // proxy logs.
+        assert!(!signed.url.contains("h.p.s") && !signed.url.contains("secret"));
     }
 
     #[test]

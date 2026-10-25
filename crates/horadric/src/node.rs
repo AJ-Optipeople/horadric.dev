@@ -1063,6 +1063,7 @@ fn serving(mut machine: Machine, heard: mpsc::Receiver<Event>, events: Sender<Ev
         }
         machine.handing_tick();
         machine.keeping_tick();
+        machine.kin_lore_tick();
         for (to, msg) in std::mem::take(&mut machine.hand.outbox) {
             // A brother over the relay hears it as an ask of its own
             // server, stamped by this node's client of it.

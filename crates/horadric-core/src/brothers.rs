@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{json, Value};
 
 use crate::brotherhood::{Owner, Roster};
-use crate::joining::{self, Crypto, Handshake, Identity, Joined, Listed, Out, Store};
+use crate::joining::{self, Crypto, Handshake, Held, Identity, Joined, Listed, Me, Out, Store};
 use crate::portal::{b64url, frame, unb64url};
 use crate::standing::Standing;
 
@@ -252,12 +252,20 @@ impl Brothers {
                 .unwrap_or_default()
         } else {
             let now = (self.hands.clock)();
+            // A hello carrying a nonce this machine drew on another
+            // channel is its own, handed back by the relay.
+            let mine: Vec<[u8; 16]> = self
+                .chans
+                .iter()
+                .filter(|(c, _)| **c != ch)
+                .map(|(_, h)| h.nonce())
+                .collect();
             let Some(h) = self.chans.get_mut(&ch) else {
                 return true;
             };
             let keyless = h.keyless();
             let peer = h.peer().to_string();
-            let (msg, out) = h.sealed(&*self.hands.crypto, payload, now);
+            let (msg, out) = h.sealed_among(&*self.hands.crypto, payload, now, &mine);
             if keyless {
                 self.early.insert(ch, payload.to_vec());
             }
@@ -414,12 +422,15 @@ impl Brothers {
             .cast
             .retain(|c| !got.iter().any(|(id, _)| *id == c.id));
         self.save();
-        for (id, link) in got {
+        for (id, _) in got {
+            let Some(held) = self.store.get(&id).and_then(Held::of) else {
+                continue;
+            };
             let waiting: Vec<u32> = self
                 .chans
                 .iter_mut()
                 .filter(|(_, h)| h.peer() == id)
-                .filter_map(|(ch, h)| h.know(link).then_some(*ch))
+                .filter_map(|(ch, h)| h.know(held.clone()).then_some(*ch))
                 .collect();
             for ch in waiting {
                 if let Some(hello) = self.early.remove(&ch) {
@@ -516,6 +527,7 @@ impl Brothers {
                     },
                     joined: self.store.key(id).is_some(),
                     linked: self.chans.values().any(|h| h.peer() == id && h.linked()),
+                    old: self.chans.values().any(|h| h.peer() == id && h.old()),
                 })
                 .collect(),
         )
@@ -649,10 +661,15 @@ impl Brothers {
         let Some((public, _)) = self.identity() else {
             return;
         };
-        let known = match self.store.key(id) {
-            Some(key) => Some(key),
+        let known = match self.store.get(id).and_then(Held::of) {
+            Some(held) => Some(held),
             None => {
-                let old = self.store.cast_key(id);
+                let old = self
+                    .store
+                    .cast
+                    .iter()
+                    .find(|b| b.id == id)
+                    .and_then(Held::of);
                 let out = self
                     .dir
                     .as_deref()
@@ -672,12 +689,12 @@ impl Brothers {
             }
         };
         let nonce = self.nonce();
-        let h = Handshake::give(
-            (self.name.as_str(), public.as_slice()),
-            (id, name),
-            known,
-            nonce,
-        );
+        let me = Me {
+            id: &self.me,
+            name: &self.name,
+            public: &public,
+        };
+        let h = Handshake::give(me, (id, name), known, nonce);
         self.chans.insert(ch, h);
     }
 
@@ -688,10 +705,14 @@ impl Brothers {
             return;
         };
         let nonce = self.nonce();
-        let me = (self.name.as_str(), public.as_slice());
-        let (h, out) = match (intent, self.store.key(id)) {
-            (Intent::Link, Some(key)) => {
-                Handshake::link(&*self.hands.crypto, me, (id, name), key, nonce)
+        let me = Me {
+            id: &self.me,
+            name: &self.name,
+            public: &public,
+        };
+        let (h, out) = match (intent, self.store.get(id).and_then(Held::of)) {
+            (Intent::Link, Some(held)) => {
+                Handshake::link(&*self.hands.crypto, me, (id, name), held, nonce)
             }
             _ => Handshake::ask(me, (id, name), nonce),
         };

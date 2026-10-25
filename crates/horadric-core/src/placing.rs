@@ -32,6 +32,11 @@ pub const PLAIN_FILE: u64 = 16 * 1024 * 1024;
 /// The most files a plain copy carries.
 pub const PLAIN_FILES: usize = 20_000;
 
+/// The most projects a receiver places at once for its brothers: clones a
+/// node runs by itself, or questions a PC's human is asked. One more asks
+/// again, as a sender does every few seconds, until one is done.
+pub const MOST_PLACING: usize = 2;
+
 /// Folders a plain copy leaves out: what an install or a build makes
 /// again, often larger than everything else together.
 const REMADE: &[&str] = &[
@@ -175,6 +180,11 @@ pub fn unattended(
             "no checkout of {project} here, and it has no remote to clone"
         ));
     };
+    if !cloneable(&url) {
+        return Err(format!(
+            "no checkout of {project} here, and its remote is not one this machine clones from by itself (only https and ssh)"
+        ));
+    }
     let parent = parent.ok_or("no folder here to clone it into")?;
     let dest = free_folder(parent, &clone_name(&url), exists);
     Ok((url, dest))
@@ -244,17 +254,71 @@ fn same_folder(a: &str, b: &str) -> bool {
     norm(a) == norm(b)
 }
 
-/// Clones `url` into `dest`, which must be new or empty. A prompt for a
-/// password would wait for a terminal nobody sees, so git is told not to.
+/// Whether a brother may have this machine clone `url`: `https://`,
+/// `ssh://`, or the scp form `user@host:path`, as a project's remote is.
+/// Never a path or `file://`, which would copy anything on this machine
+/// the brother names into a folder, nor git's other transports
+/// (`ext::` runs a command), nor anything git could read as an option.
+pub fn cloneable(url: &str) -> bool {
+    if url.is_empty() || url.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return false;
+    }
+    let host_ok = |h: &str| !h.is_empty() && !h.starts_with('-') && !h.contains(['\\', '/']);
+    for scheme in ["https://", "ssh://"] {
+        if url
+            .get(..scheme.len())
+            .is_some_and(|s| s.eq_ignore_ascii_case(scheme))
+        {
+            let rest = &url[scheme.len()..];
+            let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
+            let host = authority.rsplit('@').next().unwrap_or("");
+            return host_ok(host) && !path.is_empty();
+        }
+    }
+    if url.contains("://") || url.contains("::") {
+        return false;
+    }
+    // `user@host:path`: a user, a host of more than one letter (so never a
+    // Windows drive), and a path after the colon.
+    let Some((login, path)) = url.split_once(':') else {
+        return false;
+    };
+    let Some((user, host)) = login.split_once('@') else {
+        return false;
+    };
+    !user.is_empty()
+        && !user.starts_with('-')
+        && host.len() > 1
+        && host_ok(host)
+        && !path.is_empty()
+}
+
+/// What git is told for every clone a brother asked for: only https and
+/// ssh, so neither the URL nor anything it leads to (a submodule, a
+/// redirect) reaches a local file or runs a transport's command.
+const CLONE_GUARDS: [&str; 6] = [
+    "-c",
+    "protocol.allow=never",
+    "-c",
+    "protocol.https.allow=always",
+    "-c",
+    "protocol.ssh.allow=always",
+];
+
+/// Clones `url` into `dest`, which must be new or empty, when it is
+/// [`cloneable`]. A prompt for a password would wait for a terminal nobody
+/// sees, so git is told not to.
 pub fn clone_into(url: &str, dest: &Path) -> Result<(), String> {
+    if !cloneable(url) {
+        return Err(format!(
+            "{url} is not a remote this machine clones from: only https and ssh"
+        ));
+    }
     std::fs::create_dir_all(dest).map_err(|e| format!("{}: {e}", dest.display()))?;
     let dest_text = dest.to_string_lossy();
-    handoff::git(
-        dest,
-        &["clone", "-q", "--", url, &dest_text],
-        &[("GIT_TERMINAL_PROMPT", "0")],
-    )
-    .map(drop)
+    let mut args: Vec<&str> = CLONE_GUARDS.to_vec();
+    args.extend(["clone", "-q", "--", url, &dest_text]);
+    handoff::git(dest, &args, &[("GIT_TERMINAL_PROMPT", "0")]).map(drop)
 }
 
 /// Starts an empty repository in `dest` for a project with no remote, so
@@ -493,6 +557,70 @@ mod tests {
         let linux = |f: &str| f == "/home/agent/x";
         assert_eq!(free_folder("/home/agent/", "x", linux), "/home/agent/x-2");
         assert_eq!(free_folder("/home/agent", "y", linux), "/home/agent/y");
+    }
+
+    /// A brother names the URL a receiver clones from, so it may name only
+    /// a remote: never a path or `file://` on the receiver, another
+    /// transport, or something git reads as an option.
+    #[test]
+    fn only_https_and_ssh_remotes_are_cloned() {
+        for ok in [
+            "https://github.com/mopra/horadric.git",
+            "HTTPS://host/x",
+            "https://user@host:8443/x/y",
+            "ssh://git@github.com/mopra/horadric.git",
+            "git@github.com:mopra/horadric.git",
+            "agent@vps:repos/l11.git",
+        ] {
+            assert!(cloneable(ok), "{ok}");
+        }
+        for no in [
+            "",
+            "   ",
+            "/home/agent/secrets",
+            "../other",
+            "C:\\Users\\me\\repo",
+            "C:/Users/me/repo",
+            "file:///etc",
+            "FILE:///etc",
+            "http://host/x",
+            "git://host/x",
+            "ext::sh -c touch% /tmp/pwned",
+            "fd::3",
+            "https://",
+            "https://host",
+            "https://-oProxyCommand=x/y",
+            "ssh://-oProxyCommand=x/y",
+            "-u@host:x",
+            "user@-oProxyCommand=x:y",
+            "host:path",
+            "user@host:",
+            "@host:path",
+            "user@h:path",
+            "https://host/x y",
+            "https://host/x\n",
+        ] {
+            assert!(!cloneable(no), "{no:?}");
+        }
+    }
+
+    #[test]
+    fn a_clone_of_a_path_never_runs() {
+        let dest = std::env::temp_dir().join("horadric-never-cloned");
+        let _ = std::fs::remove_dir_all(&dest);
+        let err = clone_into("/etc", &dest).unwrap_err();
+        assert!(err.contains("only https and ssh"), "{err}");
+        assert!(!dest.exists());
+        let mut ask = crate::handing::PlaceAsk {
+            url: Some("file:///home/agent/secrets".into()),
+            folder: "x".into(),
+            ..Default::default()
+        };
+        assert!(unattended(&ask, Some("/home/agent"), |_| false)
+            .unwrap_err()
+            .contains("only https and ssh"));
+        ask.url = Some("https://github.com/x/y.git".into());
+        assert!(unattended(&ask, Some("/home/agent"), |_| false).is_ok());
     }
 
     #[test]
