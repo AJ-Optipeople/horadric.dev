@@ -84,10 +84,35 @@ pub fn placeholders(store: &Store) -> Roster {
 }
 
 /// The roster machine `me`, called `name`, serves from the files in
-/// `dir`, None before it joined any brother. Its own entry's number is
-/// raised here, past every number heard, and kept in [`COUNTED`]; the
-/// entry is signed, so any brother may pass it on.
-pub fn served(dir: &Path, me: &str, name: &str, crypto: &dyn Crypto) -> Option<Roster> {
+/// `dir`, None before it joined any brother. `sees` are the brothers it is
+/// linked to now. Its own entry's number is raised here, past every number
+/// heard, and kept in [`COUNTED`]; the entry is signed, so any brother may
+/// pass it on.
+pub fn served(
+    dir: &Path,
+    me: &str,
+    name: &str,
+    crypto: &dyn Crypto,
+    sees: &[String],
+) -> Option<Roster> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    served_at(dir, me, name, crypto, sees, now, crate::mesh::process())
+}
+
+/// [`served`] at `now`, by the process `process` (see
+/// [`crate::mesh::process`]): what a simulation of many machines in one
+/// process passes for each.
+pub fn served_at(
+    dir: &Path,
+    me: &str,
+    name: &str,
+    crypto: &dyn Crypto,
+    sees: &[String],
+    now: u64,
+    process: u64,
+) -> Option<Roster> {
     let store = Store::load(dir)?;
     if store.brothers.is_empty() {
         return None;
@@ -95,14 +120,16 @@ pub fn served(dir: &Path, me: &str, name: &str, crypto: &dyn Crypto) -> Option<R
     let signer = Signer::of(dir, me, crypto);
     if let Some(signer) = &signer {
         let t = Trust::load(dir, me, crypto);
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs());
-        let process = crate::mesh::process();
         crate::mesh::update_held(dir, |h| crate::mesh::tend(h, signer, &t, process, now));
     }
-    let heard = crate::mesh::load(dir);
+    let held = crate::mesh::load_held(dir);
+    let heard = held.roster.clone();
     let mut mine = assemble(me, name, &store, &Book::load(dir), &Standing::load(dir));
+    if let Some(own) = mine.brothers.iter_mut().find(|b| b.id == me) {
+        own.root = held.root.clone();
+        own.rooted = held.rooted;
+        own.sees = sees.iter().filter(|s| *s != me).cloned().collect();
+    }
     let path = dir.join(COUNTED);
     let last: Counted = std::fs::read(&path)
         .ok()
@@ -310,22 +337,26 @@ mod tests {
         assert_eq!(a.keepers, ["b"]);
         assert!(a.view_only.contains("c") && !a.view_only.contains("b"));
         assert_eq!(a.holds.iter().collect::<Vec<_>>(), ["b", "c"]);
+        // Who is out is the words' to say, never this machine's entry.
         standing.cast_out("b", "b-key");
         let r = assemble("a", "vps", &store, &book, &standing);
-        assert!(r.refuses("b-key"));
+        assert!(!r.refuses("b-key"));
     }
 
     #[test]
     fn a_served_roster_rises_with_a_change_and_holds_without_one() {
         let dir = scratch("served");
-        assert!(served(&dir, "a", "vps", &Fake::new()).is_none());
+        assert!(served(&dir, "a", "vps", &Fake::new(), &[]).is_none());
         store(vec![joined("b", 10)]).save(&dir).unwrap();
-        let first = served(&dir, "a", "vps", &Fake::new()).unwrap();
-        assert_eq!(served(&dir, "a", "vps", &Fake::new()).unwrap().n, first.n);
+        let first = served(&dir, "a", "vps", &Fake::new(), &[]).unwrap();
+        assert_eq!(
+            served(&dir, "a", "vps", &Fake::new(), &[]).unwrap().n,
+            first.n
+        );
         let mut standing = Standing::default();
         standing.set_control("b", false);
         standing.save(&dir).unwrap();
-        assert!(served(&dir, "a", "vps", &Fake::new()).unwrap().n > first.n);
+        assert!(served(&dir, "a", "vps", &Fake::new(), &[]).unwrap().n > first.n);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -396,7 +427,7 @@ mod tests {
         theirs.n = 900;
         let t = Trust::load(&dir, "a", &c);
         crate::mesh::hear(&dir, "b", &theirs, &t, 1);
-        let r = served(&dir, "a", "Alpha", &c).unwrap();
+        let r = served(&dir, "a", "Alpha", &c, &[]).unwrap();
         assert_eq!(r.brother("b").unwrap().name, "Beta");
         // C is not held here, so its entry is not taken.
         assert!(r.brother("c").is_none());
@@ -410,11 +441,11 @@ mod tests {
         let a = r.brother("a").unwrap().clone();
         assert!(a.n > 900);
         assert!(crate::said::entry_verifies(&c, &a));
-        assert_eq!(served(&dir, "a", "Alpha", &c).unwrap(), r);
+        assert_eq!(served(&dir, "a", "Alpha", &c, &[]).unwrap(), r);
         // The signature is kept beside its number every round, so CNG,
         // which signs anew each time, serves the same entry the same way.
         for _ in 0..2 {
-            served(&dir, "a", "Alpha", &c).unwrap();
+            served(&dir, "a", "Alpha", &c, &[]).unwrap();
             let file = std::fs::read(dir.join(COUNTED)).unwrap();
             let kept: Counted = serde_json::from_slice(&file).unwrap();
             assert_eq!(kept.sig, a.sig);
@@ -426,7 +457,7 @@ mod tests {
         let mut standing = Standing::default();
         standing.vouch("b", &key("b"));
         standing.save(&dir).unwrap();
-        let r = served(&dir, "a", "Alpha", &c).unwrap();
+        let r = served(&dir, "a", "Alpha", &c, &[]).unwrap();
         let kin = &r.brother("a").unwrap().held["b"];
         assert_eq!((kin.key.as_str(), kin.vouched), (key("b").as_str(), true));
         assert!(crate::said::entry_verifies(&c, r.brother("a").unwrap()));

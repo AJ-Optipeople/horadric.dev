@@ -90,10 +90,22 @@ pub struct Brother {
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub holds: BTreeSet<String>,
     /// The brothers it holds a link key for, by id, with the key and
-    /// whether its own human let that one in by a code. Believed only as
-    /// this brother's own word (see [`Roster::introductions`]).
+    /// whether its own human let that one in by a code. Shown, never
+    /// believed: who is in is the signed admissions' to say (see
+    /// [`crate::lineage`]).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub held: BTreeMap<String, Kin>,
+    /// The keys its brotherhood started from, as it pinned them: what a
+    /// machine that joins it pins too. Only the two first machines say a
+    /// root not pinned yet (`rooted` false): the two of them.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub root: BTreeSet<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub rooted: bool,
+    /// The brothers it is linked to now, by id: its own word that they are
+    /// there, for a keeper that cannot reach one of them itself.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub sees: BTreeSet<String>,
     /// Its own signature of all the above but `cast_out`, b64url (see
     /// [`crate::said::sign_entry`]): what lets any brother pass its entry
     /// on, and every brother believe it from whomever it comes.
@@ -150,6 +162,9 @@ impl Brother {
             cast_out: false,
             holds: BTreeSet::new(),
             held: BTreeMap::new(),
+            root: BTreeSet::new(),
+            rooted: false,
+            sees: BTreeSet::new(),
             sig: String::new(),
         }
     }
@@ -252,40 +267,6 @@ pub struct Roster {
     /// its word that it heard them end, now that it holds them no more.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub let_go: Vec<String>,
-}
-
-/// A brother this machine would take a key for, and on whose word.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Introduction {
-    pub id: String,
-    pub name: String,
-    pub key: String,
-    /// The brother whose word it is.
-    pub by: String,
-    /// Whether `by`'s own human let it in by a code, rather than `by`
-    /// only holding it.
-    pub vouched: bool,
-    /// The key this machine holds for it now, which the new one replaces:
-    /// it was let in again with a new key, by a human, on `by`.
-    pub replaces: Option<String>,
-}
-
-/// What this machine holds and stands by, against which it judges what
-/// its brothers say of others (see [`Roster::introductions`]).
-pub struct Mine<'a> {
-    pub me: &'a str,
-    /// The brothers held now, id to public key.
-    pub held: &'a BTreeMap<String, String>,
-    /// The brothers this machine's own human let in by a code, id to key.
-    pub vouched: &'a BTreeMap<String, String>,
-    /// Ids this machine let go of under a key (cast out or replaced): one
-    /// comes back only on the word of a brother whose human let it in.
-    pub had: &'a BTreeSet<String>,
-    /// Ids this machine's human cast out, or that it took as cast out:
-    /// one comes back only when a human here says so.
-    pub outcast: &'a BTreeSet<String>,
-    /// Whether brother `id` may act on this machine.
-    pub control: &'a dyn Fn(&str) -> bool,
 }
 
 impl Roster {
@@ -431,112 +412,6 @@ impl Roster {
                 .collect(),
             ..self.clone()
         }
-    }
-
-    /// Brother `id`'s own entry under `key`, in good standing: what it
-    /// said of itself, the only word about it this machine believes.
-    fn own_word(&self, id: &str, key: &str) -> Option<&Brother> {
-        self.brothers
-            .iter()
-            .find(|b| b.id == id && b.key == key && b.live(self))
-    }
-
-    /// The brothers `mine.me` takes a link key for by introduction, and
-    /// those it would but its human cast them out (which a human here must
-    /// let back). A key comes only from the own word of a brother held
-    /// (its entry under the very key held for it, as only it can serve it
-    /// over its sealed link), in good standing and with control here, and
-    /// only for a brother that one's human let in by a code, or for any it
-    /// holds when this machine's human let that one in by a code: trust
-    /// goes along the joins humans approved, never further. A key that
-    /// replaces one held, or comes back for an id let go, needs the first.
-    /// An id two such words give two keys is nobody's to choose.
-    pub fn introductions(&self, mine: &Mine) -> (Vec<Introduction>, Vec<Introduction>) {
-        let mut found: BTreeMap<&str, Vec<Introduction>> = BTreeMap::new();
-        for (by, by_key) in mine.held {
-            if by == mine.me || !(mine.control)(by) {
-                continue;
-            }
-            let Some(entry) = self.own_word(by, by_key) else {
-                continue;
-            };
-            let sponsor = mine.vouched.get(by) == Some(by_key);
-            for (id, kin) in &entry.held {
-                let replaces = mine.held.get(id).filter(|k| **k != kin.key).cloned();
-                let fresh = !mine.held.contains_key(id) && !mine.had.contains(id);
-                let trusted = kin.vouched || (sponsor && fresh);
-                if id == mine.me
-                    || id == by
-                    || kin.key.is_empty()
-                    || self.refuses(&kin.key)
-                    || mine.held.get(id) == Some(&kin.key)
-                    || !trusted
-                {
-                    continue;
-                }
-                found.entry(id).or_default().push(Introduction {
-                    id: id.clone(),
-                    name: kin.name.clone(),
-                    key: kin.key.clone(),
-                    by: by.clone(),
-                    vouched: kin.vouched,
-                    replaces,
-                });
-            }
-        }
-        let (mut taken, mut refused) = (Vec::new(), Vec::new());
-        for (id, mut words) in found {
-            if words.iter().any(|w| w.key != words[0].key) {
-                continue;
-            }
-            // The one whose human let it in speaks first.
-            words.sort_by_key(|w| !w.vouched);
-            let w = words.swap_remove(0);
-            if mine.outcast.contains(id) {
-                refused.push(w);
-            } else {
-                taken.push(w);
-            }
-        }
-        (taken, refused)
-    }
-
-    /// The brothers `mine.me` holds that only `outcast` stands behind:
-    /// each one `outcast`'s human let in by a code, or this machine took on
-    /// `outcast`'s word alone (`took`, id to the brother whose word it
-    /// was), and that no other brother in good standing, nor this
-    /// machine's human, let in by a code. What a stolen machine could have
-    /// let in, offered to be cast out with it.
-    pub fn behind_only(
-        &self,
-        outcast: &str,
-        mine: &Mine,
-        took: &BTreeMap<String, String>,
-    ) -> Vec<String> {
-        let vouches = |by: &str, id: &str, key: &str| {
-            mine.held
-                .get(by)
-                .and_then(|k| self.brothers.iter().find(|b| b.id == by && &b.key == k))
-                .and_then(|b| b.held.get(id))
-                .is_some_and(|kin| kin.vouched && kin.key == key)
-        };
-        mine.held
-            .iter()
-            .filter(|(id, _)| *id != mine.me && *id != outcast)
-            .filter(|(id, key)| {
-                vouches(outcast, id, key) || took.get(*id).is_some_and(|by| by == outcast)
-            })
-            .filter(|(id, key)| {
-                mine.vouched.get(*id) != Some(*key)
-                    && !mine.held.keys().any(|by| {
-                        by != outcast
-                            && by != *id
-                            && self.brother(by).is_some_and(|b| b.live(self))
-                            && vouches(by, id, key)
-                    })
-            })
-            .map(|(id, _)| id.clone())
-            .collect()
     }
 
     /// The brothers in `held` (id to public key) whose key was cast out.
@@ -780,6 +655,19 @@ impl Roster {
         let keepers = b.keepers.iter().filter(|k| self.control(silent, k));
         keepers_turn(keepers, me, heard, after, now)
     }
+}
+
+/// Whether brother `owner` is gone as far as this machine can tell, which
+/// a keeper needs before it takes over by itself: the relay does not list
+/// it connected (`listed`), and no brother linked here now (`linked`)
+/// says in its own signed entry that it is linked to it. A relay that only
+/// drops the frames between the owner and this keeper starts nothing.
+pub fn gone(roster: &Roster, owner: &str, listed: bool, linked: &[String]) -> bool {
+    !listed
+        && !linked
+            .iter()
+            .filter(|b| *b != owner)
+            .any(|b| roster.brother(b).is_some_and(|e| e.sees.contains(owner)))
 }
 
 /// Whether it is `me`'s turn among `keepers`, first one first: `me` is
@@ -1516,228 +1404,6 @@ mod tests {
             assert!(!m.control("desktop", "laptop"));
             assert!(m.cast_out_of(&held(&["laptop", "desktop"])) == ["laptop"]);
         }
-        // Nor does it vouch for anyone.
-        let mut late = m.clone();
-        let thief = kin("thief", true);
-        if let Some(l) = late.brothers.iter_mut().find(|b| b.id == "laptop") {
-            l.held.insert("thief".into(), thief);
-        }
-        let h = held(&["laptop"]);
-        let all = |_: &str| true;
-        let none = BTreeMap::new();
-        let empty = BTreeSet::new();
-        let mine = Mine {
-            me: "desktop",
-            held: &h,
-            vouched: &none,
-            had: &empty,
-            outcast: &empty,
-            control: &all,
-        };
-        assert!(late.introductions(&mine).0.is_empty());
-    }
-
-    /// What brother `id` holds, as it says it: `key-<id>` for each.
-    fn kin(id: &str, vouched: bool) -> Kin {
-        Kin {
-            key: format!("key-{id}"),
-            name: id.to_uppercase(),
-            vouched,
-        }
-    }
-
-    /// Brother `id`'s own word: it holds `held`, each vouched or not.
-    fn says(id: &str, held: &[(&str, bool)]) -> Brother {
-        Brother {
-            held: held
-                .iter()
-                .map(|(h, v)| (h.to_string(), kin(h, *v)))
-                .collect(),
-            ..b(id)
-        }
-    }
-
-    /// What the laptop stands by: it holds `holds`, its human let in
-    /// `vouched`, it let go of `had`, and cast out `outcast`.
-    struct Lap {
-        held: BTreeMap<String, String>,
-        vouched: BTreeMap<String, String>,
-        had: BTreeSet<String>,
-        outcast: BTreeSet<String>,
-        watch_only: BTreeSet<String>,
-    }
-
-    impl Lap {
-        fn new(holds: &[&str], vouched: &[&str]) -> Lap {
-            Lap {
-                held: held(holds),
-                vouched: held(vouched),
-                had: BTreeSet::new(),
-                outcast: BTreeSet::new(),
-                watch_only: BTreeSet::new(),
-            }
-        }
-
-        fn intros(&self, r: &Roster) -> (Vec<Introduction>, Vec<Introduction>) {
-            let control = |id: &str| !self.watch_only.contains(id);
-            r.introductions(&Mine {
-                me: "laptop",
-                held: &self.held,
-                vouched: &self.vouched,
-                had: &self.had,
-                outcast: &self.outcast,
-                control: &control,
-            })
-        }
-
-        fn taken(&self, r: &Roster) -> Vec<String> {
-            self.intros(r).0.into_iter().map(|i| i.id).collect()
-        }
-
-        fn behind(&self, r: &Roster, out: &str, took: &[(&str, &str)]) -> Vec<String> {
-            let control = |_: &str| true;
-            let took = took
-                .iter()
-                .map(|(a, b)| (a.to_string(), b.to_string()))
-                .collect();
-            let mine = Mine {
-                me: "laptop",
-                held: &self.held,
-                vouched: &self.vouched,
-                had: &self.had,
-                outcast: &self.outcast,
-                control: &control,
-            };
-            r.behind_only(out, &mine, &took)
-        }
-    }
-
-    #[test]
-    fn a_key_comes_only_along_the_joins_humans_approved() {
-        // The desktop's human let the vps in by a code; the desktop holds
-        // the nas only because someone introduced it.
-        let r = roster(vec![says("desktop", &[("vps", true), ("nas", false)])]);
-        // The laptop's own human let the desktop in: it takes the desktop's
-        // whole list, and is told whose human let the vps in.
-        let lap = Lap::new(&["desktop"], &["desktop"]);
-        assert_eq!(lap.taken(&r), ["nas", "vps"]);
-        let (taken, _) = lap.intros(&r);
-        let vps = taken.iter().find(|i| i.id == "vps").unwrap();
-        assert!(vps.vouched && vps.by == "desktop" && vps.replaces.is_none());
-        assert_eq!(vps.key, "key-vps");
-        // Met the desktop by introduction itself: only who the desktop's
-        // human let in.
-        let lap = Lap::new(&["desktop"], &[]);
-        assert_eq!(lap.taken(&r), ["vps"]);
-        // A desktop that may only watch the laptop introduces nobody.
-        let mut lap = Lap::new(&["desktop"], &["desktop"]);
-        lap.watch_only.insert("desktop".into());
-        assert!(lap.taken(&r).is_empty());
-        // An entry under another key than the one held is not the
-        // desktop's word: the relay or a stranger playing it.
-        let mut lap = Lap::new(&["desktop"], &["desktop"]);
-        lap.held
-            .insert("desktop".into(), "key-of-someone-else".into());
-        assert!(lap.taken(&r).is_empty());
-        // Held already, or itself: nothing.
-        let lap = Lap::new(&["desktop", "vps", "nas"], &["desktop"]);
-        assert!(lap.taken(&r).is_empty());
-        let me = roster(vec![says("desktop", &[("laptop", true)])]);
-        assert!(Lap::new(&["desktop"], &["desktop"]).taken(&me).is_empty());
-        // A brother no one held speaks for nobody.
-        let stranger = roster(vec![says("stranger", &[("ghost", true)])]);
-        assert!(Lap::new(&["desktop"], &["desktop"])
-            .taken(&stranger)
-            .is_empty());
-        // The one introduced cast out: not taken either.
-        let mut gone = r.clone();
-        gone.outcast.insert("key-vps".into());
-        assert_eq!(
-            Lap::new(&["desktop"], &[]).taken(&gone),
-            Vec::<String>::new()
-        );
-    }
-
-    #[test]
-    fn a_stolen_brother_cast_out_never_comes_back_by_a_roster() {
-        // The thief planted a new key for itself, and a word for the nas
-        // under the nas's real key saying it holds the laptop's thief.
-        // Merging never lets a forged entry in (see `crate::mesh`); here
-        // the roster holds it anyway, and still the thief stays out.
-        let mut r = roster(vec![says("nas", &[("thief", true)])]);
-        r.brothers[0].held.get_mut("thief").unwrap().key = "key-thief-2".into();
-        r.outcast.insert("key-thief".into());
-        let mut lap = Lap::new(&["nas"], &["nas"]);
-        lap.outcast.insert("thief".into());
-        lap.had.insert("thief".into());
-        let (taken, refused) = lap.intros(&r);
-        assert!(taken.is_empty());
-        // A human here must say so: it is only asked.
-        assert_eq!(refused.len(), 1);
-        assert_eq!(
-            (refused[0].id.as_str(), refused[0].by.as_str()),
-            ("thief", "nas")
-        );
-        // Let go of under its old key and not cast out here, it still
-        // needs the word of a brother whose human let it in, not a list.
-        let mut r = roster(vec![says("nas", &[("thief", false)])]);
-        r.brothers[0].held.get_mut("thief").unwrap().key = "key-thief-2".into();
-        let mut lap = Lap::new(&["nas"], &["nas"]);
-        lap.had.insert("thief".into());
-        assert!(lap.taken(&r).is_empty());
-    }
-
-    #[test]
-    fn a_ghost_needs_a_human_join_and_goes_with_the_brother_that_minted_it() {
-        // A stolen desktop adds a ghost to what it holds.
-        let r = roster(vec![
-            says("desktop", &[("ghost", false), ("vps", true)]),
-            says("vps", &[("desktop", true)]),
-        ]);
-        // A laptop that met the desktop by introduction takes no ghost.
-        assert_eq!(Lap::new(&["desktop"], &[]).taken(&r), ["vps"]);
-        // One whose human let the desktop in does, on the desktop's word,
-        // and casting the desktop out offers the ghost with it, not the
-        // vps, which its own human let in too.
-        let lap = Lap::new(&["desktop", "ghost", "vps"], &["desktop", "vps"]);
-        let behind = lap.behind(&r, "desktop", &[("ghost", "desktop")]);
-        assert_eq!(behind, ["ghost"]);
-        // A ghost the desktop says its human let in, which nobody else
-        // stands behind, is offered too.
-        let r2 = roster(vec![says("desktop", &[("ghost", true)])]);
-        let lap = Lap::new(&["desktop", "ghost"], &["desktop"]);
-        assert_eq!(lap.behind(&r2, "desktop", &[]), ["ghost"]);
-        // One another brother's human let in stays.
-        let r3 = roster(vec![
-            says("desktop", &[("ghost", true)]),
-            says("vps", &[("ghost", true)]),
-        ]);
-        let lap = Lap::new(&["desktop", "ghost", "vps"], &["desktop"]);
-        assert!(lap.behind(&r3, "desktop", &[]).is_empty());
-    }
-
-    #[test]
-    fn a_key_is_replaced_only_on_the_word_of_the_brother_whose_human_let_it_in() {
-        let mut lap = Lap::new(&["desktop", "vps"], &["desktop"]);
-        lap.held.insert("vps".into(), "key-vps-old".into());
-        // The desktop's human let the vps in again, with its new key.
-        let r = roster(vec![says("desktop", &[("vps", true)])]);
-        let (taken, _) = lap.intros(&r);
-        assert_eq!(taken.len(), 1);
-        assert_eq!(taken[0].replaces.as_deref(), Some("key-vps-old"));
-        assert_eq!(taken[0].key, "key-vps");
-        // The desktop merely holding another key for it replaces nothing.
-        let r = roster(vec![says("desktop", &[("vps", false)])]);
-        assert!(lap.taken(&r).is_empty());
-        // Two humans let it in with two keys: nobody's to choose.
-        let mut two = roster(vec![
-            says("desktop", &[("vps", true)]),
-            says("nas", &[("vps", true)]),
-        ]);
-        two.brothers[1].held.get_mut("vps").unwrap().key = "key-vps-3".into();
-        let mut lap = Lap::new(&["desktop", "nas"], &[]);
-        lap.held.insert("vps".into(), "key-vps-old".into());
-        assert!(lap.taken(&two).is_empty());
     }
 
     #[test]
@@ -1827,5 +1493,24 @@ mod tests {
             ]
         );
         assert!(moved("nas", &before, &after).is_empty());
+    }
+
+    #[test]
+    fn an_owner_is_gone_only_on_positive_word() {
+        // Review five, finding 6: silence on one link is no word of absence.
+        let mut r = three();
+        assert!(gone(&r, "laptop", false, &[]));
+        assert!(!gone(&r, "laptop", true, &[]));
+        if let Some(b) = r.brothers.iter_mut().find(|b| b.id == "vps") {
+            b.sees.insert("laptop".into());
+        }
+        assert!(!gone(&r, "laptop", false, &["vps".into()]));
+        // Not linked to Vps now: its word is not here to count.
+        assert!(gone(&r, "laptop", false, &[]));
+        // An owner's own word that it is there is no witness.
+        if let Some(b) = r.brothers.iter_mut().find(|b| b.id == "laptop") {
+            b.sees.insert("laptop".into());
+        }
+        assert!(gone(&r, "laptop", false, &["laptop".into()]));
     }
 }

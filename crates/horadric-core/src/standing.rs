@@ -33,15 +33,12 @@ pub struct Standing {
     /// whose word it took.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub took: BTreeMap<String, String>,
-    /// This machine heard it was cast out, by this brother (its name), and
-    /// links to nobody until its human says whether to leave.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cast_out_here: Option<String>,
-    /// Brothers, by id, whose key the roster holds contested: they and a
-    /// brother cast each other out, and neither acts on any brother until
-    /// a human decides. Follows the roster, so it shrinks as well as grows.
+    /// Brothers, by id, whose key the words hold out or contested, as the
+    /// roster last said: none of them acts on this machine. Worked out
+    /// afresh from the words each time they change, never decided here,
+    /// so it shrinks as well as grows.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
-    pub contested: BTreeSet<String>,
+    pub barred: BTreeSet<String>,
 }
 
 impl Standing {
@@ -86,9 +83,7 @@ impl Standing {
 
     /// The tray's "Can control this PC" tick for brother `id`.
     pub fn controls(&self, id: &str) -> bool {
-        !self.view_only.contains(id)
-            && !self.outcast.contains_key(id)
-            && !self.contested.contains(id)
+        !self.view_only.contains(id) && !self.outcast.contains_key(id) && !self.barred.contains(id)
     }
 
     pub fn set_control(&mut self, id: &str, on: bool) {
@@ -121,18 +116,11 @@ impl Standing {
     }
 
     /// Writes these switches into the roster `me` serves: each brother
-    /// switched to view only as such in `me`'s own entry, and each key
-    /// cast out refused. By key, never by id: a brother cast out may join
-    /// again under its old id with a new key.
+    /// switched to view only as such in `me`'s own entry. Who is out is the
+    /// words' to say, which every brother works out for itself.
     pub fn apply(&self, roster: &mut Roster, me: &str) {
         if let Some(b) = roster.brothers.iter_mut().find(|b| b.id == me) {
             b.view_only.extend(self.view_only.iter().cloned());
-        }
-        roster.outcast.extend(self.keys().map(str::to_string));
-        for b in &mut roster.brothers {
-            if roster.outcast.contains(&b.key) {
-                b.cast_out = true;
-            }
         }
     }
 
@@ -201,17 +189,21 @@ mod tests {
         let mut keyless = Standing::default();
         keyless.cast_out("ghost", "");
         assert!(!keyless.refuses("me", Some("")));
-        let mut r = roster();
-        r.brothers[0].key.clear();
-        keyless.apply(&mut r, "me");
-        assert!(!r.brother("me").unwrap().cast_out);
+        // Who is out is the words' to say: the roster served says nothing
+        // of it.
         let mut r = roster();
         s.apply(&mut r, "me");
-        assert!(r.brother("lap").unwrap().cast_out);
-        assert!(r.refuses("k-lap"));
-        assert!(r.admits("k-lap").is_none());
-        assert!(!r.control("me", "lap"));
-        assert!(r.control("me", "vps"));
+        assert!(r.outcast.is_empty());
+        assert!(!r.brother("lap").unwrap().cast_out);
+    }
+
+    #[test]
+    fn a_brother_the_words_bar_controls_nothing_until_they_no_longer_do() {
+        let mut s = Standing::default();
+        s.barred.insert("lap".into());
+        assert!(!s.controls("lap"));
+        s.barred.clear();
+        assert!(s.controls("lap"));
     }
 
     #[test]
@@ -223,11 +215,6 @@ mod tests {
         assert!(!s.refuses("lap", None));
         assert!(s.controls("lap"));
         assert!(s.refuses("lap", Some("k-lap")));
-        let mut r = roster();
-        r.brothers[1].key = "k-lap-2".into();
-        s.apply(&mut r, "me");
-        assert!(!r.brother("lap").unwrap().cast_out);
-        assert!(r.refuses("k-lap"));
         assert!(!s.joined_again("vps"));
     }
 

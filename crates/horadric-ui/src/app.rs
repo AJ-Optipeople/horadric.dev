@@ -1520,14 +1520,9 @@ fn tray_menu(hwnd: HWND) {
         Some(Choice::AutoTakeover(on)) => set_auto_takeover(on),
         Some(Choice::Control(id, on)) => set_control(&id, on),
         Some(Choice::CastOut(id, name)) => {
-            let behind = crate::brothers::behind_only(&id);
-            if let Some(also) = confirm_cast_out(&name, &behind) {
+            let (line, mine) = crate::brothers::line_of(&id);
+            if confirm_cast_out(&name, &line, mine) {
                 cast_out(&id);
-                if also {
-                    for (b, _) in &behind {
-                        cast_out(b);
-                    }
-                }
             }
         }
         Some(Choice::Leave(to)) => {
@@ -3244,22 +3239,23 @@ fn set_control(id: &str, on: bool) {
 /// `behind` are the brothers only `name` stands behind, which a stolen
 /// machine could have let in: offered too, ticked, since a thief's
 /// brothers are its own. Gives whether to cast those out with it.
-fn confirm_cast_out(name: &str, behind: &[(String, String)]) -> Option<bool> {
-    let text = cast_out_text(name, behind);
-    let also = Cell::new(true);
+fn confirm_cast_out(name: &str, line: &[(String, String)], mine: bool) -> bool {
+    let text = cast_out_text(name, line, mine);
     let pressed = ask(&Dialog {
         tone: Tone::Warning,
         title: &format!("Cast out {name}"),
         text: &text,
         buttons: &["Cast out", "Cancel"],
         default: 1,
-        check: (!behind.is_empty()).then_some(("Cast them out too", &also)),
+        check: None,
     });
-    (pressed == Some(0)).then(|| also.get() && !behind.is_empty())
+    pressed == Some(0)
 }
 
-/// What the cast out asks, naming the brothers only `name` stands behind.
-fn cast_out_text(name: &str, behind: &[(String, String)]) -> String {
+/// What the cast out asks, naming the brothers that go with `name` (its
+/// line: those that came in only through it), and saying so when this PC
+/// is one of them.
+fn cast_out_text(name: &str, line: &[(String, String)], mine: bool) -> String {
     let mut text = format!(
         "{name} will be refused from now on, by this PC and by every brother: \
          it can no longer see or control any of them, and asking to join again \
@@ -3267,12 +3263,19 @@ fn cast_out_text(name: &str, behind: &[(String, String)]) -> String {
          This cannot be undone. Only a brother asking {name} to join again \
          lets it back in, with a new key."
     );
-    if !behind.is_empty() {
-        let names: Vec<&str> = behind.iter().map(|(_, n)| n.as_str()).collect();
+    if !line.is_empty() {
+        let names: Vec<&str> = line.iter().map(|(_, n)| n.as_str()).collect();
         text.push_str(&format!(
-            "\n\n{name} let in {}, which no other brother's human let in. \
-             If {name} was stolen, so may they be.",
+            "\n\n{} came in only through {name}, so they go with it: if {name} was \
+             stolen, so may they be. Join any of them again by a code to keep it.",
             names.join(", ")
+        ));
+    }
+    if mine {
+        text.push_str(&format!(
+            "\n\nThis PC came in through {name}: once {name} is out, this PC goes \
+             with it, whoever decides it. Join this PC again by a code from a brother \
+             that did not come in through {name} to keep it."
         ));
     }
     text
@@ -9578,16 +9581,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_cast_out_names_the_brothers_only_the_outcast_let_in() {
-        let alone = cast_out_text("Laptop", &[]);
+    fn a_cast_out_names_the_line_that_goes_with_it() {
+        let alone = cast_out_text("Laptop", &[], false);
         assert!(alone.starts_with("Laptop will be refused from now on"));
-        assert!(!alone.contains("let in"));
-        let behind = [
+        assert!(!alone.contains("came in"));
+        let line = [
             ("g".to_string(), "Ghost".to_string()),
             ("v".to_string(), "vps".to_string()),
         ];
-        let text = cast_out_text("Laptop", &behind);
-        assert!(text.contains("Laptop let in Ghost, vps, which no other brother's human let in."));
+        let text = cast_out_text("Laptop", &line, false);
+        assert!(text.contains("Ghost, vps came in only through Laptop, so they go with it"));
+        assert!(!text.contains("This PC came in"));
+        let mine = cast_out_text("Laptop", &[], true);
+        assert!(mine.contains("This PC came in through Laptop"));
     }
 
     #[test]

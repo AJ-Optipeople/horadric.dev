@@ -349,7 +349,9 @@ impl Machine {
         let (Some(dir), Some(me)) = (horadric_hooks::state_dir(), relay::me()) else {
             return Vec::new();
         };
-        rostering::served(&dir, &me, &machine_name(), &relay::LinkCrypto)
+        let sees: Vec<String> =
+            relay::with(|b| b.linked().into_iter().map(|(_, id)| id).collect()).unwrap_or_default();
+        rostering::served(&dir, &me, &machine_name(), &relay::LinkCrypto, &sees)
             .map(|r| rostering::messages(&r))
             .unwrap_or_default()
     }

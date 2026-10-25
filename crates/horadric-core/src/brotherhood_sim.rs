@@ -1036,6 +1036,7 @@ impl<C: Core> Sim<C> {
                     crate::said::What::Takes { from, .. } => format!("takes from {from}"),
                     crate::said::What::Ended { .. } => "ended".to_string(),
                     crate::said::What::CastOut { .. } => "cast".to_string(),
+                    crate::said::What::Admits { .. } => "admits".to_string(),
                 };
                 format!("[{} {} {kind} @{}]", w.n, w.by, w.at)
             })
@@ -1099,7 +1100,11 @@ impl<C: Core> Sim<C> {
                 self.nodes[i].end(&k, self.now);
             }
         }
-        for day in [1u64, 40, 100, 100] {
+        // Words of an ended session stay until every brother in good
+        // standing showed it heard, two years at most from when a brother
+        // first saw it end, which a session a flood pushed out and that
+        // came back again starts afresh.
+        for day in [1u64, 40, 100, 100, 500, 100, 400, 400] {
             self.now += day * 86_400;
             self.flush();
             for i in 0..self.nodes.len() {
@@ -1115,7 +1120,7 @@ impl<C: Core> Sim<C> {
                 .collect();
             if !held.is_empty() {
                 let what = format!(
-                    "{} still holds {} ended sessions after a hundred days, {:?}",
+                    "{} still holds {} ended sessions after two years, {:?}",
                     self.ids[i],
                     held.len(),
                     held.iter().take(3).collect::<Vec<_>>()
@@ -1189,6 +1194,8 @@ pub mod core {
                 control,
                 view_only: BTreeSet::new(),
                 keepers: self.keepers.clone(),
+                casts: Vec::new(),
+                vouched: BTreeMap::new(),
                 crypto: &C,
             }
         }
@@ -1224,8 +1231,12 @@ pub mod core {
             keys.insert(me.to_string(), key(me));
             Node {
                 me,
+                // Every brother at the root, as a brotherhood from before
+                // admissions pins it: each its own line.
                 held: Held {
                     version: mesh::VERSION,
+                    root: keys.values().cloned().collect(),
+                    rooted: true,
                     ..Held::default()
                 },
                 keys,
@@ -1248,11 +1259,8 @@ pub mod core {
             }
             let n = o.n + 1;
             let s = self.signer();
-            let words = mesh::handing_word_in(&mut self.held, &s, &Node::id(key), to, n, now);
-            // The handing process is this one.
-            if let Some(p) = self.held.pending.get_mut(key) {
-                p.process = self.process;
-            }
+            let words =
+                mesh::handing_word_in(&mut self.held, &s, &Node::id(key), to, n, now, self.process);
             Some((n, words))
         }
 
@@ -1308,7 +1316,7 @@ pub mod core {
 
         fn cast(&mut self, id: &str, now: u64) {
             let s = self.signer();
-            mesh::cast_out_in(&mut self.held, Some(&s), id, id, &key(id), now);
+            mesh::cast_out_in(&mut self.held, Some(&s), id, &key(id), false, now);
             if let Some(k) = self.keys.remove(id) {
                 self.cast.insert(id.to_string(), k);
             }
@@ -1438,6 +1446,7 @@ pub mod core {
                 What::CastOut {
                     id: id.to_string(),
                     key: key(id),
+                    retired: false,
                 },
             )
         }

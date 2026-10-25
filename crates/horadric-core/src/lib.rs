@@ -37,6 +37,7 @@ pub mod journal;
 pub mod keeper;
 pub mod keepers;
 pub mod keeping;
+pub mod lineage;
 pub mod lookback;
 pub mod lore;
 pub mod merge;

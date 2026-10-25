@@ -151,10 +151,12 @@ impl Human for Boxes {
 
     fn cast_out_self(&self, token: u64, by: &str) {
         let text = format!(
-            "{by} says this PC was cast out of the brotherhood, and it links to no brother now.\n\n\
+            "{by} cast this PC out of the brotherhood: it hears its brothers' rosters, but acts \
+             on none of them and none acts on it.\n\n\
              Leave the brotherhood? Yes lets every brother and this PC's keys go: it comes back \
              only when a brother asks it to join again. Say No if you think {by} was stolen: \
-             this PC keeps its keys, links to nobody, and asks again at its next start."
+             this PC keeps its keys, and is a brother again the moment humans on brothers of \
+             two lines cast {by} out."
         );
         self.ask(token, text, |b, t, yes| b.leave(t, yes));
     }
@@ -172,9 +174,11 @@ impl Human for Boxes {
 
     fn readmit(&self, token: u64, name: &str, by: &str) {
         let text = format!(
-            "{by} let {name} in again, which was cast out here.\n\n\
-             Take {name} back? Say yes only if you set {name} up anew yourself, \
-             or know who did. Otherwise it stays refused here."
+            "{by} let {name} in again with a new key, which this PC has not taken: \
+             the key it holds for {name} is out, or {name} was cast out here.\n\n\
+             Take the new key? Say yes only if you set {name} up anew yourself, \
+             or know who did: a stolen brother could say this of any. Otherwise \
+             {name} stays as it is here."
         );
         self.ask(token, text, |b, t, yes| b.readmit(t, yes));
     }
@@ -250,6 +254,7 @@ pub fn start(secret: &str, send: Sender) -> u64 {
         human: Box::new(Boxes { generation }),
         listener: Box::new(ToApp),
         clock: now,
+        process: horadric_core::mesh::process(),
     };
     let brothers = Brothers::new(&id(secret), &pc_name(), horadric_hooks::state_dir(), hands);
     *STATE.lock().unwrap_or_else(|e| e.into_inner()) = Some((generation, brothers));
@@ -308,17 +313,24 @@ pub fn ask(brother: &str) {
     }
 }
 
-/// The brothers this PC holds that only brother `id` stands behind, id
-/// and name: those it let in, or this PC took on its word alone, that no
-/// other brother's human let in. Offered to be cast out with it.
-pub fn behind_only(id: &str) -> Vec<(String, String)> {
+/// What casting brother `id` out takes with it: the brothers this PC
+/// holds that came in only through it, id and name, and whether this PC
+/// is one of them (see [`horadric_core::brothers::line_of`]).
+pub fn line_of(id: &str) -> (Vec<(String, String)>, bool) {
     let Some(dir) = horadric_hooks::state_dir() else {
-        return Vec::new();
+        return (Vec::new(), false);
     };
-    let Some(me) = horadric_core::portal::Config::load(&dir).map(|c| self::id(&c.secret)) else {
-        return Vec::new();
-    };
-    horadric_core::brothers::behind_only(&dir, &me, id)
+    horadric_core::brothers::line_of(&dir, id)
+}
+
+/// The brothers linked now, by id: what this PC's entry says it sees.
+pub fn sees() -> Vec<String> {
+    listed()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|l| l.linked)
+        .map(|l| l.id)
+        .collect()
 }
 
 /// Casts out the brother with this id: refused from then on here and, by

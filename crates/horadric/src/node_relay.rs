@@ -198,6 +198,7 @@ pub(super) fn start(name: String, events: Sender<Event>) -> Result<(), String> {
         human: Box::new(control::Human),
         listener: Box::new(ToServing(Mutex::new(events))),
         clock: now,
+        process: horadric_core::mesh::process(),
     };
     let me = horadric_core::portal::id(&config.secret);
     *state() = Some(Brothers::new(&me, &name, dir, hands));

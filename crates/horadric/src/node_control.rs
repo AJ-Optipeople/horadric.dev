@@ -131,8 +131,9 @@ impl horadric_core::brothers::Human for Human {
 
     fn cast_out_self(&self, _token: u64, by: &str) {
         self.tell(&format!(
-            "{by} says this node was cast out of the brotherhood. It links to no brother \
-             now and keeps its keys. `horadric node leave` lets every brother and its keys go."
+            "{by} says this node was cast out of the brotherhood. It hears rosters and \
+             nothing else until the words put it back in, and keeps its keys. \
+             `horadric node leave` lets every brother and its keys go."
         ));
     }
 
@@ -707,54 +708,48 @@ pub(super) fn brothers_command() -> Result<(), String> {
     Ok(())
 }
 
-/// `horadric node cast-out <name>`: refuses a brother from now on, and,
-/// asked with yes the default, every brother only it stands behind, which
-/// a stolen machine could have let in.
+/// `horadric node cast-out <name>`: refuses a brother from now on, and with
+/// it its line, the brothers that came in only through it, which a stolen
+/// machine could have let in: they are named first.
 pub(super) fn cast_out_command(args: &[String]) -> Result<(), String> {
     let name = args.first().ok_or("usage: horadric node cast-out <name>")?;
     let (id, name) = by_name(name, &joined_pairs())?;
+    let (line, mine) = horadric_hooks::state_dir()
+        .map(|dir| horadric_core::brothers::line_of(&dir, &id))
+        .unwrap_or_default();
+    if !line.is_empty() {
+        let names: Vec<&str> = line.iter().map(|(_, n)| n.as_str()).collect();
+        println!(
+            "{} came in only through {name}, so they go with it: if {name} was stolen, so may \
+             they be. Join any of them again by a code to keep it.",
+            names.join(", ")
+        );
+    }
+    if mine {
+        println!(
+            "This node came in through {name}: once {name} is out, this node goes with it, \
+             whoever decides it. Join this node again by a code from a brother that did not \
+             come in through {name} to keep it."
+        );
+    }
     if !yes(&format!(
         "Cast {name} out? It loses its key here, and this node and every brother \
          refuse it from now on. Only a brother asking it to join again undoes it."
     )) {
         return Ok(());
     }
-    let behind = horadric_hooks::state_dir()
-        .and_then(|dir| {
-            let me = horadric_core::portal::Config::load(&dir)?;
-            let me = horadric_core::portal::id(&me.secret);
-            Some(horadric_core::brothers::behind_only(&dir, &me, &id))
-        })
-        .unwrap_or_default();
-    let mut out = vec![(id, name)];
-    if !behind.is_empty() {
-        let names: Vec<&str> = behind.iter().map(|(_, n)| n.as_str()).collect();
-        println!(
-            "{} let in {}, which no other brother's human let in. If {} was stolen, so may \
-             they be.",
-            out[0].1,
-            names.join(", "),
-            out[0].1
-        );
-        if yes_default(&format!("Cast {} out too?", names.join(", ")), true) {
-            out.extend(behind);
+    match Line::open().ok().as_mut() {
+        Some(line) => {
+            line.ask(json!({"do": "cast-out", "id": id}))?;
         }
+        None => cast_out(&id)?,
     }
-    let mut line = Line::open().ok();
-    for (id, name) in out {
-        match line.as_mut() {
-            Some(line) => {
-                line.ask(json!({"do": "cast-out", "id": id}))?;
-            }
-            None => cast_out(&id)?,
-        }
-        println!("{name} is cast out.");
-    }
+    println!("{name} is cast out.");
     Ok(())
 }
 
-/// `horadric node leave`: a node that was cast out, and so links to
-/// nobody, lets every brother and its own keys go, its human having said
+/// `horadric node leave`: a node the words hold out, which hears only
+/// rosters, lets every brother and its own keys go, its human having said
 /// so here. It comes back only when a brother asks it to join again.
 pub(super) fn leave_command() -> Result<(), String> {
     let mut line = Line::open()?;

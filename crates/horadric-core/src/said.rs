@@ -24,13 +24,14 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::brotherhood::{Brother, Ending, Kin, Link, Owner, LEAP};
 use crate::joining::Crypto;
+use crate::lineage::Tree;
 use crate::portal::{b64url, unb64url};
 
 /// What a statement is signed under, before its fields.
-const LABEL: &[u8] = b"horadric said v4";
+const LABEL: &[u8] = b"horadric said v5";
 
 /// What a brother's own entry is signed under.
-const ENTRY_LABEL: &[u8] = b"horadric entry v1";
+const ENTRY_LABEL: &[u8] = b"horadric entry v2";
 
 /// How many moves of one session are followed: enough for any session's
 /// life, and a bound on what one session can make every brother hold. A
@@ -44,8 +45,12 @@ pub const RIVALS: usize = 2;
 /// tries of one handoff.
 pub const RECALLS: usize = 32;
 
-/// The most cast outs one signer's key counts for, the lowest keys.
+/// The most cast outs one signer's key counts for of keys that are not
+/// members, the lowest: those of members all count, and they are few.
 pub const MOST_CAST: usize = 32;
+
+/// The most admissions one signer's key counts for, the lowest keys.
+pub const MOST_ADMITS: usize = 32;
 
 /// One signed statement.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -117,8 +122,22 @@ pub enum What {
     /// `by`, its owner under `n`, ended it for good.
     Ended { origin: String, session: String },
     /// `by` casts out brother `id`, whose key was `key`, its human having
-    /// said so (or let it in again with a new key).
-    CastOut { id: String, key: String },
+    /// said so. `retired`: only that key goes, not the brothers let in
+    /// through it, for a machine its human set up anew.
+    CastOut {
+        id: String,
+        key: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        retired: bool,
+    },
+    /// `by`'s human let brother `id`, called `name`, in under `key`, both
+    /// humans seeing the same code.
+    Admits {
+        id: String,
+        key: String,
+        #[serde(default)]
+        name: String,
+    },
 }
 
 fn is_zero(v: &u64) -> bool {
@@ -134,11 +153,12 @@ impl What {
             What::Takes { .. } => "takes",
             What::Ended { .. } => "ended",
             What::CastOut { .. } => "cast_out",
+            What::Admits { .. } => "admits",
         }
     }
 
     /// The session it speaks of, its creator and its id, None for a cast
-    /// out.
+    /// out or an admission.
     pub fn session(&self) -> Option<(&str, &str)> {
         match self {
             What::Owns {
@@ -154,7 +174,7 @@ impl What {
                 origin, session, ..
             }
             | What::Ended { origin, session } => Some((origin, session)),
-            What::CastOut { .. } => None,
+            What::CastOut { .. } | What::Admits { .. } => None,
         }
     }
 
@@ -227,9 +247,15 @@ pub fn signed_bytes(s: &Word) -> Vec<u8> {
             led_set(&mut out, keepers.iter());
         }
         What::Ended { .. } => {}
-        What::CastOut { id, key } => {
+        What::CastOut { id, key, retired } => {
             led(&mut out, id.as_bytes());
             led(&mut out, key.as_bytes());
+            led(&mut out, &[u8::from(*retired)]);
+        }
+        What::Admits { id, key, name } => {
+            led(&mut out, id.as_bytes());
+            led(&mut out, key.as_bytes());
+            led(&mut out, name.as_bytes());
         }
     }
     out
@@ -303,8 +329,8 @@ pub fn is_point(key: &str) -> bool {
 }
 
 /// Whether word `s` is within bounds: no id, key or signature past
-/// [`LONGEST`], no more than [`MOST_KEEPERS`] keepers, and a cast out of
-/// a real key. So a word never swells a roster past what a link carries.
+/// [`LONGEST`], no more than [`MOST_KEEPERS`] keepers, and a cast out or
+/// an admission of a real key. So a word never swells a roster past what a link carries.
 pub fn word_fits(s: &Word) -> bool {
     let short = |x: &str| x.len() <= LONGEST;
     let keepers = |k: &[String]| k.len() <= MOST_KEEPERS && k.iter().all(|x| short(x));
@@ -318,7 +344,8 @@ pub fn word_fits(s: &Word) -> bool {
             from, keepers: k, ..
         } => short(from) && keepers(k),
         What::Ended { .. } => true,
-        What::CastOut { id, key } => short(id) && is_point(key),
+        What::CastOut { id, key, .. } => short(id) && is_point(key),
+        What::Admits { id, key, name } => short(id) && short(name) && is_point(key),
     };
     base && session && own
 }
@@ -326,7 +353,7 @@ pub fn word_fits(s: &Word) -> bool {
 /// The bytes an entry's signature covers: all it says of its brother but
 /// whether this machine holds it cast out, which is the hearer's to say.
 /// In order: `n`, `id`, `name`, `key`, `link`, `view_only`, `keepers`,
-/// `auto_takeover`, `holds`, `held`.
+/// `auto_takeover`, `holds`, `held`, `root`, `rooted`, `sees`.
 pub fn entry_bytes(b: &Brother) -> Vec<u8> {
     let mut out = ENTRY_LABEL.to_vec();
     led(&mut out, &b.n.to_be_bytes());
@@ -352,6 +379,9 @@ pub fn entry_bytes(b: &Brother) -> Vec<u8> {
         led(&mut out, name.as_bytes());
         led(&mut out, &[u8::from(*vouched)]);
     }
+    led_set(&mut out, b.root.iter());
+    led(&mut out, &[u8::from(b.rooted)]);
+    led_set(&mut out, b.sees.iter());
     out
 }
 
@@ -395,10 +425,14 @@ pub fn entry_fits(b: &Brother) -> bool {
         && b.keepers.len() <= MOST_KEEPERS
         && b.holds.len() <= MOST_LISTED
         && b.held.len() <= MOST_LISTED
+        && b.root.len() <= MOST_LISTED
+        && b.sees.len() <= MOST_LISTED
         && b.view_only
             .iter()
             .chain(&b.keepers)
             .chain(&b.holds)
+            .chain(&b.root)
+            .chain(&b.sees)
             .all(|s| short(s))
         && b.held
             .iter()
@@ -422,76 +456,204 @@ impl Standing {
     }
 }
 
-/// Who is out from every cast out `casts` (words of other kinds are
-/// skipped), a function of the set alone, so the order words came in
-/// never matters. Each is an attack of its signer's key on the key it
-/// names, at most [`MOST_CAST`] counted per signer (the lowest keys).
+/// One counted cast out: its signer's key, the key it names, and what it
+/// attacks.
+struct Cast<'a> {
+    by: &'a str,
+    named: &'a str,
+    cover: BTreeSet<&'a str>,
+}
+
+/// Who is out, from every cast out `casts` (words of other kinds are
+/// skipped) and the tree of members `tree`: a function of the two alone,
+/// so the order words came in never matters. See the spec, "standing".
 ///
-/// - Two keys that attack each other are a contest. A key in contests
-///   with more keys than each of its rivals is in (a thief that cast out
-///   every brother, answered by two of them, loses); the others stay
-///   contested until a human decides.
-/// - A key in a contest counts against its rivals alone, so a thief
-///   answered by one brother casts out nobody else meanwhile.
-/// - Then the grounded labelling: a key all of whose attackers are out
-///   is in (one nobody attacks is in), a key attacked by a key that is in
-///   is out, until nothing changes. A key out leaves its contests, and
+/// - A cast out counts when its signer and the key it names are members.
+///   It attacks the named key's whole line, or the key alone when its
+///   signer came in through it (a rebel). A retirement (`retired`) is no
+///   attack: the key it names goes alone, whenever its signer is neither out
+///   nor contested by the cast outs for real.
+/// - Two keys that attack each other are a contest between two heads: on
+///   each side the topmost key the other side named whose cover holds it.
+///   So a thief's fakes answered by one cast out of the thief are the
+///   thief's own contest, one voice.
+/// - A head with more rivals than each of its rivals has is out; a rebel
+///   no head answered is a rival of the head it turned on.
+/// - A key in the line of a head in a contest counts only against the
+///   lines of that contest's rivals; a rebel's word against its own head
+///   always counts.
+/// - Then the grounded labelling: a key all of whose attackers are out is
+///   in, a key attacked by a key that is in is out, until nothing
+///   changes. A key out takes its line out with it, and a key contested
+///   makes its line contested at best. A key out leaves its contests, and
 ///   all of it is worked out again until nothing more goes out.
 ///
 /// What is neither in nor out is contested.
-pub fn standing<'a>(casts: impl IntoIterator<Item = &'a Word>) -> Standing {
-    let mut by: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+pub fn standing<'a>(casts: impl IntoIterator<Item = &'a Word>, tree: &'a Tree) -> Standing {
+    let mut raw: Vec<(&str, &str)> = Vec::new();
+    let mut retires: Vec<(&str, &str)> = Vec::new();
     for w in casts {
-        if let What::CastOut { key, .. } = &w.what {
-            if *key != w.under && !w.under.is_empty() {
-                by.entry(&w.under).or_default().insert(key);
-            }
-        }
-    }
-    let mut edges: BTreeSet<(&str, &str)> = BTreeSet::new();
-    let mut keys: BTreeSet<&str> = BTreeSet::new();
-    for (s, targets) in &by {
-        keys.insert(s);
-        for t in targets.iter().take(MOST_CAST) {
-            keys.insert(t);
-            edges.insert((s, t));
-        }
-    }
-    let mut out: BTreeSet<&str> = BTreeSet::new();
-    loop {
-        // Contests among the keys not out, and the keys that lose theirs.
-        let rivals = |out: &BTreeSet<&str>| {
-            let mut r: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
-            for (a, b) in &edges {
-                if !out.contains(a) && !out.contains(b) && edges.contains(&(*b, *a)) {
-                    r.entry(*a).or_default().insert(*b);
+        if let What::CastOut { key, retired, .. } = &w.what {
+            let by = w.under.as_str();
+            if by != key && tree.has(by) && tree.has(key) {
+                if *retired {
+                    retires.push((by, key.as_str()));
+                } else {
+                    raw.push((by, key.as_str()));
                 }
             }
-            r
-        };
-        let mut r = rivals(&out);
+        }
+    }
+    raw.sort();
+    raw.dedup();
+    let hard = contested_standing(&raw, tree);
+    // A retirement is a human's word that a machine was set up anew, not an
+    // attack: it stands, from any member the cast outs leave in, though its
+    // signer was retired in turn since. Only a cast out for real voids it.
+    let retired: BTreeSet<String> = retires
+        .iter()
+        .filter(|(by, _)| !hard.out.contains(*by) && !hard.contested.contains(*by))
+        .map(|(_, k)| k.to_string())
+        .collect();
+    Standing {
+        out: hard.out.union(&retired).cloned().collect(),
+        contested: hard.contested.difference(&retired).cloned().collect(),
+    }
+}
+
+/// [`standing`] of the cast outs for real, (signer, named) sorted:
+/// contests, voices, waiting and the grounded labelling.
+fn contested_standing<'a>(raw: &[(&'a str, &'a str)], tree: &'a Tree) -> Standing {
+    let all: Vec<Cast> = raw
+        .iter()
+        .map(|&(by, named)| {
+            let line = tree.line(named);
+            let cover = if line.contains(by) {
+                std::iter::once(named).collect()
+            } else {
+                line.iter().map(String::as_str).collect()
+            };
+            Cast { by, named, cover }
+        })
+        .collect();
+    let rebel = |c: &Cast| c.cover.len() == 1 && tree.line(c.named).contains(c.by);
+    let keys: BTreeSet<&str> = tree.members().collect();
+    let mut by: BTreeMap<&str, Vec<&Cast>> = BTreeMap::new();
+    let mut attacked: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    for c in &all {
+        by.entry(c.by).or_default().push(c);
+        attacked
+            .entry(c.by)
+            .or_default()
+            .extend(c.cover.iter().copied());
+    }
+    let attacks = |a: &str, k: &str| attacked.get(a).is_some_and(|s| s.contains(k));
+    // The topmost key `b` named whose cover holds `a`: the widest cover,
+    // since covers nest.
+    let head = |b: &str, a: &str| -> Option<&str> {
+        by.get(b)?
+            .iter()
+            .filter(|c| c.cover.contains(a))
+            .max_by_key(|c| (c.cover.len(), std::cmp::Reverse(c.named)))
+            .map(|c| c.named)
+    };
+    // Every pair of keys that attack each other, once.
+    let mut mutual: BTreeSet<(&str, &str)> = BTreeSet::new();
+    for (&a, ks) in &attacked {
+        for &k in ks {
+            if k != a && attacks(k, a) {
+                mutual.insert(if a < k { (a, k) } else { (k, a) });
+            }
+        }
+    }
+    // What each key in the line of a head in a contest may still attack:
+    // the lines of that head's rivals, and the head itself for a rebel of
+    // its line.
+    let waits = |r: &BTreeMap<&'a str, BTreeSet<&'a str>>| {
+        let mut allowed: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+        for (h, ps) in r {
+            let lines: BTreeSet<&str> = ps
+                .iter()
+                .flat_map(|p| tree.line(p).iter().map(String::as_str))
+                .collect();
+            for k in tree.line(h) {
+                let a = allowed.entry(k.as_str()).or_default();
+                a.extend(lines.iter().copied());
+                if k != h {
+                    a.insert(h);
+                }
+            }
+        }
+        allowed
+    };
+    // Contests between heads among keys not out, then the rebels whose word
+    // counts: the heads each is in contest with, the keys that fought as
+    // each head's voice (which lose with it), and what each key may still
+    // attack.
+    let contests = |out: &BTreeSet<&str>| {
+        let mut r: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+        let mut voices: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+        for &(a, b) in &mutual {
+            if out.contains(a) || out.contains(b) {
+                continue;
+            }
+            let (Some(ha), Some(hb)) = (head(b, a), head(a, b)) else {
+                continue;
+            };
+            if ha == hb || out.contains(ha) || out.contains(hb) {
+                continue;
+            }
+            r.entry(ha).or_default().insert(hb);
+            r.entry(hb).or_default().insert(ha);
+            voices.entry(ha).or_default().extend([ha, a]);
+            voices.entry(hb).or_default().extend([hb, b]);
+        }
+        let allowed = waits(&r);
+        for c in all.iter().filter(|c| rebel(c)) {
+            let free = allowed.get(c.by).is_none_or(|a| a.contains(c.named));
+            let open = !out.contains(c.by) && !out.contains(c.named);
+            if free && open && !attacks(c.named, c.by) {
+                r.entry(c.named).or_default().insert(c.by);
+                r.entry(c.by).or_default().insert(c.named);
+                voices.entry(c.named).or_default().insert(c.named);
+                voices.entry(c.by).or_default().insert(c.by);
+            }
+        }
+        let allowed = waits(&r);
+        (r, allowed, voices)
+    };
+    let mut out: BTreeSet<&str> = BTreeSet::new();
+    loop {
+        let (mut r, mut allowed, mut voices) = contests(&out);
         loop {
             let losers: Vec<&str> = r
                 .iter()
                 .filter(|(_, ps)| {
-                    ps.iter()
-                        .all(|p| r.get(p).map_or(0, BTreeSet::len) < ps.len())
+                    ps.len() > 1
+                        && ps
+                            .iter()
+                            .all(|p| r.get(p).map_or(0, BTreeSet::len) < ps.len())
                 })
                 .map(|(k, _)| *k)
-                .filter(|k| r[k].len() > 1)
                 .collect();
             if losers.is_empty() {
                 break;
             }
-            out.extend(losers);
-            r = rivals(&out);
+            for l in losers {
+                out.extend(voices.get(l).into_iter().flatten().copied());
+                out.insert(l);
+            }
+            (r, allowed, voices) = contests(&out);
         }
-        let counts =
-            |a: &str, b: &str| !out.contains(a) && r.get(a).is_none_or(|ps| ps.contains(b));
+        let counts = |c: &Cast, k: &str| {
+            !out.contains(c.by) && allowed.get(c.by).is_none_or(|a| a.contains(k))
+        };
         let mut attackers: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
-        for (a, b) in &edges {
-            if counts(a, b) {
-                attackers.entry(*b).or_default().insert(*a);
+        for c in &all {
+            for &k in &c.cover {
+                if counts(c, k) {
+                    attackers.entry(k).or_default().insert(c.by);
+                }
             }
         }
         #[derive(Clone, Copy, PartialEq)]
@@ -523,22 +685,33 @@ pub fn standing<'a>(casts: impl IntoIterator<Item = &'a Word>) -> Standing {
                 break;
             }
         }
-        let now_out: BTreeSet<&str> = label
-            .iter()
-            .filter(|(_, l)| **l == L::Out)
-            .map(|(k, _)| *k)
-            .collect();
+        // A key out takes its line with it, however it went out: one decided
+        // by the brothers of its own line covers nobody else, and a thief's
+        // fakes must not stay in by that.
+        let mut now_out: BTreeSet<&str> = BTreeSet::new();
+        for (k, l) in &label {
+            if *l == L::Out {
+                now_out.insert(k);
+                now_out.extend(tree.line(k).iter().map(String::as_str));
+            }
+        }
         if now_out == out {
-            let pick = |l: L| -> BTreeSet<String> {
-                label
-                    .iter()
-                    .filter(|(_, v)| **v == l)
-                    .map(|(k, _)| k.to_string())
-                    .collect()
-            };
+            // And a key contested makes its line contested at best.
+            let mut contested: BTreeSet<String> = BTreeSet::new();
+            for (k, l) in &label {
+                if *l == L::Open {
+                    let line = tree.line(k).iter().map(String::as_str);
+                    contested.extend(
+                        std::iter::once(*k)
+                            .chain(line)
+                            .filter(|x| !out.contains(x))
+                            .map(str::to_string),
+                    );
+                }
+            }
             return Standing {
-                out: pick(L::Out),
-                contested: pick(L::Open),
+                out: out.iter().map(|k| k.to_string()).collect(),
+                contested,
             };
         }
         out = now_out;
@@ -1121,6 +1294,7 @@ mod tests {
                 What::CastOut {
                     id: "vps".into(),
                     key: b64url(&public_of(&b)),
+                    retired: false,
                 },
             )
             .unwrap();
@@ -1156,6 +1330,27 @@ mod tests {
                 What::CastOut {
                     id: "lap".into(),
                     key: "s".into(),
+                    retired: false,
+                },
+            )),
+            signed_bytes(&word(
+                "x",
+                1,
+                7,
+                What::CastOut {
+                    id: "lap".into(),
+                    key: "s".into(),
+                    retired: true,
+                },
+            )),
+            signed_bytes(&word(
+                "x",
+                1,
+                7,
+                What::Admits {
+                    id: "lap".into(),
+                    key: "s".into(),
+                    name: String::new(),
                 },
             )),
         ];
@@ -1189,9 +1384,17 @@ mod tests {
             What::CastOut {
                 id: "vps".into(),
                 key: "nope".into(),
+                retired: false,
             },
         );
         assert!(!word_fits(&not_a_key));
+        let mut admits_none = not_a_key.clone();
+        admits_none.what = What::Admits {
+            id: "vps".into(),
+            key: "nope".into(),
+            name: String::new(),
+        };
+        assert!(!word_fits(&admits_none));
     }
 
     #[test]
@@ -1575,20 +1778,55 @@ mod tests {
     }
 
     fn cast(by: &str, target: &str) -> Word {
+        cast_as(by, target, false)
+    }
+
+    fn cast_as(by: &str, target: &str, retired: bool) -> Word {
         let what = What::CastOut {
             id: target.into(),
             key: format!("k{target}"),
+            retired,
         };
         let mut w = word(by, 0, 1, what);
-        w.sig = format!("{by}-casts-{target}");
+        w.sig = format!("{by}-casts-{target}-{retired}");
         w
     }
 
-    fn standing_of(words: &[Word]) -> (Vec<String>, Vec<String>) {
+    fn admits(by: &str, to: &str) -> Word {
+        let what = What::Admits {
+            id: to.into(),
+            key: format!("k{to}"),
+            name: String::new(),
+        };
+        let mut w = word(by, 0, 1, what);
+        w.sig = format!("{by}-admits-{to}");
+        w
+    }
+
+    /// A tree whose root is `root`, grown by `edges` (admitter, admitted).
+    fn tree(root: &[&str], edges: &[(&str, &str)]) -> Tree {
+        let root: BTreeSet<String> = root.iter().map(|r| format!("k{r}")).collect();
+        let words: Vec<Word> = edges.iter().map(|(a, b)| admits(a, b)).collect();
+        Tree::of(&root, &words)
+    }
+
+    /// Every key named in `words` at the root: each its own line.
+    fn flat(words: &[Word]) -> Tree {
+        let mut root = BTreeSet::new();
+        for w in words {
+            root.insert(w.under.clone());
+            if let What::CastOut { key, .. } = &w.what {
+                root.insert(key.clone());
+            }
+        }
+        Tree::of(&root, &[])
+    }
+
+    fn standing_in(words: &[Word], t: &Tree) -> (Vec<String>, Vec<String>) {
         let mut answers = BTreeSet::new();
         let mut order: Vec<&Word> = words.iter().collect();
         for _ in 0..words.len().max(1) {
-            let s = standing(order.iter().copied());
+            let s = standing(order.iter().copied(), t);
             answers.insert((
                 s.out.into_iter().collect::<Vec<_>>(),
                 s.contested.into_iter().collect::<Vec<_>>(),
@@ -1599,8 +1837,14 @@ mod tests {
         answers.into_iter().next().unwrap()
     }
 
+    fn standing_of(words: &[Word]) -> (Vec<String>, Vec<String>) {
+        standing_in(words, &flat(words))
+    }
+
     fn ks(ids: &[&str]) -> Vec<String> {
-        ids.iter().map(|i| format!("k{i}")).collect()
+        let mut out: Vec<String> = ids.iter().map(|i| format!("k{i}")).collect();
+        out.sort();
+        out
     }
 
     #[test]
@@ -1622,6 +1866,24 @@ mod tests {
     }
 
     #[test]
+    fn a_cast_out_by_a_key_that_is_no_member_counts_for_nothing() {
+        let t = tree(&["lap", "desk"], &[]);
+        assert_eq!(
+            standing_in(&[cast("stranger", "lap")], &t),
+            (ks(&[]), ks(&[]))
+        );
+        assert_eq!(
+            standing_in(&[cast("lap", "stranger")], &t),
+            (ks(&[]), ks(&[]))
+        );
+        // A member's every cast out counts, however many.
+        let ids: Vec<String> = (0..MOST_CAST + 10).map(|i| format!("b{i:03}")).collect();
+        let w: Vec<Word> = ids.iter().map(|i| cast("vps", i)).collect();
+        let s = standing(w.iter(), &flat(&w));
+        assert_eq!(s.out.len(), MOST_CAST + 10);
+    }
+
+    #[test]
     fn a_thief_that_casts_every_brother_out_loses_once_two_answer() {
         // Before anyone answers, the thief is in and every other out.
         let all = [cast("vps", "lap"), cast("vps", "desk"), cast("vps", "nas")];
@@ -1640,24 +1902,107 @@ mod tests {
     #[test]
     fn a_brother_answered_by_an_accomplice_needs_one_more_human() {
         // Lap casts out Vps and Nas, which Vps let in; Nas casts Lap back.
-        // Lap's word against Vps counts no more while Lap is in a contest
-        // with Nas, so Vps is in: what the spec leaves to a second human.
+        // Nas is in Vps's line, so it answers as Vps: Vps and its line and
+        // Lap are contested, until a second human decides.
+        let t = tree(&["lap", "desk", "vps"], &[("vps", "nas")]);
         let w = [cast("lap", "vps"), cast("lap", "nas"), cast("nas", "lap")];
-        assert_eq!(standing_of(&w), (ks(&[]), ks(&["lap", "nas"])));
+        assert_eq!(standing_in(&w, &t), (ks(&[]), ks(&["lap", "nas", "vps"])));
         let mut w = w.to_vec();
         w.push(cast("desk", "nas"));
-        assert_eq!(standing_of(&w), (ks(&["nas", "vps"]), ks(&[])));
+        assert_eq!(standing_in(&w, &t), (ks(&["nas", "vps"]), ks(&[])));
+    }
+
+    /// Review five, finding 3: a thief's fakes, let in through it, cast
+    /// the brothers out; two humans cast the thief out.
+    #[test]
+    fn a_thiefs_fakes_count_as_its_one_voice() {
+        let t = tree(
+            &["lap", "desk"],
+            &[
+                ("lap", "nas"),
+                ("lap", "vps"),
+                ("vps", "f1"),
+                ("vps", "f2"),
+                ("vps", "f3"),
+                ("f1", "f2"),
+                ("f2", "f1"),
+            ],
+        );
+        let mut w = Vec::new();
+        for f in ["vps", "f1", "f2", "f3"] {
+            for h in ["lap", "desk", "nas"] {
+                w.push(cast(f, h));
+            }
+        }
+        // Unanswered, they put every brother out: turning on Lap, which
+        // they came in through, they take its whole line out with it,
+        // themselves among it, until a human answers.
+        let all = ks(&["desk", "f1", "f2", "f3", "lap", "nas", "vps"]);
+        assert_eq!(standing_in(&w, &t).0, all);
+        // One human answers the thief: its whole line and that human's are
+        // contested, the rest in.
+        w.push(cast("desk", "vps"));
+        let (out, contested) = standing_in(&w, &t);
+        assert!(out.is_empty(), "{out:?}");
+        assert_eq!(contested, ks(&["desk", "f1", "f2", "f3", "vps"]));
+        // A second line answers: the thief and every fake are out, however
+        // many there are.
+        w.push(cast("lap", "vps"));
+        assert_eq!(
+            standing_in(&w, &t),
+            (ks(&["f1", "f2", "f3", "vps"]), ks(&[]))
+        );
     }
 
     #[test]
-    fn one_signer_counts_for_so_many_cast_outs() {
-        let mut w = Vec::new();
-        for i in 0..(MOST_CAST + 10) {
-            w.push(cast("vps", &format!("b{i:03}")));
-        }
-        let s = standing(w.iter());
-        assert_eq!(s.out.len(), MOST_CAST);
-        assert!(s.out.contains("kb000"));
-        assert!(!s.out.contains(&format!("kb{:03}", MOST_CAST + 5)));
+    fn a_line_cast_out_goes_whole_and_a_retired_key_alone() {
+        let t = tree(&["lap", "desk"], &[("desk", "vps"), ("vps", "nas")]);
+        assert_eq!(
+            standing_in(&[cast("lap", "vps")], &t),
+            (ks(&["nas", "vps"]), ks(&[]))
+        );
+        assert_eq!(
+            standing_in(&[cast_as("lap", "vps", true)], &t),
+            (ks(&["vps"]), ks(&[]))
+        );
+        // A brother let in again through another line keeps its place.
+        let t = tree(
+            &["lap", "desk"],
+            &[("desk", "vps"), ("vps", "nas"), ("lap", "nas")],
+        );
+        assert_eq!(
+            standing_in(&[cast("lap", "vps")], &t),
+            (ks(&["vps"]), ks(&[]))
+        );
+    }
+
+    /// A brother turning on the line it came through is a voice of its
+    /// own: the one of the first two machines that is stolen loses to the
+    /// other and a brother let in through itself.
+    #[test]
+    fn a_rebel_counts_against_the_head_of_its_own_line() {
+        let t = tree(&["pc1", "pc2"], &[("pc1", "node"), ("pc2", "box")]);
+        let mut w = vec![cast("pc1", "pc2"), cast("pc2", "pc1")];
+        assert_eq!(standing_in(&w, &t).1, ks(&["box", "node", "pc1", "pc2"]));
+        // A brother of the second's own line is that line's voice: no more.
+        w.push(cast("box", "pc1"));
+        assert_eq!(standing_in(&w, &t).1, ks(&["box", "node", "pc1", "pc2"]));
+        // The node, let in through the thief, turns on it: two voices.
+        w.push(cast("node", "pc1"));
+        let (out, contested) = standing_in(&w, &t);
+        assert_eq!(out, ks(&["node", "pc1"]));
+        assert!(contested.is_empty(), "{contested:?}");
+    }
+
+    #[test]
+    fn a_rebel_alone_casts_out_the_line_it_came_through() {
+        // And goes with it: from the words it cannot be told from a fake. A
+        // join from another line gives it a line of its own.
+        let t = tree(&["pc1", "pc2"], &[("pc1", "node")]);
+        let out = (ks(&["node", "pc1"]), ks(&[]));
+        assert_eq!(standing_in(&[cast("node", "pc1")], &t), out);
+        let t = tree(&["pc1", "pc2"], &[("pc1", "node"), ("pc2", "node")]);
+        let out = (ks(&["pc1"]), ks(&[]));
+        assert_eq!(standing_in(&[cast("node", "pc1")], &t), out);
     }
 }
