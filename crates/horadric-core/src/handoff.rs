@@ -123,7 +123,7 @@ fn commit_in(dir: &Path, refname: &str, message: &str, index: &str) -> Result<St
     )?;
     let real = PathBuf::from(real.trim());
     if real.is_file() {
-        std::fs::copy(&real, index).map_err(|e| format!("cannot copy the index: {e}"))?;
+        copy_index(&real, Path::new(index)).map_err(|e| format!("cannot copy the index: {e}"))?;
     }
     let env = [
         ("GIT_INDEX_FILE", index),
@@ -142,6 +142,21 @@ fn commit_in(dir: &Path, refname: &str, message: &str, index: &str) -> Result<St
     let commit = git(dir, &args, &env)?.trim().to_string();
     git(dir, &["update-ref", refname, &commit], &[])?;
     Ok(commit)
+}
+
+/// Copies a git index keeping its modified time. Git trusts a file's
+/// cached stat only when the file is older than the index, so a file
+/// changed within the clock tick of the last write (Linux stamps files
+/// at a few milliseconds' grain) is marked racy and hashed again. A copy
+/// stamped now would make that entry look clean and its change would be
+/// missed. Windows keeps the time on a copy, Linux does not.
+pub fn copy_index(from: &Path, to: &Path) -> std::io::Result<()> {
+    std::fs::copy(from, to)?;
+    let modified = std::fs::metadata(from)?.modified()?;
+    std::fs::File::options()
+        .write(true)
+        .open(to)?
+        .set_modified(modified)
 }
 
 /// The commits this brother has that a sender can cut a bundle against:
@@ -1010,6 +1025,25 @@ impl Joiner {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn a_copied_index_keeps_its_time() {
+        let dir = std::env::temp_dir().join(format!("horadric-copy-index-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (from, to) = (dir.join("index"), dir.join("copy"));
+        std::fs::write(&from, "x").unwrap();
+        let old = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+        std::fs::File::options()
+            .write(true)
+            .open(&from)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        copy_index(&from, &to).unwrap();
+        assert_eq!(std::fs::metadata(&to).unwrap().modified().unwrap(), old);
+        assert_eq!(std::fs::read(&to).unwrap(), b"x");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// A fresh repository in the temp folder, with one commit, removed
     /// when dropped.

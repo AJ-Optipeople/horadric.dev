@@ -231,8 +231,9 @@ impl PartialEq for Reply {
 impl Eq for Reply {}
 
 /// The longest an agent waits on its browser: a page that is slow to load,
-/// or a script that runs long.
-const BROWSER_WAIT: Duration = Duration::from_secs(if cfg!(test) { 1 } else { 90 });
+/// or a script that runs long. A test's app may start a process before it
+/// answers, which takes over a second on a busy CI runner.
+const BROWSER_WAIT: Duration = Duration::from_secs(if cfg!(test) { 5 } else { 90 });
 
 /// The mod asks again in a few seconds, so an app busy for longer than
 /// this is not worth waiting on.
@@ -1295,7 +1296,7 @@ Origin: https://a.b
                     .spawn()
                     .unwrap();
                 call.reply.send(json!({ "ok": true }));
-                child
+                (child, std::time::Instant::now())
             }
             other => panic!("{other:?}"),
         });
@@ -1308,13 +1309,16 @@ Origin: https://a.b
             body.len()
         );
         s.write_all(req.as_bytes()).unwrap();
-        let started = std::time::Instant::now();
         let mut out = String::new();
         let read = s.read_to_string(&mut out);
-        let waited = started.elapsed();
-        let _ = app.join().unwrap().kill();
+        let finished = std::time::Instant::now();
+        let (mut child, replied) = app.join().unwrap();
+        let _ = child.kill();
         read.unwrap();
         assert!(out.ends_with(r#"{"ok":true}"#), "{out}");
+        // Timed from the answer, not the request, since starting the child
+        // alone can take a second on a busy runner.
+        let waited = finished.saturating_duration_since(replied);
         assert!(waited < Duration::from_secs(2), "waited {waited:?}");
     }
 

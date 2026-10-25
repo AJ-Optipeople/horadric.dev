@@ -428,7 +428,7 @@ fn write_tree(top: &Path) -> Result<String, String> {
         SERIAL.fetch_add(1, Ordering::Relaxed)
     ));
     if seed.is_file() {
-        let _ = fs::copy(&seed, &temp);
+        let _ = horadric_core::handoff::copy_index(&seed, &temp);
     }
     let raw = raw(top)?;
     let env = [("GIT_INDEX_FILE", temp.as_os_str().to_owned())];
