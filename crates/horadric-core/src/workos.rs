@@ -296,6 +296,18 @@ pub fn fresh(exp: u64, now: u64) -> bool {
     now + MARGIN < exp
 }
 
+/// Whether a token running out at `exp` may be handed out at `now` while
+/// another caller is already refreshing it: any that has not run out yet,
+/// rather than wait on WorkOS for one a minute better. With no refresh
+/// under way, only a [`fresh`] one.
+pub fn usable(exp: u64, now: u64, refreshing: bool) -> bool {
+    if refreshing {
+        now < exp
+    } else {
+        fresh(exp, now)
+    }
+}
+
 /// What Credential Manager keeps beside the email: the refresh token and
 /// the user id, so the UI knows who is signed in without asking WorkOS.
 pub fn stored(refresh: &str, user: &User) -> Vec<u8> {
@@ -604,6 +616,15 @@ mod tests {
         assert!(fresh(1000, 900));
         assert!(!fresh(1000, 940));
         assert!(!fresh(1000, 2000));
+    }
+
+    #[test]
+    fn a_token_still_good_is_handed_out_while_another_refreshes() {
+        assert!(usable(1000, 900, false));
+        assert!(!usable(1000, 960, false));
+        assert!(usable(1000, 960, true));
+        assert!(!usable(1000, 1000, true));
+        assert!(!usable(1000, 2000, true));
     }
 
     #[test]

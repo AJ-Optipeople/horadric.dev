@@ -35,7 +35,7 @@ use horadric_core::keeper::{self, Cut, Joins, Pruning};
 use horadric_core::keepers::{too_old, Store};
 use horadric_core::keeping::{
     self, auto_due, keep_messages, kept_entry, kept_full, kept_of, owners_of, restored_heard,
-    seen_due, stores, takeover_message, waited, Book, Holding, Next, Seen,
+    seen_due, stores, takeable, takeover_message, waited, Book, Holding, Next, Seen, Untakeable,
 };
 use horadric_core::serving::Job;
 use horadric_core::{mesh, Phase};
@@ -274,6 +274,23 @@ fn held_of(from: &str, remote: &str) -> Option<(Store, Holding)> {
     keeper::held_of(&keeping::root(&dir), &joined, from, remote)
 }
 
+/// Says why session `name` kept in `store` is not taken over. One that
+/// moved on since its snapshot goes from the store: it is behind for good.
+fn untakeable(store: &Store, name: &str, why: &Untakeable) -> String {
+    match why {
+        Untakeable::Stuck => format!("{name} has a number that cannot go up."),
+        Untakeable::MovedOn(o) => {
+            let me = with(|s| s.me.clone());
+            let owner = names(&me).name(&o.brother).to_string();
+            debug(&format!("{name} is {owner}'s since, its old snapshots go"));
+            if let Err(e) = store.prune() {
+                eprintln!("horadric: cannot drop the snapshots of {name}: {e}");
+            }
+            format!("{name} is {owner}'s now, moved on since its last snapshot here.")
+        }
+    }
+}
+
 /// Drops everything this PC keeps of brother `from`, which named
 /// another keeper.
 fn let_go(from: &str) {
@@ -340,7 +357,8 @@ impl App {
     pub(super) fn keeping_offer(&self, id: &str) -> Option<String> {
         let (name, remote) = remote_of(self, id)?;
         let from = id_of(&name)?;
-        held_of(&from, &remote)?;
+        let (_, holding) = held_of(&from, &remote)?;
+        takeable(&owners(), &remote, &from, holding.record.n).ok()?;
         let (heard, _) = self.far_presence(&name)?;
         if !self.keeping_turn_for(&from, SILENT_SECS) {
             return None;
@@ -427,17 +445,13 @@ impl App {
             with(|s| s.taking.remove(id));
             return;
         };
-        // Refused before landing, so nothing lands that cannot be owned.
-        if mesh::owner_after(&owners(), &remote, holding.record.n).is_none() {
+        // Refused before landing, so nothing lands that cannot be owned,
+        // nor a session that moved on since this snapshot: landed and told,
+        // it would fence the brother it runs on now.
+        if let Err(why) = takeable(&owners(), &remote, &from, holding.record.n) {
             with(|s| s.taking.remove(id));
-            self.toasts.show(
-                Kind::Done,
-                "Not taken over",
-                &format!(
-                    "{name} gave {} a number that cannot go up.",
-                    holding.record.name
-                ),
-            );
+            let why = untakeable(&store, &holding.record.name, &why);
+            self.toasts.show(Kind::Done, "Not taken over", &why);
             return;
         }
         let checkout = self.checkout_of(&holding.record.repo);
@@ -815,8 +829,11 @@ impl App {
     /// taken over meanwhile stay paused and keep their work on a branch;
     /// once the keeper has spoken, the sessions held back at start run on.
     fn keeping_owners(&mut self, who: &str, told: &Owners) {
-        let me = with(|s| s.me.clone());
-        let moved = owning(|o| mesh::told(o, &me, who, told));
+        let (me, mine) = with(|s| (s.me.clone(), s.book.keepers.clone()));
+        let moved = match horadric_hooks::state_dir() {
+            Some(d) => mesh::update(&d, |r| mesh::told_in(r, &me, &mine, who, told)),
+            None => Vec::new(),
+        };
         self.keeping_moved(moved);
         self.keeping_release(who);
     }
@@ -1048,8 +1065,19 @@ impl App {
                 name_of(&from)?;
                 let (heard, _) = self.far_presence(&from)?;
                 let after = h.auto_takeover?.max(SILENT_SECS);
-                (auto_due(heard, h.auto_takeover, now) && self.keeping_turn_for(&from, after))
-                    .then(|| horadric_core::afar::local_id(&from, &session))
+                if !(auto_due(heard, h.auto_takeover, now) && self.keeping_turn_for(&from, after)) {
+                    return None;
+                }
+                // Asked of the roster before a takeover is tried, so an old
+                // snapshot of a session that moved on is dropped rather
+                // than tried every tick.
+                if let Err(why @ Untakeable::MovedOn(_)) =
+                    takeable(&owners(), &session, &from, h.record.n)
+                {
+                    untakeable(&store, &h.record.name, &why);
+                    return None;
+                }
+                Some(horadric_core::afar::local_id(&from, &session))
             })
             .collect();
         for id in due {
@@ -1080,6 +1108,14 @@ impl App {
                 return;
             }
         };
+        // The roster may have heard of a handoff while it landed.
+        if let Err(why) = takeable(&owners(), &record.id, &holding.from, record.n) {
+            with(|s| s.taking.remove(&tile));
+            let why = untakeable(&store, &record.name, &why);
+            crate::worktree::discard(landed.worktree);
+            fail(self, &why);
+            return;
+        }
         let since = self
             .far_presence(&holding.from)
             .map(|(h, _)| h.last)
@@ -1108,12 +1144,32 @@ impl App {
             s.taking.remove(&tile);
             s.me.clone()
         });
-        let owner = owning(|o| mesh::take_over(o, &id, record.n, &me, unix_now()));
-        // Checked before landing; only a number that rose meanwhile ends
-        // here, and then the old owner is not fenced.
-        let Some(owner) = owner else {
-            eprintln!("horadric: {id} has no number to take over with");
-            return;
+        let taken = owning(|o| {
+            Some(keeping::take_over_from(
+                o,
+                &id,
+                &holding.from,
+                record.n,
+                &me,
+                unix_now(),
+            ))
+        });
+        let owner = match taken {
+            Some(Ok(owner)) => owner,
+            // It moved on while the session started: it stops again, its
+            // work kept on its orphan branch, as any session of this PC
+            // another owns.
+            Some(Err(Untakeable::MovedOn(owner))) => {
+                eprintln!("horadric: {} moved on while it was taken over", record.name);
+                self.keeping_moved(vec![(id, owner)]);
+                return;
+            }
+            // Checked before landing; only a number that rose meanwhile
+            // ends here, and then the old owner is not fenced.
+            _ => {
+                eprintln!("horadric: {id} has no number to take over with");
+                return;
+            }
         };
         let msg = takeover_message(&BTreeMap::from([(id.clone(), owner)]));
         for (name, ready) in self.far_peer_names() {

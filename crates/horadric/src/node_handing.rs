@@ -511,7 +511,7 @@ fn model_of(args: &[String]) -> Option<String> {
 
 /// Removes a session's worktree and its branch, its work being elsewhere
 /// now.
-fn discard(w: &Worktree) {
+pub(super) fn discard(w: &Worktree) {
     let main = Path::new(&w.main);
     if git(main, &["worktree", "remove", "--force", &w.path]) {
         git(main, &["branch", "-D", &w.branch]);

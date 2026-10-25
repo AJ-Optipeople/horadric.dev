@@ -9,12 +9,14 @@
 //! The running node refreshes the access token its relay link carries.
 //! Refresh tokens rotate on every use, so a refresh holds a lock in this
 //! process and a file lock across processes: two refreshing with one token
-//! would sign the second out.
+//! would sign the second out. The token in hand has a lock of its own,
+//! never held through a refresh, so whoever only reads it or drops it
+//! (`renew`, from a terminal) never waits on WorkOS.
 
 use std::fs::{File, OpenOptions};
 use std::os::fd::AsRawFd;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Mutex, TryLockError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use horadric_core::portal::write_private;
@@ -27,9 +29,13 @@ const FILE: &str = "workos.json";
 /// Taken around every read and write of [`FILE`] that may rotate it.
 const LOCK: &str = "workos.lock";
 
-/// The access token in hand and when it runs out, behind a lock held
-/// through a refresh.
+/// The access token in hand and when it runs out. Held only to read or
+/// set it.
 static ACCESS: Mutex<Option<(String, u64)>> = Mutex::new(None);
+
+/// Held through a refresh, so this process refreshes once at a time.
+/// [`Locked`] does the same across processes.
+static REFRESHING: Mutex<()> = Mutex::new(());
 
 /// A dev instance signs in with WorkOS's staging environment, so it groups
 /// with a Windows dev instance signed in there.
@@ -158,16 +164,39 @@ pub(super) fn sign_out() -> Result<bool, String> {
     }
 }
 
+/// The access token in hand, if it may be handed out now: see
+/// [`workos::usable`].
+fn in_hand(refreshing: bool) -> Option<String> {
+    let held = ACCESS.lock().unwrap_or_else(|e| e.into_inner());
+    held.as_ref()
+        .filter(|(_, exp)| workos::usable(*exp, now(), refreshing))
+        .map(|(token, _)| token.clone())
+}
+
 /// A good access token, refreshed and the rotated refresh token kept when
-/// the one in hand is about to run out. Blocks while it refreshes.
+/// the one in hand is about to run out. Blocks while it refreshes, unless
+/// another caller is refreshing already and the one in hand has not run
+/// out yet.
 pub(super) fn access_token() -> Result<String, String> {
-    let mut held = ACCESS.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some((token, exp)) = held.as_ref() {
-        if workos::fresh(*exp, now()) {
-            return Ok(token.clone());
+    if let Some(token) = in_hand(false) {
+        return Ok(token);
+    }
+    let _one = match REFRESHING.try_lock() {
+        Ok(one) => one,
+        Err(TryLockError::Poisoned(e)) => e.into_inner(),
+        Err(TryLockError::WouldBlock) => {
+            if let Some(token) = in_hand(true) {
+                return Ok(token);
+            }
+            REFRESHING.lock().unwrap_or_else(|e| e.into_inner())
         }
+    };
+    // Whoever held it before may have just refreshed.
+    if let Some(token) = in_hand(false) {
+        return Ok(token);
     }
     let _locked = Locked::take()?;
+    // Read under the file lock: another process may have rotated it.
     let (refresh, user) = read().ok_or("not signed in")?;
     let body = workos::refresh_body(client(), &refresh);
     let answer = http::post_form(workos::AUTHENTICATE_URL, &body, 1 << 20)
@@ -179,8 +208,7 @@ pub(super) fn access_token() -> Result<String, String> {
         )
     })?;
     keep(&auth.refresh, auth.user.as_ref().unwrap_or(&user))?;
-    let exp = workos::expiry(&auth.access).unwrap_or(0);
-    *held = Some((auth.access.clone(), exp));
+    hold(auth.access.clone());
     Ok(auth.access)
 }
 

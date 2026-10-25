@@ -20,8 +20,9 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Sender};
 use std::sync::Mutex;
+use std::time::Duration;
 
 use horadric_core::brotherhood::{
     clock, orphan_branch, Heard, Owner, Owners, Presence, Roster, SILENT_SECS,
@@ -30,8 +31,8 @@ use horadric_core::handoff::{takeover_line, Record};
 use horadric_core::keeper::{self, Cut, Joins, Pruning};
 use horadric_core::keepers::{too_old, Store};
 use horadric_core::keeping::{
-    self, auto_due, keep_messages, kept_full, kept_of, owners_of, restored_heard, stores,
-    takeover_message, waited, Book, Holding,
+    self, auto_due, keep_messages, kept_full, kept_of, owners_of, restored_heard, stores, takeable,
+    takeover_message, waited, Book, Holding, Untakeable,
 };
 use horadric_core::serving::Job;
 use horadric_core::{mesh, rostering, Agent, Phase};
@@ -43,8 +44,21 @@ use super::{lock, machine_name, relay, Machine};
 /// transcript.
 static TURNS: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
 
-/// The book changed on disk (`horadric node keeper`): read it again.
-static RELOAD: AtomicBool = AtomicBool::new(true);
+/// Changes `horadric node keeper` asked for, with where to say what the
+/// book holds after. Only the serving thread writes the book: a terminal
+/// writing it too would lose the node's newer word of what was sent, or
+/// the node would lose the terminal's pick.
+static ASKED: Mutex<Vec<(Keepers, Sender<KeptBy>)>> = Mutex::new(Vec::new());
+
+/// Who keeps this node's sessions and whether the switch is on.
+type KeptBy = (Option<String>, bool);
+
+/// A change to who keeps this node's sessions: a new first keeper (None
+/// inside for no one) and the switch, each left as it is when None.
+pub(super) struct Keepers {
+    pub(super) keeper: Option<Option<String>>,
+    pub(super) auto: Option<bool>,
+}
 
 /// One snapshot at a time goes into a store.
 static RECEIVING: Mutex<()> = Mutex::new(());
@@ -82,6 +96,7 @@ pub(super) struct Keeping {
     started: u64,
     looked: u64,
     aged: u64,
+    loaded: bool,
 }
 
 fn queue<T>(m: &Mutex<Vec<T>>) -> Vec<T> {
@@ -135,9 +150,16 @@ fn owning<R: Default>(f: impl FnOnce(&mut Owners) -> R) -> R {
     }
 }
 
-/// The book was written by a terminal: read it again at the next round.
-pub(super) fn reload() {
-    RELOAD.store(true, Ordering::SeqCst);
+/// Has the serving thread make `change` to the book, and gives who keeps
+/// this node's sessions after it and whether the switch is on.
+pub(super) fn ask_keepers(change: Keepers) -> Result<KeptBy, String> {
+    let (tx, rx) = mpsc::channel();
+    ASKED
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push((change, tx));
+    rx.recv_timeout(Duration::from_secs(10))
+        .map_err(|_| "the node did not answer in time".to_string())
 }
 
 impl Machine {
@@ -189,10 +211,21 @@ impl Machine {
         if self.keep.started == 0 {
             self.keep.started = relay::now();
         }
-        if RELOAD.swap(false, Ordering::SeqCst) {
+        if !self.keep.loaded {
+            self.keep.loaded = true;
             if let Some(dir) = horadric_hooks::state_dir() {
                 self.keep.book = Book::load(&dir);
             }
+        }
+        for (change, said) in queue(&ASKED) {
+            let book = &mut self.keep.book;
+            book.change_keepers(change.keeper.as_ref().map(Option::as_deref), change.auto);
+            let now = (
+                book.keeper().map(str::to_string),
+                book.auto_takeover.is_some(),
+            );
+            self.save_book();
+            let _ = said.send(now);
         }
         for (id, n) in queue(&LANDED) {
             self.keeping_handed(&id, None, n);
@@ -421,7 +454,11 @@ impl Machine {
         let Some(me) = relay::me() else {
             return;
         };
-        let moved = owning(|o| mesh::told(o, &me, who, told));
+        let Some(dir) = horadric_hooks::state_dir() else {
+            return;
+        };
+        let mine = self.keep.book.keepers.clone();
+        let moved = mesh::update(&dir, |r| mesh::told_in(r, &me, &mine, who, told));
         self.keeping_moved(moved);
     }
 
@@ -624,8 +661,19 @@ impl Machine {
                 relay::store().get(&from)?;
                 let heard = self.heard_of(&from)?;
                 let after = h.auto_takeover?.max(SILENT_SECS);
-                (auto_due(heard, h.auto_takeover, now) && self.keeping_turn_for(&from, after))
-                    .then_some((from, session))
+                if !(auto_due(heard, h.auto_takeover, now) && self.keeping_turn_for(&from, after)) {
+                    return None;
+                }
+                // Asked of the roster before a takeover is tried, so an old
+                // snapshot of a session that moved on is dropped rather
+                // than tried every round.
+                match takeable(&owners(), &session, &from, h.record.n) {
+                    Err(why @ Untakeable::MovedOn(_)) => {
+                        self.keeping_untakeable(&store, &h.record.name, &why);
+                        None
+                    }
+                    _ => Some((from, session)),
+                }
             })
             .collect();
         for (from, session) in due {
@@ -668,11 +716,9 @@ impl Machine {
         let root = root().ok_or("no state folder")?;
         let (store, holding) = keeper::held_of(&root, &relay::store(), from, session)
             .ok_or("nothing is kept of that session here")?;
-        if mesh::owner_after(&owners(), session, holding.record.n).is_none() {
-            return Err(format!(
-                "{} gave {} a number that cannot go up",
-                holding.from_name, holding.record.name
-            ));
+        // Refused before landing, so nothing lands that cannot be owned.
+        if let Err(why) = takeable(&owners(), session, from, holding.record.n) {
+            return Err(self.keeping_untakeable(&store, &holding.record.name, &why));
         }
         if !self.keep.taking.insert(session.to_string()) {
             return Ok(());
@@ -713,6 +759,13 @@ impl Machine {
                 return;
             }
         };
+        // The roster may have heard of a handoff while it landed.
+        if let Err(why) = takeable(&owners(), &record.id, &holding.from, record.n) {
+            let why = self.keeping_untakeable(&store, &record.name, &why);
+            eprintln!("horadric node: cannot take {} over: {why}", record.name);
+            super::handing::discard(&landed.worktree);
+            return;
+        }
         let since = self
             .heard_of(&holding.from)
             .map_or_else(relay::now, |h| h.last);
@@ -732,10 +785,33 @@ impl Machine {
         let Some(me) = relay::me() else {
             return;
         };
-        let owner = owning(|o| mesh::take_over(o, &id, record.n, &me, relay::now()));
-        let Some(owner) = owner else {
-            eprintln!("horadric node: {id} has no number to take over with");
-            return;
+        let taken = owning(|o| {
+            Some(keeping::take_over_from(
+                o,
+                &id,
+                &holding.from,
+                record.n,
+                &me,
+                relay::now(),
+            ))
+        });
+        let owner = match taken {
+            Some(Ok(owner)) => owner,
+            // It moved on while the session started: it stops again, its
+            // work kept on its orphan branch, as any session of this node
+            // another owns.
+            Some(Err(Untakeable::MovedOn(owner))) => {
+                eprintln!(
+                    "horadric node: {} moved on while it was taken over",
+                    record.name
+                );
+                self.keeping_moved(vec![(id, owner)]);
+                return;
+            }
+            _ => {
+                eprintln!("horadric node: {id} has no number to take over with");
+                return;
+            }
         };
         let msg = takeover_message(&BTreeMap::from([(id.clone(), owner)]));
         for b in self.kin.ready_ids() {
@@ -748,5 +824,27 @@ impl Machine {
             "horadric node: {} runs here now, from {}'s last turn",
             record.name, holding.from_name
         );
+    }
+
+    /// Says why session `name` kept in `store` is not taken over. One that
+    /// moved on since its snapshot goes from the store: it is behind for
+    /// good.
+    fn keeping_untakeable(&self, store: &Store, name: &str, why: &Untakeable) -> String {
+        match why {
+            Untakeable::Stuck => format!("{name} has a number that cannot go up"),
+            Untakeable::MovedOn(o) => {
+                let owner = match (relay::me(), horadric_hooks::state_dir()) {
+                    (Some(me), Some(dir)) => rostering::known(&dir, &me, &machine_name())
+                        .name(&o.brother)
+                        .to_string(),
+                    _ => o.brother.clone(),
+                };
+                debug(&format!("{name} is {owner}'s since, its old snapshots go"));
+                if let Err(e) = store.prune() {
+                    eprintln!("horadric node: cannot drop the snapshots of {name}: {e}");
+                }
+                format!("{name} is {owner}'s now, moved on since its last snapshot here")
+            }
+        }
     }
 }

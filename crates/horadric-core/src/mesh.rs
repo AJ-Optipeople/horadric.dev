@@ -178,15 +178,64 @@ pub fn mine(owners: &Owners, me: &str) -> Owners {
 /// Takes the owners brother `who` told with `takeover`, higher numbers
 /// winning. Only what `who` says it owns itself is taken: a brother cannot
 /// hand a session to another this way, nor fence one by naming a
-/// stranger. Gives the sessions `me` had that went meanwhile.
-pub fn told(owners: &mut Owners, me: &str, who: &str, theirs: &Owners) -> Vec<(String, Owner)> {
+/// stranger. Nor can it take a session another owns, unless that owner
+/// named it a keeper ([`may_claim`]). `keepers` gives a brother's keepers,
+/// as it said them. Gives the sessions `me` had that went meanwhile.
+pub fn told(
+    owners: &mut Owners,
+    me: &str,
+    who: &str,
+    theirs: &Owners,
+    keepers: impl Fn(&str) -> Vec<String>,
+) -> Vec<(String, Owner)> {
     let before = owners.clone();
     for (id, o) in theirs.iter().filter(|(_, o)| o.brother == who) {
-        if !owners.get(id).is_some_and(|had| had >= o) {
-            owners.insert(id.clone(), o.clone());
+        let had = owners.get(id);
+        if had.is_some_and(|had| had >= o) {
+            continue;
         }
+        if !may_claim(had, who, &keepers) {
+            continue;
+        }
+        owners.insert(id.clone(), o.clone());
     }
     moved(me, &before, owners)
+}
+
+/// Whether brother `who` may claim a session whose owner, as held here, is
+/// `held`: one nobody is known to own, one that is `who`'s already, or one
+/// whose owner named `who` among its keepers (`keepers`). Anyone else
+/// naming itself owner of another's session is refused, so a keeper
+/// holding a snapshot of a session that was handed on since never fences
+/// the brother running it now. A handoff to `who` is not this: the sender
+/// records it itself (`took`, [`handed`]), and a third brother hears it in
+/// the roster.
+pub fn may_claim(held: Option<&Owner>, who: &str, keepers: impl Fn(&str) -> Vec<String>) -> bool {
+    held.is_none_or(|o| o.brother == who || keepers(&o.brother).iter().any(|k| k == who))
+}
+
+/// [`told`] against the roster held: a brother's keepers as its roster
+/// entry says them, and this machine's own (`mine`, which its held roster
+/// leaves out) from its book.
+pub fn told_in(
+    roster: &mut Roster,
+    me: &str,
+    mine: &[String],
+    who: &str,
+    theirs: &Owners,
+) -> Vec<(String, Owner)> {
+    let brothers = roster.clone();
+    let keepers = |b: &str| {
+        if b == me {
+            mine.to_vec()
+        } else {
+            brothers
+                .brother(b)
+                .map(|x| x.keepers.clone())
+                .unwrap_or_default()
+        }
+    };
+    told(&mut roster.sessions, me, who, theirs, keepers)
 }
 
 #[cfg(test)]
@@ -246,12 +295,65 @@ mod tests {
             ("s2".to_string(), at("vps", 5)),
             ("s3".to_string(), at("desk", 1)),
         ]);
-        let went = told(&mut o, "lap", "desk", &theirs);
+        // Desk keeps lap's sessions, so its takeover of s1 stands.
+        let keeps = |b: &str| {
+            if b == "lap" {
+                vec!["desk".to_string()]
+            } else {
+                Vec::new()
+            }
+        };
+        let went = told(&mut o, "lap", "desk", &theirs, keeps);
         assert_eq!(went, vec![("s1".to_string(), at("desk", 2))]);
         assert_eq!(o["s2"], at("lap", 1));
         assert_eq!(o["s3"], at("desk", 1));
         // Told again: nothing more.
-        assert!(told(&mut o, "lap", "desk", &theirs).is_empty());
+        assert!(told(&mut o, "lap", "desk", &theirs, keeps).is_empty());
+    }
+
+    #[test]
+    fn a_keeper_with_an_old_snapshot_never_fences_the_brother_it_was_handed_to() {
+        // Alpha named the node its keeper, then handed s to Beta under 3.
+        // The node's old snapshot of s outlived the handoff, Alpha died,
+        // and the node took s over from it under 4.
+        let mut roster = Roster::first(Brother::new("alpha", "Alpha", "ka", Link::Relay));
+        roster.brothers[0].keepers = vec!["node".into()];
+        roster.sessions.insert("s".into(), at("beta", 3));
+        let claim = Owners::from([("s".to_string(), at("node", 4))]);
+        // Beta runs s and keeps nothing with the node: refused.
+        let went = told_in(&mut roster, "beta", &[], "node", &claim);
+        assert!(went.is_empty());
+        assert_eq!(roster.sessions["s"], at("beta", 3));
+        // Had Beta named the node its keeper, the takeover would stand.
+        let went = told_in(&mut roster, "beta", &["node".into()], "node", &claim);
+        assert_eq!(went, vec![("s".to_string(), at("node", 4))]);
+        // A third brother holding s as Alpha's takes the node's word, the
+        // node being Alpha's keeper, but not a stranger's.
+        let mut third = Roster::first(Brother::new("alpha", "Alpha", "ka", Link::Relay));
+        third.brothers[0].keepers = vec!["node".into()];
+        third.sessions.insert("s".into(), at("alpha", 2));
+        let stranger = Owners::from([("s".to_string(), at("vps", 9))]);
+        assert!(told_in(&mut third, "desk", &[], "vps", &stranger).is_empty());
+        told_in(&mut third, "desk", &[], "node", &claim);
+        assert_eq!(third.sessions["s"], at("node", 4));
+    }
+
+    #[test]
+    fn only_the_owner_or_its_keepers_may_claim() {
+        let none = |_: &str| Vec::new();
+        let keeps = |b: &str| {
+            if b == "lap" {
+                vec!["desk".to_string(), "vps".to_string()]
+            } else {
+                Vec::new()
+            }
+        };
+        assert!(may_claim(None, "desk", none));
+        assert!(may_claim(Some(&at("desk", 3)), "desk", none));
+        assert!(!may_claim(Some(&at("lap", 3)), "desk", none));
+        assert!(may_claim(Some(&at("lap", 3)), "desk", keeps));
+        assert!(may_claim(Some(&at("lap", 3)), "vps", keeps));
+        assert!(!may_claim(Some(&at("lap", 3)), "nas", keeps));
     }
 
     #[test]

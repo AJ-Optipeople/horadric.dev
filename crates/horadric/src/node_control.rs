@@ -20,7 +20,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use horadric_core::joining::Store;
-use horadric_core::keeping::{self, Book};
+use horadric_core::keeping::Book;
 use horadric_core::standing::Standing;
 use serde_json::{json, Value};
 
@@ -242,8 +242,14 @@ fn request(conn: u64, req: &Value) -> Value {
             Err(e) => json!({"re": "control", "error": e}),
         },
         "keeper" => {
-            node_keeping::reload();
-            json!({"re": "keeper"})
+            let change = node_keeping::Keepers {
+                keeper: req.get("keeper").map(|k| k.as_str().map(str::to_string)),
+                auto: req["auto"].as_bool(),
+            };
+            match node_keeping::ask_keepers(change) {
+                Ok((keeper, auto)) => json!({"re": "keeper", "keeper": keeper, "auto": auto}),
+                Err(e) => json!({"re": "keeper", "error": e}),
+            }
         }
         other => json!({"re": other, "error": "not something a node does"}),
     }
@@ -657,7 +663,6 @@ pub(super) fn view_only_command(args: &[String]) -> Result<(), String> {
 /// if it falls silent, and whether that keeper does so by itself.
 pub(super) fn keeper_command(args: &[String]) -> Result<(), String> {
     let dir = horadric_hooks::state_dir().ok_or("cannot find the state folder")?;
-    let mut book = Book::load(&dir);
     let auto = if args.iter().any(|a| a == "--auto") {
         Some(true)
     } else if args.iter().any(|a| a == "--no-auto") {
@@ -667,38 +672,53 @@ pub(super) fn keeper_command(args: &[String]) -> Result<(), String> {
     };
     let pick = args.iter().find(|a| !a.starts_with("--"));
     let joined = joined_pairs();
-    match pick.map(String::as_str) {
-        Some("none") => book.set_keeper(None),
-        Some(name) => {
-            let (id, _) = by_name(name, &joined)?;
-            book.set_keeper(Some(&id));
+    let keeper = match pick.map(String::as_str) {
+        Some("none") => Some(None),
+        Some(name) => Some(Some(by_name(name, &joined)?.0)),
+        None => None,
+    };
+    if keeper.is_none() && auto.is_none() {
+        let book = Book::load(&dir);
+        let shown = book
+            .keeper()
+            .map(|k| name_of(k, &joined))
+            .unwrap_or_else(|| "no one".into());
+        println!("This node's sessions are kept by {shown}.");
+        if book.auto_takeover.is_some() {
+            println!("It takes them over by itself after 10 minutes of silence.");
         }
-        None if auto.is_none() => {
-            let shown = book
-                .keeper()
-                .map(|k| name_of(k, &joined))
-                .unwrap_or_else(|| "no one".into());
-            println!("This node's sessions are kept by {shown}.");
-            if book.auto_takeover.is_some() {
-                println!("It takes them over by itself after 10 minutes of silence.");
+        return Ok(());
+    }
+    // A running node writes the book every turn, so it makes the change
+    // itself; only with none running is the file this terminal's to write.
+    let (now, on) = match Line::open() {
+        Ok(mut line) => {
+            let mut req = json!({"do": "keeper"});
+            if let Some(k) = &keeper {
+                req["keeper"] = json!(k);
             }
-            return Ok(());
+            if let Some(a) = auto {
+                req["auto"] = json!(a);
+            }
+            let v = line.ask(req)?;
+            (v["keeper"].as_str().map(str::to_string), v["auto"] == true)
         }
-        None => {}
-    }
-    if let Some(on) = auto {
-        book.auto_takeover = on.then_some(keeping::AUTO_AFTER);
-    }
-    book.save(&dir)
-        .map_err(|e| format!("cannot keep the keeper: {e}"))?;
-    if let Ok(mut line) = Line::open() {
-        line.ask(json!({"do": "keeper"}))?;
-    }
-    match book.keeper() {
+        Err(_) => {
+            let mut book = Book::load(&dir);
+            book.change_keepers(keeper.as_ref().map(Option::as_deref), auto);
+            book.save(&dir)
+                .map_err(|e| format!("cannot keep the keeper: {e}"))?;
+            (
+                book.keeper().map(str::to_string),
+                book.auto_takeover.is_some(),
+            )
+        }
+    };
+    match now {
         Some(k) => println!(
             "{} keeps this node's sessions{}.",
-            name_of(k, &joined),
-            if book.auto_takeover.is_some() {
+            name_of(&k, &joined),
+            if on {
                 ", and takes them over by itself after 10 minutes of silence"
             } else {
                 ""

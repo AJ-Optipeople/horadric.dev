@@ -20,7 +20,7 @@ use serde_json::{json, Value};
 use crate::afar::Entry;
 use crate::agent::Agent;
 use crate::brotherhood::{
-    keepers_turn, offers_takeover, Heard, Owner, Presence, Roster, Said, SILENT_SECS,
+    keepers_turn, offers_takeover, Heard, Owner, Owners, Presence, Roster, Said, SILENT_SECS,
 };
 use crate::handoff::{self, git, handoff_ref, Package, Part, Record, TranscriptFile};
 use crate::keepers::{self, Meta, Side, SideFolder, Store};
@@ -132,11 +132,11 @@ impl Book {
         book
     }
 
+    /// Written whole and synced before it replaces the old one, so a
+    /// crash or a full disk never leaves half a book.
     pub fn save(&self, dir: &Path) -> std::io::Result<()> {
         let json = serde_json::to_vec_pretty(self).map_err(std::io::Error::other)?;
-        let tmp = dir.join(format!("{BOOK_FILE}.tmp"));
-        std::fs::write(&tmp, json)?;
-        std::fs::rename(tmp, dir.join(BOOK_FILE))
+        crate::portal::write_private(&dir.join(BOOK_FILE), &json)
     }
 
     /// The keeper snapshots go to: only the first, so two brothers never
@@ -154,6 +154,17 @@ impl Book {
                 self.keepers.insert(0, k.to_string());
             }
             None => self.keepers.clear(),
+        }
+    }
+
+    /// What `horadric node keeper` asks: `keeper` first (Some(None) for no
+    /// one) and the switch on or off, each left as it is when None.
+    pub fn change_keepers(&mut self, keeper: Option<Option<&str>>, auto: Option<bool>) {
+        if let Some(k) = keeper {
+            self.set_keeper(k);
+        }
+        if let Some(on) = auto {
+            self.auto_takeover = on.then_some(AUTO_AFTER);
         }
     }
 
@@ -439,6 +450,57 @@ pub fn waited(last: u64, started: u64, now: u64) -> bool {
     last >= started || now.saturating_sub(started) >= SILENT_SECS
 }
 
+/// Why a keeper may not take a kept session over.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Untakeable {
+    /// The session moved on since its snapshot was cut: handed or taken
+    /// to the brother of this owner, or back to the snapshot's own brother
+    /// under a higher number. What is kept is behind it, so it goes.
+    MovedOn(Owner),
+    /// Its number is at the end and cannot go up to fence the old owner.
+    Stuck,
+}
+
+/// Whether brother `from`'s snapshot of `session`, cut under roster number
+/// `held`, may be taken over by its keeper, as the roster holds the
+/// session now: only while it is still the session's newest word. Gives
+/// the number it is taken over under.
+///
+/// A snapshot that outlived a handoff (its store was not pruned in time,
+/// or the keeper was not running) would otherwise land a stale copy and,
+/// told to everyone, fence the brother the session runs on now. The
+/// roster's owner is behind the snapshot only where it is `from` under a
+/// number no higher, or another brother under a lower one, which is a
+/// roster that has not heard of `from`'s later handoff yet.
+pub fn takeable(owners: &Owners, session: &str, from: &str, held: u64) -> Result<u64, Untakeable> {
+    if let Some(o) = owners.get(session) {
+        let behind = if o.brother == from {
+            o.n <= held
+        } else {
+            o.n < held
+        };
+        if !behind {
+            return Err(Untakeable::MovedOn(o.clone()));
+        }
+    }
+    crate::mesh::owner_after(owners, session, held).ok_or(Untakeable::Stuck)
+}
+
+/// `me` takes `session` over from `from`'s snapshot cut under `held`, if
+/// [`takeable`] allows it still, in one change of the owners so nothing
+/// moves the session between the look and the take. Gives the new owner.
+pub fn take_over_from(
+    owners: &mut Owners,
+    session: &str,
+    from: &str,
+    held: u64,
+    me: &str,
+    now: u64,
+) -> Result<Owner, Untakeable> {
+    takeable(owners, session, from, held)?;
+    crate::mesh::take_over(owners, session, held, me, now).ok_or(Untakeable::Stuck)
+}
+
 const HOLDING_FILE: &str = "holding.json";
 
 impl Holding {
@@ -450,7 +512,9 @@ impl Holding {
     pub fn save(&self, store: &Store) -> Result<(), String> {
         std::fs::create_dir_all(&store.0).map_err(|e| e.to_string())?;
         let json = serde_json::to_vec(self).map_err(|e| e.to_string())?;
-        std::fs::write(store.0.join(HOLDING_FILE), json).map_err(|e| e.to_string())
+        // Whole or not at all: a store whose holding cannot be read is one
+        // no keeper can take over or show.
+        crate::portal::write_private(&store.0.join(HOLDING_FILE), &json).map_err(|e| e.to_string())
     }
 }
 
@@ -1221,5 +1285,100 @@ mod tests {
         let h = restored_heard([(&kept(None), T)]);
         assert!(offer(h, "Desk", started).is_some());
         assert!(auto_due(h, Some(AUTO_AFTER), started));
+    }
+
+    fn owner(b: &str, n: u64) -> Owner {
+        Owner {
+            n,
+            brother: b.into(),
+            since: 7,
+        }
+    }
+
+    #[test]
+    fn a_snapshot_that_outlived_a_handoff_is_never_taken_over() {
+        // Alpha's snapshot of s was cut under 2. Alpha then handed s to
+        // Beta under 3, and the store outlived it.
+        let mut o = Owners::from([("s".to_string(), owner("beta", 3))]);
+        let moved = Untakeable::MovedOn(owner("beta", 3));
+        assert_eq!(takeable(&o, "s", "alpha", 2), Err(moved.clone()));
+        assert_eq!(
+            take_over_from(&mut o, "s", "alpha", 2, "node", 9),
+            Err(moved)
+        );
+        assert_eq!(o["s"], owner("beta", 3));
+        // Handed back to Alpha under 4 after the snapshot: still behind.
+        o.insert("s".into(), owner("alpha", 4));
+        assert_eq!(
+            takeable(&o, "s", "alpha", 2),
+            Err(Untakeable::MovedOn(owner("alpha", 4)))
+        );
+        // Already taken over here: not twice.
+        o.insert("s".into(), owner("node", 3));
+        assert!(takeable(&o, "s", "alpha", 2).is_err());
+    }
+
+    #[test]
+    fn a_snapshot_still_the_newest_word_is_taken_over_one_higher() {
+        // Never heard of: taken over above the snapshot's number.
+        let mut o = Owners::new();
+        assert_eq!(takeable(&o, "s", "alpha", 2), Ok(3));
+        // Alpha's own, at the snapshot's number.
+        o.insert("s".into(), owner("alpha", 2));
+        assert_eq!(takeable(&o, "s", "alpha", 2), Ok(3));
+        let t = take_over_from(&mut o, "s", "alpha", 2, "node", 9).unwrap();
+        assert_eq!(
+            t,
+            Owner {
+                since: 9,
+                ..owner("node", 3)
+            }
+        );
+        assert_eq!(o["s"], t);
+        // A roster that has not heard Beta handed s to Alpha under 4 yet:
+        // the snapshot is newer than it, so it stands.
+        let o = Owners::from([("s".to_string(), owner("beta", 3))]);
+        assert_eq!(takeable(&o, "s", "alpha", 4), Ok(5));
+        // At the end of the numbers: refused.
+        let o = Owners::from([("s".to_string(), owner("alpha", u64::MAX))]);
+        assert_eq!(takeable(&o, "s", "alpha", u64::MAX), Err(Untakeable::Stuck));
+    }
+
+    #[test]
+    fn a_keeper_change_leaves_alone_what_it_does_not_name() {
+        let mut b = Book {
+            keepers: vec!["a".into(), "b".into()],
+            ..Book::default()
+        };
+        b.change_keepers(None, Some(true));
+        assert_eq!(b.keepers, ["a", "b"]);
+        assert_eq!(b.auto_takeover, Some(AUTO_AFTER));
+        b.change_keepers(Some(Some("b")), None);
+        assert_eq!(b.keepers, ["b", "a"]);
+        assert_eq!(b.auto_takeover, Some(AUTO_AFTER));
+        b.change_keepers(Some(None), Some(false));
+        assert!(b.keepers.is_empty());
+        assert_eq!(b.auto_takeover, None);
+    }
+
+    #[test]
+    fn a_holding_and_a_book_are_written_whole() {
+        let root = std::env::temp_dir().join(format!("horadric-whole-{}", std::process::id()));
+        let store = store_of(&root, "lap", "s").unwrap();
+        let mut h = Holding {
+            from_name: "Lap".into(),
+            ..Holding::default()
+        };
+        h.save(&store).unwrap();
+        h.from_name = "Laptop".into();
+        h.save(&store).unwrap();
+        assert_eq!(Holding::load(&store).unwrap().from_name, "Laptop");
+        assert!(!store.0.join(format!("{HOLDING_FILE}.tmp")).exists());
+        let mut book = Book::default();
+        book.set_keeper(Some("desk"));
+        book.save(&root).unwrap();
+        assert_eq!(Book::load(&root).keeper(), Some("desk"));
+        assert!(!root.join(format!("{BOOK_FILE}.tmp")).exists());
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
