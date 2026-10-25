@@ -13,6 +13,8 @@ pub mod ask;
 pub mod background;
 pub mod bench;
 pub mod brotherhood;
+#[cfg(test)]
+mod brotherhood_sim;
 pub mod brothers;
 pub mod checkpoint;
 pub mod chronicle;
