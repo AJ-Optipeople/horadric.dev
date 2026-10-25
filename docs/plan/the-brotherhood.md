@@ -581,6 +581,13 @@ Each step is useful alone and each is verified before the next starts.
    "asleep", "silent" and "out of reach" on the tiles. Pure and tested:
    merging two rosters, the owner rule, refusing a cast out key.
    Verified with three dev instances.
+
+   Done on 2026-10-25, its last parts by step 18 (below): "asleep",
+   "silent" and "out of reach" and view only per link came with steps 3
+   and 13, session owners with step 13, and joining once joins everyone,
+   the roster merged and carried, owners in it and cast out travelling in
+   it with step 18. Its three dev instances were two Windows dev
+   instances and a dev node on `exit1-eu`.
 9. **The shared lore.** Entries with a writing brother and a number,
    removal as an entry, the catch up on connect and the stream after,
    projects matched by repository, vectors embedded on arrival. Pure and
@@ -965,6 +972,72 @@ Each step is useful alone and each is verified before the next starts.
     its relay brother. Verified with two dev instances and the VPS: the
     VPS let in by Alpha links to Beta with no code, cast out on Beta
     drops it on Alpha too.
+
+    Done on 2026-10-25 (1b47045, 6175d31). `roster.json` in the state
+    folder (`horadric-core/src/mesh.rs`) holds every roster heard,
+    merged, and every session's owner: keeping's `owners` moved into it
+    (an older `keeping.json` gives them up once), so handoffs, takeovers,
+    `takeover` messages and rosters all write one place. A brother serves
+    that, without anything said of itself, merged with its own entry put
+    together afresh (numbered past every number it heard, as a clock that
+    only goes up) and an entry numbered nought per brother it holds. A
+    brother is an entry per key, so one cast out and let in again under
+    its old id is two, the old one refused for good; a heard roster never
+    speaks for the hearer. Introductions are the roster: an entry's
+    `holds` says whom it holds a key for, and a brother takes a key for N
+    when one it holds, under the key it holds, lists N (`Roster::
+    introduced`), from `joining::introduced_key` (static ECDH, both keys
+    and ids, lower id first, pinned against Python). The lower id dials;
+    a hello that beats its introduction waits and is heard again. Core
+    `Brothers` takes rosters and `cast_out` before routing them, so a PC
+    and a node do it alike, and tells the app `Gone` (tiles go) and
+    `Moved` (sessions fenced, unless being handed to that brother). Cast
+    out: the outcast is told sealed (at once, or once its hello proves its
+    old key) and lets every brother and its key pair go; asking to join
+    under its old id or key is refused unasked, so it comes back only when
+    a brother asks it, with a new key. A node's hello over `--stdio` says
+    its relay id and key; a PC holding that brother under that key shows
+    it once, the relay link preferred and `ssh` standing by. A session
+    another brother owns now is not shown on a silent brother's kept list
+    too. A name two brothers share is shown with the start of each key,
+    and names one of them nowhere. A node's own sessions get Claude Code's
+    trust written for their folder.
+
+    Seen on 2026-10-25 with "Alpha" and "Beta" (scratch `APPDATA`, Beta on
+    43119) and a dev node "vps18" on `exit1-eu` (its own state folder,
+    staging sign in confirmed in the browser pane), through
+    `wss://portal.horadric.dev`: Alpha and Beta joined (562 738); `horadric
+    node signin --to Alpha` and Alpha's yes (032 492) let the node in, and
+    within a second the node logged "Beta was introduced" and linked to
+    Beta, nobody asked. Beta showed "demo18 · vps18" and "alphaproj ·
+    Alpha"; all three `roster.json` agreed. Cast out on Beta's tray: the
+    node was told and let both go, Alpha dropped it from Beta's roster and
+    its tiles went; `signin --to Alpha` again was refused with no prompt.
+    Alpha's "Ask to join" with `horadric node let-in` attached took it
+    back (454 009) with a new key, Beta took it from Alpha's roster, and
+    the old key stayed refused everywhere. Cast out again while the node
+    was stopped: started, it relinked to Alpha under its old key and was
+    told so. An SSH entry for the same node on Alpha folded into it: one
+    "demo18 · vps18" cluster, the tray's "vps18 linked, ssh standby" and
+    no line under Linux nodes; Town Portal off on Alpha, "goes on over
+    ssh" and the tiles stayed lit, back on, the relay again. Keeper
+    vps18: Alpha killed with its hosts, two minutes on Beta's tile read
+    "Alpha silent since 02:13" with "Take over on vps18", which the node
+    did into a worktree of its clone with the turn's edit; Alpha back
+    fenced its copy onto `horadric/orphaned/<id>` from the roster alone.
+    With the switch on, a second session was taken over by the node by
+    itself ten minutes after Alpha went, `notes.txt` and all, both
+    resumed with `claude --resume`. `horadric new` on the node wrote
+    trust for its folder.
+
+    Found on the way: Town Portal turned off left brother links counted
+    up (the reader's down came after the brothers were gone); a node
+    whose agent is a stand-in cannot resume a Claude session, so takeover
+    tests run without `HORADRIC_AGENT`. Left open: a brother let in by one
+    later cast out stays, when others met it meanwhile (cast it out too);
+    a brother that lost `brothers.json` but kept its secret rejoins with a
+    new key under its old id, and brothers holding its old key keep it
+    until it is cast out; roster owners are never pruned.
 19. **Later, each its own decision.** Teams: a WorkOS organization as a
     brotherhood of several people, each seeing the others' sessions view
     only by default, and the lore shared or not per project; catching
