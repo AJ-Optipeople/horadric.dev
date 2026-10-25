@@ -1,29 +1,22 @@
 //! A brother's word, signed: what it says about the brotherhood that
-//! others pass on. A link proves only who sent a message, so a fact one
-//! brother learns from another (a handoff, a takeover, a cast out, who
-//! keeps whom) can travel past the brother whose word it is only when that
-//! brother signed it. Every brother signs with its long term key, the ECDH
-//! pair it joined with, ECDSA P-256 over SHA-256 ([`Crypto::sign`]), and
-//! every brother that hears the word, from whomever, checks it against the
-//! key it holds for the signer.
+//! others pass on, and the two pure functions every brother works the
+//! brotherhood out with: [`resolve`], whose a session is, and
+//! [`standing`], who is out. Both depend on the words held and nothing
+//! else, so two brothers that hold the same words agree whatever order
+//! they came in. docs/plan/brotherhood-ownership.md is the specification;
+//! docs/PORTAL.md, "Signed word", the wire format.
 //!
-//! What is signed: a statement on a session's owner ([`What::Owns`],
-//! [`What::Hands`], [`What::Recalls`], [`What::Takes`], [`What::Ended`]),
-//! a cast out ([`What::CastOut`]), and a brother's own roster entry, which
-//! names its keepers, whom it lets only watch, and the brothers it let in
-//! ([`sign_entry`]). Each kind is signed under a label of its own, its
-//! fields each led by their length, so no statement reads as another. See
-//! docs/PORTAL.md, "Signed word".
+//! Every brother signs with its long term key, the ECDH pair it joined
+//! with, ECDSA P-256 over SHA-256 ([`Crypto::sign`]), and names the key it
+//! signed under ([`Word::under`]). A hearer takes a word only under the
+//! key it holds for the signer, or held before, never a key the word or
+//! another brother names.
 //!
 //! A session is its creator's (its `origin`) and its id together: only
 //! the creator starts its chain, so a brother naming a session it did not
-//! start makes a session of its own, never another's. Whose a session is
-//! now is worked out from all the words held on it by one pure function
-//! ([`resolve`]), which depends on nothing but those words: every brother
-//! that holds the same words agrees, whatever order they came in, and
-//! whatever it heard of anyone's entry since. It also says which words can
-//! matter, and only those are kept, so a word nobody's chain reaches (one
-//! a brother made up to swell rosters or stall a session) is not.
+//! start makes a session of its own, never another's. Every change of a
+//! session's owner, and of who may take it over, is a word in that
+//! session's own chain.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -34,20 +27,25 @@ use crate::joining::Crypto;
 use crate::portal::{b64url, unb64url};
 
 /// What a statement is signed under, before its fields.
-const LABEL: &[u8] = b"horadric said v3";
+const LABEL: &[u8] = b"horadric said v4";
 
 /// What a brother's own entry is signed under.
 const ENTRY_LABEL: &[u8] = b"horadric entry v1";
 
-/// How many moves of one session are followed and kept: enough for any
-/// session's life, and a bound on what one session can make every brother
-/// hold (each move keeps a few words beside it, its rivals at most
-/// [`RIVALS`]). A session moved more often than this stops moving.
+/// How many moves of one session are followed: enough for any session's
+/// life, and a bound on what one session can make every brother hold. A
+/// session moved this often stops moving, and can still end.
 pub const CHAIN: usize = 256;
 
-/// The most rivals of each kind kept at one move: handoffs its receiver
-/// acknowledged, takeovers, handoffs nobody acknowledged.
+/// The most candidates of each rank kept at one move.
 pub const RIVALS: usize = 2;
+
+/// The most recalls kept at one move, the lowest: far past the failed
+/// tries of one handoff.
+pub const RECALLS: usize = 32;
+
+/// The most cast outs one signer's key counts for, the lowest keys.
+pub const MOST_CAST: usize = 32;
 
 /// One signed statement.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -56,9 +54,20 @@ pub struct Word {
     pub n: u64,
     /// The brother whose word it is, by relay id.
     pub by: String,
-    /// When it was said, by its clock: what "taken over at 14:12" shows.
+    /// The public key it is signed under, b64url: the one the hearer holds
+    /// for `by`, or held before.
+    #[serde(default)]
+    pub under: String,
+    /// When it was said, by its clock: what "taken over at 14:12" shows,
+    /// never compared with another clock.
     #[serde(default)]
     pub at: u64,
+    /// The signature of the word that made `by` the owner this word builds
+    /// on (for an acknowledgement, of the handoff it acknowledges): a word
+    /// signed on a handoff later taken back, or on a step that lost, so
+    /// builds on nothing. Empty for a session's first word and a cast out.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub after: String,
     #[serde(flatten)]
     pub what: What,
     /// ECDSA P-256 `r || s`, b64url.
@@ -71,43 +80,49 @@ pub struct Word {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum What {
-    /// `by` runs the session under `n`: its creator starting it, or the
-    /// brother it was just handed to saying it runs it now.
-    Owns { origin: String, session: String },
-    /// `by`, its owner under `n - 1`, handed it to `to`.
+    /// `by` runs the session under `n`, and names `keepers`, in order, as
+    /// who may take it over from it at `n`, the `v`th time at `n`. With
+    /// `v` nought: its creator starting it, or the brother it was handed
+    /// to acknowledging it runs it.
+    Owns {
+        origin: String,
+        session: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        keepers: Vec<String>,
+        #[serde(default, skip_serializing_if = "is_zero")]
+        v: u64,
+    },
+    /// `by`, its owner under `n - 1`, hands it to `to`.
     Hands {
         origin: String,
         session: String,
         to: String,
     },
-    /// `by` takes back its handoff to `to` under `n`, which did not land:
-    /// the handoff counts no more, run or not.
+    /// `by` takes back its handoff under `n` whose signature is `hand`:
+    /// it did not land, and counts no more, run or not.
     Recalls {
         origin: String,
         session: String,
-        to: String,
+        hand: String,
     },
-    /// `by` took it over from `from`, whose number was `n - 1`, as a
-    /// keeper `from`'s own signed `entry` names: the entry it relied on
-    /// goes with it, so the takeover is judged by that entry alone, the
-    /// same on every brother whatever `from` said since.
+    /// `by`, a keeper of `from`, took it over from `from`'s `n - 1`, and
+    /// names its own `keepers`.
     Takes {
         origin: String,
         session: String,
         from: String,
-        entry: Box<Brother>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        keepers: Vec<String>,
     },
-    /// `by`, its owner under `n`, ended it for good. `was`: every brother
-    /// that owned it before, which may hold a paused copy.
-    Ended {
-        origin: String,
-        session: String,
-        #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
-        was: BTreeSet<String>,
-    },
-    /// `by` casts out brother `id` and the key `key` it had, its human
-    /// having said so (or let it in again with a new key).
+    /// `by`, its owner under `n`, ended it for good.
+    Ended { origin: String, session: String },
+    /// `by` casts out brother `id`, whose key was `key`, its human having
+    /// said so (or let it in again with a new key).
     CastOut { id: String, key: String },
+}
+
+fn is_zero(v: &u64) -> bool {
+    *v == 0
 }
 
 impl What {
@@ -126,7 +141,9 @@ impl What {
     /// out.
     pub fn session(&self) -> Option<(&str, &str)> {
         match self {
-            What::Owns { origin, session }
+            What::Owns {
+                origin, session, ..
+            }
             | What::Hands {
                 origin, session, ..
             }
@@ -136,9 +153,7 @@ impl What {
             | What::Takes {
                 origin, session, ..
             }
-            | What::Ended {
-                origin, session, ..
-            } => Some((origin, session)),
+            | What::Ended { origin, session } => Some((origin, session)),
             What::CastOut { .. } => None,
         }
     }
@@ -192,21 +207,26 @@ pub fn signed_bytes(s: &Word) -> Vec<u8> {
     let mut out = LABEL.to_vec();
     led(&mut out, s.what.kind().as_bytes());
     led(&mut out, s.by.as_bytes());
+    led(&mut out, s.under.as_bytes());
     led(&mut out, &s.n.to_be_bytes());
     led(&mut out, &s.at.to_be_bytes());
+    led(&mut out, s.after.as_bytes());
     if let Some((origin, session)) = s.what.session() {
         led(&mut out, origin.as_bytes());
         led(&mut out, session.as_bytes());
     }
     match &s.what {
-        What::Owns { .. } => {}
-        What::Hands { to, .. } | What::Recalls { to, .. } => led(&mut out, to.as_bytes()),
-        What::Takes { from, entry, .. } => {
-            led(&mut out, from.as_bytes());
-            led(&mut out, &entry_bytes(entry));
-            led(&mut out, entry.sig.as_bytes());
+        What::Owns { keepers, v, .. } => {
+            led_set(&mut out, keepers.iter());
+            led(&mut out, &v.to_be_bytes());
         }
-        What::Ended { was, .. } => led_set(&mut out, was.iter()),
+        What::Hands { to, .. } => led(&mut out, to.as_bytes()),
+        What::Recalls { hand, .. } => led(&mut out, hand.as_bytes()),
+        What::Takes { from, keepers, .. } => {
+            led(&mut out, from.as_bytes());
+            led_set(&mut out, keepers.iter());
+        }
+        What::Ended { .. } => {}
         What::CastOut { id, key } => {
             led(&mut out, id.as_bytes());
             led(&mut out, key.as_bytes());
@@ -235,12 +255,26 @@ impl<'a> Signer<'a> {
         })
     }
 
-    /// `what`, said by this machine at number `n` and time `at`.
+    /// The public key it signs under, b64url.
+    pub fn key(&self) -> String {
+        b64url(&crate::joining::public_of(&self.private))
+    }
+
+    /// `what`, said by this machine at number `n` and time `at`, building
+    /// on nothing: a session's first word, or a cast out.
     pub fn sign(&self, n: u64, at: u64, what: What) -> Option<Word> {
+        self.sign_after(n, at, "", what)
+    }
+
+    /// `what`, said at number `n` and time `at`, built on the word whose
+    /// signature is `after`.
+    pub fn sign_after(&self, n: u64, at: u64, after: &str, what: What) -> Option<Word> {
         let mut s = Word {
             n,
             by: self.me.to_string(),
+            under: self.key(),
             at,
+            after: after.to_string(),
             what,
             sig: String::new(),
         };
@@ -254,13 +288,39 @@ impl<'a> Signer<'a> {
     }
 }
 
-/// Whether `s` is signed by the brother whose public key (b64url) is
-/// `key`.
-pub fn verifies(c: &dyn Crypto, key: &str, s: &Word) -> bool {
-    let (Some(public), Some(sig)) = (unb64url(key), unb64url(&s.sig)) else {
+/// Whether `s` is signed under the key it names. The hearer must still
+/// check that key is the one it holds for the signer.
+pub fn verifies(c: &dyn Crypto, s: &Word) -> bool {
+    let (Some(public), Some(sig)) = (unb64url(&s.under), unb64url(&s.sig)) else {
         return false;
     };
     c.verify(&public, &signed_bytes(s), &sig)
+}
+
+/// Whether `key` (b64url) is a P-256 point, as every brother's is.
+pub fn is_point(key: &str) -> bool {
+    unb64url(key).is_some_and(|p| p.len() == 65 && p[0] == 4)
+}
+
+/// Whether word `s` is within bounds: no id, key or signature past
+/// [`LONGEST`], no more than [`MOST_KEEPERS`] keepers, and a cast out of
+/// a real key. So a word never swells a roster past what a link carries.
+pub fn word_fits(s: &Word) -> bool {
+    let short = |x: &str| x.len() <= LONGEST;
+    let keepers = |k: &[String]| k.len() <= MOST_KEEPERS && k.iter().all(|x| short(x));
+    let base = short(&s.by) && short(&s.under) && short(&s.after) && short(&s.sig);
+    let session = s.what.session().is_none_or(|(o, id)| short(o) && short(id));
+    let own = match &s.what {
+        What::Owns { keepers: k, .. } => keepers(k),
+        What::Hands { to, .. } => short(to),
+        What::Recalls { hand, .. } => short(hand),
+        What::Takes {
+            from, keepers: k, ..
+        } => short(from) && keepers(k),
+        What::Ended { .. } => true,
+        What::CastOut { id, key } => short(id) && is_point(key),
+    };
+    base && session && own
 }
 
 /// The bytes an entry's signature covers: all it says of its brother but
@@ -345,202 +405,506 @@ pub fn entry_fits(b: &Brother) -> bool {
             .all(|(id, k)| short(id) && short(&k.key) && short(&k.name))
 }
 
+/// Who is out, worked out from every cast out held at once.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Standing {
+    /// Keys cast out by a key that is in.
+    pub out: BTreeSet<String>,
+    /// Keys neither in nor out: two that cast each other out, with no
+    /// brother that is in deciding, and every key only they cast out.
+    pub contested: BTreeSet<String>,
+}
+
+impl Standing {
+    /// Whether `key` has lost control: out or contested.
+    pub fn bars(&self, key: &str) -> bool {
+        self.out.contains(key) || self.contested.contains(key)
+    }
+}
+
+/// Who is out from every cast out `casts` (words of other kinds are
+/// skipped), a function of the set alone, so the order words came in
+/// never matters. Each is an attack of its signer's key on the key it
+/// names, at most [`MOST_CAST`] counted per signer (the lowest keys).
+///
+/// - Two keys that attack each other are a contest. A key in contests
+///   with more keys than each of its rivals is in (a thief that cast out
+///   every brother, answered by two of them, loses); the others stay
+///   contested until a human decides.
+/// - A key in a contest counts against its rivals alone, so a thief
+///   answered by one brother casts out nobody else meanwhile.
+/// - Then the grounded labelling: a key all of whose attackers are out
+///   is in (one nobody attacks is in), a key attacked by a key that is in
+///   is out, until nothing changes. A key out leaves its contests, and
+///   all of it is worked out again until nothing more goes out.
+///
+/// What is neither in nor out is contested.
+pub fn standing<'a>(casts: impl IntoIterator<Item = &'a Word>) -> Standing {
+    let mut by: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    for w in casts {
+        if let What::CastOut { key, .. } = &w.what {
+            if *key != w.under && !w.under.is_empty() {
+                by.entry(&w.under).or_default().insert(key);
+            }
+        }
+    }
+    let mut edges: BTreeSet<(&str, &str)> = BTreeSet::new();
+    let mut keys: BTreeSet<&str> = BTreeSet::new();
+    for (s, targets) in &by {
+        keys.insert(s);
+        for t in targets.iter().take(MOST_CAST) {
+            keys.insert(t);
+            edges.insert((s, t));
+        }
+    }
+    let mut out: BTreeSet<&str> = BTreeSet::new();
+    loop {
+        // Contests among the keys not out, and the keys that lose theirs.
+        let rivals = |out: &BTreeSet<&str>| {
+            let mut r: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+            for (a, b) in &edges {
+                if !out.contains(a) && !out.contains(b) && edges.contains(&(*b, *a)) {
+                    r.entry(*a).or_default().insert(*b);
+                }
+            }
+            r
+        };
+        let mut r = rivals(&out);
+        loop {
+            let losers: Vec<&str> = r
+                .iter()
+                .filter(|(_, ps)| {
+                    ps.iter()
+                        .all(|p| r.get(p).map_or(0, BTreeSet::len) < ps.len())
+                })
+                .map(|(k, _)| *k)
+                .filter(|k| r[k].len() > 1)
+                .collect();
+            if losers.is_empty() {
+                break;
+            }
+            out.extend(losers);
+            r = rivals(&out);
+        }
+        let counts =
+            |a: &str, b: &str| !out.contains(a) && r.get(a).is_none_or(|ps| ps.contains(b));
+        let mut attackers: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+        for (a, b) in &edges {
+            if counts(a, b) {
+                attackers.entry(*b).or_default().insert(*a);
+            }
+        }
+        #[derive(Clone, Copy, PartialEq)]
+        enum L {
+            In,
+            Out,
+            Open,
+        }
+        let mut label: BTreeMap<&str, L> = keys
+            .iter()
+            .map(|k| (*k, if out.contains(k) { L::Out } else { L::Open }))
+            .collect();
+        loop {
+            let mut changed = false;
+            for k in &keys {
+                if label[k] != L::Open {
+                    continue;
+                }
+                let att = attackers.get(k);
+                if att.is_none_or(|a| a.iter().all(|x| label[x] == L::Out)) {
+                    label.insert(*k, L::In);
+                    changed = true;
+                } else if att.is_some_and(|a| a.iter().any(|x| label[x] == L::In)) {
+                    label.insert(*k, L::Out);
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        let now_out: BTreeSet<&str> = label
+            .iter()
+            .filter(|(_, l)| **l == L::Out)
+            .map(|(k, _)| *k)
+            .collect();
+        if now_out == out {
+            let pick = |l: L| -> BTreeSet<String> {
+                label
+                    .iter()
+                    .filter(|(_, v)| **v == l)
+                    .map(|(k, _)| k.to_string())
+                    .collect()
+            };
+            return Standing {
+                out: pick(L::Out),
+                contested: pick(L::Open),
+            };
+        }
+        out = now_out;
+    }
+}
+
 /// Whose a session is, worked out from the words held on it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Resolved {
     /// Its owner now, None where no chain starts at its creator's first
     /// word.
     pub owner: Option<Owner>,
+    /// The signature of the word that made the owner the owner: what each
+    /// word it signs on the session next names as `after`.
+    pub made: String,
+    /// The owner's keepers at its number, in order, and the highest `v`
+    /// it named them under.
+    pub keepers: Vec<String>,
+    pub v: u64,
+    /// The owner got it by a handoff it acknowledged, or by one it has not
+    /// acknowledged yet.
+    pub acked: bool,
+    pub unacked: bool,
     /// Its owner ended it for good.
     pub ended: Option<Ending>,
-    /// The words that can matter, the only ones worth keeping: the chain
-    /// and, at each move, its rivals and what settles them.
+    /// Every brother that owned it along the chain, the owner among them.
+    pub owners: BTreeSet<String>,
+    /// Those and every keeper any of them named along the chain: every
+    /// brother that may hold a copy of it.
+    pub holders: BTreeSet<String>,
+    /// The words that can matter, the only ones worth keeping.
     pub kept: Vec<Word>,
-    /// Brothers that ran the session at a move whose word did not stand
-    /// (a handoff they acknowledged, or a takeover), with that number: a
-    /// copy that ran there too, for its human to look at.
+    /// Brothers made owner by a word that lost, other than the winner,
+    /// with that number: a copy that ran there too, for its human to look
+    /// at.
     pub twice: Vec<(String, u64)>,
 }
 
-/// How a step ranks among its rivals at one number, lowest first.
+/// How a candidate ranks among its rivals at one number, lowest first.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-struct Step {
-    /// 0 a handoff its receiver acknowledged, 1 a takeover, 2 a handoff
+struct Rank {
+    /// 0 a handoff its receiver acknowledged, 1 a takeover, 3 a handoff
     /// nobody acknowledged.
     rank: u8,
     /// Of two keepers, the one named first.
     order: usize,
-    /// Of two alike, the brother lowest by id: deterministic, where only
-    /// a brother that handed a session twice, and two receivers that ran
-    /// it, could make two.
+    /// Who it makes owner.
     to: String,
 }
 
-/// Whose session `origin` created is, from `words`, every one of them on
-/// it and signed by the brother it names (checked before, a takeover's
-/// entry too). Depends on these words alone, so it is the same on every
-/// brother that holds the same words, whatever order they came in:
-///
-/// - The chain starts at the creator's own lowest `owns`; nobody else
-///   starts it.
-/// - Each step is exactly one number up from the owner before: its owner
-///   handing it on (unless it recalled that handoff), or a keeper that
-///   owner's own entry, carried in the takeover, names and does not let
-///   only watch, taking it over.
-/// - Of two steps at one number: a handoff its receiver acknowledged (its
-///   `owns` at that number) stands over a takeover, which stands over a
-///   handoff nobody acknowledged; of two keepers the one named first. So a
-///   brother that handed a session on cannot take it back, and a keeper
-///   that took over not knowing of a handoff the receiver ran never fences
-///   the receiver.
-/// - Its owner's `ended` at its number ends it, unless a handoff from that
-///   number was acknowledged: then the session runs on the receiver.
-pub fn resolve(origin: &str, words: &[&Word]) -> Resolved {
+/// One candidate step: its rank, its word, the word acknowledging it.
+type Step<'w> = (Rank, &'w Word, Option<&'w Word>);
+
+/// How the owner at one link of the chain came to own it.
+#[derive(Debug, Clone)]
+struct Tenure {
+    n: u64,
+    brother: String,
+    since: u64,
+    /// The word that made it owner.
+    made: String,
+    /// The takeover word that made it owner, when it was one, and whether
+    /// its key is out.
+    takes: Option<(String, bool)>,
+    /// It came by a handoff acknowledged under a key that is not out.
+    acked_in: bool,
+    acked: bool,
+    unacked: bool,
+}
+
+/// One walk along the chain with the takeovers in `skip` set aside.
+struct Walk {
+    chain: Vec<Tenure>,
+    keepers: Vec<String>,
+    v: u64,
+    ended: Option<Ending>,
+    holders: BTreeSet<String>,
+    kept: Vec<Word>,
+    twice: Vec<(String, u64)>,
+}
+
+/// Whose session `origin` created is, from `words` (every one of them on
+/// it, each checked to be signed by the brother it names, under a key the
+/// hearer holds for it), `bars` saying which keys are out. Depends on
+/// these alone. See docs/plan/brotherhood-ownership.md, "resolve".
+pub fn resolve(origin: &str, words: &[&Word], bars: &dyn Fn(&str) -> bool) -> Resolved {
     let mut by_n: BTreeMap<u64, Vec<&Word>> = BTreeMap::new();
     for w in words {
         by_n.entry(w.n).or_default().push(w);
     }
+    for v in by_n.values_mut() {
+        v.sort();
+        v.dedup();
+    }
     let genesis = words
         .iter()
         .filter(|w| matches!(w.what, What::Owns { .. }) && w.by == origin)
-        .filter(|w| (1..=LEAP).contains(&w.n))
+        .filter(|w| w.after.is_empty() && (1..=LEAP).contains(&w.n))
         .min_by_key(|w| (w.n, w.at, &w.sig));
     let Some(g) = genesis else {
         return Resolved::default();
     };
-    let mut cur = Owner {
+    // Takeovers under a key that is out count only when the chain moved
+    // on from their taker to a brother that ran it under a key that is
+    // not (see the spec, "Takeovers by a key that is out"). Each pass sets
+    // aside one that did not and walks again.
+    let mut skip: BTreeSet<String> = BTreeSet::new();
+    let mut kept: BTreeSet<Word> = BTreeSet::new();
+    let walk = loop {
+        let w = walk(origin, g, &by_n, bars, &skip);
+        kept.extend(w.kept.iter().cloned());
+        let unvouched = w.chain.iter().enumerate().find_map(|(i, l)| {
+            let (sig, out) = l.takes.as_ref()?;
+            let vouched = w.chain[i + 1..].iter().any(|later| later.acked_in);
+            (*out && !vouched).then(|| sig.clone())
+        });
+        match unvouched {
+            Some(sig) if !skip.contains(&sig) => {
+                skip.insert(sig);
+            }
+            _ => break w,
+        }
+    };
+    let Some(last) = walk.chain.last().cloned() else {
+        return Resolved::default();
+    };
+    let owners: BTreeSet<String> = walk.chain.iter().map(|l| l.brother.clone()).collect();
+    let ended = walk.ended.map(|mut e| {
+        e.was = owners
+            .iter()
+            .filter(|o| **o != last.brother)
+            .cloned()
+            .collect();
+        e
+    });
+    let mut holders = walk.holders;
+    holders.extend(owners.iter().cloned());
+    Resolved {
+        owner: Some(Owner {
+            n: last.n,
+            brother: last.brother.clone(),
+            since: last.since,
+        }),
+        made: last.made.clone(),
+        keepers: walk.keepers,
+        v: walk.v,
+        acked: last.acked,
+        unacked: last.unacked,
+        ended,
+        owners,
+        holders,
+        kept: kept.into_iter().collect(),
+        twice: walk.twice,
+    }
+}
+
+/// The chain from genesis `g`, the takeovers whose signatures are in
+/// `skip` set aside. Every word counts only after the very word that made
+/// its signer the owner it builds on (its `after`): one signed on a
+/// handoff later taken back, or on a step that lost, builds on nothing.
+fn walk(
+    origin: &str,
+    g: &Word,
+    by_n: &BTreeMap<u64, Vec<&Word>>,
+    bars: &dyn Fn(&str) -> bool,
+    skip: &BTreeSet<String>,
+) -> Walk {
+    let none = Vec::new();
+    let mut cur = Tenure {
         n: g.n,
         brother: origin.to_string(),
         since: g.at,
+        made: g.sig.clone(),
+        takes: None,
+        acked_in: false,
+        acked: false,
+        unacked: false,
     };
-    let mut kept = vec![(*g).clone()];
-    let mut twice = Vec::new();
-    let none = Vec::new();
-    for _ in 0..CHAIN {
+    let mut made_by: &Word = g;
+    let mut out = Walk {
+        chain: Vec::new(),
+        keepers: Vec::new(),
+        v: 0,
+        ended: None,
+        holders: BTreeSet::new(),
+        kept: vec![g.clone()],
+        twice: Vec::new(),
+    };
+    for i in 0..=CHAIN {
         let here = by_n.get(&cur.n).unwrap_or(&none);
+        let on = |w: &&Word| w.by == cur.brother && w.after == cur.made;
+        // The owner's keepers at its number: its newest word naming them,
+        // on this very tenure.
+        let named = here
+            .iter()
+            .copied()
+            .filter(|w| matches!(w.what, What::Owns { .. }) && on(w))
+            .chain(
+                Some(made_by).filter(|w| matches!(w.what, What::Takes { .. } | What::Owns { .. })),
+            )
+            .max_by_key(|w| {
+                let v = match &w.what {
+                    What::Owns { v, .. } => *v,
+                    _ => 0,
+                };
+                (v, w.at, w.sig.clone())
+            });
+        let (keepers, v) = match named.map(|w| &w.what) {
+            Some(What::Owns { keepers, v, .. }) => (keepers.clone(), *v),
+            Some(What::Takes { keepers, .. }) => (keepers.clone(), 0),
+            _ => (Vec::new(), 0),
+        };
+        if let Some(w) = named {
+            out.kept.push(w.clone());
+        }
+        out.holders.extend(keepers.iter().cloned());
+        out.chain.push(cur.clone());
+        out.keepers = keepers.clone();
+        out.v = v;
         let ended = here
             .iter()
             .copied()
-            .filter(|w| matches!(w.what, What::Ended { .. }) && w.by == cur.brother)
-            .min_by_key(|w| (w.at, &w.sig));
-        let Some(next) = cur.n.checked_add(1) else {
-            break;
+            .filter(|w| matches!(w.what, What::Ended { .. }) && on(w))
+            .min_by_key(|w| (w.at, w.sig.clone()));
+        let next = cur.n.checked_add(1);
+        let at = next.and_then(|n| by_n.get(&n)).unwrap_or(&none);
+        let mut steps: Vec<Step> = if i < CHAIN && next.is_some() {
+            at.iter()
+                .filter(|w| w.after == cur.made)
+                .filter_map(|w| step(w, &cur.brother, &keepers, at, skip))
+                .collect()
+        } else {
+            Vec::new()
         };
-        let at = by_n.get(&next).unwrap_or(&none);
-        let mut steps: Vec<(Step, &Word, Option<&Word>)> = at
-            .iter()
-            .filter_map(|w| step(w, &cur.brother, at))
-            .collect();
         steps.sort_by(|a, b| (&a.0, a.1).cmp(&(&b.0, b.1)));
-        // What can matter at this move: the best few of each rank, what
-        // acknowledges or recalls them, and nothing else.
-        let mut per_rank = [0usize; 3];
+        let mut per_rank: BTreeMap<u8, usize> = BTreeMap::new();
         steps.retain(|s| {
-            let r = s.0.rank as usize;
-            per_rank[r] += 1;
-            per_rank[r] <= RIVALS
+            let c = per_rank.entry(s.0.rank).or_default();
+            *c += 1;
+            *c <= RIVALS
         });
-        let recalls: Vec<&Word> = at
+        let mut recalls: Vec<&Word> = at
             .iter()
             .copied()
             .filter(|w| matches!(w.what, What::Recalls { .. }) && w.by == cur.brother)
             .collect();
-        let acked = steps.first().is_some_and(|b| b.0.rank == 0);
+        recalls.sort();
         // A recall is kept whether or not its handoff is: the handoff may
-        // come later, from a brother that has it.
-        kept.extend(recalls.iter().take(RIVALS * 3).map(|w| (*w).clone()));
-        if let Some(e) = ended.filter(|_| !acked) {
-            let was = match &e.what {
-                What::Ended { was, .. } => was.clone(),
-                _ => BTreeSet::new(),
+        // come later, in a bundle.
+        out.kept
+            .extend(recalls.iter().take(RECALLS).map(|w| (*w).clone()));
+        // A brother that ran a handoff taken back (its bundle landed late)
+        // holds a copy that does not stand: told, and waited for.
+        let mut late: Vec<String> = Vec::new();
+        for r in recalls.iter().take(RECALLS) {
+            let What::Recalls { hand, .. } = &r.what else {
+                continue;
             };
-            kept.push(e.clone());
-            return Resolved {
-                owner: Some(cur),
-                ended: Some(Ending {
-                    n: e.n,
-                    at: e.at,
-                    was,
-                }),
-                kept,
-                twice,
-            };
-        }
-        let Some((top, best, _)) = steps.first().cloned() else {
-            break;
-        };
-        for (s, w, ack) in &steps {
-            kept.push((*w).clone());
-            kept.extend(ack.cloned());
-            // The same handoff signed twice (two words, one receiver) is
-            // no copy run elsewhere: only a brother other than the winner
-            // ran one.
-            let other = s.to != top.to;
-            if other && s.rank < 2 && !twice.contains(&(s.to.clone(), next)) {
-                twice.push((s.to.clone(), next));
+            let ran = at.iter().copied().find(|w| {
+                w.after == *hand && matches!(w.what, What::Owns { .. }) && w.by != cur.brother
+            });
+            let handed = at.iter().copied().find(|w| w.sig == *hand);
+            if let (Some(ran), Some(handed)) = (ran, handed) {
+                out.kept.push(handed.clone());
+                out.kept.push(ran.clone());
+                out.holders.insert(ran.by.clone());
+                late.push(ran.by.clone());
             }
         }
-        cur = Owner {
-            n: next,
+        let winner = steps.first().map(|s| s.0.to.clone());
+        for b in late.drain(..) {
+            let pair = (b, cur.n + 1);
+            if winner.as_ref() != Some(&pair.0) && !out.twice.contains(&pair) {
+                out.twice.push(pair);
+            }
+        }
+        let acked = steps.first().is_some_and(|b| b.0.rank == 0);
+        if let Some(e) = ended.filter(|_| !acked) {
+            out.kept.push(e.clone());
+            out.ended = Some(Ending {
+                n: e.n,
+                at: e.at,
+                was: BTreeSet::new(),
+            });
+            return out;
+        }
+        let Some((top, best, ack)) = steps.first().cloned() else {
+            return out;
+        };
+        for (s, w, a) in &steps {
+            out.kept.push((*w).clone());
+            out.kept.extend(a.cloned());
+            let other = s.to != top.to;
+            let pair = (s.to.clone(), cur.n + 1);
+            if other && s.rank < 2 && !out.twice.contains(&pair) {
+                out.twice.push(pair);
+            }
+        }
+        let takes =
+            matches!(best.what, What::Takes { .. }).then(|| (best.sig.clone(), bars(&best.under)));
+        cur = Tenure {
+            n: cur.n + 1,
             brother: top.to.clone(),
             since: best.at,
+            made: best.sig.clone(),
+            takes,
+            acked_in: ack.is_some_and(|a| !bars(&a.under)),
+            acked: ack.is_some(),
+            unacked: ack.is_none() && matches!(best.what, What::Hands { .. }),
         };
+        made_by = best;
     }
-    kept.sort();
-    kept.dedup();
-    Resolved {
-        owner: Some(cur),
-        ended: None,
-        kept,
-        twice,
-    }
+    out
 }
 
-/// Word `w` as a step from owner `from` (the owner before, whose number is
-/// one below `w`'s) with the acknowledgement that settles it, among `at`,
-/// every word at its number. None where it is no such step.
+/// Word `w`, built on the owner `from`'s tenure (whose number is one
+/// below `w`'s, naming `keepers`), as a candidate step, with the word
+/// acknowledging it, among `at`, every word at its number. None where it
+/// is no such step.
 fn step<'w>(
     w: &'w Word,
     from: &str,
+    keepers: &[String],
     at: &[&'w Word],
-) -> Option<(Step, &'w Word, Option<&'w Word>)> {
+    skip: &BTreeSet<String>,
+) -> Option<Step<'w>> {
     match &w.what {
         What::Hands {
             origin,
             session,
             to,
         } if w.by == from && !to.is_empty() && to != from => {
-            let recalled = at
-                .iter()
-                .any(|r| r.by == w.by && matches!(&r.what, What::Recalls { to: t, .. } if t == to));
+            let recalled = at.iter().any(|r| {
+                r.by == w.by && matches!(&r.what, What::Recalls { hand, .. } if *hand == w.sig)
+            });
             if recalled {
                 return None;
             }
+            // Its receiver ran that very handoff.
             let ack = at
                 .iter()
-                .filter(|a| a.by == *to)
-                .filter(|a| matches!(&a.what, What::Owns { origin: o, session: s } if o == origin && s == session))
-                .min_by_key(|a| (a.at, &a.sig))
+                .filter(|a| a.by == *to && a.after == w.sig)
+                .filter(|a| {
+                    matches!(&a.what, What::Owns { origin: o, session: s, .. } if o == origin && s == session)
+                })
+                .min_by_key(|a| (a.at, a.sig.clone()))
                 .copied();
-            let rank = if ack.is_some() { 0 } else { 2 };
-            let s = Step {
+            let rank = if ack.is_some() { 0 } else { 3 };
+            let r = Rank {
                 rank,
                 order: 0,
                 to: to.clone(),
             };
-            Some((s, w, ack))
+            Some((r, w, ack))
         }
-        What::Takes { from: f, entry, .. } if f == from && w.by != from && entry.id == from => {
-            if entry.view_only.contains(&w.by) {
-                return None;
-            }
-            let order = entry.keepers.iter().position(|k| *k == w.by)?;
-            let s = Step {
+        What::Takes { from: f, .. } if f == from && w.by != from && !skip.contains(&w.sig) => {
+            // One under a key out is a candidate too, so a brother that
+            // hears the cast out later still agrees: `resolve` sets it
+            // aside unless the chain moved on from it.
+            let order = keepers.iter().position(|k| *k == w.by)?;
+            let r = Rank {
                 rank: 1,
                 order,
                 to: w.by.clone(),
             };
-            Some((s, w, None))
+            Some((r, w, None))
         }
         _ => None,
     }
@@ -556,84 +920,128 @@ mod tests {
         Word {
             n,
             by: by.into(),
+            under: format!("k{by}"),
             at,
+            after: String::new(),
             what,
-            sig: String::new(),
+            sig: format!("{by}-{n}-{at}"),
         }
     }
 
-    fn owns(by: &str, n: u64) -> Word {
-        let what = What::Owns {
+    fn owns_what(keepers: &[&str], v: u64) -> What {
+        What::Owns {
             origin: "lap".into(),
             session: "s".into(),
-        };
-        word(by, n, 7, what)
+            keepers: keepers.iter().map(|k| k.to_string()).collect(),
+            v,
+        }
     }
 
-    fn hands(by: &str, to: &str, n: u64, at: u64) -> Word {
+    /// Lap starts s at `n`, naming Desk then Vps its keepers.
+    fn start(n: u64) -> Word {
+        let mut w = word("lap", n, 7, owns_what(&["desk", "vps"], 0));
+        w.sig = format!("lap-starts-{n}");
+        w
+    }
+
+    /// Lap's s, started at 1.
+    fn g() -> Word {
+        start(1)
+    }
+
+    /// `by` names `keepers` at `n` the `v`th time, on the tenure `after`
+    /// made.
+    fn rekeep(by: &str, n: u64, keepers: &[&str], v: u64, after: &Word) -> Word {
+        let mut w = word(by, n, 7 + v, owns_what(keepers, v));
+        w.after = after.sig.clone();
+        w.sig = format!("{by}-names-{n}-{v}-{}", keepers.join("+"));
+        w
+    }
+
+    /// `by` runs s, handed it by `hand`, naming Desk then Vps.
+    fn ack(by: &str, hand: &Word) -> Word {
+        let mut w = word(by, hand.n, 8, owns_what(&["desk", "vps"], 0));
+        w.after = hand.sig.clone();
+        w.sig = format!("{by}-runs-{}", hand.sig);
+        w
+    }
+
+    fn hands(by: &str, to: &str, n: u64, at: u64, after: &Word) -> Word {
         let what = What::Hands {
             origin: "lap".into(),
             session: "s".into(),
             to: to.into(),
         };
-        word(by, n, at, what)
+        let mut w = word(by, n, at, what);
+        w.after = after.sig.clone();
+        w.sig = format!("{by}-hands-{to}-{n}-{at}-on-{}", after.sig);
+        w
     }
 
-    fn recalls(by: &str, to: &str, n: u64) -> Word {
+    fn recalls(by: &str, hand: &Word) -> Word {
         let what = What::Recalls {
             origin: "lap".into(),
             session: "s".into(),
-            to: to.into(),
+            hand: hand.sig.clone(),
         };
-        word(by, n, 50, what)
+        let mut w = word(by, hand.n, 50, what);
+        w.after = hand.after.clone();
+        w.sig = format!("{by}-recalls-{}", hand.sig);
+        w
     }
 
-    /// Lap's entry as it stood, naming desk then vps, letting `watchers`
-    /// only watch.
-    fn lap_entry(keepers: &[&str], watchers: &[&str]) -> Box<Brother> {
-        let mut b = Brother::new("lap", "lap", "kl", Link::Relay);
-        b.keepers = keepers.iter().map(|k| k.to_string()).collect();
-        b.view_only = watchers.iter().map(|k| k.to_string()).collect();
-        Box::new(b)
-    }
-
-    fn takes(by: &str, from: &str, n: u64) -> Word {
-        takes_by(by, from, n, lap_entry(&["desk", "vps"], &[]))
-    }
-
-    fn takes_by(by: &str, from: &str, n: u64, entry: Box<Brother>) -> Word {
+    /// `by` takes s over from `from` at `n`, naming Lap its keeper.
+    fn takes(by: &str, from: &str, n: u64, after: &Word) -> Word {
         let what = What::Takes {
             origin: "lap".into(),
             session: "s".into(),
             from: from.into(),
-            entry,
+            keepers: vec!["lap".into()],
         };
-        word(by, n, 9, what)
+        let mut w = word(by, n, 9, what);
+        w.after = after.sig.clone();
+        w.sig = format!("{by}-takes-{from}-{n}-on-{}", after.sig);
+        w
     }
 
-    fn ended(by: &str, n: u64) -> Word {
+    fn ended(by: &str, n: u64, after: &Word) -> Word {
         let what = What::Ended {
             origin: "lap".into(),
             session: "s".into(),
-            was: BTreeSet::new(),
         };
-        word(by, n, 9, what)
+        let mut w = word(by, n, 9, what);
+        w.after = after.sig.clone();
+        w.sig = format!("{by}-ends-{n}-on-{}", after.sig);
+        w
     }
 
-    /// Who owns s under which number, from `words` in every order.
-    fn whose(words: &[Word]) -> Option<(String, u64, bool)> {
+    fn none(_: &str) -> bool {
+        false
+    }
+
+    /// Who owns s under which number and whether it ended, from `words`
+    /// in several orders, with `bars` the keys out.
+    fn whose_with(words: &[Word], bars: &dyn Fn(&str) -> bool) -> Option<(String, u64, bool)> {
         let mut answers = BTreeSet::new();
         let mut order: Vec<&Word> = words.iter().collect();
         for _ in 0..words.len().max(1) {
-            let r = resolve("lap", &order);
+            let r = resolve("lap", &order, bars);
             answers.insert(r.owner.map(|o| (o.brother, o.n, r.ended.is_some())));
             order.rotate_left(1);
         }
         order.reverse();
-        let r = resolve("lap", &order);
+        let r = resolve("lap", &order, bars);
         answers.insert(r.owner.map(|o| (o.brother, o.n, r.ended.is_some())));
         assert_eq!(answers.len(), 1, "order changed the answer: {answers:?}");
         answers.into_iter().next().unwrap()
+    }
+
+    fn whose(words: &[Word]) -> Option<(String, u64, bool)> {
+        whose_with(words, &none)
+    }
+
+    fn at(b: &str, n: u64) -> Option<(String, u64, bool)> {
+        Some((b.to_string(), n, false))
     }
 
     #[test]
@@ -645,10 +1053,17 @@ mod tests {
             private: a,
             crypto: &c,
         };
-        let s = signer.sign(3, 9, hands("lap", "desk", 3, 9).what).unwrap();
-        let key = b64url(&public_of(&a));
-        assert!(verifies(&c, &key, &s));
-        assert!(!verifies(&c, &b64url(&public_of(&b)), &s));
+        let s = signer
+            .sign_after(3, 9, "parent", hands("lap", "desk", 3, 9, &g()).what)
+            .unwrap();
+        assert_eq!(s.under, b64url(&public_of(&a)));
+        assert!(verifies(&c, &s));
+        // Named under another key, it does not verify.
+        let other = Word {
+            under: b64url(&public_of(&b)),
+            ..s.clone()
+        };
+        assert!(!verifies(&c, &other));
         let other_origin = What::Hands {
             origin: "vps".into(),
             session: "s".into(),
@@ -665,33 +1080,52 @@ mod tests {
                 ..s.clone()
             },
             Word {
-                what: hands("lap", "vps", 3, 9).what,
+                after: "another".into(),
+                ..s.clone()
+            },
+            Word {
+                what: hands("lap", "vps", 3, 9, &g()).what,
                 ..s.clone()
             },
             Word {
                 what: other_origin,
                 ..s.clone()
             },
-            Word {
-                what: recalls("lap", "desk", 3).what,
-                ..s.clone()
-            },
         ] {
-            assert!(!verifies(&c, &key, &bent), "{bent:?}");
+            assert!(!verifies(&c, &bent), "{bent:?}");
         }
-        // A takeover's signature covers the entry it relied on.
-        let t = signer.sign(3, 9, takes("lap", "x", 3).what).unwrap();
-        assert!(verifies(&c, &key, &t));
-        let mut bent = t.clone();
-        if let What::Takes { entry, .. } = &mut bent.what {
-            entry.keepers.push("nas".into());
+        // Keepers and their version are signed too.
+        let o = signer.sign(3, 9, start(3).what).unwrap();
+        assert!(verifies(&c, &o));
+        let mut bent = o.clone();
+        if let What::Owns { keepers, .. } = &mut bent.what {
+            keepers.push("nas".into());
         }
-        assert!(!verifies(&c, &key, &bent));
+        assert!(!verifies(&c, &bent));
+        let mut bent = o.clone();
+        if let What::Owns { v, .. } = &mut bent.what {
+            *v = 2;
+        }
+        assert!(!verifies(&c, &bent));
+        for w in [&s, &o] {
+            let text = serde_json::to_string(w).unwrap();
+            assert_eq!(serde_json::from_str::<Word>(&text).unwrap(), *w, "{text}");
+        }
         let text = serde_json::to_string(&s).unwrap();
         assert!(text.contains(r#""kind":"hands""#), "{text}");
-        assert_eq!(serde_json::from_str::<Word>(&text).unwrap(), s);
-        let text = serde_json::to_string(&t).unwrap();
-        assert_eq!(serde_json::from_str::<Word>(&text).unwrap(), t);
+        // A cast out's own key and the signer's do not collide.
+        let cast = signer
+            .sign(
+                0,
+                9,
+                What::CastOut {
+                    id: "vps".into(),
+                    key: b64url(&public_of(&b)),
+                },
+            )
+            .unwrap();
+        let text = serde_json::to_string(&cast).unwrap();
+        assert_eq!(serde_json::from_str::<Word>(&text).unwrap(), cast, "{text}");
     }
 
     #[test]
@@ -701,32 +1135,63 @@ mod tests {
             #[serde(deserialize_with = "lenient")]
             said: Vec<Word>,
         }
-        let good = serde_json::to_value(owns("lap", 1)).unwrap();
+        let good = serde_json::to_value(g()).unwrap();
         let text = serde_json::json!({"said": [good, {"kind": "a_kind_from_later", "n": 1}, 7]});
         let read: Said = serde_json::from_value(text).unwrap();
-        assert_eq!(read.said, vec![owns("lap", 1)]);
+        assert_eq!(read.said, vec![g()]);
     }
 
     #[test]
     fn no_two_kinds_sign_the_same_bytes() {
-        let a = signed_bytes(&owns("x", 1));
-        let b = signed_bytes(&hands("x", "", 1, 7));
-        let r = signed_bytes(&recalls("x", "", 1));
-        let c = signed_bytes(&word(
-            "x",
-            1,
-            7,
-            What::CastOut {
-                id: "lap".into(),
-                key: "s".into(),
-            },
-        ));
-        let all = [a, b, r, c];
+        let h = hands("x", "", 1, 7, &g());
+        let all = [
+            signed_bytes(&word("x", 1, 7, owns_what(&[], 0))),
+            signed_bytes(&h),
+            signed_bytes(&recalls("x", &h)),
+            signed_bytes(&ended("x", 1, &g())),
+            signed_bytes(&word(
+                "x",
+                1,
+                7,
+                What::CastOut {
+                    id: "lap".into(),
+                    key: "s".into(),
+                },
+            )),
+        ];
         for (i, x) in all.iter().enumerate() {
             for y in &all[i + 1..] {
                 assert_ne!(x, y);
             }
         }
+    }
+
+    #[test]
+    fn a_word_past_its_bounds_does_not_fit() {
+        assert!(word_fits(&g()));
+        let many: Vec<String> = (0..=MOST_KEEPERS).map(|i| i.to_string()).collect();
+        let refs: Vec<&str> = many.iter().map(String::as_str).collect();
+        assert!(!word_fits(&word("lap", 1, 1, owns_what(&refs, 0))));
+        let mut long = hands("lap", "desk", 2, 1, &g());
+        long.what = What::Hands {
+            origin: "lap".into(),
+            session: "s".into(),
+            to: "x".repeat(LONGEST + 1),
+        };
+        assert!(!word_fits(&long));
+        let mut far = g();
+        far.after = "x".repeat(LONGEST + 1);
+        assert!(!word_fits(&far));
+        let not_a_key = word(
+            "lap",
+            0,
+            1,
+            What::CastOut {
+                id: "vps".into(),
+                key: "nope".into(),
+            },
+        );
+        assert!(!word_fits(&not_a_key));
     }
 
     #[test]
@@ -759,9 +1224,6 @@ mod tests {
         let mut k = b.clone();
         k.keepers = vec!["vps".into()];
         assert!(!entry_verifies(&c, &k));
-        let mut v = b.clone();
-        v.held.get_mut("vps").unwrap().vouched = false;
-        assert!(!entry_verifies(&c, &v));
         let mut n = b.clone();
         n.n += 1;
         assert!(!entry_verifies(&c, &n));
@@ -777,179 +1239,425 @@ mod tests {
         let mut many = b.clone();
         many.keepers = (0..=MOST_KEEPERS).map(|i| i.to_string()).collect();
         assert!(!entry_fits(&many));
-        let mut held = b.clone();
-        for i in 0..=MOST_LISTED {
-            held.held.insert(
-                i.to_string(),
-                Kin {
-                    key: "k".into(),
-                    name: "n".into(),
-                    vouched: false,
-                },
-            );
-        }
-        assert!(!entry_fits(&held));
     }
 
     #[test]
     fn only_the_creator_starts_a_chain() {
-        assert_eq!(whose(&[owns("lap", 1)]), Some(("lap".into(), 1, false)));
-        assert_eq!(whose(&[owns("desk", 1)]), None);
-        assert_eq!(whose(&[owns("lap", LEAP + 1)]), None);
-        assert_eq!(whose(&[owns("lap", 0)]), None);
-        let w = [owns("lap", 1), owns("lap", 5)];
-        assert_eq!(whose(&w), Some(("lap".into(), 1, false)));
+        assert_eq!(whose(&[g()]), at("lap", 1));
+        let mut desk = word("desk", 1, 1, owns_what(&[], 0));
+        desk.sig = "desk-starts".into();
+        assert_eq!(whose(&[desk]), None);
+        assert_eq!(whose(&[start(LEAP + 1)]), None);
+        assert_eq!(whose(&[start(0)]), None);
+        assert_eq!(whose(&[g(), start(5)]), at("lap", 1));
+        // A first word must build on nothing.
+        let mut built = g();
+        built.after = "x".into();
+        assert_eq!(whose(&[built]), None);
     }
 
     #[test]
     fn a_chain_goes_one_higher_each_step_from_the_owner_before() {
-        let w = [owns("lap", 1), hands("lap", "desk", 2, 8), owns("desk", 2)];
-        assert_eq!(whose(&w), Some(("desk".into(), 2, false)));
-        let w = [owns("lap", 1), hands("lap", "desk", 3, 8)];
-        assert_eq!(whose(&w), Some(("lap".into(), 1, false)));
-        let w = [owns("lap", 1), hands("vps", "desk", 2, 8)];
-        assert_eq!(whose(&w), Some(("lap".into(), 1, false)));
-        let w = [owns("lap", 1), hands("lap", "lap", 2, 8)];
-        assert_eq!(whose(&w), Some(("lap".into(), 1, false)));
+        let h = hands("lap", "desk", 2, 8, &g());
+        assert_eq!(whose(&[g(), h.clone(), ack("desk", &h)]), at("desk", 2));
+        assert_eq!(
+            whose(&[g(), hands("lap", "desk", 3, 8, &g())]),
+            at("lap", 1)
+        );
+        assert_eq!(
+            whose(&[g(), hands("vps", "desk", 2, 8, &g())]),
+            at("lap", 1)
+        );
+        assert_eq!(whose(&[g(), hands("lap", "lap", 2, 8, &g())]), at("lap", 1));
     }
 
     #[test]
-    fn a_takeover_is_judged_by_the_entry_it_carries_alone() {
-        let w = [owns("lap", 1), takes("vps", "lap", 2)];
-        assert_eq!(whose(&w), Some(("vps".into(), 2, false)));
-        let w = [owns("lap", 1), takes("nas", "lap", 2)];
-        assert_eq!(whose(&w), Some(("lap".into(), 1, false)));
-        let w = [owns("lap", 1), takes("desk", "vps", 2)];
-        assert_eq!(whose(&w), Some(("lap".into(), 1, false)));
-        // One it lets only watch takes nothing.
-        let watched = takes_by("desk", "lap", 2, lap_entry(&["desk"], &["desk"]));
+    fn a_word_counts_only_after_the_word_it_names() {
+        // Built on a word that is not the one that made its signer the
+        // owner, it builds on nothing.
+        let other = start(9);
+        let h = hands("lap", "desk", 2, 8, &other);
+        assert_eq!(whose(&[g(), h.clone(), ack("desk", &h)]), at("lap", 1));
+        // An acknowledgement of another handoff acknowledges nothing here.
+        let h = hands("lap", "desk", 2, 8, &g());
+        let elsewhere = hands("lap", "desk", 2, 9, &g());
+        let r = {
+            let w = [g(), h.clone(), ack("desk", &elsewhere)];
+            let refs: Vec<&Word> = w.iter().collect();
+            resolve("lap", &refs, &none)
+        };
+        assert!(r.unacked);
+        assert_eq!(r.made, h.sig);
+    }
+
+    #[test]
+    fn a_takeover_counts_by_the_owners_newest_keeper_word() {
+        assert_eq!(whose(&[g(), takes("vps", "lap", 2, &g())]), at("vps", 2));
+        assert_eq!(whose(&[g(), takes("nas", "lap", 2, &g())]), at("lap", 1));
+        assert_eq!(whose(&[g(), takes("desk", "vps", 2, &g())]), at("lap", 1));
+        // Review four, finding 2: Lap dropped Vps from its keepers at its
+        // own number. Vps's takeover counts no more, whenever it was signed.
+        let w = [
+            g(),
+            rekeep("lap", 1, &["desk"], 1, &g()),
+            takes("vps", "lap", 2, &g()),
+        ];
+        assert_eq!(whose(&w), at("lap", 1));
+        // Switched to view only it is no keeper either: the same word.
+        // Named again later, it may.
+        let w = [
+            g(),
+            rekeep("lap", 1, &["desk"], 1, &g()),
+            rekeep("lap", 1, &["vps"], 2, &g()),
+            takes("vps", "lap", 2, &g()),
+        ];
+        assert_eq!(whose(&w), at("vps", 2));
+        // The taker names its own keepers, which the next takeover needs.
+        let t = takes("vps", "lap", 2, &g());
         assert_eq!(
-            whose(&[owns("lap", 1), watched]),
-            Some(("lap".into(), 1, false))
+            whose(&[g(), t.clone(), takes("lap", "vps", 3, &t)]),
+            at("lap", 3)
         );
-        // An entry that is another brother's is no entry of the owner's.
-        let mut wrong = lap_entry(&["desk"], &[]);
-        wrong.id = "vps".into();
-        let w = [owns("lap", 1), takes_by("desk", "lap", 2, wrong)];
-        assert_eq!(whose(&w), Some(("lap".into(), 1, false)));
+        assert_eq!(
+            whose(&[g(), t.clone(), takes("desk", "vps", 3, &t)]),
+            at("vps", 2)
+        );
     }
 
     #[test]
     fn a_handoff_and_a_takeover_that_raced_settle_alike_everywhere() {
+        let h = hands("lap", "birch", 2, 8, &g());
         let w = [
-            owns("lap", 1),
-            hands("lap", "birch", 2, 8),
-            owns("birch", 2),
-            takes("desk", "lap", 2),
+            g(),
+            h.clone(),
+            ack("birch", &h),
+            takes("desk", "lap", 2, &g()),
         ];
-        assert_eq!(whose(&w), Some(("birch".into(), 2, false)));
+        assert_eq!(whose(&w), at("birch", 2));
         let refs: Vec<&Word> = w.iter().collect();
         // Desk ran a copy that lost: told.
-        assert_eq!(resolve("lap", &refs).twice, vec![("desk".to_string(), 2)]);
-        // One handoff signed twice, to the brother that ran it: nobody ran
-        // a copy elsewhere (seen live, a node warned Birch ran its own
-        // session twice).
-        let w = [
-            owns("lap", 1),
-            hands("lap", "birch", 2, 8),
-            hands("lap", "birch", 2, 9),
-            owns("birch", 2),
-        ];
+        assert_eq!(
+            resolve("lap", &refs, &none).twice,
+            vec![("desk".to_string(), 2)]
+        );
+        // One handoff signed twice, to the brother that ran it: no copy ran
+        // elsewhere.
+        let h2 = hands("lap", "birch", 2, 9, &g());
+        let w = [g(), h.clone(), h2, ack("birch", &h)];
         let refs: Vec<&Word> = w.iter().collect();
-        let r = resolve("lap", &refs);
+        let r = resolve("lap", &refs, &none);
         assert_eq!(r.owner.map(|o| o.brother), Some("birch".to_string()));
         assert!(r.twice.is_empty());
+        assert!(r.acked);
+        let w = [g(), h.clone(), takes("desk", "lap", 2, &g())];
+        assert_eq!(whose(&w), at("desk", 2));
         let w = [
-            owns("lap", 1),
-            hands("lap", "birch", 2, 8),
-            takes("desk", "lap", 2),
+            g(),
+            takes("vps", "lap", 2, &g()),
+            takes("desk", "lap", 2, &g()),
         ];
-        assert_eq!(whose(&w), Some(("desk".into(), 2, false)));
-        let w = [
-            owns("lap", 1),
-            takes("vps", "lap", 2),
-            takes("desk", "lap", 2),
-        ];
-        assert_eq!(whose(&w), Some(("desk".into(), 2, false)));
+        assert_eq!(whose(&w), at("desk", 2));
     }
 
     #[test]
     fn a_brother_that_handed_a_session_on_cannot_take_it_back() {
-        let base = [
-            owns("lap", 1),
-            hands("lap", "birch", 2, 8),
-            owns("birch", 2),
-        ];
+        let h = hands("lap", "birch", 2, 8, &g());
+        let base = [g(), h.clone(), ack("birch", &h)];
         let mut w = base.to_vec();
-        w.push(owns("lap", 2));
-        w.push(hands("lap", "vps", 2, 9_999));
-        assert_eq!(whose(&w), Some(("birch".into(), 2, false)));
+        w.push(rekeep("lap", 2, &[], 1, &g()));
+        w.push(hands("lap", "vps", 2, 9_999, &g()));
+        assert_eq!(whose(&w), at("birch", 2));
         let mut w = base.to_vec();
-        w.push(ended("lap", 1));
-        assert_eq!(whose(&w), Some(("birch".into(), 2, false)));
+        w.push(ended("lap", 1, &g()));
+        assert_eq!(whose(&w), at("birch", 2));
         let w = [
-            owns("lap", 1),
-            ended("lap", 1),
-            hands("lap", "birch", 2, 8),
-            takes("desk", "lap", 2),
+            g(),
+            ended("lap", 1, &g()),
+            h.clone(),
+            takes("desk", "lap", 2, &g()),
         ];
         assert_eq!(whose(&w), Some(("lap".into(), 1, true)));
     }
 
     #[test]
-    fn a_recalled_handoff_counts_no_more_even_where_it_was_run() {
-        // Review finding 6: Lap's handoff to Ash did not land in time, so
-        // Lap recalled it and handed s to Birch. Ash ran it late anyway.
+    fn a_recall_takes_back_that_very_handoff_and_no_other() {
+        // Review three, finding 6: Lap's handoff to Ash did not land in
+        // time, so Lap recalled it and handed s to Birch. Ash ran it late
+        // anyway.
+        let first = hands("lap", "ash", 2, 8, &g());
+        let to_birch = hands("lap", "birch", 2, 60, &g());
         let w = [
-            owns("lap", 1),
-            hands("lap", "ash", 2, 8),
-            recalls("lap", "ash", 2),
-            hands("lap", "birch", 2, 60),
-            owns("birch", 2),
-            owns("ash", 2),
+            g(),
+            first.clone(),
+            recalls("lap", &first),
+            to_birch.clone(),
+            ack("birch", &to_birch),
+            ack("ash", &first),
         ];
-        assert_eq!(whose(&w), Some(("birch".into(), 2, false)));
+        assert_eq!(whose(&w), at("birch", 2));
+        // Review four, finding 3: the next try to the very same brother is
+        // a new word, and counts.
+        let again = hands("lap", "ash", 2, 61, &g());
+        let w = [
+            g(),
+            first.clone(),
+            recalls("lap", &first),
+            again.clone(),
+            ack("ash", &again),
+        ];
+        assert_eq!(whose(&w), at("ash", 2));
+        // Ash's acknowledgement of the first does not acknowledge the try:
+        // the try is Ash's only once Ash ran it.
+        let w = [
+            g(),
+            first.clone(),
+            recalls("lap", &first),
+            again.clone(),
+            ack("ash", &first),
+        ];
+        let refs: Vec<&Word> = w.iter().collect();
+        assert!(resolve("lap", &refs, &none).unacked);
         // Only its owner recalls a handoff.
         let w = [
-            owns("lap", 1),
-            hands("lap", "ash", 2, 8),
-            recalls("vps", "ash", 2),
-            owns("ash", 2),
+            g(),
+            first.clone(),
+            recalls("vps", &first),
+            ack("ash", &first),
         ];
-        assert_eq!(whose(&w), Some(("ash".into(), 2, false)));
+        assert_eq!(whose(&w), at("ash", 2));
+    }
+
+    #[test]
+    fn nothing_built_on_a_handoff_taken_back_counts_when_it_is_tried_again() {
+        // Found by the simulation: Lap's handoff to Ash was taken back, but
+        // Ash had run it and handed s to Dogwood. Lap then tried Ash again,
+        // and Ash ran that. What Ash built on the first counts for nothing.
+        let first = hands("lap", "ash", 2, 8, &g());
+        let ash_ran = ack("ash", &first);
+        let on_first = hands("ash", "dogwood", 3, 20, &first);
+        let again = hands("lap", "ash", 2, 30, &g());
+        let w = [
+            g(),
+            first.clone(),
+            ash_ran,
+            on_first.clone(),
+            ack("dogwood", &on_first),
+            recalls("lap", &first),
+            again.clone(),
+            ack("ash", &again),
+            ended("ash", 2, &first),
+        ];
+        assert_eq!(whose(&w), at("ash", 2));
+    }
+
+    #[test]
+    fn a_brother_that_ran_a_handoff_taken_back_is_told_and_waited_for() {
+        let first = hands("lap", "ash", 2, 8, &g());
+        let w = [
+            g(),
+            first.clone(),
+            recalls("lap", &first),
+            ack("ash", &first),
+        ];
+        let refs: Vec<&Word> = w.iter().collect();
+        let r = resolve("lap", &refs, &none);
+        assert_eq!(r.owner.clone().unwrap().brother, "lap");
+        assert_eq!(r.twice, vec![("ash".to_string(), 2)]);
+        assert!(r.holders.contains("ash"));
+        assert!(r.kept.contains(&first));
+        // Tried again and run, Ash owns it: nothing to tell.
+        let again = hands("lap", "ash", 2, 9, &g());
+        let mut w = w.to_vec();
+        w.push(again.clone());
+        w.push(ack("ash", &again));
+        let refs: Vec<&Word> = w.iter().collect();
+        assert!(resolve("lap", &refs, &none).twice.is_empty());
+    }
+
+    #[test]
+    fn a_session_that_moved_as_often_as_allowed_can_still_end() {
+        // Review four, finding 7.
+        let mut w = vec![g()];
+        let mut owner = "lap";
+        let mut made = g();
+        for n in 2..=(CHAIN as u64 + 1) {
+            let to = if owner == "lap" { "desk" } else { "lap" };
+            let h = hands(owner, to, n, n, &made);
+            w.push(h.clone());
+            w.push(ack(to, &h));
+            owner = to;
+            made = h;
+        }
+        let refs: Vec<&Word> = w.iter().collect();
+        let r = resolve("lap", &refs, &none);
+        let last = r.owner.clone().unwrap();
+        assert_eq!(last.n, CHAIN as u64 + 1);
+        assert!(r.ended.is_none());
+        // One more move is not followed, an ending is.
+        let h = hands(&last.brother, "vps", last.n + 1, 1, &made);
+        w.push(h.clone());
+        w.push(ack("vps", &h));
+        w.push(ended(&last.brother, last.n, &made));
+        let refs: Vec<&Word> = w.iter().collect();
+        let r = resolve("lap", &refs, &none);
+        assert_eq!(r.owner.unwrap().n, last.n);
+        assert!(r.ended.is_some());
+    }
+
+    #[test]
+    fn a_takeover_under_a_key_out_stands_only_once_it_moved_on_to_a_brother_in() {
+        let out = |k: &str| k == "kvps";
+        // Vps, cast out, took s over from a live Lap: it does not stand.
+        assert_eq!(
+            whose_with(&[g(), takes("vps", "lap", 2, &g())], &out),
+            at("lap", 1)
+        );
+        // Taken over before it was cast out and handed to Birch, which ran
+        // it: it stands, and Birch keeps it.
+        let t = takes("vps", "lap", 2, &g());
+        let h = hands("vps", "birch", 3, 9, &t);
+        let w = [g(), t.clone(), h.clone(), ack("birch", &h)];
+        assert_eq!(whose_with(&w, &out), at("birch", 3));
+        // Handed only to a brother out too, it does not.
+        let both = |k: &str| k == "kvps" || k == "knas";
+        let h = hands("vps", "nas", 3, 9, &t);
+        let w = [g(), t.clone(), h.clone(), ack("nas", &h)];
+        assert_eq!(whose_with(&w, &both), at("lap", 1));
+        // Set aside, a rival takeover by a keeper in counts, though named
+        // after it.
+        let g2 = {
+            let mut w = word("lap", 1, 7, owns_what(&["vps", "desk"], 0));
+            w.sig = "lap-starts-vd".into();
+            w
+        };
+        let w = [
+            g2.clone(),
+            takes("vps", "lap", 2, &g2),
+            takes("desk", "lap", 2, &g2),
+        ];
+        assert_eq!(whose_with(&w, &out), at("desk", 2));
     }
 
     #[test]
     fn only_the_words_that_can_matter_are_kept() {
-        // Review finding 1: words nobody's chain reaches, however many and
-        // whoever signed them, are not kept, and decide nothing.
-        let mut w = vec![
-            owns("lap", 1),
-            hands("lap", "birch", 2, 8),
-            owns("birch", 2),
-        ];
-        w.push(owns("vps", 999_999));
+        let h = hands("lap", "birch", 2, 8, &g());
+        let mut w = vec![g(), h.clone(), ack("birch", &h)];
+        let mut vps = word("vps", 999_999, 1, owns_what(&[], 0));
+        vps.sig = "vps-starts".into();
+        w.push(vps.clone());
         for i in 0..50 {
-            w.push(hands("vps", "nas", 3 + i, 1));
-            w.push(owns("nas", 2));
+            let x = hands("vps", "nas", 3 + i, 1, &vps);
+            w.push(ack("nas", &x));
+            w.push(x);
         }
         for i in 0..10 {
-            w.push(hands("lap", &format!("x{i}"), 2, 1));
+            w.push(hands("lap", &format!("x{i}"), 2, i, &g()));
         }
+        // Lap renamed its keepers twice at 1: the newest is kept.
+        w.push(rekeep("lap", 1, &["desk"], 1, &g()));
+        w.push(rekeep("lap", 1, &["vps"], 2, &g()));
         let refs: Vec<&Word> = w.iter().collect();
-        let r = resolve("lap", &refs);
-        assert_eq!(
-            r.owner.unwrap(),
-            Owner {
-                n: 2,
-                brother: "birch".into(),
-                since: 8
-            }
-        );
-        assert!(r.kept.len() <= 6, "{:?}", r.kept);
-        assert!(r.kept.iter().all(|k| k.by != "vps"));
+        let r = resolve("lap", &refs, &none);
+        assert_eq!(r.owner.clone().unwrap().brother, "birch");
+        assert!(r.kept.len() <= 8, "{:?}", r.kept);
+        assert!(r.kept.iter().all(|k| k.by != "vps" && k.by != "nas"));
+        assert!(!r.kept.contains(&rekeep("lap", 1, &["desk"], 1, &g())));
         // Kept alone, they say the same.
         let again: Vec<&Word> = r.kept.iter().collect();
-        assert_eq!(resolve("lap", &again).owner.unwrap().brother, "birch");
+        assert_eq!(resolve("lap", &again, &none).owner, r.owner);
+        assert_eq!(
+            r.holders,
+            ["birch", "desk", "lap", "vps"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect()
+        );
+    }
+
+    fn cast(by: &str, target: &str) -> Word {
+        let what = What::CastOut {
+            id: target.into(),
+            key: format!("k{target}"),
+        };
+        let mut w = word(by, 0, 1, what);
+        w.sig = format!("{by}-casts-{target}");
+        w
+    }
+
+    fn standing_of(words: &[Word]) -> (Vec<String>, Vec<String>) {
+        let mut answers = BTreeSet::new();
+        let mut order: Vec<&Word> = words.iter().collect();
+        for _ in 0..words.len().max(1) {
+            let s = standing(order.iter().copied());
+            answers.insert((
+                s.out.into_iter().collect::<Vec<_>>(),
+                s.contested.into_iter().collect::<Vec<_>>(),
+            ));
+            order.rotate_left(1);
+        }
+        assert_eq!(answers.len(), 1, "order changed it: {answers:?}");
+        answers.into_iter().next().unwrap()
+    }
+
+    fn ks(ids: &[&str]) -> Vec<String> {
+        ids.iter().map(|i| format!("k{i}")).collect()
+    }
+
+    #[test]
+    fn who_is_out_is_worked_out_from_every_cast_out_at_once() {
+        // Plain: Lap casts Vps out.
+        assert_eq!(standing_of(&[cast("lap", "vps")]), (ks(&["vps"]), ks(&[])));
+        // Review four, finding 4: two that cast each other out are both
+        // contested, whichever came first.
+        let w = [cast("vps", "lap"), cast("lap", "vps")];
+        assert_eq!(standing_of(&w), (ks(&[]), ks(&["lap", "vps"])));
+        // A third brother in decides.
+        let w = [cast("vps", "lap"), cast("lap", "vps"), cast("desk", "vps")];
+        assert_eq!(standing_of(&w), (ks(&["vps"]), ks(&[])));
+        // Review three, finding 5: one out casts nobody out, whenever.
+        let w = [cast("lap", "vps"), cast("vps", "desk")];
+        assert_eq!(standing_of(&w), (ks(&["vps"]), ks(&[])));
+        // A cast out of its own key is nothing.
+        assert_eq!(standing_of(&[cast("lap", "lap")]), (ks(&[]), ks(&[])));
+    }
+
+    #[test]
+    fn a_thief_that_casts_every_brother_out_loses_once_two_answer() {
+        // Before anyone answers, the thief is in and every other out.
+        let all = [cast("vps", "lap"), cast("vps", "desk"), cast("vps", "nas")];
+        assert_eq!(standing_of(&all), (ks(&["desk", "lap", "nas"]), ks(&[])));
+        // One answers: those two are contested, and the thief's word
+        // against the rest counts no more.
+        let mut w = all.to_vec();
+        w.push(cast("lap", "vps"));
+        assert_eq!(standing_of(&w), (ks(&[]), ks(&["lap", "vps"])));
+        // A second answers: the thief is in more contests than each of
+        // them, and is out.
+        w.push(cast("desk", "vps"));
+        assert_eq!(standing_of(&w), (ks(&["vps"]), ks(&[])));
+    }
+
+    #[test]
+    fn a_brother_answered_by_an_accomplice_needs_one_more_human() {
+        // Lap casts out Vps and Nas, which Vps let in; Nas casts Lap back.
+        // Lap's word against Vps counts no more while Lap is in a contest
+        // with Nas, so Vps is in: what the spec leaves to a second human.
+        let w = [cast("lap", "vps"), cast("lap", "nas"), cast("nas", "lap")];
+        assert_eq!(standing_of(&w), (ks(&[]), ks(&["lap", "nas"])));
+        let mut w = w.to_vec();
+        w.push(cast("desk", "nas"));
+        assert_eq!(standing_of(&w), (ks(&["nas", "vps"]), ks(&[])));
+    }
+
+    #[test]
+    fn one_signer_counts_for_so_many_cast_outs() {
+        let mut w = Vec::new();
+        for i in 0..(MOST_CAST + 10) {
+            w.push(cast("vps", &format!("b{i:03}")));
+        }
+        let s = standing(w.iter());
+        assert_eq!(s.out.len(), MOST_CAST);
+        assert!(s.out.contains("kb000"));
+        assert!(!s.out.contains(&format!("kb{:03}", MOST_CAST + 5)));
     }
 }

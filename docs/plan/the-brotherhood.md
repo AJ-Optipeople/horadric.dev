@@ -1245,6 +1245,47 @@ Each step is useful alone and each is verified before the next starts.
     closed. The node first warned that Birch ran `r3` twice: one handoff
     signed twice was counted as a rival; fixed, and the next build was
     quiet.
+
+    Specified on 2026-10-25 after a fifth review found holes again, three
+    of them opened by the round before: patching finding by finding kept
+    regressing, so the rules were written down first, with six invariants
+    ([brotherhood-ownership.md](brotherhood-ownership.md)), then held to
+    them by a seeded simulation (`brotherhood_sim.rs`): brothers start,
+    hand, retry, take over, sleep, restart, end and rename keepers, one of
+    them is stolen, floods and casts every brother out, and the relay
+    drops, delays, duplicates, reorders and replays, every invariant
+    checked after every step. Run against the code before the change it
+    broke agreement on who is out, a cast out thief kept control, a
+    dropped keeper's takeover stood, a recalled handoff could never go to
+    the same brother again, one handoff was signed twice, and a flood of
+    ended sessions outlived a hundred days. The rules now: every change of
+    keepers is a word in each session's own chain (`owns` with a higher
+    `v`), so a takeover is judged by the owner's newest keeper word, never
+    an entry; every word names the word it builds on (`after`), so
+    nothing built on a handoff that was taken back, or on a step that
+    lost, ever counts again (the long run found a session coming back to
+    life that way); a recall names the very handoff it takes back, and a
+    pending handoff is kept on disk; who is out is worked out from all
+    cast outs at once, contests and all (`said::standing`); a takeover by
+    a key out stands only once the session moved on to a brother not out;
+    every session a brother created counts against its bounds, ended or
+    not, and endings are timed by this machine's clock. A signed in
+    machine keeps its token's old expiry until the relay says ok, and asks
+    again on later or refused; the relay exempts from refreshing only
+    machines it knew before it began asking.
+
+    Seen on that build with the dev instances and a fresh dev node, their
+    old rosters upgraded on start: Ash handed `r4` to Birch with Cedar,
+    its keeper, stopped; Cedar came back to Birch alone, learned the
+    handoff, and with Birch gone refused "r4 is Birch's since, its
+    snapshots go". The node took `n4` and `d4` over by itself two minutes
+    after Ash died, Cedar believed it, and Ash came back fenced ("taken
+    over by exit1-eu at 13:40"). Then Ash switched the node to view only:
+    its next keeper word on `e4` named Cedar alone, the node held it, and
+    with Ash dead the node took nothing over in four minutes. The node's
+    relay link held nine minutes and Cedar's fifteen on tokens refreshed
+    in band. The simulation runs a thousand seeds in CI (about a hundred
+    seconds unoptimised) and twenty thousand in its long run, clean.
 19. **Later, each its own decision.** Teams: a WorkOS organization as a
     brotherhood of several people, each seeing the others' sessions view
     only by default, and the lore shared or not per project; catching

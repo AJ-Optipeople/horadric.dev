@@ -24,7 +24,7 @@ use horadric_core::brothers::{Brothers, Event as Link, Hands, Listener, Relay};
 use horadric_core::joining::{Crypto, Listed, Store};
 use horadric_core::portal::{unframe, Config};
 use horadric_core::relaying::{
-    after_failure, after_link, closed_word, pc_dial, refresh_due, refresh_message, PING_SECS,
+    after_failure, after_link, closed_word, pc_dial, refresh_message, Refresh, PING_SECS,
     SILENT_SECS,
 };
 use horadric_link::ws::Socket;
@@ -226,9 +226,13 @@ pub(super) fn start(name: String, events: Sender<Event>) -> Result<(), String> {
 /// The socket while connected, and the sign in it was dialled under.
 type Slot = Arc<Mutex<Option<(Socket, u64)>>>;
 
-/// When the access token the link was dialled with (or last renewed with)
-/// runs out, so the ping loop sends a fresh one first.
-static EXPIRES: AtomicU64 = AtomicU64::new(0);
+/// Where the link's in-band token refresh stands: the token the relay
+/// holds runs out at its `exp`, which moves only on the relay's `ok`.
+static REFRESH: Mutex<Refresh> = Mutex::new(Refresh {
+    exp: 0,
+    sent: 0,
+    after: 0,
+});
 
 fn write_loop(rx: Receiver<(bool, Vec<u8>)>, slot: Slot) {
     for (text, frame) in rx {
@@ -263,14 +267,14 @@ fn ping_loop(slot: &Slot, out: &Sender<(bool, Vec<u8>)>) {
             since = 0;
             let _ = out.send((true, br#"{"ping":1}"#.to_vec()));
         }
-        let exp = EXPIRES.load(Ordering::SeqCst);
-        if refresh_due(exp, now()) {
-            let fresh = signin::access_token().ok().and_then(|t| {
-                let e = horadric_core::workos::expiry(&t)?;
-                (e > exp).then_some((t, e))
-            });
-            if let Some((token, e)) = fresh {
-                EXPIRES.store(e, Ordering::SeqCst);
+        let at = now();
+        let due = *REFRESH.lock().unwrap_or_else(|e| e.into_inner());
+        if due.due(at) {
+            let fresh = signin::access_token()
+                .ok()
+                .filter(|t| horadric_core::workos::expiry(t).is_some_and(|e| e > due.exp));
+            if let Some(token) = fresh {
+                REFRESH.lock().unwrap_or_else(|e| e.into_inner()).sent(at);
                 let _ = out.send((true, refresh_message(&token)));
             }
         }
@@ -295,7 +299,7 @@ fn read_loop(relay: &str, secret: &str, name: &str, slot: &Slot) {
         let dial = match signin::access_token() {
             Ok(token) => {
                 let exp = horadric_core::workos::expiry(&token).unwrap_or(0);
-                EXPIRES.store(exp, Ordering::SeqCst);
+                *REFRESH.lock().unwrap_or_else(|e| e.into_inner()) = Refresh::dialled(exp);
                 pc_dial(relay, secret, Some((&token, name)))
             }
             Err(e) => {
@@ -353,6 +357,18 @@ fn heard(socket: &Socket, text: bool, data: &[u8]) {
         let Ok(v) = serde_json::from_slice::<Value>(data) else {
             return;
         };
+        // The relay's answer to a fresh token: a refused one is forgotten,
+        // so the next is new.
+        let answer = REFRESH
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .answer(&v, now());
+        if let Some(refused) = answer {
+            if refused {
+                signin::forget_access();
+            }
+            return;
+        }
         if with(|b| b.text(&v)).unwrap_or(false) {
             return;
         }

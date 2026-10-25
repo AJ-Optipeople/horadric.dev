@@ -225,10 +225,16 @@ pub struct Roster {
     pub brothers: Vec<Brother>,
     #[serde(default)]
     pub sessions: BTreeMap<String, Owner>,
-    /// Every key ever cast out. Never shrinks, not even by a merge, which
-    /// is what makes casting out impossible to undo.
+    /// The keys cast out: as held, those [`crate::said::standing`] puts
+    /// out, worked out from every cast out word at once (and any refused
+    /// here with no word to sign). A merge never drops one.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub outcast: BTreeSet<String>,
+    /// The keys neither in nor out, as held: two brothers that cast each
+    /// other out with nobody in deciding. They act on no brother, but are
+    /// not dropped.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub contested: BTreeSet<String>,
     /// Sessions ended for good, by id, as their owners said it.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub ended: BTreeMap<String, Ending>,
@@ -691,6 +697,7 @@ impl Roster {
             brothers,
             sessions,
             outcast,
+            contested: self.contested.union(&other.contested).cloned().collect(),
             ended,
             said: said.into_iter().cloned().collect(),
             let_go: self

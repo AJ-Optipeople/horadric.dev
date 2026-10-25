@@ -969,10 +969,14 @@ mod tests {
         let words = vec![crate::said::Word {
             n: 2,
             by: "desk".into(),
+            under: "k".into(),
             at: T,
+            after: "x0".into(),
             what: crate::said::What::Owns {
                 origin: "desk".into(),
                 session: "s".into(),
+                keepers: vec!["lap".into()],
+                v: 1,
             },
             sig: "x".into(),
         }];

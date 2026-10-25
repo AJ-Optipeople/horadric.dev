@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 
 use horadric_core::portal::{frame, unframe};
 use horadric_core::relaying::{
-    after_failure, after_link, closed_word, pc_dial, refresh_due, refresh_message, silent, Dial,
+    after_failure, after_link, closed_word, pc_dial, refresh_message, silent, Dial, Refresh,
     PING_SECS,
 };
 use horadric_core::release::split_url;
@@ -134,12 +134,12 @@ impl Link {
         // the link for as long as the app runs.
         // When the token the link was dialled with runs out, so the ping
         // loop sends a fresh one first.
-        let expires = Arc::new(AtomicU64::new(0));
-        let dial_expires = expires.clone();
+        let refresh = Arc::new(Mutex::new(Refresh::default()));
+        let dial_refresh = refresh.clone();
         let url = move || {
             let token = crate::workos::access_token().ok();
             let exp = token.as_deref().and_then(horadric_core::workos::expiry);
-            dial_expires.store(exp.unwrap_or(0), Ordering::SeqCst);
+            *dial_refresh.lock().unwrap() = Refresh::dialled(exp.unwrap_or(0));
             let name = crate::portal_pair::pc_name();
             pc_dial(
                 &relay,
@@ -156,8 +156,13 @@ impl Link {
                 .ok();
         }
         {
-            let (stop, slot, heard, dialed) =
-                (stop.clone(), slot.clone(), heard.clone(), dialed.clone());
+            let (stop, slot, heard, dialed, refresh) = (
+                stop.clone(),
+                slot.clone(),
+                heard.clone(),
+                dialed.clone(),
+                refresh.clone(),
+            );
             std::thread::Builder::new()
                 .name("portal-read".into())
                 .spawn(move || {
@@ -166,7 +171,17 @@ impl Link {
                         dialed.store(SIGNED.load(Ordering::SeqCst), Ordering::SeqCst);
                         url()
                     };
-                    read_loop(&url, &stop, &slot, &tx, &*wake, &hear, generation)
+                    let reader = Reader {
+                        url: &url,
+                        stop: &stop,
+                        slot: &slot,
+                        tx: &tx,
+                        wake: &*wake,
+                        hear: &hear,
+                        refresh: &refresh,
+                        generation,
+                    };
+                    read_loop(&reader)
                 })
                 .ok();
         }
@@ -174,7 +189,7 @@ impl Link {
             let (stop, slot, out) = (stop.clone(), slot.clone(), out.clone());
             std::thread::Builder::new()
                 .name("portal-ping".into())
-                .spawn(move || ping_loop(&stop, &slot, &out, &heard, &dialed, &expires, origin))
+                .spawn(move || ping_loop(&stop, &slot, &out, &heard, &dialed, &refresh, origin))
                 .ok();
         }
         Link {
@@ -263,7 +278,7 @@ fn ping_loop(
     out: &Sender<Out>,
     heard: &AtomicU64,
     dialed: &AtomicU64,
-    expires: &AtomicU64,
+    refresh: &Mutex<Refresh>,
     origin: Instant,
 ) {
     let mut since_ping = 0;
@@ -278,14 +293,16 @@ fn ping_loop(
             since_ping = 0;
             let _ = out.send((true, br#"{"ping":1}"#.to_vec()));
         }
-        let exp = expires.load(Ordering::SeqCst);
-        if refresh_due(exp, crate::portal_pair::now()) {
-            let fresh = crate::workos::access_token().ok().and_then(|t| {
-                let e = horadric_core::workos::expiry(&t)?;
-                (e > exp).then_some((t, e))
-            });
-            if let Some((token, e)) = fresh {
-                expires.store(e, Ordering::SeqCst);
+        // A fresh token while the old one lasts; the link's expiry moves
+        // when the relay answers ok (see `read_loop`).
+        let now = crate::portal_pair::now();
+        let due = *refresh.lock().unwrap();
+        if due.due(now) {
+            let fresh = crate::workos::access_token()
+                .ok()
+                .filter(|t| horadric_core::workos::expiry(t).is_some_and(|e| e > due.exp));
+            if let Some(token) = fresh {
+                refresh.lock().unwrap().sent(now);
                 let _ = out.send((true, refresh_message(&token)));
             }
         }
@@ -296,15 +313,29 @@ fn ping_loop(
     }
 }
 
-fn read_loop(
-    url: &dyn Fn() -> Dial,
-    stop: &AtomicBool,
-    slot: &Slot,
-    tx: &Sender<Incoming>,
-    wake: &dyn Fn(),
-    hear: &dyn Fn(),
+/// What the reading thread works with.
+struct Reader<'a> {
+    url: &'a dyn Fn() -> Dial,
+    stop: &'a AtomicBool,
+    slot: &'a Slot,
+    tx: &'a Sender<Incoming>,
+    wake: &'a dyn Fn(),
+    hear: &'a dyn Fn(),
+    refresh: &'a Mutex<Refresh>,
     generation: u64,
-) {
+}
+
+fn read_loop(r: &Reader) {
+    let Reader {
+        url,
+        stop,
+        slot,
+        tx,
+        wake,
+        hear,
+        refresh,
+        generation,
+    } = *r;
     let deliver = |i: Incoming| {
         if tx.send(i).is_ok() {
             wake();
@@ -331,6 +362,9 @@ fn read_loop(
                 deliver(Incoming::Connected(true));
                 while let Some((text, data)) = receive(&socket) {
                     hear();
+                    if text && answered(refresh, &data) {
+                        continue;
+                    }
                     if for_brothers(generation, text, &data) {
                         continue;
                     }
@@ -378,6 +412,24 @@ fn read_loop(
 }
 
 /// Hands a frame to [`crate::brothers`], true when it was theirs.
+/// Whether text frame `data` is the relay's answer to a fresh token, taken
+/// into `refresh`. A refused token is forgotten, so the next is new.
+fn answered(refresh: &Mutex<Refresh>, data: &[u8]) -> bool {
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(data) else {
+        return false;
+    };
+    let now = crate::portal_pair::now();
+    match refresh.lock().unwrap().answer(&v, now) {
+        Some(refused) => {
+            if refused {
+                crate::workos::forget_access();
+            }
+            true
+        }
+        None => false,
+    }
+}
+
 fn for_brothers(generation: u64, text: bool, data: &[u8]) -> bool {
     if text {
         return serde_json::from_slice::<serde_json::Value>(data)

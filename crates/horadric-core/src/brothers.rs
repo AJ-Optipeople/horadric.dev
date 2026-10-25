@@ -89,16 +89,18 @@ pub trait Human: Send {
              brother now. Its keys are kept until you choose to leave."
         ));
     }
-    /// Brother `by`, cast out by `name`, says `name` is cast out too: the
-    /// two cast each other out, and which word counted first depends on
-    /// the order this machine heard them. So the human decides, once:
-    /// [`Brothers::cast_out_contested`] with `token`, Yes casting `name`
-    /// out here. Where no human can be asked, `name` stays.
+    /// Brothers `by` and `name` cast each other out: neither acts on any
+    /// brother until a human on a brother that is in decides, whichever
+    /// word came first. Asked once for each of the two: is `name` no
+    /// longer the human's? [`Brothers::cast_out_contested`] with `token`,
+    /// Yes casting `name` out here, No the default. Where no human can be
+    /// asked, both stay contested.
     fn contested(&self, token: u64, by: &str, name: &str) {
         let _ = token;
         self.tell(&format!(
-            "{by}, which {name} cast out, says {name} is cast out too. {name} stays a \
-             brother here unless you cast it out yourself."
+            "{by} and {name} cast each other out, so neither acts on any brother \
+             until a human decides. Casting one of them out from a brother that is \
+             in decides it."
         ));
     }
     /// Brother `by`'s human let `name` in again, which was cast out here:
@@ -203,6 +205,8 @@ pub struct Brothers {
     /// Cast outs the human is asked about, the brother each would cast
     /// out, by token.
     contested: HashMap<u64, String>,
+    /// This machine's own key is contested, and its human was told.
+    told_contested: bool,
     hands: Hands,
 }
 
@@ -229,6 +233,7 @@ impl Brothers {
             asked_back: HashSet::new(),
             out: None,
             contested: HashMap::new(),
+            told_contested: false,
             hands,
         };
         // Cast out before it stopped: it stays out until its human says.
@@ -538,7 +543,7 @@ impl Brothers {
     /// this machine was cast out, and so holds nothing any more.
     fn settle_on(&mut self, roster: &Roster) -> bool {
         let mine = self.store.me.as_ref().map(|m| m.public.clone());
-        if let Some(mine) = mine.filter(|k| roster.refuses(k)) {
+        if let Some(mine) = mine.clone().filter(|k| roster.refuses(k)) {
             let by = roster
                 .said
                 .iter()
@@ -551,6 +556,7 @@ impl Brothers {
         if self.out.is_some() {
             return false;
         }
+        self.follow_contests(roster, mine.as_deref());
         let (intros, refused) = self.judged(roster);
         let replaced = |id: &str| intros.iter().any(|i| i.id == id && i.replaces.is_some());
         for id in roster.cast_out_of(&self.store.held()) {
@@ -568,6 +574,35 @@ impl Brothers {
             self.ask_back(r);
         }
         true
+    }
+
+    /// Keeps [`Standing::contested`] to the brothers whose key the roster
+    /// holds contested, so none of them acts on this machine, and tells
+    /// this machine's human, once, when its own key is.
+    fn follow_contests(&mut self, roster: &Roster, mine: Option<&str>) {
+        if let Some(dir) = self.dir.clone() {
+            let contested: BTreeSet<String> = self
+                .store
+                .held()
+                .into_iter()
+                .filter(|(_, k)| roster.contested.contains(k))
+                .map(|(id, _)| id)
+                .collect();
+            let mut standing = Standing::load(&dir);
+            if standing.contested != contested {
+                standing.contested = contested;
+                if let Err(e) = standing.save(&dir) {
+                    eprintln!("horadric: cannot keep who is contested: {e}");
+                }
+            }
+        }
+        let here = mine.is_some_and(|k| roster.contested.contains(k));
+        if here && !self.told_contested {
+            self.hands.human.note(
+                "This machine and a brother cast each other out, so neither acts on any                  brother until a human decides: casting the other out from a brother                  that is in decides it.",
+            );
+        }
+        self.told_contested = here;
     }
 
     /// Brother `id` was let in again with a new key, its human having seen
@@ -2328,8 +2363,7 @@ mod tests {
         let ch = net.join();
         net.take_events();
         // Beta claims s1, signed; Alpha's roster carries Beta's word and
-        // its own takeover of it, as a keeper's would, with the entry of
-        // Beta's it relied on.
+        // its own takeover of it, as a keeper's would.
         let fake = Fake::new();
         let beta = crate::said::Signer::of(&net.dirs[1], "b", &fake).unwrap();
         let alpha = crate::said::Signer::of(&net.dirs[0], "a", &fake).unwrap();
@@ -2337,17 +2371,18 @@ mod tests {
         crate::mesh::own(&net.dirs[1], Some(&beta), &t, "s1", 1);
         let owns = crate::mesh::chain(&crate::mesh::load_held(&net.dirs[1]), "s1", "b");
         let takes = |dir: &std::path::Path| {
-            let r = crate::rostering::served(dir, "b", "Beta", &fake).unwrap();
-            let entry = r.brothers.iter().find(|x| x.id == "b").unwrap().clone();
+            // Serving its roster, Beta names its keepers anew on its own
+            // sessions.
+            crate::rostering::served(dir, "b", "Beta", &fake).unwrap();
             let what = crate::said::What::Takes {
                 origin: "b".into(),
                 session: "s1".into(),
                 from: "b".into(),
-                entry: Box::new(entry),
+                keepers: Vec::new(),
             };
-            alpha.sign(2, 2, what).unwrap()
+            alpha.sign_after(2, 2, &owns[0].sig, what).unwrap()
         };
-        // Beta's entry names no keeper: Alpha's takeover is not believed.
+        // Beta's word names no keeper: Alpha's takeover is not believed.
         let refused = takes(&net.dirs[1]);
         crate::mesh::update(&net.dirs[0], |r| {
             r.said.extend(owns.iter().cloned());
@@ -2357,8 +2392,7 @@ mod tests {
         let events = net.take_events();
         assert!(!events.iter().any(|(_, e)| matches!(e, Event::Moved { .. })));
         assert_eq!(crate::mesh::owners(&net.dirs[1])["b/s1"].brother, "b");
-        // Beta named Alpha its keeper, and Alpha's takeover carries that
-        // entry: now it stands.
+        // Beta named Alpha its keeper, and said so on s1: now it stands.
         let mut book = crate::keeping::Book::default();
         book.set_keeper(Some("a"));
         book.save(&net.dirs[1]).unwrap();

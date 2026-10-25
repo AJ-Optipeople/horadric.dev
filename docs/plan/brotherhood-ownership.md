@@ -64,18 +64,25 @@ care:
 Every word is
 
 ```
-{ n, by, under, at, kind, ...fields, sig }
+{ n, by, under, at, after, kind, ...fields, sig }
 ```
 
 `by` is the signer's relay id, `under` the public key it signed under
 (b64url), `at` the signer's clock (seconds, shown to humans, never
 compared with another clock), `sig` ECDSA P-256 over SHA-256, `r || s`.
+`after` is the signature of the word that made `by` the owner this word
+builds on (the session's first word, the handoff it acknowledged or the
+takeover it made); an acknowledgement names the handoff it
+acknowledges; a session's first word and a cast out name nothing. So a
+word signed on a handoff that was later taken back, or on a step that
+lost, builds on nothing, whatever number it carries: a brother that gets
+the same number again by a new word starts afresh.
 
 The signature covers `"horadric said v4"`, then each part led by its
 length as a 4 byte big endian number: the kind, `by`, `under`, `n` and `at`
-(8 bytes big endian each), then for a session `origin` and `session`,
-then the kind's own fields in the order the table gives, a list as a 4
-byte count and then each item led by its length.
+(8 bytes big endian each), `after`, then for a session `origin` and
+`session`, then the kind's own fields in the order the table gives, a
+list as a 4 byte count and then each item led by its length.
 
 | kind | fields | says |
 |---|---|---|
@@ -163,21 +170,24 @@ only ones kept), and the brothers that ran a copy whose word did not
 stand.
 
 1. **Genesis.** The chain starts at the creator's own `owns` with the
-   lowest `n`, at most 1,000,000. Nobody else starts it.
+   lowest `n`, at most 1,000,000, naming nothing `after`. Nobody else
+   starts it. The word that made the owner (`M`) is that word.
 2. **Keepers at a number.** The owner's keepers at its number `n` are
-   those named by its words at `n` with the highest `v`: an `owns` by
-   the owner at `n`, or the `takes` that made it the owner (`v` 0). An
-   owner reached by a handoff it never acknowledged names none.
-3. **Steps.** From owner `O` at `n`, the candidates at `n` + 1 are:
-   - each `hands` by `O` to another brother that no `recalls` by `O` at
-     `n` + 1 names: **acknowledged** if its receiver signed an `owns` at
-     `n` + 1, rank 0, else rank 3;
-   - each `takes` by a keeper `k` of `O` at `n`, from `O`, under a key
-     that is in: rank 1, ordered by `k`'s place among the keepers.
+   those named, with the highest `v`, by its `owns` at `n` after `M` (an
+   acknowledgement names the handoff, which is `M`), or by `M` itself (the
+   first word, or the `takes`). An owner reached by a handoff it never
+   acknowledged names none.
+3. **Steps.** From owner `O` at `n`, made so by `M`, the candidates at
+   `n` + 1 are the words after `M`:
+   - each `hands` by `O` to another brother that no `recalls` by `O`
+     names: **acknowledged** if its receiver signed an `owns` at `n` + 1
+     after it, rank 0, else rank 3;
+   - each `takes` by a keeper `k` of `O` at `n`, from `O`: rank 1,
+     ordered by `k`'s place among the keepers.
    The best candidate (lowest rank, then place, then the receiver's id,
    then the word itself) makes the next owner. Ties between two words
    that make the same brother owner are no rivalry.
-4. **Ending.** `O`'s `ended` at its own `n` ends the session there,
+4. **Ending.** `O`'s `ended` at its own `n` after `M` ends the session there,
    unless an acknowledged handoff left `n`: then the receiver runs it on.
    This holds at the last number reachable too: a session that moved as
    often as allowed can still end.

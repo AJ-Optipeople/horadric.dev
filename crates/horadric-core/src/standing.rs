@@ -37,6 +37,11 @@ pub struct Standing {
     /// links to nobody until its human says whether to leave.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cast_out_here: Option<String>,
+    /// Brothers, by id, whose key the roster holds contested: they and a
+    /// brother cast each other out, and neither acts on any brother until
+    /// a human decides. Follows the roster, so it shrinks as well as grows.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub contested: BTreeSet<String>,
 }
 
 impl Standing {
@@ -81,7 +86,9 @@ impl Standing {
 
     /// The tray's "Can control this PC" tick for brother `id`.
     pub fn controls(&self, id: &str) -> bool {
-        !self.view_only.contains(id) && !self.outcast.contains_key(id)
+        !self.view_only.contains(id)
+            && !self.outcast.contains_key(id)
+            && !self.contested.contains(id)
     }
 
     pub fn set_control(&mut self, id: &str, on: bool) {

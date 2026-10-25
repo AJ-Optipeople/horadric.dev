@@ -108,9 +108,6 @@ struct State {
     noted: u64,
     /// Sessions handed to another, which go from here without ending.
     handed: HashSet<String>,
-    /// Handoffs signed and not yet run by their receiver: the session, to
-    /// whom (by id) and under which number, to recall should one fail.
-    signed: HashMap<String, (String, u64)>,
 }
 
 thread_local! {
@@ -372,21 +369,17 @@ impl App {
             return Vec::new();
         };
         let n = n.saturating_add(1);
-        with(|s| s.signed.insert(id.to_string(), (to.clone(), n)));
         trusted(|d, s, _| s.map(|s| mesh::handing_word(d, s, id, &to, n, unix_now())))
             .flatten()
             .unwrap_or_default()
     }
 
-    /// A handoff of session `id` failed: its signed word is taken back, so
-    /// a receiver that lands it late does not run it, and the session can
-    /// go to another brother under the same number.
+    /// A handoff of session `id` failed: that very signed word is taken
+    /// back (the roster keeps it pending), so a receiver that lands it late
+    /// does not run it, and the next try, to any brother, counts.
     pub(super) fn keeping_recall(&mut self, id: &str) {
-        let Some((to, n)) = with(|s| s.signed.remove(id)) else {
-            return;
-        };
         let now = unix_now();
-        trusted(|d, s, t| s.map(|s| mesh::recall(d, s, t, id, &to, n, now)));
+        trusted(|d, s, t| s.map(|s| mesh::recall(d, s, t, id, now)));
         debug(&format!("the handoff of {id} is recalled"));
     }
 
@@ -418,10 +411,7 @@ impl App {
             }
             return;
         };
-        with(|s| {
-            s.handed.insert(id.to_string());
-            s.signed.remove(id);
-        });
+        with(|s| s.handed.insert(id.to_string()));
         let Some(to) = id_of(name) else {
             return;
         };
@@ -431,8 +421,7 @@ impl App {
                 save(&s.book);
             }
         });
-        let now = unix_now();
-        trusted(|d, s, t| s.map(|s| mesh::hand(d, s, t, id, &to, n, now)));
+        trusted(|d, _, t| mesh::hand(d, t, id, &to, n));
     }
 
     /// Whether this PC may take over brother `from`'s session `remote` as

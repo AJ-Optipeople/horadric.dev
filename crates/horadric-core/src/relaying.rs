@@ -59,6 +59,75 @@ pub fn refresh_message(token: &str) -> Vec<u8> {
         .into_bytes()
 }
 
+/// How long a fresh token sent waits for the relay's answer before it is
+/// sent again.
+pub const ASK_AGAIN: u64 = 20;
+
+/// How long after the relay answered `later` (it could not ask WorkOS, or
+/// was checking another) a fresh token goes again.
+pub const LATER: u64 = 10;
+
+/// How long after the relay refused a fresh token one goes again, a new
+/// one asked of WorkOS.
+pub const REFUSED: u64 = 30;
+
+/// Where a link's in-band token refresh stands: when the token the relay
+/// holds for it runs out, when a fresh one went that the relay has not
+/// answered, and when one may go again. The expiry moves only on the
+/// relay's `ok`, so a token it refused is never taken as renewed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Refresh {
+    pub exp: u64,
+    pub sent: u64,
+    pub after: u64,
+}
+
+impl Refresh {
+    /// A link dialled with a token that runs out at `exp` (nought for one
+    /// not signed in).
+    pub fn dialled(exp: u64) -> Refresh {
+        Refresh {
+            exp,
+            ..Refresh::default()
+        }
+    }
+
+    /// Whether a fresh token goes now.
+    pub fn due(&self, now: u64) -> bool {
+        refresh_due(self.exp, now)
+            && now >= self.after
+            && (self.sent == 0 || now >= self.sent.saturating_add(ASK_AGAIN))
+    }
+
+    /// A fresh token went at `now`.
+    pub fn sent(&mut self, now: u64) {
+        self.sent = now;
+    }
+
+    /// The relay's text frame `v`, at `now`: whether it is the relay's
+    /// answer to a fresh token, and if so whether it refused it (so a new
+    /// one is to be asked of WorkOS).
+    pub fn answer(&mut self, v: &serde_json::Value, now: u64) -> Option<bool> {
+        let word = v.get("token")?.as_str()?;
+        self.sent = 0;
+        match word {
+            "ok" => {
+                let exp = v.get("exp").and_then(serde_json::Value::as_u64);
+                self.exp = self.exp.max(exp.unwrap_or(0));
+                Some(false)
+            }
+            "later" => {
+                self.after = now.saturating_add(LATER);
+                Some(false)
+            }
+            _ => {
+                self.after = now.saturating_add(REFUSED);
+                Some(true)
+            }
+        }
+    }
+}
+
 /// How to dial the relay's `/pc`. A signed in machine (`signed` is its
 /// access token and name) is a v3 brother the relay groups with the rest
 /// of its human's; without it the machine is served as a v2 PC.
@@ -126,6 +195,39 @@ mod tests {
             .headers
             .iter()
             .any(|h| h.0 == REFRESH_HEADER));
+    }
+
+    #[test]
+    fn a_fresh_token_counts_only_once_the_relay_took_it() {
+        // Review four, finding 6.
+        let mut r = Refresh::dialled(1_000);
+        assert!(!r.due(1_000 - REFRESH_AHEAD - 1));
+        let now = 1_000 - REFRESH_AHEAD;
+        assert!(r.due(now));
+        r.sent(now);
+        // Sent, not answered: not sent again at once, but again in time.
+        assert!(!r.due(now + 1));
+        assert!(r.due(now + ASK_AGAIN));
+        // Later: the expiry stays, a token goes again shortly.
+        let later = serde_json::json!({"token": "later"});
+        assert_eq!(r.answer(&later, now + 2), Some(false));
+        assert_eq!(r.exp, 1_000);
+        assert!(!r.due(now + 3));
+        assert!(r.due(now + 2 + LATER));
+        // Refused: a new one is asked for, and goes after a while.
+        r.sent(now + 20);
+        let refused = serde_json::json!({"token": "refused", "why": "token expired"});
+        assert_eq!(r.answer(&refused, now + 21), Some(true));
+        assert_eq!(r.exp, 1_000);
+        assert!(!r.due(now + 22));
+        assert!(r.due(now + 21 + REFUSED));
+        // Taken: the relay's expiry is the link's now.
+        let ok = serde_json::json!({"token": "ok", "exp": 1_300});
+        assert_eq!(r.answer(&ok, now + 60), Some(false));
+        assert_eq!(r.exp, 1_300);
+        assert!(!r.due(now + 61));
+        // Anything else from the relay is not an answer.
+        assert_eq!(r.answer(&serde_json::json!({"open": 3}), now), None);
     }
 
     #[test]

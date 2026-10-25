@@ -161,10 +161,11 @@ impl Human for Boxes {
 
     fn contested(&self, token: u64, by: &str, name: &str) {
         let text = format!(
-            "{by}, which {name} cast out, says {name} is cast out too.\n\n\
-             The two cast each other out, and which word this PC heard first is \
-             chance. Cast {name} out here too? Say No unless you know {name} was \
-             stolen: {by} may be the stolen one."
+            "{by} and {name} cast each other out, so neither acts on any brother \
+             until a human decides.\n\n\
+             Is {name} no longer yours, stolen or lost? Yes casts {name} out from \
+             this PC too, which decides it. Say No unless you know: {by} may be the \
+             stolen one, and you are asked about it as well."
         );
         self.ask(token, text, |b, t, yes| b.cast_out_contested(t, yes));
     }

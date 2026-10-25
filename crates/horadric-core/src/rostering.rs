@@ -98,7 +98,8 @@ pub fn served(dir: &Path, me: &str, name: &str, crypto: &dyn Crypto) -> Option<R
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs());
-        crate::mesh::update_held(dir, |h| crate::mesh::sign_own(h, signer, &t, now));
+        let process = crate::mesh::process();
+        crate::mesh::update_held(dir, |h| crate::mesh::tend(h, signer, &t, process, now));
     }
     let heard = crate::mesh::load(dir);
     let mut mine = assemble(me, name, &store, &Book::load(dir), &Standing::load(dir));
@@ -388,6 +389,8 @@ mod tests {
         let owns = crate::said::What::Owns {
             origin: "b".into(),
             session: "s".into(),
+            keepers: Vec::new(),
+            v: 0,
         };
         theirs.said.push(b.sign(1, 1, owns).unwrap());
         theirs.n = 900;
