@@ -1220,6 +1220,9 @@ impl App {
                 if !(auto_due(heard, h.auto_takeover, now) && self.keeping_turn_for(&from, after)) {
                     return None;
                 }
+                if !owner_gone(&dir, &from) {
+                    return None;
+                }
                 // Asked of the roster before a takeover is tried, so an old
                 // snapshot of a session that moved on is dropped rather
                 // than tried every tick.
@@ -1353,4 +1356,17 @@ impl App {
             ),
         );
     }
+}
+
+/// Whether brother `from` is gone as far as this PC can tell, which a
+/// keeper needs before it takes over by itself: the relay does not list
+/// it, and no brother linked here says in its own entry that it is linked
+/// to it (see [`horadric_core::brotherhood::gone`]).
+fn owner_gone(dir: &Path, from: &str) -> bool {
+    let listed = crate::brothers::listed()
+        .unwrap_or_default()
+        .iter()
+        .any(|l| l.id == from);
+    let linked = crate::brothers::sees();
+    horadric_core::brotherhood::gone(&mesh::load(dir), from, listed, &linked)
 }

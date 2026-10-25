@@ -769,6 +769,9 @@ impl Machine {
                 if !(auto_due(heard, h.auto_takeover, now) && self.keeping_turn_for(&from, after)) {
                     return None;
                 }
+                if !owner_gone(&from) {
+                    return None;
+                }
                 // Asked of the roster before a takeover is tried, so an old
                 // snapshot of a session that moved on is dropped rather
                 // than tried every round.
@@ -979,4 +982,21 @@ impl Machine {
             }
         }
     }
+}
+
+/// Whether brother `from` is gone as far as this node can tell, which a
+/// keeper needs before it takes over by itself: the relay does not list
+/// it, and no brother linked here says in its own entry that it is linked
+/// to it (see [`horadric_core::brotherhood::gone`]).
+fn owner_gone(from: &str) -> bool {
+    let listed = relay::listed()
+        .unwrap_or_default()
+        .iter()
+        .any(|l| l.id == from);
+    let linked: Vec<String> =
+        relay::with(|b| b.linked().into_iter().map(|(_, id)| id).collect()).unwrap_or_default();
+    let roster = horadric_hooks::state_dir()
+        .map(|d| mesh::load(&d))
+        .unwrap_or_default();
+    horadric_core::brotherhood::gone(&roster, from, listed, &linked)
 }
