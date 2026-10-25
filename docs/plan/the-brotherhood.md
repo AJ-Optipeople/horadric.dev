@@ -344,6 +344,11 @@ key set up from every PC and cannot reach a home server behind a router.
 - **Only the first keeper takes over.** Automatic takeover is the first
   keeper on the list, or the next only once the first has been out of
   reach as long. Two brothers never race for one session.
+- **Only on word that the owner is gone.** Silence on its own link is not
+  enough to take over by itself: the relay must not list the owner, and
+  no brother linked to the keeper may say in its own signed entry that it
+  is linked to the owner. A relay that drops the frames between an owner
+  and its keeper starts nothing.
 - **Fenced.** Taking over raises the session's number in the roster. A
   brother that comes back asks the roster before its sessions run on,
   and a session whose number is behind is not resumed: it stays paused,
