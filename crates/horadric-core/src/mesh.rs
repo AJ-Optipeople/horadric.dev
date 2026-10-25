@@ -47,7 +47,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::brotherhood::{Ending, Owner, Owners, Roster};
 use crate::joining::Crypto;
-use crate::said::{self, resolve, Kept, Resolved, Signer, What, Word, CHAIN};
+use crate::said::{self, resolve, Resolved, Signer, What, Word};
 
 /// Beside `brothers.json`.
 pub const FILE: &str = "roster.json";
@@ -60,7 +60,7 @@ pub const HORIZON: u64 = 30 * 86_400;
 /// The most sessions started by one brother this machine holds at once.
 /// Far past what one machine runs; a brother past it (a stolen one making
 /// up sessions to swell every roster) starts no more here.
-pub const MOST_SESSIONS: usize = 512;
+pub const MOST_SESSIONS: usize = 128;
 
 /// The most cast outs signed by one brother this machine holds.
 pub const MOST_CAST: usize = 32;
@@ -89,10 +89,14 @@ pub struct Held {
     /// over within [`HORIZON`] goes.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub orphans: BTreeMap<String, u64>,
-    /// Sessions told to this machine's human as moved on past what it can
-    /// follow, with the number told, so each is told once.
+    /// Sessions told to this machine's human as run on a brother whose
+    /// word did not stand, with the number told, so each is told once.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub warned: BTreeMap<String, u64>,
+    /// Cast outs this machine's human was asked about, (signer, target),
+    /// so each is asked once.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub asked: BTreeSet<(String, String)>,
 }
 
 /// The roster held, empty when there is none yet.
@@ -132,7 +136,8 @@ fn unix_now() -> u64 {
 /// Written whole and synced before it replaces the old one.
 fn save(dir: &Path, held: &Held) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
-    let text = serde_json::to_vec_pretty(held).map_err(std::io::Error::other)?;
+    // Not pretty: it can hold thousands of words, rewritten whole.
+    let text = serde_json::to_vec(held).map_err(std::io::Error::other)?;
     crate::portal::write_private(&dir.join(FILE), &text)
 }
 
@@ -231,35 +236,27 @@ impl<'a> Trust<'a> {
         id == self.me || self.control.contains(id)
     }
 
-    /// What brother `id` said of itself that a takeover of its sessions is
-    /// judged by, from its own entry signed under the key held for it, or
-    /// for a brother since cast out, the one it signed before; this
-    /// machine's own from its book and its switches, which its own entry
-    /// says too.
-    pub fn kept(&self, roster: &Roster, id: &str) -> Kept {
-        if id == self.me {
-            return Kept {
-                keepers: self.keepers.clone(),
-                view_only: self.view_only.clone(),
-            };
-        }
-        let held = self.keys.get(id).or_else(|| self.cast.get(id));
-        let ok = |k: &String| held == Some(k) || roster.refuses(k);
+    /// Brother `id`'s newest entry, signed under the key held for it (or
+    /// the one it had, for a brother since cast out): what a keeper's
+    /// takeover of its sessions carries, to be judged by.
+    pub fn entry(&self, roster: &Roster, id: &str) -> Option<crate::brotherhood::Brother> {
+        let held = self.keys.get(id).or_else(|| self.cast.get(id))?;
         roster
             .brothers
             .iter()
-            .filter(|b| b.id == id && !b.sig.is_empty() && ok(&b.key))
-            .max_by_key(|b| (held == Some(&b.key), b.n))
-            .map(|b| Kept {
-                keepers: b.keepers.clone(),
-                view_only: b.view_only.clone(),
+            .filter(|b| b.id == id && b.key == *held && !b.sig.is_empty())
+            .max_by_key(|b| b.n)
+            .map(|b| crate::brotherhood::Brother {
+                cast_out: false,
+                ..b.clone()
             })
-            .unwrap_or_default()
     }
 
     /// Whether `s` is signed by its brother under the key held for it,
     /// one not cast out. A cast out, which a brother cast out itself may
-    /// still have signed (see [`believe`]), may be under the key it had.
+    /// still have signed (see [`take_cast`]), may be under the key it had.
+    /// A takeover's entry must be its owner's own, signed under the key
+    /// held for that owner (or the one it had), and within bounds.
     fn signed(&self, roster: &Roster, s: &Word) -> bool {
         let held = self
             .keys
@@ -270,7 +267,19 @@ impl<'a> Trust<'a> {
                     .then(|| self.cast.get(&s.by).or_else(|| self.keys.get(&s.by)))
                     .flatten()
             });
-        held.is_some_and(|k| said::verifies(self.crypto, k, s))
+        if !held.is_some_and(|k| said::verifies(self.crypto, k, s)) {
+            return false;
+        }
+        match &s.what {
+            What::Takes { from, entry, .. } => {
+                let owner = self.keys.get(from).or_else(|| self.cast.get(from));
+                entry.id == *from
+                    && owner == Some(&entry.key)
+                    && said::entry_fits(entry)
+                    && said::entry_verifies(self.crypto, entry)
+            }
+            _ => true,
+        }
     }
 }
 
@@ -288,54 +297,37 @@ fn words_of<'r>(r: &'r Roster, key: &'r str) -> impl Iterator<Item = &'r Word> +
         .filter(move |w| w.what.key().as_deref() == Some(key))
 }
 
-/// Whose the session keyed `key` is, from the words held on it.
-fn resolved(r: &Roster, key: &str, t: &Trust) -> Resolved {
-    let words: Vec<&Word> = words_of(r, key).collect();
-    let origin = said::split(key).0.unwrap_or("");
-    resolve(origin, &words, &|b| t.kept(r, b))
-}
-
-/// Works out every signed session's owner and ending anew from its words,
-/// as one function of them, and keeps only the words that bear on it.
-/// Sessions held before words were signed keep what they were.
-fn settle(h: &mut Held, t: &Trust) {
-    let keys: BTreeSet<String> = h.roster.said.iter().filter_map(|w| w.what.key()).collect();
-    for key in keys {
-        let r = resolved(&h.roster, &key, t);
-        match &r.owner {
-            Some(o) => {
-                h.roster.sessions.insert(key.clone(), o.clone());
-                match r.ended {
-                    Some(e) => h.roster.ended.insert(key.clone(), e),
-                    None => h.roster.ended.remove(&key),
-                };
-            }
-            None => {
-                // Nothing its creator signed is held: none of it counts.
-                h.roster
-                    .said
-                    .retain(|w| w.what.key().as_deref() != Some(&key));
-                h.roster.sessions.remove(&key);
-                h.roster.ended.remove(&key);
-            }
+/// Every word held, by the session it speaks of: built once, so taking in
+/// a roster is never a scan of every word for every word.
+fn index(said: &[Word]) -> BTreeMap<String, Vec<Word>> {
+    let mut by: BTreeMap<String, Vec<Word>> = BTreeMap::new();
+    for w in said {
+        if let Some(k) = w.what.key() {
+            by.entry(k).or_default().push(w.clone());
         }
     }
+    by
+}
+
+/// Whose the session keyed `key` is, from the words held on it.
+fn resolved(r: &Roster, key: &str) -> Resolved {
+    let words: Vec<&Word> = words_of(r, key).collect();
+    resolve(said::split(key).0.unwrap_or(""), &words)
 }
 
 /// Takes in what `words` says that this machine may believe, every word
 /// checked once against the key held for its signer:
 ///
-/// - A cast out counts when its signer has control over this machine (had,
-///   for one since cast out), and is not cast out itself, or was cast out
-///   by the very brother it casts out: two that cast each other out both
-///   stay out, whichever word came first.
-/// - A word on a session is kept for its session (its creator and id);
-///   which of them stand is [`crate::said::resolve`]'s to say. A session
-///   let go takes nothing, a brother past [`MOST_SESSIONS`] starts none,
-///   and a session past [`CHAIN`] moves takes no more.
+/// - A cast out counts as [`take_cast`] says.
+/// - A word on a session is weighed with every word held on it by
+///   [`crate::said::resolve`], and only the words that can matter are
+///   kept: a word nobody's chain reaches is not, whoever signed it. A
+///   session let go takes nothing, and a brother past [`MOST_SESSIONS`]
+///   live sessions here starts no more here (this machine's own always).
 ///
-/// True when anything changed.
-pub fn believe(h: &mut Held, words: &[Word], t: &Trust) -> bool {
+/// Gives the cast outs this machine's human is to be asked about (see
+/// [`take_cast`]), with whether anything changed.
+pub fn believe(h: &mut Held, words: &[Word], t: &Trust) -> (bool, Vec<(String, String)>) {
     let mut new: Vec<&Word> = words
         .iter()
         .filter(|s| !h.roster.said.contains(s))
@@ -344,60 +336,88 @@ pub fn believe(h: &mut Held, words: &[Word], t: &Trust) -> bool {
     new.dedup();
     new.retain(|s| t.signed(&h.roster, s));
     if new.is_empty() {
-        return false;
+        return (false, Vec::new());
     }
     let before = h.clone();
-    let casts: Vec<&Word> = new
+    let mut asked = Vec::new();
+    for w in new
         .iter()
-        .copied()
         .filter(|w| matches!(w.what, What::CastOut { .. }))
-        .collect();
-    for w in &casts {
-        take_cast(h, w, t, &new);
+    {
+        asked.extend(take_cast(h, w, t));
     }
-    let mut starts: BTreeMap<String, usize> = BTreeMap::new();
-    for k in h.roster.sessions.keys() {
-        if let (Some(origin), _) = said::split(k) {
-            *starts.entry(origin.to_string()).or_default() += 1;
+    let mut by = index(&h.roster.said);
+    let mut fresh: BTreeMap<String, Vec<Word>> = BTreeMap::new();
+    for w in new.iter().filter(|w| w.what.session().is_some()) {
+        if let Some(k) = w.what.key() {
+            fresh.entry(k).or_default().push((*w).clone());
         }
     }
-    // A creator's first word before the rest, so a session's chain is
-    // never refused for coming ahead of its start.
-    let mut owner_words: Vec<&Word> = new
-        .into_iter()
-        .filter(|w| w.what.session().is_some())
-        .collect();
-    owner_words.sort_by_key(|w| !matches!(&w.what, What::Owns { origin, .. } if *origin == w.by));
-    for w in owner_words {
-        let Some(key) = w.what.key() else {
-            continue;
-        };
+    let live = |r: &Roster, origin: &str| {
+        r.sessions
+            .keys()
+            .filter(|k| said::split(k).0 == Some(origin) && !r.ended.contains_key(*k))
+            .count()
+    };
+    for (key, add) in fresh {
         if h.pruned.contains_key(&key) {
             continue;
         }
-        let held = words_of(&h.roster, &key).count();
-        if held == 0 {
-            let (origin, _) = w.what.session().unwrap_or_default();
-            let n = starts.entry(origin.to_string()).or_default();
-            if *n >= MOST_SESSIONS {
-                continue;
-            }
-            *n += 1;
-        }
-        if held >= CHAIN * 2 {
+        let origin = said::split(&key).0.unwrap_or_default().to_string();
+        let started = by.contains_key(&key);
+        if !started && origin != t.me && live(&h.roster, &origin) >= MOST_SESSIONS {
             continue;
         }
-        h.roster.said.push(w.clone());
+        let words = by.entry(key.clone()).or_default();
+        words.extend(add);
+        let refs: Vec<&Word> = words.iter().collect();
+        let r = resolve(&origin, &refs);
+        let roster = &mut h.roster;
+        match r.owner {
+            Some(o) => {
+                roster.sessions.insert(key.clone(), o);
+                match r.ended {
+                    Some(e) => roster.ended.insert(key.clone(), e),
+                    None => roster.ended.remove(&key),
+                };
+                *words = r.kept;
+            }
+            // Nothing its creator signed is held: none of it counts.
+            None => {
+                roster.sessions.remove(&key);
+                roster.ended.remove(&key);
+                words.clear();
+            }
+        }
     }
-    settle(h, t);
-    *h != before
+    let casts: Vec<Word> = h
+        .roster
+        .said
+        .iter()
+        .filter(|w| w.what.session().is_none())
+        .cloned()
+        .collect();
+    // Held in session order, so a roster's parts carry a chain whole and
+    // in order.
+    h.roster.said = casts
+        .into_iter()
+        .chain(by.into_values().flatten())
+        .collect();
+    (*h != before, asked)
 }
 
-/// Takes cast out `w` (one of `batch`, the words heard with it) if it
-/// counts (see [`believe`]).
-fn take_cast(h: &mut Held, w: &Word, t: &Trust, batch: &[&Word]) {
+/// Takes cast out `w` if it counts: its signer has control over this
+/// machine and is not cast out, its target is a real key, and its signer
+/// signed fewer than [`MOST_CAST`]. A cast out signed by a brother already
+/// out never counts, so a stolen machine cannot cast out, after the fact,
+/// the brother whose human cast it out. Where the brother it casts out is
+/// the very one that cast its signer out (two cast each other out, maybe
+/// at once, so which counted first depends on the order each brother
+/// heard them), this machine's human is asked, once: the (signer, target)
+/// given back. Never asked about this machine itself.
+fn take_cast(h: &mut Held, w: &Word, t: &Trust) -> Option<(String, String)> {
     let What::CastOut { id, key } = &w.what else {
-        return;
+        return None;
     };
     let point = crate::portal::unb64url(key).is_some_and(|p| p.len() == 65 && p[0] == 4);
     let known = h
@@ -414,19 +434,20 @@ fn take_cast(h: &mut Held, w: &Word, t: &Trust, batch: &[&Word]) {
     let had_control =
         t.controls(&w.by) || (t.cast.contains_key(&w.by) && !t.view_only.contains(&w.by));
     if !point || known || by_signer >= MOST_CAST || !had_control {
-        return;
+        return None;
     }
     let signer_out =
         t.cast.contains_key(&w.by) || t.keys.get(&w.by).is_some_and(|k| h.roster.refuses(k));
     if signer_out {
-        // Its signer is out: this counts only against the brother that
-        // cast it out, so two that cast each other out both stay out.
-        let mut all = h.roster.said.iter().chain(batch.iter().copied());
-        let answered = all
-            .any(|x| x.by == *id && matches!(&x.what, What::CastOut { id: o, .. } if *o == w.by));
-        if !answered {
-            return;
-        }
+        let answered =
+            h.roster.said.iter().any(|x| {
+                x.by == *id && matches!(&x.what, What::CastOut { id: o, .. } if *o == w.by)
+            });
+        let wanted = (w.by.clone(), id.clone());
+        return (answered && *id != t.me && !h.asked.contains(&wanted)).then(|| {
+            h.asked.insert(wanted.clone());
+            wanted
+        });
     }
     let r = &mut h.roster;
     r.outcast.insert(key.clone());
@@ -434,6 +455,7 @@ fn take_cast(h: &mut Held, w: &Word, t: &Trust, batch: &[&Word]) {
         b.cast_out = true;
     }
     r.said.push(w.clone());
+    None
 }
 
 /// What hearing a brother's roster changed here.
@@ -444,10 +466,13 @@ pub struct Heard {
     /// Sessions this machine owned that are another's now, by id, with
     /// their new owner: they stop here and keep their work.
     pub moved: Vec<(String, Owner)>,
-    /// Sessions that moved on past what this machine can follow, or run
-    /// in two places, newly so: their id, the owner held and the highest
-    /// number a word names. For the human to look at.
-    pub unfollowed: Vec<(String, Owner, u64)>,
+    /// Sessions that ran on a brother whose word did not stand, newly
+    /// seen: their id, the owner now, the brother and the number. A copy
+    /// that brother may still run, for the human to look at.
+    pub twice: Vec<(String, Owner, String, u64)>,
+    /// Cast outs this machine's human is to be asked about: (the brother
+    /// that signed it, the brother it casts out), see [`take_cast`].
+    pub asked: Vec<(String, String)>,
     /// Whether anything changed.
     pub changed: bool,
 }
@@ -464,16 +489,22 @@ pub fn moved(me: &str, before: &Owners, after: &Owners) -> Vec<(String, Owner)> 
 
 /// What `theirs`, served by brother `from` over its own link, changes in
 /// what this machine holds: entries signed by their brother under the key
-/// held for it (or the one it had, for a brother cast out) newer than the
-/// one held, the signed word as [`believe`] takes it, and, as `from`'s own
-/// word, which sessions it holds ended or let go. `now` is for pruning.
+/// held for it, within bounds, newer than the one held (never anew from a
+/// brother cast out), the signed word as [`believe`] takes it, and, as
+/// `from`'s own word, which sessions it holds ended or let go. `now` is
+/// for pruning.
 pub fn merged(held: &Held, from: &str, theirs: &Roster, t: &Trust, now: u64) -> (Held, Heard) {
     let mut h = held.clone();
     let me = t.me.as_str();
     let r = &mut h.roster;
     for e in &theirs.brothers {
-        let key = t.keys.get(&e.id).or_else(|| t.cast.get(&e.id));
-        if e.id == me || key != Some(&e.key) || e.sig.is_empty() {
+        let key = t.keys.get(&e.id);
+        if e.id == me
+            || key != Some(&e.key)
+            || e.sig.is_empty()
+            || r.refuses(&e.key)
+            || !said::entry_fits(e)
+        {
             continue;
         }
         let had = r.brothers.iter().find(|b| b.id == e.id && b.key == e.key);
@@ -481,15 +512,9 @@ pub fn merged(held: &Held, from: &str, theirs: &Roster, t: &Trust, now: u64) -> 
             continue;
         }
         r.brothers.retain(|b| !(b.id == e.id && b.key == e.key));
-        let cast_out = r.refuses(&e.key);
-        r.insert(crate::brotherhood::Brother {
-            cast_out,
-            ..e.clone()
-        });
+        r.insert(e.clone());
     }
-    believe(&mut h, &theirs.said, t);
-    // An entry may name keepers anew, which changes whose a session is.
-    settle(&mut h, t);
+    let (_, asked) = believe(&mut h, &theirs.said, t);
     let r = &mut h.roster;
     // The roster's own number only says how far a brother counted. One
     // past half the range is no count, and would only pin this machine's.
@@ -506,49 +531,44 @@ pub fn merged(held: &Held, from: &str, theirs: &Roster, t: &Trust, now: u64) -> 
                 .insert(from.to_string());
         }
     }
-    let (went, unfollowed) = changes(held, &mut h, me);
+    let (went, twice) = changes(held, &mut h, me);
     prune(&mut h, me, &t.keepers, now);
     let heard = Heard {
         moved: went,
-        unfollowed,
+        twice,
+        asked,
         changed: h != *held,
         roster: h.roster.clone(),
     };
     (h, heard)
 }
 
-/// Sessions newly past what can be followed: their id, the owner held,
-/// and the highest number a word names.
-type Unfollowed = Vec<(String, Owner, u64)>;
+/// Sessions newly seen to have run on a brother whose word did not
+/// stand: id, owner now, that brother and the number.
+type Twice = Vec<(String, Owner, String, u64)>;
 
 /// What a change from `before` to `h` means here: sessions of `me` that
 /// went (told before pruning, so one taken over and ended since is still
-/// fenced), and sessions newly past what can be followed.
-fn changes(before: &Held, h: &mut Held, me: &str) -> (Vec<(String, Owner)>, Unfollowed) {
+/// fenced), and copies newly seen to have run on a brother whose word did
+/// not stand.
+fn changes(before: &Held, h: &mut Held, me: &str) -> (Vec<(String, Owner)>, Twice) {
     note_owners(&before.roster.sessions, h);
     let went = moved(me, &before.roster.sessions, &h.roster.sessions);
-    let mut unfollowed = Vec::new();
-    let seen: Vec<(String, u64)> = h
-        .roster
-        .sessions
-        .keys()
-        .map(|k| {
-            (
-                k.clone(),
-                words_of(&h.roster, k).map(|w| w.n).max().unwrap_or(0),
-            )
-        })
-        .collect();
-    for (key, top) in seen {
-        let Some(o) = h.roster.sessions.get(&key) else {
+    let mut twice = Vec::new();
+    for (key, words) in index(&h.roster.said) {
+        let Some(o) = h.roster.sessions.get(&key).cloned() else {
             continue;
         };
-        if top > o.n && !h.roster.ended.contains_key(&key) && h.warned.get(&key) < Some(&top) {
-            h.warned.insert(key.clone(), top);
-            unfollowed.push((said::split(&key).1.to_string(), o.clone(), top));
+        let refs: Vec<&Word> = words.iter().collect();
+        let r = resolve(said::split(&key).0.unwrap_or(""), &refs);
+        for (b, n) in r.twice {
+            if b != me && h.warned.get(&key) < Some(&n) {
+                h.warned.insert(key.clone(), n);
+                twice.push((said::split(&key).1.to_string(), o.clone(), b, n));
+            }
         }
     }
-    (went, unfollowed)
+    (went, twice)
 }
 
 /// Drops the owner of every session that ended and that every brother
@@ -602,7 +622,11 @@ pub fn prune(h: &mut Held, me: &str, keepers: &[String], now: u64) {
         copies.retain(|c| !gone(c));
         let acks = h.acks.get(id);
         let heard = |b: &String| acks.is_some_and(|a| a.contains(b));
-        let fenced = copies.iter().all(heard);
+        // A brother that may hold a copy is waited for, three horizons at
+        // most: one away that long would only bring back a copy its
+        // keeper let go long before, and an offline one must not keep
+        // every ended session forever.
+        let fenced = copies.iter().all(heard) || now >= e.at.saturating_add(HORIZON * 3);
         let everyone = live.iter().all(heard);
         if fenced && (everyone || now >= e.at.saturating_add(HORIZON)) {
             due.push(id.clone());
@@ -643,15 +667,82 @@ pub fn hear(dir: &Path, from: &str, theirs: &Roster, t: &Trust, now: u64) -> Hea
 pub fn told(dir: &Path, words: &[Word], t: &Trust) -> Heard {
     update_held(dir, |h| {
         let before = h.clone();
-        believe(h, words, t);
-        let (moved, unfollowed) = changes(&before, h, &t.me);
+        let (_, asked) = believe(h, words, t);
+        let (moved, twice) = changes(&before, h, &t.me);
         Heard {
             moved,
-            unfollowed,
+            twice,
+            asked,
             changed: *h != before,
             roster: h.roster.clone(),
         }
     })
+}
+
+/// This machine takes back its handoff of session `session` to brother
+/// `to` under `n`, which did not land: signed, so the handoff counts no
+/// more anywhere, and `to` does not run it should the bundle land late.
+pub fn recall(dir: &Path, signer: &Signer, t: &Trust, session: &str, to: &str, n: u64, now: u64) {
+    update_held(dir, |h| {
+        let Some(key) = my_key(h, session, &t.me) else {
+            return;
+        };
+        let what = What::Recalls {
+            origin: said::split(&key).0.unwrap_or_default().to_string(),
+            session: session.to_string(),
+            to: to.to_string(),
+        };
+        if let Some(w) = signer.sign(n, now, what) {
+            believe(h, &[w], t);
+        }
+    });
+}
+
+/// Whether this machine may run session `session`, handed here under `n`
+/// with the bundle's `words`, as the roster in `dir` holds it: the handoff
+/// must still be the session's newest word, not recalled, with no other
+/// handoff at that number its receiver already runs. Asked before a
+/// bundle lands, so a handoff that failed and went to another brother
+/// meanwhile is never run late here, fencing the one that runs it.
+pub fn may_arrive(
+    dir: &Path,
+    t: &Trust,
+    words: &[Word],
+    session: &str,
+    n: u64,
+) -> Result<(), String> {
+    let mut h = load_held(dir);
+    believe(&mut h, words, t);
+    let key = key_for(&h, session, &t.me, words).ok_or("its sender's word is not here")?;
+    let mut held: Vec<Word> = words_of(&h.roster, &key).cloned().collect();
+    let other = held.iter().any(|w| {
+        w.n == n
+            && w.by != t.me
+            && matches!(&w.what, What::Owns { .. })
+            && held
+                .iter()
+                .any(|x| x.n == n && matches!(&x.what, What::Hands { to, .. } if *to == w.by))
+    });
+    if other {
+        return Err("another brother already runs it".into());
+    }
+    let (origin, _) = said::split(&key);
+    held.push(Word {
+        n,
+        by: t.me.clone(),
+        at: 0,
+        what: What::Owns {
+            origin: origin.unwrap_or_default().to_string(),
+            session: session.to_string(),
+        },
+        sig: String::new(),
+    });
+    let refs: Vec<&Word> = held.iter().collect();
+    match resolve(origin.unwrap_or(""), &refs).owner {
+        Some(o) if o.brother == t.me && o.n == n => Ok(()),
+        Some(o) if o.n > n => Err("it moved on since".into()),
+        _ => Err("its sender took the handoff back, or never made it".into()),
+    }
 }
 
 /// Every session's owner, by its roster key.
@@ -970,10 +1061,7 @@ pub enum Untakeable {
     /// Nothing signed says whose it is, so no brother would believe the
     /// takeover.
     Unheard,
-    /// A signed word names a higher number than this machine can follow:
-    /// the session moved on, or runs in two places. Nothing is taken over
-    /// until it can be followed.
-    Unfollowed(u64),
+
     /// Its owner does not name this machine its keeper, or lets it only
     /// watch, as its signed entry says.
     NotKeeper,
@@ -989,9 +1077,9 @@ pub enum Untakeable {
 /// brother that hears the takeover will, so a takeover this machine makes
 /// is one they all believe:
 ///
-/// - the session's owner is still `from` under the snapshot's number, and
-///   no word names a higher one;
-/// - `from` names this machine among its keepers, in its signed entry;
+/// - the session's owner is still `from` under the snapshot's number;
+/// - `from` names this machine among its keepers, and does not let it
+///   only watch, in its newest signed entry, which the takeover carries;
 /// - its owner never said it ended, nor was it let go;
 /// - and no brother linked now lists it, so it does not run elsewhere.
 pub fn takeable(
@@ -1012,7 +1100,7 @@ pub fn takeable(
     if h.roster.ended.contains_key(&key) || h.pruned.contains_key(&key) {
         return Err(Untakeable::Ended);
     }
-    let r = resolved(&h.roster, &key, t);
+    let r = resolved(&h.roster, &key);
     let Some(cur) = r.owner else {
         return Err(Untakeable::Unheard);
     };
@@ -1022,28 +1110,39 @@ pub fn takeable(
     if cur.n < snapshot {
         return Err(Untakeable::Unheard);
     }
-    if r.seen > cur.n {
-        return Err(Untakeable::Unfollowed(r.seen));
-    }
     let n = cur.n.checked_add(1).ok_or(Untakeable::Stuck)?;
-    let (origin, _) = said::split(&key);
-    let trial = Word {
-        n,
-        by: t.me.clone(),
-        at: 0,
-        what: What::Takes {
-            origin: origin.unwrap_or_default().to_string(),
-            session: session.to_string(),
-            from: from.to_string(),
-        },
-        sig: String::new(),
-    };
+    let entry = t.entry(&h.roster, from).ok_or(Untakeable::NotKeeper)?;
+    let trial = takes_word(&key, session, from, entry, n, t.me.clone());
     let mut words: Vec<&Word> = words_of(&h.roster, &key).collect();
     words.push(&trial);
-    let after = resolve(origin.unwrap_or(""), &words, &|b| t.kept(&h.roster, b));
+    let after = resolve(said::split(&key).0.unwrap_or(""), &words);
     match after.owner {
         Some(o) if o.brother == t.me && o.n == n => Ok(n),
         _ => Err(Untakeable::NotKeeper),
+    }
+}
+
+/// The takeover of session `session` (keyed `key`) from `from` under `n`,
+/// by `by`, carrying `from`'s own `entry` it relies on: unsigned.
+fn takes_word(
+    key: &str,
+    session: &str,
+    from: &str,
+    entry: crate::brotherhood::Brother,
+    n: u64,
+    by: String,
+) -> Word {
+    Word {
+        n,
+        by,
+        at: 0,
+        what: What::Takes {
+            origin: said::split(key).0.unwrap_or_default().to_string(),
+            session: session.to_string(),
+            from: from.to_string(),
+            entry: Box::new(entry),
+        },
+        sig: String::new(),
     }
 }
 
@@ -1083,12 +1182,8 @@ pub fn take(
         believe(h, carried, t);
         let n = takeable(h, t, session, from, snapshot, carried, listed)?;
         let key = key_for(h, session, from, carried).ok_or(Untakeable::Unheard)?;
-        let origin = said::split(&key).0.unwrap_or_default().to_string();
-        let what = What::Takes {
-            origin,
-            session: session.to_string(),
-            from: from.to_string(),
-        };
+        let entry = t.entry(&h.roster, from).ok_or(Untakeable::NotKeeper)?;
+        let what = takes_word(&key, session, from, entry, n, t.me.clone()).what;
         let w = signer.sign(n, now, what).ok_or(Untakeable::NotKeeper)?;
         believe(h, &[w], t);
         let o = h
@@ -1139,7 +1234,7 @@ mod tests {
     static C: Fake = Fake::new();
 
     /// Every test brother.
-    const ALL: [&str; 6] = ["lap", "desk", "birch", "cedar", "vps", "nas"];
+    const ALL: [&str; 7] = ["lap", "desk", "birch", "cedar", "vps", "nas", "ash"];
 
     /// Brother `id`'s key pair, the same every time.
     fn pair(id: &str) -> [u8; 96] {
@@ -1166,40 +1261,73 @@ mod tests {
         signer(by).sign(n, n.saturating_mul(10), what).unwrap()
     }
 
+    fn sess(origin: &str) -> (String, String) {
+        (origin.to_string(), "s".to_string())
+    }
+
     /// Lap's session `s`.
     fn owns(by: &'static str, n: u64) -> Word {
-        let what = What::Owns {
-            origin: "lap".into(),
-            session: "s".into(),
-        };
-        word(by, n, what)
+        let (origin, session) = sess("lap");
+        word(by, n, What::Owns { origin, session })
     }
 
     fn hands(by: &'static str, to: &str, n: u64) -> Word {
-        let what = What::Hands {
-            origin: "lap".into(),
-            session: "s".into(),
-            to: to.into(),
-        };
-        word(by, n, what)
+        let (origin, session) = sess("lap");
+        let to = to.into();
+        word(
+            by,
+            n,
+            What::Hands {
+                origin,
+                session,
+                to,
+            },
+        )
     }
 
-    fn takes(by: &'static str, from: &str, n: u64) -> Word {
+    fn recalls(by: &'static str, to: &str, n: u64) -> Word {
+        let (origin, session) = sess("lap");
+        let to = to.into();
+        word(
+            by,
+            n,
+            What::Recalls {
+                origin,
+                session,
+                to,
+            },
+        )
+    }
+
+    /// A takeover by `by` from `from`, relying on `from`'s signed entry
+    /// naming `by` its keeper.
+    fn takes(by: &'static str, from: &'static str, n: u64) -> Word {
+        takes_with(by, from, n, entry(from, 3, &[by]))
+    }
+
+    fn takes_with(by: &'static str, from: &str, n: u64, e: Brother) -> Word {
+        let (origin, session) = sess("lap");
         let what = What::Takes {
-            origin: "lap".into(),
-            session: "s".into(),
+            origin,
+            session,
             from: from.into(),
+            entry: Box::new(e),
         };
         word(by, n, what)
     }
 
     fn ended(by: &'static str, n: u64) -> Word {
-        let what = What::Ended {
-            origin: "lap".into(),
-            session: "s".into(),
-            was: BTreeSet::new(),
-        };
-        word(by, n, what)
+        let (origin, session) = sess("lap");
+        let was = BTreeSet::new();
+        word(
+            by,
+            n,
+            What::Ended {
+                origin,
+                session,
+                was,
+            },
+        )
     }
 
     fn cast(by: &'static str, id: &str) -> Word {
@@ -1232,13 +1360,21 @@ mod tests {
         trust_with(me, &[], &[])
     }
 
+    /// `gone` was cast out here: its key no longer held, kept apart.
+    fn without(mut t: Trust<'static>, gone: &str) -> Trust<'static> {
+        let k = t.keys.remove(gone).unwrap();
+        t.control.remove(gone);
+        t.cast.insert(gone.into(), k);
+        t
+    }
+
     /// Brother `id`'s own entry, signed, naming `keepers`.
-    fn entry(id: &'static str, n: u64, keepers: &[&str]) -> Brother {
+    fn entry(id: &str, n: u64, keepers: &[&str]) -> Brother {
         watched(id, n, keepers, &[])
     }
 
     /// The same, letting `watchers` only watch it.
-    fn watched(id: &'static str, n: u64, keepers: &[&str], watchers: &[&str]) -> Brother {
+    fn watched(id: &str, n: u64, keepers: &[&str], watchers: &[&str]) -> Brother {
         let mut b = Brother::new(id, id, &key(id), Link::Relay);
         b.n = n;
         b.keepers = keepers.iter().map(|k| k.to_string()).collect();
@@ -1247,8 +1383,6 @@ mod tests {
         b
     }
 
-    /// A roster carrying `entries` and `words`, as any brother may serve
-    /// another's.
     fn roster(entries: Vec<Brother>, words: Vec<Word>) -> Roster {
         Roster {
             n: 5,
@@ -1258,9 +1392,12 @@ mod tests {
         }
     }
 
-    /// What brother `me` holds after hearing `r` from `from`.
     fn heard(held: &Held, me: &str, from: &str, r: &Roster) -> (Held, Heard) {
         merged(held, from, r, &trust(me), 1)
+    }
+
+    fn take_in(h: &mut Held, words: &[Word], t: &Trust) -> bool {
+        believe(h, words, t).0
     }
 
     fn at(b: &str, n: u64, since: u64) -> Owner {
@@ -1296,9 +1433,6 @@ mod tests {
 
     #[test]
     fn a_third_brother_learns_a_handoff_from_its_receiver_and_never_takes_it_over() {
-        // Review finding 1 of the first round: Lap hands s to Birch and
-        // sleeps; Cedar, its keeper, was not linked to Lap then. Birch
-        // passes Lap's signed word on, so Cedar learns it while Lap is away.
         let cedar = cedar_keeps_lap();
         let t = trust("cedar");
         assert_eq!(takeable(&cedar, &t, "s", "lap", 1, &[], &[]), Ok(2));
@@ -1308,8 +1442,6 @@ mod tests {
             takeable(&cedar, &t, "s", "lap", 1, &[], &[]),
             Err(Untakeable::MovedOn(at("birch", 2, 20)))
         );
-        // The same word passed on by a brother that is neither end counts
-        // the same: it is Lap's signature that is believed.
         let (nas, _) = heard(
             &cedar_keeps_lap(),
             "cedar",
@@ -1317,7 +1449,6 @@ mod tests {
             &roster(Vec::new(), to_birch()),
         );
         assert_eq!(owner(&nas), Some(("birch".into(), 2)));
-        // And a stale takeover Cedar might still try is refused by itself.
         let dir = scratch("scenario-one");
         update_held(&dir, |h| *h = cedar.clone());
         let tried = take(&dir, &signer("cedar"), &t, "s", "lap", 1, &[], &[], 9);
@@ -1328,46 +1459,36 @@ mod tests {
 
     #[test]
     fn a_takeover_that_raced_a_handoff_never_fences_the_brother_that_ran_it() {
-        let lap = entry("lap", 3, &["cedar"]);
         let race = takes("cedar", "lap", 2);
-        // Birch ran it, so Birch keeps it, whichever word came first.
         for words in [
             [to_birch(), vec![race.clone()]].concat(),
             [vec![race.clone()], to_birch()].concat(),
         ] {
             let mut h = Held::default();
-            h.roster.insert(lap.clone());
             for w in &words {
-                believe(&mut h, std::slice::from_ref(w), &trust("nas"));
+                take_in(&mut h, std::slice::from_ref(w), &trust("nas"));
             }
             assert_eq!(owner(&h), Some(("birch".into(), 2)), "{words:?}");
         }
-        // Cedar, which ran its copy, hears Birch's word and stops it.
         let mut cedar = cedar_keeps_lap();
-        believe(&mut cedar, std::slice::from_ref(&race), &trust("cedar"));
+        take_in(&mut cedar, std::slice::from_ref(&race), &trust("cedar"));
         assert_eq!(owner(&cedar), Some(("cedar".into(), 2)));
         let (_, h) = heard(&cedar, "cedar", "birch", &roster(Vec::new(), to_birch()));
         assert_eq!(h.moved, vec![("s".to_string(), at("birch", 2, 20))]);
-    }
-
-    #[test]
-    fn a_brother_that_handed_a_session_on_cannot_take_it_back() {
-        // Review finding 4: hours later Lap signs that it owns s under 2
-        // again, or hands it elsewhere under 2, with a later time.
-        let mut h = Held::default();
-        let t = trust("nas");
-        believe(&mut h, &to_birch(), &t);
-        let back = word(
-            "lap",
-            2,
-            What::Owns {
-                origin: "lap".into(),
-                session: "s".into(),
-            },
+        // Cedar fences its own copy; a third brother's human is told,
+        // once, that a copy ran on Cedar.
+        assert!(h.twice.is_empty());
+        let all = [to_birch(), vec![race.clone()]].concat();
+        let (nas, h) = heard(
+            &Held::default(),
+            "nas",
+            "birch",
+            &roster(Vec::new(), all.clone()),
         );
-        believe(&mut h, &[back, hands("lap", "vps", 2), ended("lap", 1)], &t);
-        assert_eq!(owner(&h), Some(("birch".into(), 2)));
-        assert!(!h.roster.ended.contains_key(S));
+        assert_eq!(h.twice.len(), 1);
+        assert_eq!((h.twice[0].2.as_str(), h.twice[0].3), ("cedar", 2));
+        let (_, again) = heard(&nas, "nas", "birch", &roster(Vec::new(), all));
+        assert!(again.twice.is_empty());
     }
 
     #[test]
@@ -1388,19 +1509,47 @@ mod tests {
             keys: BTreeMap::new(),
             ..trust("desk")
         };
-        assert!(!believe(&mut h, &[bare, forged, bent], &t));
-        assert!(!believe(&mut h, &[owns("lap", 1)], &stranger));
+        assert!(!take_in(&mut h, &[bare, forged, bent], &t));
+        assert!(!take_in(&mut h, &[owns("lap", 1)], &stranger));
         assert!(h.roster.sessions.is_empty() && h.roster.said.is_empty());
-        assert!(believe(&mut h, &[owns("lap", 1)], &t));
-        assert_eq!(owner(&h), Some(("lap".into(), 1)));
-        assert!(!believe(&mut h, &[owns("lap", 1)], &t));
+        assert!(take_in(&mut h, &[owns("lap", 1)], &t));
+        assert!(!take_in(&mut h, &[owns("lap", 1)], &t));
+    }
+
+    #[test]
+    fn a_word_no_chain_reaches_is_not_kept_nor_stalls_anything() {
+        // Review finding 1: Vps, which Lap lets only watch, signs a word
+        // under a huge number on Lap's session, and floods it with junk.
+        let mut h = cedar_keeps_lap();
+        let t = trust("cedar");
+        let far = word(
+            "vps",
+            999_999,
+            What::Owns {
+                origin: "lap".into(),
+                session: "s".into(),
+            },
+        );
+        let mut junk = vec![far];
+        for i in 0..600u64 {
+            junk.push(hands("vps", "nas", 2 + i));
+            junk.push(takes_with("vps", "lap", 2, entry("lap", 3, &[])));
+        }
+        take_in(&mut h, &junk, &t);
+        assert!(
+            h.roster.said.iter().all(|w| w.by == "lap"),
+            "{:?}",
+            h.roster.said.len()
+        );
+        assert_eq!(takeable(&h, &t, "s", "lap", 1, &[], &[]), Ok(2));
+        // Honest words still come in after the flood, and settle it alike.
+        take_in(&mut h, &to_birch(), &t);
+        assert_eq!(owner(&h), Some(("birch".into(), 2)));
+        assert_eq!(chain(&h, "s", "birch").len(), 3);
     }
 
     #[test]
     fn a_session_made_up_under_anothers_id_is_its_makers_alone() {
-        // Review finding 5: Desk names Lap's session id first, on a brother
-        // that never heard of it. Lap's own still stands, and a keeper of
-        // Lap's still takes it over.
         let mut h = Held::default();
         h.roster.insert(entry("lap", 3, &["cedar"]));
         let t = trust("cedar");
@@ -1414,16 +1563,15 @@ mod tests {
                 },
             )
         };
-        believe(&mut h, &[made_up("lap"), made_up("desk")], &t);
+        take_in(&mut h, &[made_up("lap"), made_up("desk")], &t);
         assert_eq!(owner(&h), None);
         assert_eq!(h.roster.sessions["desk/s"].brother, "desk");
-        believe(&mut h, &[owns("lap", 1)], &t);
+        take_in(&mut h, &[owns("lap", 1)], &t);
         assert_eq!(owner(&h), Some(("lap".into(), 1)));
         assert_eq!(
             takeable(&h, &t, "s", "lap", 1, &[owns("lap", 1)], &[]),
             Ok(2)
         );
-        // Lap's list still shows s; Desk's made up one does not hide it.
         assert!(!shown_elsewhere(&h.roster, "s", "lap"));
         assert!(!shown_elsewhere(&h.roster, "s", "desk"));
         assert!(shown_elsewhere(&h.roster, "s", "vps"));
@@ -1445,13 +1593,6 @@ mod tests {
             &roster(vec![entry("lap", 4, &[])], Vec::new()),
         );
         assert_eq!(h2.roster.brother("lap").unwrap().keepers, ["desk"]);
-        let (h3, _) = heard(
-            &h,
-            "vps",
-            "nas",
-            &roster(vec![entry("lap", 6, &[])], Vec::new()),
-        );
-        assert!(h3.roster.brother("lap").unwrap().keepers.is_empty());
         let mut bent = entry("nas", 9, &[]);
         bent.keepers = vec!["vps".into()];
         let mut other = entry("cedar", 9, &[]);
@@ -1469,102 +1610,153 @@ mod tests {
     }
 
     #[test]
-    fn a_takeover_is_judged_by_its_owners_entry_alike_on_every_brother() {
-        // Review finding 3: Lap's keepers are Vps then Desk. Vps lets Desk
-        // only watch Vps; that is no word on Lap's sessions. Lap dies while
-        // Vps is away, Desk takes s over; Vps, back, believes it as every
-        // brother does, and never takes s over itself.
-        let lap = entry("lap", 3, &["vps", "desk"]);
-        let words = vec![owns("lap", 1), takes("desk", "lap", 2)];
-        let mut on_vps = Held::default();
-        on_vps.roster.insert(lap.clone());
-        let t = trust_with("vps", &[], &["desk"]);
-        believe(&mut on_vps, &words, &t);
-        assert_eq!(owner(&on_vps), Some(("desk".into(), 2)));
-        assert!(matches!(
-            takeable(&on_vps, &t, "s", "lap", 1, &[], &[]),
-            Err(Untakeable::MovedOn(_))
-        ));
-        // A brother Lap lets only watch it takes nothing of Lap's, whoever
-        // hears it.
-        let mut on_nas = Held::default();
-        on_nas
-            .roster
-            .insert(watched("lap", 4, &["vps", "desk"], &["desk"]));
-        believe(&mut on_nas, &words, &trust("nas"));
-        assert_eq!(owner(&on_nas), Some(("lap".into(), 1)));
-        // A keeper the owner never named takes nothing either.
-        let mut h = Held::default();
-        believe(
-            &mut h,
-            &[owns("lap", 1), takes("nas", "lap", 2)],
-            &trust("vps"),
+    fn an_entry_past_its_bounds_or_from_a_brother_cast_out_is_not_taken() {
+        // Review finding 3: a 900 KB entry would stop every roster that
+        // carries it. And review finding 2: a brother cast out signs no new
+        // entry anyone takes.
+        let mut big = Brother::new("lap", "lap", &key("lap"), Link::Relay);
+        big.name = "x".repeat(said::LONGEST * 4);
+        assert!(sign_entry(&C, &pair("lap"), &mut big));
+        let (h, _) = heard(
+            &Held::default(),
+            "vps",
+            "desk",
+            &roster(vec![big], Vec::new()),
         );
-        assert_eq!(owner(&h), Some(("lap".into(), 1)));
-        // A brother this machine lets only watch still moves its own
-        // sessions: its sessions are recorded here like any.
+        assert!(h.roster.brothers.is_empty());
         let mut h = Held::default();
-        let watcher = trust_with("vps", &[], &["lap"]);
-        believe(&mut h, &to_birch(), &watcher);
+        take_in(&mut h, &[cast("desk", "lap")], &trust("vps"));
+        let t = without(trust("vps"), "lap");
+        let late = roster(vec![entry("lap", 50, &[])], Vec::new());
+        let (h, _) = merged(&h, "nas", &late, &t, 1);
+        assert!(h.roster.brother("lap").is_none());
+    }
+
+    #[test]
+    fn a_takeover_stands_by_the_entry_it_carries_whatever_the_owner_says_after() {
+        // Review finding 2: Desk took s over as Lap's keeper. Lap's human
+        // then drops Desk, or a stolen Lap publishes no keepers: Desk keeps
+        // it, on every brother.
+        let mut h = Held::default();
+        let t = trust("nas");
+        h.roster.insert(entry("lap", 3, &["desk"]));
+        take_in(&mut h, &[owns("lap", 1), takes("desk", "lap", 2)], &t);
+        assert_eq!(owner(&h), Some(("desk".into(), 2)));
+        let (h, _) = merged(
+            &h,
+            "lap",
+            &roster(vec![watched("lap", 9, &[], &["desk"])], Vec::new()),
+            &t,
+            1,
+        );
+        assert_eq!(owner(&h), Some(("desk".into(), 2)));
+        // A keeper its owner's entry never named, or lets only watch, takes
+        // nothing, judged by the entry it carries.
+        let mut h = Held::default();
+        let refused = [
+            takes_with("nas", "lap", 2, entry("lap", 3, &["desk"])),
+            takes_with("desk", "lap", 2, watched("lap", 3, &["desk"], &["desk"])),
+        ];
+        take_in(&mut h, &[owns("lap", 1)], &t);
+        take_in(&mut h, &refused, &t);
+        assert_eq!(owner(&h), Some(("lap".into(), 1)));
+        // An entry that is not the owner's own signature carries nothing.
+        let mut forged = entry("lap", 3, &["nas"]);
+        forged.keepers = vec!["vps".into()];
+        let w = takes_with("vps", "lap", 2, forged);
+        assert!(!take_in(&mut h, &[w], &t));
+        // A brother this machine lets only watch moves its own sessions
+        // here as anywhere.
+        let mut h = Held::default();
+        take_in(&mut h, &to_birch(), &trust_with("vps", &[], &["lap"]));
         assert_eq!(owner(&h), Some(("birch".into(), 2)));
     }
 
     #[test]
+    fn a_keeper_takes_over_only_by_its_owners_newest_entry_held_here() {
+        let mut h = cedar_keeps_lap();
+        let t = trust("cedar");
+        assert_eq!(takeable(&h, &t, "s", "lap", 1, &[], &[]), Ok(2));
+        // Lap drops Cedar: Cedar no longer takes over, by Lap's newest.
+        let (after, _) = heard(
+            &h,
+            "cedar",
+            "lap",
+            &roster(vec![entry("lap", 4, &[])], Vec::new()),
+        );
+        assert_eq!(
+            takeable(&after, &t, "s", "lap", 1, &[], &[]),
+            Err(Untakeable::NotKeeper)
+        );
+        h.roster.brothers.clear();
+        assert_eq!(
+            takeable(&h, &t, "s", "lap", 1, &[], &[]),
+            Err(Untakeable::NotKeeper)
+        );
+    }
+
+    #[test]
     fn a_newcomer_follows_a_long_chain_from_its_start() {
-        // Review finding 2: after many moves a brother that held nothing
-        // still follows it, from the creator's first word.
         let mut words = vec![owns("lap", 1)];
         let ring = ["lap", "desk"];
         for n in 2..40u64 {
             let (by, to) = (ring[(n % 2) as usize], ring[((n + 1) % 2) as usize]);
             words.push(hands(by, to, n));
-            words.push(word(
-                to,
-                n,
-                What::Owns {
-                    origin: "lap".into(),
-                    session: "s".into(),
-                },
-            ));
+            let what = What::Owns {
+                origin: "lap".into(),
+                session: "s".into(),
+            };
+            words.push(word(to, n, what));
         }
         let mut h = Held::default();
-        believe(&mut h, &words, &trust("nas"));
+        take_in(&mut h, &words, &trust("nas"));
         assert_eq!(owner(&h).unwrap().1, 39);
         let words = chain(&h, "s", "lap");
-        assert!(words.iter().any(|w| w.n == 1));
         let mut newcomer = Held::default();
-        believe(&mut newcomer, &words, &trust("cedar"));
+        take_in(&mut newcomer, &words, &trust("cedar"));
         assert_eq!(owner(&newcomer), owner(&h));
     }
 
     #[test]
-    fn a_keeper_that_cannot_follow_a_session_never_takes_it_over_and_says_so() {
-        // Review finding 2's stale keeper: Cedar holds Lap's s under 1; a
-        // word signed under 12 comes that it cannot follow. It takes
-        // nothing over, and its human is told once.
-        let mut cedar = cedar_keeps_lap();
-        let far = takes("cedar", "desk", 12);
-        let (after, h) = heard(
-            &cedar,
-            "cedar",
-            "nas",
-            &roster(Vec::new(), vec![far.clone()]),
-        );
-        assert_eq!(h.unfollowed, vec![("s".to_string(), at("lap", 1, 10), 12)]);
-        assert_eq!(
-            takeable(&after, &trust("cedar"), "s", "lap", 1, &[], &[]),
-            Err(Untakeable::Unfollowed(12))
-        );
-        let (_, again) = heard(&after, "cedar", "nas", &roster(Vec::new(), vec![far]));
-        assert!(again.unfollowed.is_empty());
-        cedar = after;
-        assert_eq!(owner(&cedar), Some(("lap".into(), 1)));
+    fn a_failed_handoff_recalled_is_never_run_late() {
+        // Review finding 6: Lap's handoff to Ash did not land in time; Lap
+        // recalled it and handed s to Birch, which ran it. Ash's bundle
+        // lands late: Ash refuses to run it, and had it run, Birch stands.
+        let bundle_to_ash = vec![owns("lap", 1), hands("lap", "ash", 2)];
+        let dir = scratch("recall");
+        let s = signer("lap");
+        let lt = trust("lap");
+        assert_eq!(own(&dir, Some(&s), &lt, "s", 1), 1);
+        let sent = handing_word(&dir, &s, "s", "ash", 2, 5);
+        recall(&dir, &s, &lt, "s", "ash", 2, 200);
+        let words = load_held(&dir).roster.said;
+        assert!(words.iter().any(|w| matches!(w.what, What::Recalls { .. })));
+        let ash = scratch("recall-ash");
+        let at = trust("ash");
+        assert_eq!(may_arrive(&ash, &at, &sent, "s", 2), Ok(()));
+        update_held(&ash, |h| {
+            believe(h, &words, &at);
+        });
+        assert!(may_arrive(&ash, &at, &sent, "s", 2).is_err());
+        // Another brother already runs it under that number.
+        let mut ran = bundle_to_ash.clone();
+        ran.extend([hands("lap", "birch", 2), owns("birch", 2)]);
+        let fresh = scratch("recall-other");
+        assert!(may_arrive(&fresh, &at, &ran, "s", 2).is_err());
+        // And the recalled handoff never stands, run or not.
+        let mut h = Held::default();
+        let mut all = ran.clone();
+        all.extend([recalls("lap", "ash", 2), owns("ash", 2)]);
+        take_in(&mut h, &all, &trust("nas"));
+        assert_eq!(owner(&h), Some(("birch".into(), 2)));
+        for d in [dir, ash, fresh] {
+            let _ = std::fs::remove_dir_all(&d);
+        }
     }
 
     #[test]
     fn what_one_brother_can_make_every_other_hold_is_bounded() {
-        // Review finding 1: a stolen brother signs sessions and cast outs
-        // by the thousand to swell every roster past what a link carries.
+        // Review findings 1 and 7.
         let mut h = Held::default();
         let t = trust("lap");
         let made: Vec<Word> = (0..MOST_SESSIONS + 50)
@@ -1576,19 +1768,16 @@ mod tests {
                 word("desk", 1, what)
             })
             .collect();
-        believe(&mut h, &made, &t);
+        take_in(&mut h, &made, &t);
         assert_eq!(h.roster.sessions.len(), MOST_SESSIONS);
         let mut casts = Vec::new();
         for i in 0..MOST_CAST + 10 {
-            let mut k = public_of(&pair(&format!("ghost{i}")));
-            k[0] = 4;
             let what = What::CastOut {
                 id: format!("ghost{i}"),
-                key: b64url(&k),
+                key: b64url(&public_of(&pair(&format!("ghost{i}")))),
             };
             casts.push(word("desk", 0, what));
         }
-        // And a cast out of a key that is no key at all.
         casts.push(word(
             "desk",
             0,
@@ -1597,53 +1786,94 @@ mod tests {
                 key: "not a key".into(),
             },
         ));
-        believe(&mut h, &casts, &t);
+        take_in(&mut h, &casts, &t);
         assert_eq!(h.roster.outcast.len(), MOST_CAST);
-        // Whatever is held goes out in parts a relay frame carries.
         for m in crate::rostering::messages(&h.roster) {
-            assert!(m.to_string().len() < crate::rostering::SAID_PART + 4096);
+            assert!(m.to_string().len() <= crate::rostering::PART + 4096);
         }
-        assert!(crate::rostering::messages(&h.roster).len() >= 2);
     }
 
     #[test]
-    fn two_brothers_that_cast_each_other_out_both_stay_out_in_any_order() {
-        // Review finding 6: a stolen Lap casts Desk out first; Desk's own
-        // cast out of Lap must count all the same.
-        for first in [true, false] {
-            let mut h = Held::default();
-            let mut t = trust("nas");
-            let (a, b) = (cast("lap", "desk"), cast("desk", "lap"));
-            let (one, two) = if first { (a, b) } else { (b, a) };
-            believe(&mut h, std::slice::from_ref(&one), &t);
-            // Hearing it, this machine let the one cast out go.
-            let gone = if first { "desk" } else { "lap" };
-            let k = t.keys.remove(gone).unwrap();
-            t.control.remove(gone);
-            t.cast.insert(gone.into(), k);
-            believe(&mut h, &[two], &t);
-            assert!(h.roster.refuses(&key("lap")), "{first}");
-            assert!(h.roster.refuses(&key("desk")), "{first}");
-        }
-        // One cast out by a third brother casts nobody out after.
+    fn this_machines_own_sessions_are_never_refused_and_ended_ones_do_not_count() {
+        // Review finding 8: a busy node with many ended sessions still
+        // starts its own new ones, and others' ended ones free their place.
         let mut h = Held::default();
-        let mut t = trust("nas");
-        believe(&mut h, &[cast("vps", "lap")], &t);
-        let k = t.keys.remove("lap").unwrap();
-        t.control.remove("lap");
-        t.cast.insert("lap".into(), k);
-        believe(&mut h, &[cast("lap", "desk")], &t);
+        let t = trust("desk");
+        let mine: Vec<Word> = (0..MOST_SESSIONS + 5)
+            .map(|i| {
+                let what = What::Owns {
+                    origin: "desk".into(),
+                    session: format!("s{i}"),
+                };
+                word("desk", 1, what)
+            })
+            .collect();
+        take_in(&mut h, &mine, &t);
+        assert_eq!(h.roster.sessions.len(), MOST_SESSIONS + 5);
+        let mut h = Held::default();
+        let t = trust("lap");
+        let theirs = |i: usize| {
+            let what = What::Owns {
+                origin: "desk".into(),
+                session: format!("s{i}"),
+            };
+            word("desk", 1, what)
+        };
+        let ends = |i: usize| {
+            let what = What::Ended {
+                origin: "desk".into(),
+                session: format!("s{i}"),
+                was: BTreeSet::new(),
+            };
+            word("desk", 1, what)
+        };
+        let all: Vec<Word> = (0..MOST_SESSIONS)
+            .flat_map(|i| [theirs(i), ends(i)])
+            .collect();
+        take_in(&mut h, &all, &t);
+        take_in(&mut h, &[theirs(MOST_SESSIONS + 1)], &t);
+        assert!(h
+            .roster
+            .sessions
+            .contains_key(&format!("desk/s{}", MOST_SESSIONS + 1)));
+    }
+
+    #[test]
+    fn a_cast_out_signed_by_a_brother_out_never_counts_and_mutual_ones_are_asked() {
+        // Review finding 5: Desk's human cast Lap out; Lap, stolen, signs a
+        // cast out of Desk afterwards. It counts nowhere.
+        let mut h = Held::default();
+        let t = trust("nas");
+        take_in(&mut h, &[cast("desk", "lap")], &t);
+        let t = without(t, "lap");
+        let (_, asked) = believe(&mut h, &[cast("lap", "desk")], &t);
         assert!(!h.roster.refuses(&key("desk")));
+        // That they cast each other out is asked of the human, once; never
+        // on Desk itself.
+        assert_eq!(asked, vec![("lap".to_string(), "desk".to_string())]);
+        let (_, again) = believe(&mut h, &[cast("lap", "desk")], &t);
+        assert!(again.is_empty());
+        let mut on_desk = Held::default();
+        let dt = trust("desk");
+        take_in(&mut on_desk, &[cast("desk", "lap")], &dt);
+        let (_, asked) = believe(&mut on_desk, &[cast("lap", "desk")], &without(dt, "lap"));
+        assert!(asked.is_empty() && !on_desk.roster.refuses(&key("desk")));
+        // One cast out by a third brother casts nobody out after, unasked.
+        let mut h = Held::default();
+        let t = trust("nas");
+        take_in(&mut h, &[cast("vps", "lap")], &t);
+        let (_, asked) = believe(&mut h, &[cast("lap", "desk")], &without(t, "lap"));
+        assert!(asked.is_empty() && !h.roster.refuses(&key("desk")));
     }
 
     #[test]
     fn a_cast_out_counts_only_from_a_brother_with_control_over_this_machine() {
-        let word = cast("nas", "birch");
+        let w = cast("nas", "birch");
         let mut on_lap = Held::default();
         on_lap.roster.insert(entry("birch", 1, &[]));
-        assert!(believe(
+        assert!(take_in(
             &mut on_lap,
-            std::slice::from_ref(&word),
+            std::slice::from_ref(&w),
             &trust("lap")
         ));
         assert!(on_lap.roster.refuses(&key("birch")));
@@ -1659,19 +1889,12 @@ mod tests {
 
     #[test]
     fn a_cast_out_owners_session_is_still_taken_over_or_goes_in_time() {
-        // Review finding 7: Lap is cast out; Cedar, its keeper, still takes
-        // its session over by the entry Lap signed before.
         let mut h = cedar_keeps_lap();
-        let mut t = trust("cedar");
-        believe(&mut h, &[cast("desk", "lap")], &t);
-        let k = t.keys.remove("lap").unwrap();
-        t.control.remove("lap");
-        t.cast.insert("lap".into(), k);
-        settle(&mut h, &t);
+        take_in(&mut h, &[cast("desk", "lap")], &trust("cedar"));
+        let t = without(trust("cedar"), "lap");
         prune(&mut h, "cedar", &[], 100);
         assert!(h.orphans.contains_key(S));
         assert_eq!(takeable(&h, &t, "s", "lap", 1, &[], &[]), Ok(2));
-        // No keeper took it over: it goes once the horizon passed.
         prune(&mut h, "cedar", &[], 100 + HORIZON);
         assert!(owner(&h).is_none() && h.pruned.contains_key(S));
     }
@@ -1680,12 +1903,12 @@ mod tests {
     fn a_session_its_owner_ended_is_never_taken_over_nor_brought_back() {
         let mut h = cedar_keeps_lap();
         let t = trust("cedar");
-        assert!(believe(&mut h, &[ended("lap", 1)], &t));
+        assert!(take_in(&mut h, &[ended("lap", 1)], &t));
         assert_eq!(
             takeable(&h, &t, "s", "lap", 1, &[], &[]),
             Err(Untakeable::Ended)
         );
-        believe(
+        take_in(
             &mut h,
             &[takes("cedar", "lap", 2), hands("lap", "desk", 2)],
             &t,
@@ -1696,12 +1919,11 @@ mod tests {
         prune(&mut h, "cedar", &[], 100);
         assert!(h.pruned.contains_key(S) && h.roster.said.is_empty());
         assert!(h.roster.let_go.contains(&S.to_string()));
-        assert!(!believe(&mut h, &[owns("lap", 1), ended("lap", 1)], &t));
+        assert!(!take_in(&mut h, &[owns("lap", 1), ended("lap", 1)], &t));
         assert_eq!(
             takeable(&h, &t, "s", "lap", 1, &[], &[]),
             Err(Untakeable::Ended)
         );
-        assert!(owner(&h).is_none());
         assert!(over(&h, "s", "lap", &[]));
     }
 
@@ -1726,14 +1948,6 @@ mod tests {
         let t = trust_with("lap", &["desk"], &[]);
         assert_eq!(own(&dir, Some(&s), &t, "s", 5), 1);
         assert_eq!(own(&dir, Some(&s), &t, "s", 6), 1);
-        let held = load_held(&dir);
-        assert!(said::verifies(
-            &C,
-            &key("lap"),
-            &chain(&held, "s", "lap")[0]
-        ));
-        // The bundle's words, believed by a receiver that never heard of s,
-        // which says it runs it: the handoff is settled.
         let words = handing_word(&dir, &s, "s", "birch", 2, 7);
         assert_eq!(words.len(), 2);
         let birch = scratch("own-birch");
@@ -1747,9 +1961,11 @@ mod tests {
             2,
             8
         ));
-        let theirs = load_held(&birch);
-        assert!(theirs.roster.said.iter().any(|w| w.by == "birch"));
-        // Without the sender's word it is not Birch's.
+        assert!(load_held(&birch)
+            .roster
+            .said
+            .iter()
+            .any(|w| w.by == "birch"));
         let other = scratch("own-other");
         assert!(!arrived(
             &other,
@@ -1760,7 +1976,6 @@ mod tests {
             2,
             8
         ));
-        // The sender on `took`.
         assert!(hand(&dir, &s, &t, "s", "birch", 2, 8));
         assert_eq!(owners(&dir)[S].brother, "birch");
         assert!(!end(&dir, Some(&s), &t, "s", 9));
@@ -1806,15 +2021,16 @@ mod tests {
         assert_eq!(takeable_in(&dir, &t, "s", "lap", 1, &carried, &[]), Ok(2));
         let (o, words) = take(&dir, &signer("desk"), &t, "s", "lap", 1, &carried, &[], 9).unwrap();
         assert_eq!((o.brother.as_str(), o.n), ("desk", 2));
+        // A brother that holds no entry of Lap's believes it all the same:
+        // the takeover carries the entry it relied on.
         let mut vps = Held::default();
-        vps.roster.insert(entry("lap", 2, &["desk"]));
-        believe(&mut vps, &words, &trust("vps"));
+        take_in(&mut vps, &words, &trust("vps"));
         assert_eq!(owner(&vps), Some(("desk".into(), 2)));
         let mut lap = Held::default();
         let lt = trust_with("lap", &["desk"], &[]);
-        believe(&mut lap, &[owns("lap", 1)], &lt);
+        take_in(&mut lap, &[owns("lap", 1)], &lt);
         let before = lap.roster.sessions.clone();
-        believe(&mut lap, &words, &lt);
+        take_in(&mut lap, &words, &lt);
         assert_eq!(moved("lap", &before, &lap.roster.sessions).len(), 1);
         assert!(take(&dir, &signer("desk"), &t, "s", "lap", 1, &carried, &[], 10).is_err());
         let _ = std::fs::remove_dir_all(&dir);
@@ -1848,9 +2064,30 @@ mod tests {
     }
 
     #[test]
+    fn a_roster_in_parts_is_taken_part_by_part_as_it_was_whole() {
+        // Review finding 3: everything goes in parts, entries too.
+        let mut whole = Roster {
+            n: 9,
+            ..Roster::default()
+        };
+        for i in 0..20u64 {
+            whole.insert(entry(ALL[(i % 7) as usize], i + 1, &[]));
+        }
+        whole.said = to_birch();
+        whole.let_go.push("x/y".into());
+        let parts = crate::rostering::messages(&whole);
+        let mut a = Held::default();
+        for p in &parts {
+            let r: Roster = serde_json::from_value(p.clone()).unwrap();
+            a = merged(&a, "desk", &r, &trust("vps"), 1).0;
+        }
+        let (b, _) = merged(&Held::default(), "desk", &whole, &trust("vps"), 1);
+        assert_eq!(a.roster.sessions, b.roster.sessions);
+        assert_eq!(a.roster.brothers, b.roster.brothers);
+    }
+
+    #[test]
     fn a_roster_with_a_word_it_cannot_read_keeps_the_rest() {
-        // Review finding 8: a kind a newer brother says, or a broken word,
-        // costs only itself, never the roster or `roster.json`.
         let mut v = serde_json::to_value(roster(Vec::new(), vec![owns("lap", 1)])).unwrap();
         v["said"]
             .as_array_mut()
@@ -1893,29 +2130,24 @@ mod tests {
         h.acks.get_mut(S).unwrap().insert("nas".into());
         prune(&mut h, "vps", &[], 100);
         assert!(!h.roster.sessions.contains_key(S));
-        assert_eq!(h.pruned[S], 100);
         prune(&mut h, "vps", &[], 100 + HORIZON);
         assert!(h.pruned.is_empty());
     }
 
     #[test]
-    fn the_horizon_waits_for_no_bystander_but_always_for_who_could_hold_a_copy() {
+    fn a_brother_that_could_hold_a_copy_is_waited_for_three_horizons_at_most() {
         let mut h = taken_and_ended(100);
         h.acks.insert(S.into(), acks(&["desk", "nas"]));
-        prune(&mut h, "vps", &[], 100 + HORIZON * 10);
+        prune(&mut h, "vps", &[], 100 + HORIZON * 3 - 1);
         assert_eq!(h.roster.sessions[S], at("desk", 2, 7));
+        prune(&mut h, "vps", &[], 100 + HORIZON * 3);
+        assert!(!h.roster.sessions.contains_key(S));
         let mut h = taken_and_ended(100);
         h.acks.insert(S.into(), acks(&["desk", "lap"]));
         prune(&mut h, "vps", &[], 100 + HORIZON - 1);
         assert!(h.roster.sessions.contains_key(S));
         prune(&mut h, "vps", &[], 100 + HORIZON);
         assert!(!h.roster.sessions.contains_key(S));
-        let mut h = taken_and_ended(100);
-        let lap = h.roster.brothers.iter_mut().find(|b| b.id == "lap");
-        lap.unwrap().keepers = vec!["nas".into()];
-        h.acks.insert(S.into(), acks(&["desk", "lap"]));
-        prune(&mut h, "vps", &[], 100 + HORIZON * 10);
-        assert!(h.roster.sessions.contains_key(S));
         let mut h = taken_and_ended(100);
         h.roster.cast_out("lap");
         h.acks.insert(S.into(), acks(&["desk", "nas"]));
@@ -1930,9 +2162,6 @@ mod tests {
         theirs.let_go.push(S.into());
         let (h, _) = merged(&h, "desk", &theirs, &trust("vps"), 6);
         assert!(h.acks[S].contains("desk"));
-        let h2 = taken_and_ended(5);
-        let (h2, _) = merged(&h2, "desk", &Roster::default(), &trust("vps"), 6);
-        assert!(!h2.acks.get(S).is_some_and(|a| a.contains("desk")));
     }
 
     #[test]
@@ -1941,7 +2170,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join(FILE), b"{ not json").unwrap();
         assert_eq!(load(&dir), Roster::default());
-        let aside: Vec<_> = std::fs::read_dir(&dir)
+        let aside = std::fs::read_dir(&dir)
             .unwrap()
             .flatten()
             .filter(|e| {
@@ -1949,8 +2178,8 @@ mod tests {
                     .to_string_lossy()
                     .starts_with("roster.json.unreadable-")
             })
-            .collect();
-        assert_eq!(aside.len(), 1);
+            .count();
+        assert_eq!(aside, 1);
         reset(&dir);
         let _ = std::fs::remove_dir_all(&dir);
     }

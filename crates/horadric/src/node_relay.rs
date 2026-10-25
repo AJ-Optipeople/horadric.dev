@@ -24,7 +24,8 @@ use horadric_core::brothers::{Brothers, Event as Link, Hands, Listener, Relay};
 use horadric_core::joining::{Crypto, Listed, Store};
 use horadric_core::portal::{unframe, Config};
 use horadric_core::relaying::{
-    after_failure, after_link, closed_word, pc_dial, PING_SECS, SILENT_SECS,
+    after_failure, after_link, closed_word, pc_dial, refresh_due, refresh_message, PING_SECS,
+    SILENT_SECS,
 };
 use horadric_link::ws::Socket;
 use serde_json::{json, Value};
@@ -225,6 +226,10 @@ pub(super) fn start(name: String, events: Sender<Event>) -> Result<(), String> {
 /// The socket while connected, and the sign in it was dialled under.
 type Slot = Arc<Mutex<Option<(Socket, u64)>>>;
 
+/// When the access token the link was dialled with (or last renewed with)
+/// runs out, so the ping loop sends a fresh one first.
+static EXPIRES: AtomicU64 = AtomicU64::new(0);
+
 fn write_loop(rx: Receiver<(bool, Vec<u8>)>, slot: Slot) {
     for (text, frame) in rx {
         let socket = slot
@@ -258,6 +263,17 @@ fn ping_loop(slot: &Slot, out: &Sender<(bool, Vec<u8>)>) {
             since = 0;
             let _ = out.send((true, br#"{"ping":1}"#.to_vec()));
         }
+        let exp = EXPIRES.load(Ordering::SeqCst);
+        if refresh_due(exp, now()) {
+            let fresh = signin::access_token().ok().and_then(|t| {
+                let e = horadric_core::workos::expiry(&t)?;
+                (e > exp).then_some((t, e))
+            });
+            if let Some((token, e)) = fresh {
+                EXPIRES.store(e, Ordering::SeqCst);
+                let _ = out.send((true, refresh_message(&token)));
+            }
+        }
         let renewed = signed != SIGNED.load(Ordering::SeqCst);
         if renewed || socket.quiet() > Duration::from_secs(SILENT_SECS) {
             socket.close();
@@ -277,7 +293,11 @@ fn read_loop(relay: &str, secret: &str, name: &str, slot: &Slot) {
             continue;
         }
         let dial = match signin::access_token() {
-            Ok(token) => pc_dial(relay, secret, Some((&token, name))),
+            Ok(token) => {
+                let exp = horadric_core::workos::expiry(&token).unwrap_or(0);
+                EXPIRES.store(exp, Ordering::SeqCst);
+                pc_dial(relay, secret, Some((&token, name)))
+            }
             Err(e) => {
                 eprintln!("horadric node: {e}");
                 let (wait, next) = after_failure(backoff.max(5));

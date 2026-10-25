@@ -20,7 +20,7 @@
 //! silent brother's session asks it to (`handoff` to this node), and
 //! resumes the session told what happened.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Sender};
 use std::sync::Mutex;
@@ -63,6 +63,10 @@ pub(super) struct Keepers {
     pub(super) keeper: Option<Option<String>>,
     pub(super) auto: Option<bool>,
 }
+
+/// Handoffs signed and not yet run by their receiver: the session, to
+/// whom and under which number, to recall should one fail.
+static SIGNED_HANDS: Mutex<BTreeMap<String, (String, u64)>> = Mutex::new(BTreeMap::new());
 
 /// One snapshot at a time goes into a store.
 static RECEIVING: Mutex<()> = Mutex::new(());
@@ -195,11 +199,38 @@ impl Machine {
         if relay::store().get(to).is_none() {
             return Vec::new();
         }
-        trusted(|d, s, _| {
-            s.map(|s| mesh::handing_word(d, s, id, to, n.saturating_add(1), relay::now()))
-        })
-        .flatten()
-        .unwrap_or_default()
+        let n = n.saturating_add(1);
+        SIGNED_HANDS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(id.to_string(), (to.to_string(), n));
+        trusted(|d, s, _| s.map(|s| mesh::handing_word(d, s, id, to, n, relay::now())))
+            .flatten()
+            .unwrap_or_default()
+    }
+
+    /// A handoff of session `id` failed: its signed word is taken back, so
+    /// a receiver that lands it late does not run it.
+    pub(super) fn keeping_recall(&mut self, id: &str) {
+        let signed = SIGNED_HANDS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(id);
+        if let Some((to, n)) = signed {
+            let now = relay::now();
+            trusted(|d, s, t| s.map(|s| mesh::recall(d, s, t, id, &to, n, now)));
+        }
+    }
+
+    /// Whether this node may run session `id`, handed here under `n` with
+    /// the bundle's `words`.
+    pub(super) fn keeping_may_arrive(
+        &self,
+        id: &str,
+        words: &[Word],
+        n: u64,
+    ) -> Result<(), String> {
+        trusted(|d, _, t| mesh::may_arrive(d, t, words, id, n)).unwrap_or(Ok(()))
     }
 
     /// A handoff moved session `id` to brother `to` (None for this node)
@@ -219,6 +250,10 @@ impl Machine {
         if relay::store().get(to).is_none() {
             return;
         }
+        SIGNED_HANDS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(id);
         self.keep.book.forget(id);
         self.save_book();
         trusted(|d, s, t| s.map(|s| mesh::hand(d, s, t, id, to, n, relay::now())));
@@ -443,11 +478,16 @@ impl Machine {
         let Ok(roster) = serde_json::from_value::<Roster>(msg.clone()) else {
             return;
         };
-        let keepers = roster
-            .brother(who)
-            .map(|b| b.keepers.clone())
-            .unwrap_or_default();
-        self.keeping_keepers(who, keepers);
+        // A roster comes in parts: only the one with the brother's own
+        // entry says who keeps it.
+        if let Some(b) = roster
+            .brothers
+            .iter()
+            .filter(|b| b.id == who)
+            .max_by_key(|b| b.n)
+        {
+            self.keeping_keepers(who, b.keepers.clone());
+        }
     }
 
     fn keeping_keepers(&mut self, from: &str, keepers: Vec<String>) {
@@ -515,11 +555,11 @@ impl Machine {
     /// node taken over meanwhile stop and keep their work on a branch.
     fn keeping_owners(&mut self, words: &[Word]) {
         let heard = trusted(|d, _, t| mesh::told(d, words, t)).unwrap_or_default();
-        for (id, o, top) in &heard.unfollowed {
+        for (id, o, ran, n) in &heard.twice {
             eprintln!(
-                "horadric node: {id} was signed at number {top}, past {}'s {}: it moved on, or it runs in two places",
+                "horadric node: {id} is {}'s, but it also ran on {} (from its number {n}), which stops its copy once it hears",
                 self.shown(&o.brother),
-                o.n
+                self.shown(ran)
             );
         }
         self.keeping_moved(heard.moved);
@@ -947,9 +987,7 @@ impl Machine {
                 format!("{name} was ended for good on its brother")
             }
             Untakeable::Listed(b) => format!("{name} runs on {} now", named(b)),
-            Untakeable::Unfollowed(top) => format!(
-                "{name} was signed at number {top}, past what this node can follow: it moved on, or it runs in two places"
-            ),
+
             Untakeable::Unheard => {
                 format!("nothing its owner signed says whose {name} is yet")
             }

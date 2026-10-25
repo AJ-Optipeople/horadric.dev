@@ -218,6 +218,7 @@ impl Machine {
             Do::LetGo(n) => self.let_go(id, &o.to, n),
             Do::Fail(why) => {
                 self.hand.out.remove(id);
+                self.keeping_recall(id);
                 self.line(id, &format!("not handed off: {why}"));
                 eprintln!("horadric node: handing {id} off failed: {why}");
             }
@@ -374,6 +375,12 @@ impl Machine {
             Ok(Some(p)) => p,
             Err(e) => return Some(Box::new(move || refused(&id, &e))),
         };
+        // Never run a handoff its sender took back, or that another brother
+        // already runs: landed late, it would fence the one running it.
+        let r = &package.record;
+        if let Err(why) = self.keeping_may_arrive(&r.id, &r.said, r.n.saturating_add(1)) {
+            return Some(Box::new(move || refused(&id, &why)));
+        }
         let node = Arc::clone(&self.node);
         let places = Arc::clone(&self.hand.places);
         // Named as each side knows the other, for the moved line.

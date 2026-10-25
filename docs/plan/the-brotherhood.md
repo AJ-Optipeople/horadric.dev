@@ -126,7 +126,8 @@ screen. What it lacks:
   let in, a session's owner moving or ending, a cast out) carries its
   ECDSA P-256 signature, made with the same long term key pair it joined
   with. Any brother may pass any word on, and every brother believes it
-  for the signature alone, then judges it by one rule (`said::judge`).
+  for the signature alone, then works out whose a session is from all
+  the words held on it by one pure function (`said::resolve`).
   Rejected: believing a brother only about itself over its own link,
   which closed forgery but could not carry a handoff past the two
   brothers it was between, so a keeper that never heard it took a
@@ -1212,6 +1213,38 @@ Each step is useful alone and each is verified before the next starts.
     node took `nodekept2` over by itself when Ash died, Birch and Cedar
     believed it, and Ash came back fenced ("taken over by exit1-eu at
     04:26"). Rosters went out in parts with no resend loop.
+
+    Hardened on 2026-10-25 after a fourth review. A brother keeps only
+    the words that can matter (`said::resolve` says which: the chain, at
+    each move the best two of each rank and what acknowledges them, and
+    recalls), so made up words cost nothing and cannot stall a takeover;
+    a chain follows 256 moves. A `takes` carries the owner's signed entry
+    it relied on, so a takeover stands by that entry everywhere, whatever
+    the owner signs later. Entries past the bounds (`said::entry_fits`)
+    are not taken, and rosters go as `{"t":"roster"}` parts of 256 KB
+    each, entries first. A failed handoff is recalled by a signed
+    `recalls`, and a receiver runs a bundle only when it was not recalled
+    and nobody runs the session under that number (`mesh::may_arrive`).
+    A brother cast out casts nobody out, whenever it signed; two that cast
+    each other out are put to the human, once. Each other brother may
+    have 128 live sessions held, a machine's own never capped, and a
+    brother holding a copy of an ended session is waited for ninety days
+    at most. A signed in machine hands the relay a fresh WorkOS token on
+    the open socket (`X-Horadric-Refresh: 1`, `{"token":..}`), since an
+    access token lasts five minutes; the relay closes such a socket two
+    minutes past its token's expiry, and older machines not before 2027.
+    Its state file is written whole and synced, and bounded.
+
+    Seen on that build with the same dev instances and a fresh dev node:
+    Ash handed `r3` to Birch with Cedar, its keeper, stopped; Cedar came
+    back to Birch alone, learned the handoff, and with Birch gone refused
+    "r3 is Birch's since, its snapshots go". The node took `n3` over by
+    itself two minutes after Ash died, Cedar believed it, and Ash came
+    back fenced ("taken over by exit1-eu at 09:15"). Cedar's relay link
+    and the node's held 21 and 11 minutes on refreshed tokens, never
+    closed. The node first warned that Birch ran `r3` twice: one handoff
+    signed twice was counted as a rival; fixed, and the next build was
+    quiet.
 19. **Later, each its own decision.** Teams: a WorkOS organization as a
     brotherhood of several people, each seeing the others' sessions view
     only by default, and the lore shared or not per project; catching

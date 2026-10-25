@@ -108,6 +108,9 @@ struct State {
     noted: u64,
     /// Sessions handed to another, which go from here without ending.
     handed: HashSet<String>,
+    /// Handoffs signed and not yet run by their receiver: the session, to
+    /// whom (by id) and under which number, to recall should one fail.
+    signed: HashMap<String, (String, u64)>,
 }
 
 thread_local! {
@@ -303,9 +306,7 @@ fn untakeable(store: &Store, name: &str, why: &Untakeable) -> String {
             format!("{name} was ended for good on its brother.")
         }
         Untakeable::Listed(b) => format!("{name} runs on {} now.", named(b)),
-        Untakeable::Unfollowed(top) => format!(
-            "{name} was signed at number {top}, past what this PC can follow: it moved on, or it runs in two places."
-        ),
+
         Untakeable::Unheard => {
             format!("Nothing its owner signed says whose {name} is yet, so no brother would believe the takeover.")
         }
@@ -370,11 +371,35 @@ impl App {
         let Some(to) = id_of(to) else {
             return Vec::new();
         };
-        trusted(|d, s, _| {
-            s.map(|s| mesh::handing_word(d, s, id, &to, n.saturating_add(1), unix_now()))
-        })
-        .flatten()
-        .unwrap_or_default()
+        let n = n.saturating_add(1);
+        with(|s| s.signed.insert(id.to_string(), (to.clone(), n)));
+        trusted(|d, s, _| s.map(|s| mesh::handing_word(d, s, id, &to, n, unix_now())))
+            .flatten()
+            .unwrap_or_default()
+    }
+
+    /// A handoff of session `id` failed: its signed word is taken back, so
+    /// a receiver that lands it late does not run it, and the session can
+    /// go to another brother under the same number.
+    pub(super) fn keeping_recall(&mut self, id: &str) {
+        let Some((to, n)) = with(|s| s.signed.remove(id)) else {
+            return;
+        };
+        let now = unix_now();
+        trusted(|d, s, t| s.map(|s| mesh::recall(d, s, t, id, &to, n, now)));
+        debug(&format!("the handoff of {id} is recalled"));
+    }
+
+    /// Whether this PC may run session `id`, handed here under `n` with
+    /// the bundle's `words`: not when its sender recalled the handoff, or
+    /// another brother already runs it under that number.
+    pub(super) fn keeping_may_arrive(
+        &self,
+        id: &str,
+        words: &[Word],
+        n: u64,
+    ) -> Result<(), String> {
+        trusted(|d, _, t| mesh::may_arrive(d, t, words, id, n)).unwrap_or(Ok(()))
     }
 
     /// A handoff moved session `id` to brother `to` (its name, None for
@@ -393,7 +418,10 @@ impl App {
             }
             return;
         };
-        with(|s| s.handed.insert(id.to_string()));
+        with(|s| {
+            s.handed.insert(id.to_string());
+            s.signed.remove(id);
+        });
         let Some(to) = id_of(name) else {
             return;
         };
@@ -858,11 +886,16 @@ impl App {
         let Ok(roster) = serde_json::from_value::<Roster>(msg.clone()) else {
             return;
         };
-        let keepers = roster
-            .brother(&from)
-            .map(|b| b.keepers.clone())
-            .unwrap_or_default();
-        self.keeping_keepers(&from, keepers);
+        // A roster comes in parts: only the one with the brother's own
+        // entry says who keeps it.
+        if let Some(b) = roster
+            .brothers
+            .iter()
+            .filter(|b| b.id == from)
+            .max_by_key(|b| b.n)
+        {
+            self.keeping_keepers(&from, b.keepers.clone());
+        }
         // Its owners were merged into the roster held before this, so a
         // keeper's roster is its word on what was taken over.
         self.keeping_release(&from);
@@ -936,14 +969,14 @@ impl App {
     /// run on.
     fn keeping_owners(&mut self, who: &str, words: &[Word]) {
         let heard = trusted(|d, _, t| mesh::told(d, words, t)).unwrap_or_default();
-        for (id, o, top) in &heard.unfollowed {
+        for (id, o, ran, n) in &heard.twice {
             let owner = crate::project::brother_name(&o.brother);
+            let ran = crate::project::brother_name(ran);
             self.toasts.show(
                 Kind::Done,
-                "Cannot follow a session",
+                "A session ran twice",
                 &format!(
-                    "{id} was signed at number {top}, past {owner}'s {}: it moved on, or it runs in two places. Look at it on {owner}.",
-                    o.n
+                    "{id} is {owner}'s, but it also ran on {ran} (from its number {n}). {ran} stops its copy once it hears."
                 ),
             );
         }

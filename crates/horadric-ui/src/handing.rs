@@ -622,6 +622,7 @@ impl App {
                     s.asks.remove(id);
                     s.stuck.insert(id.to_string());
                 });
+                self.keeping_recall(id);
                 self.handing_line(id, &format!("not handed off: {why}"));
                 self.toasts.show(Kind::Failed, "Handoff failed", &why);
             }
@@ -906,6 +907,11 @@ impl App {
         };
         let record = package.record.clone();
         let id = record.id.clone();
+        // Never run a handoff its sender took back, or that another brother
+        // already runs: landed late, it would fence the one running it.
+        if let Err(why) = self.keeping_may_arrive(&id, &record.said, record.n.saturating_add(1)) {
+            return Some(Box::new(move || refused(&id, &why)));
+        }
         let taken = self
             .shared
             .registry

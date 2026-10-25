@@ -159,6 +159,16 @@ impl Human for Boxes {
         self.ask(token, text, |b, t, yes| b.leave(t, yes));
     }
 
+    fn contested(&self, token: u64, by: &str, name: &str) {
+        let text = format!(
+            "{by}, which {name} cast out, says {name} is cast out too.\n\n\
+             The two cast each other out, and which word this PC heard first is \
+             chance. Cast {name} out here too? Say No unless you know {name} was \
+             stolen: {by} may be the stolen one."
+        );
+        self.ask(token, text, |b, t, yes| b.cast_out_contested(t, yes));
+    }
+
     fn readmit(&self, token: u64, name: &str, by: &str) {
         let text = format!(
             "{by} let {name} in again, which was cast out here.\n\n\

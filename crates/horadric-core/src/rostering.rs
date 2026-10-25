@@ -179,36 +179,71 @@ pub fn roster_message(roster: &Roster) -> Value {
     msg
 }
 
-/// The most a `said` message's words take, well under the relay's 1 MB a
+/// The most one roster message takes, well under the relay's 1 MB a
 /// frame, so a roster of any size goes through.
-pub const SAID_PART: usize = 256 << 10;
+pub const PART: usize = 256 << 10;
 
-/// Everything a roster says, as the messages it goes in: the `roster`,
-/// then `{"t":"said","said":[...]}` parts of its signed word, each at most
-/// [`SAID_PART`] long. A word longer than a part on its own is left out:
-/// no brother signs one so long.
+/// Everything a roster says, as the messages it goes in: `{"t":"roster"}`
+/// fragments of at most [`PART`] each, every one a roster in itself (its
+/// number, and some of its entries, endings, sessions let go, cast out
+/// keys and signed word), so a brother takes each as it comes and the
+/// whole once all came. Entries first, the signed word in session order
+/// last, so a chain comes whole and in order. An item longer than a part
+/// on its own is left out: no brother signs one so long.
 pub fn messages(roster: &Roster) -> Vec<Value> {
-    let mut out = vec![roster_message(roster)];
-    let mut part: Vec<Value> = Vec::new();
-    let mut size = 0;
+    let head = || json!({"t": "roster", "n": roster.n});
+    let mut items: Vec<(&str, Value)> = Vec::new();
+    if !roster.outcast.is_empty() {
+        items.push(("outcast", json!(roster.outcast)));
+    }
+    for b in &roster.brothers {
+        items.extend(serde_json::to_value(b).ok().map(|v| ("brothers", v)));
+    }
+    for (k, e) in &roster.ended {
+        items.extend(
+            serde_json::to_value(e)
+                .ok()
+                .map(|v| ("ended", json!([k, v]))),
+        );
+    }
+    for k in &roster.let_go {
+        items.push(("let_go", json!(k)));
+    }
     for w in &roster.said {
-        let Ok(v) = serde_json::to_value(w) else {
-            continue;
-        };
-        let len = v.to_string().len() + 1;
-        if len > SAID_PART {
+        items.extend(serde_json::to_value(w).ok().map(|v| ("said", v)));
+    }
+    let mut out = Vec::new();
+    let mut msg = head();
+    let mut size = 0;
+    for (field, v) in items {
+        let len = v.to_string().len() + field.len() + 8;
+        if len > PART {
             continue;
         }
-        if size + len > SAID_PART {
-            out.push(json!({"t": "said", "said": std::mem::take(&mut part)}));
+        if size + len > PART {
+            out.push(std::mem::replace(&mut msg, head()));
             size = 0;
         }
         size += len;
-        part.push(v);
+        match field {
+            "outcast" => msg["outcast"] = v,
+            "ended" => {
+                if !msg["ended"].is_object() {
+                    msg["ended"] = json!({});
+                }
+                msg["ended"][v[0].as_str().unwrap_or_default()] = v[1].clone();
+            }
+            f => {
+                if !msg[f].is_array() {
+                    msg[f] = json!([]);
+                }
+                if let Some(list) = msg[f].as_array_mut() {
+                    list.push(v);
+                }
+            }
+        }
     }
-    if !part.is_empty() {
-        out.push(json!({"t": "said", "said": part}));
-    }
+    out.push(msg);
     out
 }
 

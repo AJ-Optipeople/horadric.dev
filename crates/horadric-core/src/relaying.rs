@@ -36,6 +36,29 @@ pub struct Dial {
 /// The header that carries a machine's relay secret.
 pub const SECRET_HEADER: &str = "X-Horadric-Secret";
 
+/// The header a signed in machine dials with to say it sends fresh access
+/// tokens on the open link: the relay then closes a link whose token ran
+/// out and was never renewed, so a stolen token cannot hold one open.
+pub const REFRESH_HEADER: &str = "X-Horadric-Refresh";
+
+/// How long before its access token runs out a machine sends a fresh one
+/// on its link. Inside `workos::MARGIN`, so asking for the token then gets
+/// a new one, and well inside the relay's two minutes of grace after.
+pub const REFRESH_AHEAD: u64 = 45;
+
+/// Whether a link dialled with a token running out at `exp` is due a
+/// fresh one at `now`. Nought is a link that was not signed in.
+pub fn refresh_due(exp: u64, now: u64) -> bool {
+    exp != 0 && now + REFRESH_AHEAD >= exp
+}
+
+/// The text frame that hands the relay a fresh access token on the link.
+pub fn refresh_message(token: &str) -> Vec<u8> {
+    serde_json::json!({ "token": token })
+        .to_string()
+        .into_bytes()
+}
+
 /// How to dial the relay's `/pc`. A signed in machine (`signed` is its
 /// access token and name) is a v3 brother the relay groups with the rest
 /// of its human's; without it the machine is served as a v2 PC.
@@ -45,6 +68,7 @@ pub fn pc_dial(relay: &str, secret: &str, signed: Option<(&str, &str)>) -> Dial 
     if let Some((token, name)) = signed {
         url.push_str(&format!("?name={}", uri_encode(name)));
         headers.push(("Authorization", format!("Bearer {token}")));
+        headers.push((REFRESH_HEADER, "1".to_string()));
     }
     Dial { url, headers }
 }
@@ -87,6 +111,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_link_renews_its_token_just_before_it_runs_out() {
+        assert!(!refresh_due(0, 5));
+        assert!(!refresh_due(1_000, 1_000 - REFRESH_AHEAD - 1));
+        assert!(refresh_due(1_000, 1_000 - REFRESH_AHEAD));
+        assert!(refresh_due(1_000, 2_000));
+        const { assert!(REFRESH_AHEAD < crate::workos::MARGIN) };
+        let m: serde_json::Value = serde_json::from_slice(&refresh_message("t.k.n")).unwrap();
+        assert_eq!(m, serde_json::json!({"token": "t.k.n"}));
+        // Signed in, the dial says it renews; not signed in, it does not.
+        let d = pc_dial("wss://r", "s", Some(("tok", "Desk")));
+        assert!(d.headers.contains(&(REFRESH_HEADER, "1".to_string())));
+        assert!(!pc_dial("wss://r", "s", None)
+            .headers
+            .iter()
+            .any(|h| h.0 == REFRESH_HEADER));
+    }
+
+    #[test]
     fn only_too_many_machines_is_told_to_the_human() {
         assert!(closed_word(Some(4429))
             .unwrap()
@@ -118,6 +160,7 @@ mod tests {
             vec![
                 ("X-Horadric-Secret", "s".to_string()),
                 ("Authorization", "Bearer h.p.s".to_string()),
+                ("X-Horadric-Refresh", "1".to_string()),
             ]
         );
         // Nothing that proves the machine is in the address, which a

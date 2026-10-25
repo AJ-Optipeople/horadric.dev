@@ -459,9 +459,20 @@ longest keep their place: one more that the relay saw before the
 youngest connected one takes that one's place (closed with 4429), and
 any other is closed with 4429. So a burst of new secrets from a stolen
 login never locks out machines the relay already knew; it keeps those
-first-seen times (at most 64 per user) across a restart. A socket whose
-access token expires is closed with 4401, and the machine signs in
-afresh. A frame past 1 MB is dropped by the relay, the socket kept. A
+first-seen times (at most 64 per user) across a restart.
+
+An access token lasts minutes (five, as WorkOS issues them), a socket
+hours, so a signed in machine hands the relay a fresh one on the open
+socket (0.35): it dials with the header `X-Horadric-Refresh: 1`, and
+45 seconds before its token's `exp` sends `{"token":"<access token>"}`.
+The relay checks it as it checked the first, for the same user, and
+answers `{"token":"ok","exp":<s>}`, `{"token":"refused","why"}` or
+`{"token":"later"}` (WorkOS could not be asked, or a check is under
+way). A socket that said it refreshes is closed with 4401 two minutes
+past its token's `exp`, so a token taken from a machine holds a socket
+open minutes, not for as long as it likes; one that did not (0.34 and
+older) is let be until 2027-01-01. A machine closed with 4401 refreshes
+its token and dials again. A frame past 1 MB is dropped by the relay, the socket kept. A
 machine closed with 4429 waits the
 longest backoff, and its human is told once, plainly: too many machines
 are signed in as them, and if they did not sign in that many, someone
@@ -648,11 +659,17 @@ fields.
   handoff's bundle record carries the sender's signed word that it hands
   the session on, one higher, with the words before it: the receiver owns
   the session on that word as soon as it runs it, and passes it on.
+- A handoff that fails (the receiver refused it, or never answered) is
+  taken back by the sender's signed `recalls`, sent to every brother. A
+  receiver runs a bundle only when its sender has not recalled it and no
+  brother already runs the session under that number, so a late bundle
+  never fences the copy that ran on.
 - A keeper takes over only by the rule every brother judges it by: the
   session is still its owner's under the snapshot's number, the owner's
   signed entry names this keeper, the owner never signed it ended, and no
-  brother linked now lists it. A keeper that hears the session ended
-  drops what it keeps of it.
+  brother linked now lists it. Its `takes` carries that entry, so the
+  takeover stands by it on every brother whatever the owner signs later.
+  A keeper that hears the session ended drops what it keeps of it.
 
 ## Protocol v3: the roster
 
@@ -678,9 +695,17 @@ its `brothers.json`, unsigned, which only names it here.
   "ended": { "<origin>/<horadric id>": { "n": 2, "at": 1761000100, "was": ["<pc id>"] } },
   "let_go": ["<origin>/<horadric id>"],
   "outcast": ["<b64url public key>"] }
-{ "t": "said", "said": [{ "n": 2, "by": "<pc id>", "at": 1761000000, "kind": "hands",
+{ "t": "roster", "n": 1761000042,
+  "said": [{ "n": 2, "by": "<pc id>", "at": 1761000000, "kind": "hands",
   "origin": "<pc id>", "session": "<horadric id>", "to": "<pc id>", "sig": "<b64url r || s>" }] }
 ```
+
+A roster goes as `{"t":"roster"}` parts of at most 256 KB each (0.35),
+every part a roster in itself with the same `n`: entries first, then
+endings, sessions let go, and the signed word in session order last, so
+a chain comes whole and in order. A hearer takes each part as it comes.
+An item longer than a part on its own is never sent. 0.34 sent the word
+apart, as `{"t":"said"}`, which a hearer still takes.
 
 A link proves only who sent a roster, so nothing in one is believed for
 who sent it: what one brother says of the brotherhood carries its own
@@ -692,8 +717,9 @@ a handoff could not travel past the two brothers it was between, and
 - A brother's entry is taken when it is signed by that brother under the
   very key this machine holds for it, whoever passed it on, and replaces
   an older one (by its number) under that key. An entry without a
-  signature, under another key, or for a brother this machine holds no
-  key for, is left out. The hearer's own entry is only ever what it puts
+  signature, under another key, for a brother this machine holds no
+  key for, for a brother cast out, or past the bounds (at most 256 ids
+  in each list, 16 keepers, no string past 256 bytes), is left out. The hearer's own entry is only ever what it puts
   together itself. Its `keepers` are who may take its sessions over; its
   `held` is whom it let in (see "Introductions" below).
 - The `said` parts after it are the signed word on sessions' owners and
@@ -756,15 +782,17 @@ A word on owners and cast outs:
 |---|---|---|
 | `owns` | `origin`, `session` | `by` runs it under `n`: its creator starting it, or the brother it was handed to saying it runs it now |
 | `hands` | `origin`, `session`, `to` | `by`, its owner under `n` - 1, handed it to `to` |
-| `takes` | `origin`, `session`, `from` | `by`, a keeper `from` named, took it over, `from`'s number being `n` - 1 |
+| `recalls` | `origin`, `session`, `to` | `by` takes back its handoff to `to` under `n`, which did not land |
+| `takes` | `origin`, `session`, `from`, `entry` | `by`, a keeper `from`'s signed `entry` names, took it over, `from`'s number being `n` - 1 |
 | `ended` | `origin`, `session`, `was` | `by`, its owner under `n`, ended it for good; `was` owned it before |
 | `cast_out` | `id`, `key` | `by`'s human cast out brother `id` and its key (or let it in again with a new one), `n` 0 |
 
-The signature covers `"horadric said v2"`, then the kind, `by`, `n` and
+The signature covers `"horadric said v3"`, then the kind, `by`, `n` and
 `at` (8 bytes big endian each), then for a session `origin` and
-`session`, then `to`, `from`, or `was` (a 4 byte count, then each), or
-for a cast out `id` and `key`, every part led by its length as a 4 byte
-big endian number. A brother's entry is signed the same way under
+`session`, then `to`, or `from` with the bytes `entry`'s signature
+covers and that signature, or `was` (a 4 byte count, then each), or for
+a cast out `id` and `key`, every part led by its length as a 4 byte big
+endian number. A brother's entry is signed the same way under
 `"horadric entry v1"`: `n`, `id`, `name`, `key`, `link`, `view_only` and
 `keepers` (each a count and its items), `auto_takeover` (8 bytes, or
 empty), `holds` (a count and its items), and `held` (a count, then each
@@ -780,11 +808,12 @@ take over) is judged alike:
 - The chain starts at its creator's own `owns`, its lowest number (at
   most 1,000,000); nobody else starts it.
 - Each step goes exactly one number up from the owner before: its owner
-  handing it on, or a keeper that owner's own signed entry names, and
-  does not let only watch, taking it over. That entry is the same on
-  every brother, so whether a takeover counts never depends on who hears
-  it; a brother's own sessions are judged by its own book and switches,
-  which its entry says too.
+  handing it on (unless it recalled that handoff), or a keeper that
+  owner's own signed entry names, and does not let only watch, taking it
+  over. The `takes` carries that entry, checked under the owner's key, so
+  whether a takeover counts depends on its words alone, never on the
+  owner's latest entry or who hears it: an owner that names another
+  keeper afterwards cannot undo a takeover its old entry allowed.
 - The brother a session is handed to says, signed, that it runs it
   (`owns` at the new number) as soon as it does. Of two steps at one
   number, a handoff its receiver acknowledged stands over a takeover,
@@ -795,37 +824,42 @@ take over) is judged alike:
 - Its owner's `ended` at its number ends it, unless a handoff from that
   number was acknowledged. After that nothing moves it, and once it was
   let go nothing brings it back for thirty days.
-- A brother holds every word of a session, from its start, its rivals
-  too, up to 512 words: a brother that never heard of a session follows
-  it from the start. Where a word names a number past what can be
-  followed (the session moved on along words not held here, or runs in
-  two places), the brother's human is told once, and no keeper takes it
-  over until it can be followed.
+- A brother keeps only the words that can matter: the chain from its
+  start, and at each move the best two of each rank, what acknowledges
+  them, and the recalls. A word nobody's chain reaches is not kept nor
+  passed on, so words made up to swell rosters or stall a session cost
+  nothing, and a brother that never heard of a session follows it from
+  the start. A chain follows 256 moves; a session moved more often stops
+  moving.
+- A brother that ran the session at a move whose word did not stand (a
+  handoff it acknowledged, or a takeover, that lost to a rival) ran it
+  twice: its copy stops once it hears, and every human is told once.
 
-A cast out counts when its signer has control over the hearer (had, for
-one since cast out) and is not cast out itself, or was cast out by the
-very brother it casts out: two brothers that cast each other out both
-stay out, whichever word came first. Whoever passes it on, a brother that
-only watches the hearer casts nobody out there, the hearer least of all.
+A cast out counts when its signer has control over the hearer and is
+not cast out itself: a brother out, whenever its word was said, casts
+nobody out, so a stolen brother cast out cannot cast out others after
+the fact. Two brothers that cast each other out are a question for the
+hearer's human, asked once, which of the two stays (neither goes on its
+own); a word about the hearer itself is never put to it. Whoever passes
+it on, a brother that only watches the hearer casts nobody out there.
 A brother keeps the word as it came and passes it on, never signing
 another's cast out as its own. A machine that hears its own key cast out
 links to nobody and asks its human whether to leave; it erases its keys
 only on that yes (`horadric node leave` on a node), so a stolen brother
 that casts it out first cannot wipe it.
 
-What one brother can make every other hold is bounded: 512 sessions
-started by any one brother, 32 cast outs signed by any one (each of a
-real key), 512 words on any one session. A session whose owner was cast
-out goes after thirty days if no keeper took it over first (a keeper
-still may, by the entry that owner signed before). The roster goes out
-as `{"t":"roster",...}` without its words or owners, then
-`{"t":"said","said":[<word>...]}` parts of at most 256 KB each, so a
-roster of any size fits the relay's frames; `let_go` in the roster names
-the sessions a brother dropped after they ended, which counts as having
-heard them end. A word that cannot be read (a kind a newer brother says,
-or a broken one) is left out alone, never the roster with it. A frame
-past the relay's 1 MB is not sent, and one that comes is dropped, never
-the link.
+What one brother can make every other hold is bounded: 128 live
+sessions started by any other brother (a machine's own are never
+capped), 32 cast outs signed by any one (each of a real key), and per
+session the words above. A session whose owner was cast out goes after
+thirty days if no keeper took it over first (a keeper still may, by the
+entry that owner signed before). A session that ended is dropped once
+every brother heard; one that holds a copy is waited for at most ninety
+days. `let_go` in the roster names the sessions a brother dropped after
+they ended, which counts as having heard them end. A word that cannot be
+read (a kind a newer brother says, or a broken one) is left out alone,
+never the roster with it. A frame past the relay's 1 MB is not sent, and
+one that comes is dropped, never the link.
 
 ## Protocol v3: introductions and casting out
 

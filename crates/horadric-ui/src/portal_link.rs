@@ -15,7 +15,8 @@ use std::time::{Duration, Instant};
 
 use horadric_core::portal::{frame, unframe};
 use horadric_core::relaying::{
-    after_failure, after_link, closed_word, pc_dial, silent, Dial, PING_SECS,
+    after_failure, after_link, closed_word, pc_dial, refresh_due, refresh_message, silent, Dial,
+    PING_SECS,
 };
 use horadric_core::release::split_url;
 use windows::core::{w, HSTRING, PCWSTR};
@@ -131,8 +132,14 @@ impl Link {
         let (relay, secret) = (relay.to_string(), secret.to_string());
         // Asked again on every connect: an access token lasts minutes,
         // the link for as long as the app runs.
+        // When the token the link was dialled with runs out, so the ping
+        // loop sends a fresh one first.
+        let expires = Arc::new(AtomicU64::new(0));
+        let dial_expires = expires.clone();
         let url = move || {
             let token = crate::workos::access_token().ok();
+            let exp = token.as_deref().and_then(horadric_core::workos::expiry);
+            dial_expires.store(exp.unwrap_or(0), Ordering::SeqCst);
             let name = crate::portal_pair::pc_name();
             pc_dial(
                 &relay,
@@ -167,7 +174,7 @@ impl Link {
             let (stop, slot, out) = (stop.clone(), slot.clone(), out.clone());
             std::thread::Builder::new()
                 .name("portal-ping".into())
-                .spawn(move || ping_loop(&stop, &slot, &out, &heard, &dialed, origin))
+                .spawn(move || ping_loop(&stop, &slot, &out, &heard, &dialed, &expires, origin))
                 .ok();
         }
         Link {
@@ -247,14 +254,16 @@ fn write_loop(rx: Receiver<Out>, slot: Slot) {
     }
 }
 
-/// Pings the relay while connected, and closes a connection that has gone
-/// quiet, which sends the reader round to connect again.
+/// Pings the relay while connected, hands it a fresh access token before
+/// the one in use runs out, and closes a connection that has gone quiet,
+/// which sends the reader round to connect again.
 fn ping_loop(
     stop: &AtomicBool,
     slot: &Slot,
     out: &Sender<Out>,
     heard: &AtomicU64,
     dialed: &AtomicU64,
+    expires: &AtomicU64,
     origin: Instant,
 ) {
     let mut since_ping = 0;
@@ -268,6 +277,17 @@ fn ping_loop(
         if since_ping >= PING_SECS {
             since_ping = 0;
             let _ = out.send((true, br#"{"ping":1}"#.to_vec()));
+        }
+        let exp = expires.load(Ordering::SeqCst);
+        if refresh_due(exp, crate::portal_pair::now()) {
+            let fresh = crate::workos::access_token().ok().and_then(|t| {
+                let e = horadric_core::workos::expiry(&t)?;
+                (e > exp).then_some((t, e))
+            });
+            if let Some((token, e)) = fresh {
+                expires.store(e, Ordering::SeqCst);
+                let _ = out.send((true, refresh_message(&token)));
+            }
         }
         let renewed = dialed.load(Ordering::SeqCst) != SIGNED.load(Ordering::SeqCst);
         if renewed || silent(ms(origin), heard.load(Ordering::SeqCst)) {
