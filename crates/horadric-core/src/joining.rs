@@ -50,6 +50,28 @@ pub trait Crypto: Send + Sync {
     /// Opens what [`Crypto::seal_bound`] made, `None` when it is short,
     /// forged, under another key, or bound to another `aad`.
     fn open_bound(&self, key: &[u8; 32], sealed: &[u8], aad: &[u8]) -> Option<Vec<u8>>;
+    /// ECDSA P-256 over SHA-256 of `msg` with the same key pair ECDH uses,
+    /// `r || s`. What a brother says that others pass on is signed so, and
+    /// believed for the key alone (see [`crate::said`]).
+    fn sign(&self, private: &[u8; 96], msg: &[u8]) -> Option<[u8; 64]>;
+    /// Whether `sig` is the signature of `msg` under the 65 byte public key
+    /// `public`.
+    fn verify(&self, public: &[u8], msg: &[u8], sig: &[u8]) -> bool;
+}
+
+/// The join this build speaks: 2 since the brotherhood signs its word
+/// (0.35). One that sends less is an older Horadric, which cannot be a
+/// brother now: both sides say so rather than join it.
+pub const JOIN_V: u64 = 2;
+
+/// A message's `v`, nought when it has none.
+fn version(msg: &Value) -> u64 {
+    msg.get("v").and_then(Value::as_u64).unwrap_or(0)
+}
+
+/// What a human is told of a brother on a Horadric older than 0.35.
+fn newer(name: &str) -> String {
+    format!("{name} needs a newer Horadric to join this one. Update it, then ask again.")
 }
 
 /// The public key of a private key kept as [`Crypto::pair`] makes it.
@@ -292,8 +314,10 @@ impl Way {
 
 /// The key a join's own link seals the welcomes and what follows with,
 /// from the link key the join agreed and both join nonces. That link key
-/// already binds both public keys, the asker's first (see [`agree`]), so
-/// a join reflected to its own sender has nothing to agree with.
+/// already binds both public keys, the asker's first (see [`agree`]). It
+/// does not stop a join reflected to its own sender, since ECDH with one's
+/// own public key agrees too: each side refuses a key equal to its own
+/// instead ([`Handshake::heard`], and `Brothers::kept`).
 pub fn join_session_key(link: &[u8; 32], asker_nonce: &[u8], giver_nonce: &[u8]) -> [u8; 32] {
     derive(
         "horadric link session v1",
@@ -352,8 +376,21 @@ pub fn frame_aad(way: Way, n: u64) -> Vec<u8> {
 /// and for the giver's the asker's nonce (empty in the asker's own), each
 /// led by its length, so an old answer played again to a new hello does
 /// not open, and neither does a hello handed back to the side that sent it.
+/// Its label names the protocol: v3 is the brotherhood whose word is
+/// signed (0.35), so a brother that does not sign is told apart.
 pub fn hello_aad(way: Way, ends: Ends, asker_nonce: &[u8]) -> Vec<u8> {
-    let mut aad = b"horadric link hello v2".to_vec();
+    bound_hello_aad(b"horadric link hello v3", way, ends, asker_nonce)
+}
+
+/// The hello bound to both ends as 0.33 and 0.34 sent it, before the
+/// brotherhood signed its word. Nothing links on it any more: it is opened
+/// only to tell such a brother apart, as [`old_hello_aad`] is.
+fn unsigned_hello_aad(way: Way, ends: Ends, asker_nonce: &[u8]) -> Vec<u8> {
+    bound_hello_aad(b"horadric link hello v2", way, ends, asker_nonce)
+}
+
+fn bound_hello_aad(label: &[u8], way: Way, ends: Ends, asker_nonce: &[u8]) -> Vec<u8> {
+    let mut aad = label.to_vec();
     aad.push(way.byte());
     for p in ends.parts().into_iter().chain([asker_nonce]) {
         aad.extend_from_slice(&(p.len() as u32).to_be_bytes());
@@ -595,15 +632,16 @@ impl Handshake {
     pub fn ask(me: Me, peer: (&str, &str), nonce: [u8; 16]) -> (Handshake, Vec<Out>) {
         let commit = commitment(me.public, &nonce);
         let hs = Handshake::new(me, peer, nonce, State::Committed { nonce });
-        let join = json!({"t": "join", "v": 1, "name": me.name, "commit": b64url(&commit)});
+        let join = json!({"t": "join", "v": JOIN_V, "name": me.name, "commit": b64url(&commit)});
         (hs, vec![Out::Plain(join)])
     }
 
     /// Links again to a brother that joined before, under what is held for
     /// it, with `nonce` fresh random bytes for this link's own key. The
-    /// hello goes twice: bound as before 0.33 first, which only a brother
-    /// on an older Horadric answers, and only so this side can say it
-    /// needs a newer one, then bound to both ends, which is what links.
+    /// hello goes three times: bound as before 0.33, then as 0.33 and 0.34
+    /// bound it, which only a brother on an older Horadric answers, and
+    /// only so this side can say it needs a newer one, then as now, which
+    /// is what links.
     pub fn link(
         c: &dyn Crypto,
         me: Me,
@@ -612,17 +650,21 @@ impl Handshake {
         nonce: [u8; 16],
     ) -> (Handshake, Vec<Out>) {
         let mut hs = Handshake::new(me, peer, nonce, State::Over);
-        let old = hs.hello(&nonce, 3).to_string();
-        let old = c.seal_bound(
-            &held.link,
-            old.as_bytes(),
-            &old_hello_aad(Way::FromAsker, &[]),
-        );
-        let hello = hs.hello(&nonce, 4).to_string();
-        let aad = hello_aad(Way::FromAsker, hs.ends(Way::FromAsker, &held.public), &[]);
-        let hello = c.seal_bound(&held.link, hello.as_bytes(), &aad);
+        let ends = hs.ends(Way::FromAsker, &held.public);
+        let hellos = [
+            (3, old_hello_aad(Way::FromAsker, &[])),
+            (4, unsigned_hello_aad(Way::FromAsker, ends, &[])),
+            (5, hello_aad(Way::FromAsker, ends, &[])),
+        ];
+        let out = hellos
+            .iter()
+            .map(|(v, aad)| {
+                let hello = hs.hello(&nonce, *v).to_string();
+                Out::Sealed(c.seal_bound(&held.link, hello.as_bytes(), aad))
+            })
+            .collect();
         hs.state = State::Greeting { held, nonce };
-        (hs, vec![Out::Sealed(old), Out::Sealed(hello)])
+        (hs, out)
     }
 
     /// The side a brother asked: waits for its first word. `known` is what
@@ -637,7 +679,8 @@ impl Handshake {
         Handshake::new(me, peer, nonce, state)
     }
 
-    /// Version 4 is the hello bound to both ends, 3 the one before.
+    /// Version 5 is the hello of a brotherhood that signs its word, 4 the
+    /// one bound to both ends before it, 3 the one before that.
     fn hello(&self, nonce: &[u8], v: u8) -> Value {
         json!({"t": "hello", "v": v, "kind": "brother", "name": self.name, "nonce": b64url(nonce)})
     }
@@ -665,7 +708,7 @@ impl Handshake {
     }
 
     /// Whether the brother on this channel runs a Horadric too old to
-    /// link to: it said hello, or answered one, bound as before 0.33.
+    /// link to: it said hello, or answered one, bound as before 0.35.
     pub fn old(&self) -> bool {
         matches!(self.state, State::Old | State::Waiting { old: true, .. })
     }
@@ -763,15 +806,24 @@ impl Handshake {
                     self.state = State::Waiting { nonce, known, old };
                     return vec![];
                 };
+                if version(msg) < JOIN_V {
+                    let mut out = vec![Out::Plain(json!({"t": "refused"}))];
+                    out.extend(self.fail(newer(&self.peer_name)));
+                    return out;
+                }
                 self.state = State::Offered { nonce, commit };
                 vec![Out::Plain(json!({
                     "t": "joining",
+                    "v": JOIN_V,
                     "name": self.name,
                     "pub": b64url(&self.public),
                     "nonce": b64url(&nonce),
                 }))]
             }
             ("joining", State::Committed { nonce }) => {
+                if version(msg) < JOIN_V {
+                    return self.fail(newer(&self.peer_name));
+                }
                 let (Some(theirs), Some(their_nonce)) = (point(msg, "pub"), nonce16(msg, "nonce"))
                 else {
                     return self.fail(format!(
@@ -779,6 +831,14 @@ impl Handshake {
                         self.peer_name
                     ));
                 };
+                // ECDH with one's own public key agrees too: a relay that
+                // hands a machine its own join must find nothing to agree.
+                if theirs == self.public {
+                    return self.fail(format!(
+                        "{} answered with this PC's own key, so something between the two PCs played it back. Nothing was kept.",
+                        self.peer_name
+                    ));
+                }
                 let Some(shared) = ecdh(&theirs) else {
                     return self.fail(format!("{}'s key is not a key.", self.peer_name));
                 };
@@ -797,7 +857,7 @@ impl Handshake {
                     self.state = State::Offered { nonce, commit };
                     return vec![];
                 };
-                if commitment(&theirs, &their_nonce)[..] != commit[..] {
+                if commitment(&theirs, &their_nonce)[..] != commit[..] || theirs == self.public {
                     let mut out = vec![Out::Plain(json!({"t": "refused"}))];
                     out.extend(self.fail(format!(
                         "{} did not send the key it promised, so something between the two PCs may have changed it. It was not let in.",
@@ -902,9 +962,15 @@ impl Handshake {
                 let aad = hello_aad(Way::FromGiver, ends, &nonce);
                 let theirs = open_hello(c, &held.link, payload, &aad).filter(|n| !own(n));
                 let Some(theirs) = theirs else {
-                    // Only an older giver answers the hello bound as before.
-                    let aad = old_hello_aad(Way::FromGiver, &nonce);
-                    if open_hello(c, &held.link, payload, &aad).is_some_and(|n| !own(&n)) {
+                    // Only an older giver answers a hello bound as before.
+                    let older = [
+                        old_hello_aad(Way::FromGiver, &nonce),
+                        unsigned_hello_aad(Way::FromGiver, ends, &nonce),
+                    ];
+                    let opens = |aad: &Vec<u8>| {
+                        open_hello(c, &held.link, payload, aad).is_some_and(|n| !own(&n))
+                    };
+                    if older.iter().any(opens) {
                         return (State::Old, None, vec![]);
                     }
                     return (State::Greeting { held, nonce }, None, vec![]);
@@ -924,8 +990,15 @@ impl Handshake {
                 let aad = hello_aad(Way::FromAsker, ends, &[]);
                 let theirs = open_hello(c, &held.link, payload, &aad).filter(|n| !own(n));
                 let Some(theirs) = theirs else {
-                    let aad = old_hello_aad(Way::FromAsker, &[]);
-                    let older = open_hello(c, &held.link, payload, &aad).is_some_and(|n| !own(&n));
+                    let opens = |aad: &Vec<u8>| {
+                        open_hello(c, &held.link, payload, aad).is_some_and(|n| !own(&n))
+                    };
+                    let older = [
+                        old_hello_aad(Way::FromAsker, &[]),
+                        unsigned_hello_aad(Way::FromAsker, ends, &[]),
+                    ]
+                    .iter()
+                    .any(opens);
                     let state = State::Waiting {
                         nonce,
                         known: Some(held),
@@ -935,7 +1008,7 @@ impl Handshake {
                 };
                 let key = session_key(&held.link, ends, &theirs, &nonce);
                 let session = Session::new(key, Way::FromGiver);
-                let hello = self.hello(&nonce, 4).to_string();
+                let hello = self.hello(&nonce, 5).to_string();
                 let aad = hello_aad(Way::FromGiver, ends, &theirs);
                 let answer = c.seal_bound(&held.link, hello.as_bytes(), &aad);
                 (State::Greeted { session }, None, vec![Out::Sealed(answer)])
@@ -1052,13 +1125,14 @@ pub fn brothers_message(v: &Value) -> Option<Vec<(String, String)>> {
 
 /// What a closed relay connection means for the next try. 4401: the
 /// token was refused, sign in again (so the cached one goes). 4503: the
-/// relay could not check it, wait the longest. Anything else waits the
+/// relay could not check it, and 4429: too many of the human's machines
+/// are connected; either way wait the longest. Anything else waits the
 /// usual backoff. Gives (seconds to wait, the backoff after, whether to
 /// drop the access token).
 pub fn after_close(code: Option<u16>, backoff: u64, max: u64) -> (u64, u64, bool) {
     match code {
         Some(4401) => (backoff, (backoff * 2).min(max), true),
-        Some(4503) => (max, max, false),
+        Some(4503 | 4429) => (max, max, false),
         _ => (backoff, (backoff * 2).min(max), false),
     }
 }
@@ -1158,6 +1232,22 @@ pub(crate) mod fake {
                 .map(|(c, k)| c ^ k)
                 .collect();
             Some(plain)
+        }
+
+        /// The hash of the public key and the message: only the key it
+        /// names verifies it, and any change to the message breaks it,
+        /// which is all the tests of who believes whom need.
+        fn sign(&self, private: &[u8; 96], msg: &[u8]) -> Option<[u8; 64]> {
+            let mut sig = [0u8; 64];
+            sig[..32].copy_from_slice(&sha256(&[b"sig", &public_of(private)[..], msg].concat()));
+            Some(sig)
+        }
+
+        fn verify(&self, public: &[u8], msg: &[u8], sig: &[u8]) -> bool {
+            public.len() == 65
+                && sig.len() == 64
+                && sig[..32] == sha256(&[b"sig", public, msg].concat())
+                && sig[32..] == [0u8; 32]
         }
     }
 
@@ -1688,13 +1778,15 @@ mod tests {
             [7; 16],
         );
         let sent = sealed_bytes(&hello);
-        assert_eq!(sent.len(), 2);
+        assert_eq!(sent.len(), 3);
         let first = F.open_bound(&key, &sent[0], &old_hello_aad(Way::FromAsker, &[]));
         let theirs: Value = serde_json::from_slice(&first.unwrap()).unwrap();
         let nonce = nonce16(&theirs, "nonce").unwrap();
-        assert!(F
-            .open_bound(&key, &sent[1], &old_hello_aad(Way::FromAsker, &[]))
-            .is_none());
+        for later in &sent[1..] {
+            assert!(F
+                .open_bound(&key, later, &old_hello_aad(Way::FromAsker, &[]))
+                .is_none());
+        }
         let answer = old_hello([8; 16], Way::FromGiver, &nonce);
         assert_eq!(a.sealed(&F, &answer, 0), (None, vec![]));
         assert!(a.old() && !a.linked());
@@ -1706,6 +1798,114 @@ mod tests {
         let (a3, mut g3, _, ready) = relink(key, 3, 4);
         pass(&ready, &mut g3, &desk, 0);
         assert!(a3.linked() && g3.linked() && !a3.old() && !g3.old());
+    }
+
+    /// A brother on 0.33 or 0.34 binds its hello to both ends but does not
+    /// sign its word, so its roster and its takeovers would be believed by
+    /// nobody: it is told apart as an older one is, either way round, and
+    /// never linked.
+    #[test]
+    fn a_brother_that_does_not_sign_its_word_is_told_apart_and_never_linked() {
+        let key = [4; 32];
+        let (lap, desk) = (key_of(1), key_of(2));
+        let ends = |asker: (&'static str, &[u8]), giver: (&'static str, &[u8])| {
+            unsigned_hello_aad(Way::FromAsker, Ends { asker, giver }, &[])
+        };
+        let unsigned_hello = |nonce: [u8; 16], aad: Vec<u8>| {
+            let hello = json!({"t": "hello", "v": 4, "kind": "brother", "name": "Old", "nonce": b64url(&nonce)});
+            F.seal_bound(&key, hello.to_string().as_bytes(), &aad)
+        };
+        // Its hellos come as 0.34 sends them, v1 and then bound: nothing
+        // answers, and it needs a newer Horadric.
+        let mut g = Handshake::give(
+            me("d", "Desktop", &desk),
+            ("l", "Laptop"),
+            Some(held(key, 1)),
+            [9; 16],
+        );
+        let aad = ends(("l", &lap), ("d", &desk));
+        let (msg, out) = g.sealed(&F, &unsigned_hello([7; 16], aad), 0);
+        assert_eq!((msg, out), (None, vec![]));
+        assert!(g.old() && !g.linked());
+        // Asked by this build, a 0.34 giver opens only the bound hello it
+        // knows and answers under it: this side links not, and says so.
+        let (mut a, hello) = Handshake::link(
+            &F,
+            me("l", "Laptop", &lap),
+            ("d", "Desktop"),
+            held(key, 2),
+            [7; 16],
+        );
+        let sent = sealed_bytes(&hello);
+        let bound = ends(("l", &lap), ("d", &desk));
+        let opened = F.open_bound(&key, &sent[1], &bound).unwrap();
+        let theirs: Value = serde_json::from_slice(&opened).unwrap();
+        assert_eq!(theirs["v"], 4);
+        assert!(F.open_bound(&key, &sent[2], &bound).is_none());
+        let nonce = nonce16(&theirs, "nonce").unwrap();
+        let answer_aad = unsigned_hello_aad(
+            Way::FromGiver,
+            Ends {
+                asker: ("l", &lap),
+                giver: ("d", &desk),
+            },
+            &nonce,
+        );
+        let answer = unsigned_hello([8; 16], answer_aad);
+        assert_eq!(a.sealed(&F, &answer, 0), (None, vec![]));
+        assert!(a.old() && !a.linked());
+    }
+
+    /// A join from, or to, a Horadric that does not sign its word is
+    /// refused on both sides with the reason, never asked of a human.
+    #[test]
+    fn a_join_with_an_older_horadric_is_refused_and_said_why() {
+        let (lap, desk) = (key_of(1), key_of(2));
+        let (_, out) = Handshake::ask(me("l", "Laptop", &lap), ("d", "Desktop"), [7; 16]);
+        let Out::Plain(join) = &out[0] else {
+            panic!("{out:?}");
+        };
+        assert_eq!(join["v"], JOIN_V);
+        let mut old = join.clone();
+        old["v"] = json!(1);
+        let mut g = Handshake::give(me("d", "Desktop", &desk), ("l", "Laptop"), None, [9; 16]);
+        let back = g.heard(&old, &fake_ecdh(&desk));
+        assert_eq!(back[0], Out::Plain(json!({"t": "refused"})));
+        assert!(matches!(&back[1], Out::Failed(why) if why.contains("needs a newer Horadric")));
+        // An older giver answers `joining` without a version.
+        let (mut a, _) = Handshake::ask(me("l", "Laptop", &lap), ("d", "Desktop"), [7; 16]);
+        let joining = json!({"t": "joining", "name": "Desktop", "pub": b64url(&desk), "nonce": b64url(&[9; 16])});
+        let back = a.heard(&joining, &fake_ecdh(&lap));
+        assert!(matches!(&back[0], Out::Failed(why) if why.contains("needs a newer Horadric")));
+        assert!(!a.asking());
+    }
+
+    /// Review finding 6: ECDH with one's own public key agrees, so a join
+    /// the relay reflects back to its sender would agree with itself. Both
+    /// sides refuse a key equal to their own.
+    #[test]
+    fn a_join_reflected_to_its_sender_agrees_to_nothing() {
+        let lap = key_of(1);
+        let (mut a, out) = Handshake::ask(me("l", "Laptop", &lap), ("d", "Desktop"), [7; 16]);
+        // The relay plays the asker's own key back as the giver's.
+        let joining = json!({"t": "joining", "v": JOIN_V, "name": "Desktop", "pub": b64url(&lap), "nonce": b64url(&[9; 16])});
+        let back = a.heard(&joining, &fake_ecdh(&lap));
+        assert!(matches!(&back[0], Out::Failed(why) if why.contains("own key")));
+        assert!(!a.asking());
+        // And a giver handed its own key in a reveal refuses it, its
+        // commitment matching or not.
+        let Out::Plain(join) = &out[0] else {
+            panic!("{out:?}");
+        };
+        let commit = commitment(&lap, &[7; 16]);
+        let mut join = join.clone();
+        join["commit"] = json!(b64url(&commit));
+        let mut g = Handshake::give(me("d", "Laptop", &lap), ("l", "Laptop"), None, [9; 16]);
+        g.heard(&join, &fake_ecdh(&lap));
+        let reveal = json!({"t": "reveal", "pub": b64url(&lap), "nonce": b64url(&[7; 16])});
+        let back = g.heard(&reveal, &fake_ecdh(&lap));
+        assert_eq!(back[0], Out::Plain(json!({"t": "refused"})));
+        assert!(!g.asking());
     }
 
     #[test]
@@ -1804,14 +2004,22 @@ mod tests {
         let mut aad = b"horadric link frame v1g".to_vec();
         aad.extend_from_slice(&5u64.to_be_bytes());
         assert_eq!(frame_aad(Way::FromGiver, 5), aad);
+        // The hello of 0.33 and 0.34, which now only tells them apart.
         assert_eq!(
-            b64url(&sha256(&hello_aad(Way::FromAsker, ends, &[]))),
+            b64url(&sha256(&unsigned_hello_aad(Way::FromAsker, ends, &[]))),
             "rvb-RdN0x5662CVbs1nVRgh3SiT1l6HK_VmFmbg8UDk"
         );
         assert_eq!(
-            b64url(&sha256(&hello_aad(Way::FromGiver, ends, b"N"))),
+            b64url(&sha256(&unsigned_hello_aad(Way::FromGiver, ends, b"N"))),
             "LmspQ5z8_gDPTM8wko0SfVt6SqCB9NG3LGdMLTknKfE"
         );
+        // The hello that links now: the same, under the label v3.
+        for (way, nonce) in [(Way::FromAsker, &b""[..]), (Way::FromGiver, b"N")] {
+            let now = hello_aad(way, ends, nonce);
+            let before = unsigned_hello_aad(way, ends, nonce);
+            assert_eq!(&now[..22], b"horadric link hello v3");
+            assert_eq!(now[22..], before[22..]);
+        }
         // A brother on 0.32 or older is still told apart by these.
         assert_eq!(
             old_hello_aad(Way::FromAsker, &[]),
@@ -1982,6 +2190,7 @@ mod tests {
         assert_eq!(after_close(Some(4401), 1, 30), (1, 2, true));
         assert_eq!(after_close(Some(4401), 16, 30), (16, 30, true));
         assert_eq!(after_close(Some(4503), 1, 30), (30, 30, false));
+        assert_eq!(after_close(Some(4429), 2, 30), (30, 30, false));
         assert_eq!(after_close(None, 4, 30), (4, 8, false));
         assert_eq!(after_close(Some(1000), 30, 30), (30, 30, false));
     }

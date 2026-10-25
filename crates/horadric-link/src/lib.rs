@@ -9,6 +9,7 @@
 
 pub mod crypto;
 pub mod ecdh;
+pub mod ecdsa;
 pub mod http;
 mod stream;
 pub mod ws;

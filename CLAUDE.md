@@ -49,7 +49,9 @@ Do not reopen these without asking. They were argued through and chosen.
   and `tungstenite`: the AES-GCM, ECDH, TLS and WebSocket that Windows
   has built in and Linux does not (writing crypto is not the project
   either). Windows keeps CNG and WinHTTP; the crate is used there only
-  by a test that holds the two to the same bytes.
+  by a test that holds the two to the same bytes. `p256` has its `ecdsa`
+  feature too, for the signatures a brother's word carries (decided
+  2026-10-25), which brings `ecdsa`, `rfc6979`, `sha2` and `signature`.
   Not a crate but vendored: `conpty.dll` and `OpenConsole.exe` from
   Microsoft's ConPTY package, the pseudo console that passes `CSI c`
   through so OSC 7501 works (see

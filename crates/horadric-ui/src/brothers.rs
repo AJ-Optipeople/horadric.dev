@@ -56,6 +56,16 @@ impl Crypto for Cng {
     fn open_bound(&self, key: &[u8; 32], sealed: &[u8], aad: &[u8]) -> Option<Vec<u8>> {
         open_bound(key, sealed, aad)
     }
+
+    fn sign(&self, private: &[u8; 96], msg: &[u8]) -> Option<[u8; 64]> {
+        let key = crate::update::PrivateKey::from_bytes(private).ok()?;
+        crate::update::sign(&key, msg).ok()
+    }
+
+    fn verify(&self, public: &[u8], msg: &[u8], sig: &[u8]) -> bool {
+        // CNG takes the point without its leading 4.
+        public.len() == 65 && public[0] == 4 && crate::update::verify(&public[1..], msg, sig)
+    }
 }
 
 /// The relay link's sending half, which queues for its writer thread.
@@ -238,6 +248,13 @@ pub fn stop(generation: u64) {
     }
 }
 
+/// Something about the relay link for the human, a toast.
+pub fn note(text: &str) {
+    tell_link(Link::Note {
+        text: text.to_string(),
+    });
+}
+
 /// The relay connection came up or went down.
 pub fn connected(generation: u64, up: bool) {
     with(generation, |b| b.connected(up));
@@ -295,7 +312,10 @@ pub fn cast_out(id: &str) {
             let Some(dir) = horadric_hooks::state_dir() else {
                 return;
             };
-            if let Err(e) = cast_out_offline(&dir, id) {
+            let me = horadric_core::portal::Config::load(&dir)
+                .map(|c| self::id(&c.secret))
+                .unwrap_or_default();
+            if let Err(e) = cast_out_offline(&dir, &me, id, &Cng) {
                 eprintln!("horadric: cannot keep the brothers: {e}");
             }
             tell_link(Link::Gone { id: id.to_string() });

@@ -64,6 +64,19 @@ pub fn after_link(lived: u64, code: Option<u16>, backoff: u64) -> (u64, u64, boo
     joining::after_close(code, backoff, MAX_BACKOFF)
 }
 
+/// What the human is told when the relay closes this machine's link with
+/// `code`, None for a close that needs no word. 4429 is the relay
+/// refusing one machine more than it serves a human: said plainly, since
+/// a login someone else holds would look just like this.
+pub fn closed_word(code: Option<u16>) -> Option<&'static str> {
+    (code == Some(4429)).then_some(
+        "Town Portal refused this machine: too many machines are signed in as you \
+         right now (16 at most). If you did not sign in that many, someone else may \
+         have your login: sign out of Horadric on machines you no longer use, and \
+         change your password. It tries again by itself.",
+    )
+}
+
 /// The wait after a try that never connected, and the backoff after it.
 pub fn after_failure(backoff: u64) -> (u64, u64) {
     (backoff, (backoff * 2).min(MAX_BACKOFF))
@@ -72,6 +85,15 @@ pub fn after_failure(backoff: u64) -> (u64, u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_too_many_machines_is_told_to_the_human() {
+        assert!(closed_word(Some(4429))
+            .unwrap()
+            .contains("too many machines"));
+        assert_eq!(closed_word(Some(4401)), None);
+        assert_eq!(closed_word(None), None);
+    }
 
     #[test]
     fn a_quiet_relay_is_dead_after_seventy_seconds() {

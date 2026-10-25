@@ -14,7 +14,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use horadric_core::portal::{frame, unframe};
-use horadric_core::relaying::{after_failure, after_link, pc_dial, silent, Dial, PING_SECS};
+use horadric_core::relaying::{
+    after_failure, after_link, closed_word, pc_dial, silent, Dial, PING_SECS,
+};
 use horadric_core::release::split_url;
 use windows::core::{w, HSTRING, PCWSTR};
 use windows::Win32::Networking::WinHttp::{
@@ -290,6 +292,8 @@ fn read_loop(
     };
     let debug = std::env::var_os("HORADRIC_DEBUG").is_some();
     let mut backoff = 1;
+    // Told once until a link closes for another reason, not every retry.
+    let mut told = false;
     while !stop.load(Ordering::SeqCst) {
         let wait;
         let dial = url();
@@ -319,6 +323,14 @@ fn read_loop(
                 drop(socket);
                 crate::brothers::connected(generation, false);
                 deliver(Incoming::Connected(false));
+                match closed_word(code) {
+                    Some(word) if !told => {
+                        told = true;
+                        crate::brothers::note(word);
+                    }
+                    Some(_) => {}
+                    None => told = false,
+                }
                 let (w, next, stale) = after_link(began.elapsed().as_secs(), code, backoff);
                 if stale {
                     crate::workos::forget_access();

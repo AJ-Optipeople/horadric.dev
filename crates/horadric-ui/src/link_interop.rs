@@ -35,6 +35,14 @@ impl Crypto for Link {
     fn open_bound(&self, key: &[u8; 32], sealed: &[u8], aad: &[u8]) -> Option<Vec<u8>> {
         horadric_link::open_bound(key, sealed, aad)
     }
+
+    fn sign(&self, private: &[u8; 96], msg: &[u8]) -> Option<[u8; 64]> {
+        horadric_link::ecdsa::sign(private, msg)
+    }
+
+    fn verify(&self, public: &[u8], msg: &[u8], sig: &[u8]) -> bool {
+        horadric_link::ecdsa::verify(public, msg, sig)
+    }
 }
 
 /// The sealed frames among what a handshake step says.
@@ -233,5 +241,32 @@ fn a_tampered_or_misbound_frame_opens_on_neither() {
         }
         assert_eq!(cng::open_bound(&[6; 32], &sealed, &aad), None);
         assert_eq!(horadric_link::open_bound(&[6; 32], &sealed, &aad), None);
+    }
+}
+
+/// A brother's word is signed with its long term key, ECDH's pair, and
+/// any brother checks it whatever it runs: so what CNG signs the link
+/// verifies, what the link signs CNG verifies, each under the other's
+/// key pairs too, and a signature under another key or of another word
+/// verifies on neither.
+#[test]
+fn signatures_made_on_one_verify_on_the_other() {
+    let sides: [&dyn Crypto; 2] = [&Cng, &Link];
+    for _ in 0..8 {
+        for pair in [cng_pair().unwrap(), ecdh::pair()] {
+            let public = cng_public(&pair);
+            let other = cng_public(&cng_pair().unwrap());
+            for signer in sides {
+                let sig = signer.sign(&pair, b"I hand s to b at 3").unwrap();
+                for checker in sides {
+                    assert!(checker.verify(&public, b"I hand s to b at 3", &sig));
+                    assert!(!checker.verify(&public, b"I hand s to c at 3", &sig));
+                    assert!(!checker.verify(&other, b"I hand s to b at 3", &sig));
+                    let mut bent = sig;
+                    bent[40] ^= 1;
+                    assert!(!checker.verify(&public, b"I hand s to b at 3", &bent));
+                }
+            }
+        }
     }
 }

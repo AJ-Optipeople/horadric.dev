@@ -94,6 +94,11 @@ pub struct Brother {
     /// this brother's own word (see [`Roster::introductions`]).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub held: BTreeMap<String, Kin>,
+    /// Its own signature of all the above but `cast_out`, b64url (see
+    /// [`crate::said::sign_entry`]): what lets any brother pass its entry
+    /// on, and every brother believe it from whomever it comes.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub sig: String,
 }
 
 /// One brother another holds, as that one says it.
@@ -145,6 +150,7 @@ impl Brother {
             cast_out: false,
             holds: BTreeSet::new(),
             held: BTreeMap::new(),
+            sig: String::new(),
         }
     }
 
@@ -202,6 +208,12 @@ pub struct Counted {
     /// Each brother's number and a hash of its entry, by its id and key.
     #[serde(default)]
     pub brothers: BTreeMap<String, (u64, u64)>,
+    /// The signature of this machine's own entry as last served, and a
+    /// hash of what it signed, so the same entry keeps the same one.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub sig: String,
+    #[serde(default)]
+    pub signed: u64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -220,59 +232,12 @@ pub struct Roster {
     /// Sessions ended for good, by id, as their owners said it.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub ended: BTreeMap<String, Ending>,
-}
-
-/// What one brother told this machine about a session's owner, judged
-/// (see [`accept_owner`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Teller<'a> {
-    /// Its id, as the link it spoke on proves.
-    pub id: &'a str,
-    /// Whether it may act on this machine (not view only).
-    pub control: bool,
-}
-
-/// The owner this machine records for a session after brother `from`
-/// said `o` of it, where it held `cur`, or None to keep `cur`. Nobody is
-/// believed about a session but the brothers it concerns:
-///
-/// - a brother says it owns a session nobody is known to own, or raises
-///   its own, never by more than [`LEAP`];
-/// - an owner hands its own session to another, one number higher;
-/// - a keeper the owner named itself (`keeps(owner, keeper)`, from the
-///   owner's own word) takes it over, exactly one number higher, while it
-///   has not ended.
-///
-/// All but marking its own anew needs `from` to have control here: a
-/// view only brother watches, it does not move sessions.
-pub fn accept_owner(
-    cur: Option<&Owner>,
-    o: &Owner,
-    from: Teller,
-    ended: bool,
-    keeps: impl Fn(&str, &str) -> bool,
-) -> Option<Owner> {
-    if o.n == 0 || o.brother.is_empty() {
-        return None;
-    }
-    let Some(c) = cur else {
-        return (from.control && o.brother == from.id && o.n <= LEAP).then(|| o.clone());
-    };
-    if o <= c {
-        return None;
-    }
-    if c.brother == from.id {
-        let same = o.brother == from.id && o.n == c.n;
-        let up = o.n <= c.n.saturating_add(LEAP);
-        let handed = o.brother == from.id || o.n == c.n.saturating_add(1);
-        return (up && handed && (same || from.control)).then(|| o.clone());
-    }
-    let taken = from.control
-        && !ended
-        && o.brother == from.id
-        && Some(o.n) == c.n.checked_add(1)
-        && keeps(&c.brother, from.id);
-    taken.then(|| o.clone())
+    /// The signed word behind `sessions`, `ended` and `outcast`: each
+    /// session's last moves and its ending, and each cast out. What a
+    /// brother believes of these, it believes from here alone, whoever
+    /// passed it on (see [`crate::said`] and [`crate::mesh::believe`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub said: Vec<crate::said::Word>,
 }
 
 /// A brother this machine would take a key for, and on whose word.
@@ -712,12 +677,14 @@ impl Roster {
                 ended.insert(id.clone(), e.clone());
             }
         }
+        let said: BTreeSet<&crate::said::Word> = self.said.iter().chain(&other.said).collect();
         Roster {
             n: self.n.max(other.n),
             brothers,
             sessions,
             outcast,
             ended,
+            said: said.into_iter().cloned().collect(),
         }
     }
 
@@ -731,7 +698,13 @@ impl Roster {
         let mut changed = false;
         let mut brothers = BTreeMap::new();
         for b in &mut self.brothers {
-            let entry = hash_json(&Brother { n: 0, ..b.clone() });
+            // Not the signature: CNG signs anew each time, and the same
+            // entry must count as the same.
+            let entry = hash_json(&Brother {
+                n: 0,
+                sig: String::new(),
+                ..b.clone()
+            });
             let at = format!("{} {}", b.id, b.key);
             match last.brothers.get(&at) {
                 Some(&(n, was)) if was == entry => b.n = b.n.max(n),
@@ -743,7 +716,7 @@ impl Roster {
             brothers.insert(at, (b.n, entry));
         }
         changed |= last.brothers.keys().any(|id| !brothers.contains_key(id));
-        let rest = hash_json(&(&self.sessions, &self.outcast, &self.ended));
+        let rest = hash_json(&(&self.sessions, &self.outcast, &self.ended, &self.said));
         changed |= rest != last.rest;
         let top = self.brothers.iter().map(|b| b.n).max().unwrap_or(0);
         self.n = self.n.max(if changed { next } else { last.n }).max(top);
@@ -751,6 +724,7 @@ impl Roster {
             n: self.n,
             rest,
             brothers,
+            ..Counted::default()
         }
     }
 

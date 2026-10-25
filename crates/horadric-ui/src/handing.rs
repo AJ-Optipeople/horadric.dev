@@ -614,7 +614,7 @@ impl App {
                 };
                 self.far_tell(&o.to, ask);
             }
-            Do::Pack { known, clean } => self.handing_pack(id, known, clean),
+            Do::Pack { known, clean } => self.handing_pack(id, &o.to, known, clean),
             Do::LetGo(n) => self.let_go(id, &o.to, n),
             Do::Fail(why) => {
                 with(|s| {
@@ -665,14 +665,18 @@ impl App {
         bases_ask_placing(id, &repo.unwrap_or_default(), &place)
     }
 
-    /// Packs session `id` on a thread for its receiver, which has `known`.
-    fn handing_pack(&mut self, id: &str, known: Vec<String>, clean: bool) {
+    /// Packs session `id` on a thread for its receiver `to`, which has
+    /// `known`. The record carries this PC's signed word that it hands the
+    /// session to `to`, so `to` owns it on that word as soon as it runs.
+    fn handing_pack(&mut self, id: &str, to: &str, known: Vec<String>, clean: bool) {
         let args = self
             .consoles
             .get(id)
             .map(|c| c.args.clone())
             .or_else(|| self.paused.get(id).map(|p| p.args.clone()))
             .unwrap_or_default();
+        let n = self.keeping_number(id);
+        let said = self.keeping_handing(id, to, n);
         let record = self.shared.registry.lock().ok().and_then(|r| {
             let s = r.get(id)?;
             Some(Record {
@@ -688,7 +692,8 @@ impl App {
                 model: model_of(&args),
                 from: crate::portal_pair::pc_name(),
                 interrupted: !clean,
-                n: self.keeping_number(id),
+                n,
+                said,
                 ..Record::default()
             })
         });
@@ -756,7 +761,7 @@ impl App {
             if let Ok(id) = &result {
                 let n = l.record.n.saturating_add(1);
                 with(|s| s.took.insert(id.clone(), n));
-                self.keeping_handed(id, None, n);
+                self.keeping_handed(id, None, n, &l.record.said);
             }
             let _ = l.done.send(result);
         }
@@ -769,7 +774,7 @@ impl App {
             s.out.remove(id);
             s.took.remove(id);
         });
-        self.keeping_handed(id, Some(to), n);
+        self.keeping_handed(id, Some(to), n, &[]);
         let (tree, cwd, session) = match self.shared.registry.lock() {
             Ok(mut r) => match r.get_mut(id) {
                 Some(s) => (

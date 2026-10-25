@@ -596,7 +596,7 @@ impl Portal {
     /// joined, None before it joined any.
     fn roster(&self) -> Option<horadric_core::brotherhood::Roster> {
         let me = horadric_core::portal::id(&self.config.secret);
-        horadric_core::rostering::served(&self.dir, &me, &pc_name())
+        horadric_core::rostering::served(&self.dir, &me, &pc_name(), &crate::brothers::Cng)
     }
 
     /// Cuts off every connection from a phone no longer in the config,

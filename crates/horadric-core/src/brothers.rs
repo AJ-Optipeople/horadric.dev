@@ -17,6 +17,7 @@ use serde_json::{json, Value};
 use crate::brotherhood::{Introduction, Mine, Owner, Roster};
 use crate::joining::{self, Crypto, Handshake, Held, Identity, Joined, Listed, Me, Out, Store};
 use crate::portal::{b64url, frame, unb64url};
+use crate::said::Signer;
 use crate::standing::Standing;
 
 /// The sending half of a relay link. Neither call may block on the
@@ -36,11 +37,15 @@ pub trait Relay: Send {
 pub struct Asking {
     pub ch: u32,
     pub token: u64,
+    /// The name the relay gives the machine on the other side. Only a
+    /// label: the relay picks it, and the id behind it.
     pub name: String,
     pub code: String,
-    /// The brother is held here, or known to the roster, under another
-    /// key, which saying yes replaces everywhere.
-    pub replaces: bool,
+    /// The brother this machine holds, or the roster knows, under the id
+    /// the relay names and another key, by the name this machine knows it
+    /// by: saying yes replaces its key everywhere. Never the relay's name,
+    /// which could put a new machine's name on an old brother's id.
+    pub replaces: Option<String>,
 }
 
 /// The human at this machine, asked whether a code matches. Both asks
@@ -347,9 +352,9 @@ impl Brothers {
             }
             return;
         }
-        if let (true, Some(key)) = (t == "roster" && !asks(&msg), held) {
+        if t == "roster" && !asks(&msg) && held.is_some() {
             if let Ok(roster) = serde_json::from_value::<Roster>(msg.clone()) {
-                self.heard_roster(peer, &key, &roster);
+                self.heard_roster(peer, &roster);
             }
             // Cast out meanwhile, this machine has nobody to tell.
             if self.store.get(peer).is_none() {
@@ -368,21 +373,16 @@ impl Brothers {
         self.hands.listener.event(e);
     }
 
-    /// Takes in a roster brother `peer`, held under `key`, served: what it
-    /// may say merged into what is held (see [`crate::mesh::merged`]), then
-    /// acted on.
-    fn heard_roster(&mut self, peer: &str, key: &str, theirs: &Roster) {
+    /// Takes in a roster brother `peer` served: what this machine may
+    /// believe of it merged into what is held (see
+    /// [`crate::mesh::merged`]), then acted on.
+    fn heard_roster(&mut self, peer: &str, theirs: &Roster) {
         let Some(dir) = self.dir.clone() else {
             return;
         };
-        let from = crate::mesh::Peer {
-            id: peer,
-            key,
-            control: self.controls(peer),
-        };
-        let keepers = crate::keeping::Book::load(&dir).keepers;
+        let t = crate::mesh::Trust::load(&dir, &self.me, &*self.hands.crypto);
         let now = (self.hands.clock)();
-        let heard = crate::mesh::hear(&dir, &self.me, from, theirs, &keepers, now);
+        let heard = crate::mesh::hear(&dir, peer, theirs, &t, now);
         if heard.changed {
             debug(&format!("the roster is at {} now", heard.roster.n));
         }
@@ -472,7 +472,10 @@ impl Brothers {
             if let Err(e) = standing.save(&dir) {
                 eprintln!("horadric: cannot keep the key replaced: {e}");
             }
-            crate::mesh::update(&dir, |r| r.cast_out_key(id, &old.name, &old.public));
+            // Not signed: the word is the brother's whose human let the new
+            // key in, which every brother has already.
+            let now = (self.hands.clock)();
+            crate::mesh::cast_out(&dir, None, id, &old.name, &old.public, now);
         }
         let gone: Vec<(u32, bool)> = self
             .chans
@@ -770,7 +773,8 @@ impl Brothers {
     /// its key dropped and every channel to it closed.
     pub fn cast_out(&mut self, id: &str) {
         if let Some(dir) = self.dir.clone() {
-            mark_cast_out(&dir, &self.store, id);
+            let signer = Signer::of(&dir, &self.me, &*self.hands.crypto);
+            mark_cast_out(&dir, &self.store, id, signer.as_ref(), (self.hands.clock)());
         }
         self.part(id);
     }
@@ -992,23 +996,31 @@ impl Brothers {
         }
     }
 
-    /// Whether the brother joining on `ch` is held here, or known to the
-    /// roster in good standing, under a key other than the one it shows.
-    fn replaces(&self, ch: u32) -> bool {
-        let Some(h) = self.chans.get(&ch) else {
-            return false;
-        };
-        let Some(key) = h.peer_key().map(b64url) else {
-            return false;
-        };
+    /// The brother the one joining on `ch` would replace, by the name this
+    /// machine knows it by: one held here, or known to the roster in good
+    /// standing, under the same id and a key other than the one it shows.
+    fn replaces(&self, ch: u32) -> Option<String> {
+        let h = self.chans.get(&ch)?;
+        let key = h.peer_key().map(b64url)?;
         let id = h.peer();
-        let held = self.store.get(id).is_some_and(|b| b.public != key);
-        held || self.dir.as_deref().is_some_and(|d| {
-            let r = crate::mesh::load(d);
-            r.brothers
-                .iter()
-                .any(|b| b.id == id && b.key != key && !b.cast_out && !r.refuses(&b.key))
-        })
+        if let Some(b) = self.store.get(id).filter(|b| b.public != key) {
+            return Some(if b.name.is_empty() {
+                id.to_string()
+            } else {
+                b.name.clone()
+            });
+        }
+        let r = crate::mesh::load(self.dir.as_deref()?);
+        r.brothers
+            .iter()
+            .find(|b| b.id == id && b.key != key && !b.cast_out && !r.refuses(&b.key))
+            .map(|b| {
+                if b.name.is_empty() {
+                    id.to_string()
+                } else {
+                    b.name.clone()
+                }
+            })
     }
 
     /// Both humans said yes on `ch`: the brother is kept, vouched for by
@@ -1021,6 +1033,14 @@ impl Brothers {
     fn kept(&mut self, ch: u32, joined: Joined) {
         let id = joined.id.clone();
         let new = joined.public.clone();
+        // A join the relay reflected to this machine agrees with itself:
+        // never a brother.
+        let own = self.store.me.as_ref().map(|m| m.public.as_str());
+        if own == Some(new.as_str()) || id == self.me {
+            debug("a join came back with this machine's own key: nothing kept");
+            self.close(ch);
+            return;
+        }
         let mut old: BTreeSet<String> = self
             .store
             .get(&id)
@@ -1069,12 +1089,10 @@ impl Brothers {
             if let Err(e) = standing.save(&dir) {
                 eprintln!("horadric: cannot keep who was let in: {e}");
             }
-            if !old.is_empty() {
-                crate::mesh::update(&dir, |r| {
-                    for k in &old {
-                        r.cast_out_key(&id, &name, k);
-                    }
-                });
+            let signer = Signer::of(&dir, &self.me, &*self.hands.crypto);
+            let now = (self.hands.clock)();
+            for k in &old {
+                crate::mesh::cast_out(&dir, signer.as_ref(), &id, &name, k, now);
             }
         }
         let text = if old.is_empty() {
@@ -1141,8 +1159,9 @@ impl Brothers {
 }
 
 /// Writes the human's cast out of brother `id` where it lasts: in
-/// [`Standing`], and in the roster, which carries it to every brother.
-fn mark_cast_out(dir: &Path, store: &Store, id: &str) {
+/// [`Standing`], and in the roster, which carries it, signed by `signer`,
+/// to every brother.
+fn mark_cast_out(dir: &Path, store: &Store, id: &str, signer: Option<&Signer>, now: u64) {
     let b = store
         .get(id)
         .or_else(|| store.cast.iter().find(|b| b.id == id));
@@ -1153,15 +1172,24 @@ fn mark_cast_out(dir: &Path, store: &Store, id: &str) {
         eprintln!("horadric: cannot keep who was cast out: {e}");
     }
     if !key.is_empty() {
-        crate::mesh::update(dir, |r| r.cast_out_key(id, name, key));
+        crate::mesh::cast_out(dir, signer, id, name, key, now);
     }
 }
 
 /// Casts brother `id` out with no relay link up, from the files alone:
 /// the next link loads them so, and its brothers hear it in the roster.
-pub fn cast_out_offline(dir: &Path, id: &str) -> std::io::Result<()> {
+/// `me` is this machine's relay id, which signs it.
+pub fn cast_out_offline(
+    dir: &Path,
+    me: &str,
+    id: &str,
+    crypto: &dyn Crypto,
+) -> std::io::Result<()> {
     let mut store = Store::load(dir).unwrap_or_default();
-    mark_cast_out(dir, &store, id);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    mark_cast_out(dir, &store, id, Signer::of(dir, me, crypto).as_ref(), now);
     if store.cast_out(id) {
         store.save(dir)?;
     }
@@ -1179,15 +1207,20 @@ fn debug(what: &str) {
 /// machine that stole only the relay secret comes this way.
 pub fn let_in_text(a: &Asking) -> String {
     let (name, code) = (&a.name, &a.code);
-    let mut text = format!(
+    if let Some(held) = &a.replaces {
+        return format!(
+            "A machine asks to join as {held}, already your brother, with a new key. \
+             The relay calls it {name}.\n\n\
+             Say yes only if you set {held} up anew yourself (its keys were lost) \
+             and its screen shows the code {code}. {}",
+            replaces_text(held)
+        );
+    }
+    format!(
         "{name} wants to join. Let it in?\n\n\
          Say yes only if {name} shows the code {code}. \
          A brother sees this PC's sessions and can type into them."
-    );
-    if a.replaces {
-        text.push_str(&replaces_text(name));
-    }
-    text
+    )
 }
 
 /// What the asking side asks its human: the relay could play the brother
@@ -1195,24 +1228,30 @@ pub fn let_in_text(a: &Asking) -> String {
 /// too.
 pub fn confirm_text(a: &Asking) -> String {
     let (name, code) = (&a.name, &a.code);
-    let mut text = format!(
+    if let Some(held) = &a.replaces {
+        return format!(
+            "The machine asked answers as {held}, already your brother, with a new key. \
+             The relay calls it {name}.\n\n\
+             Say yes only if you set {held} up anew yourself (its keys were lost) \
+             and its screen shows exactly the code {code}. {}",
+            replaces_text(held)
+        );
+    }
+    format!(
         "Does {name} show the code {code}?\n\n\
          Say yes only if {name}'s screen shows exactly this code. \
          If it shows another, or none, something between the two PCs \
          may be pretending to be {name}: say no."
-    );
-    if a.replaces {
-        text.push_str(&replaces_text(name));
-    }
-    text
+    )
 }
 
-/// Said when a yes replaces a brother's key.
-fn replaces_text(name: &str) -> String {
+/// Said when a yes replaces the key of brother `held`, named as this
+/// machine knows it.
+fn replaces_text(held: &str) -> String {
     format!(
-        "\n\nThis replaces {name}'s key. {name} is a brother already under another \
-         key, which every brother refuses once you say yes. Say yes only if {name} \
-         was set up anew (its keys lost) and you set it up yourself."
+        "Saying yes replaces {held}'s key: every brother refuses its old key from \
+         then on. If {held} still runs with its old keys, say no: something is \
+         pretending to be it."
     )
 }
 
@@ -1299,7 +1338,8 @@ mod tests {
     impl H {
         fn ask(&self, a: Asking, what: &'static str) {
             let mut w = self.1.lock().unwrap();
-            w.tokens.insert((self.0, a.ch), (a.token, a.replaces));
+            w.tokens
+                .insert((self.0, a.ch), (a.token, a.replaces.is_some()));
             w.asked.push((self.0, a.ch, what, a.name, a.code));
         }
     }
@@ -1585,7 +1625,8 @@ mod tests {
         /// every brother linked to it as its server would, and pumped.
         fn serve_roster(&mut self, i: usize) {
             let me = IDS[i];
-            let roster = crate::rostering::served(&self.dirs[i], me, NAMES[i]).unwrap();
+            let roster =
+                crate::rostering::served(&self.dirs[i], me, NAMES[i], &Fake::new()).unwrap();
             let msg = crate::rostering::roster_message(&roster);
             let linked: Vec<u32> = self.linked(i);
             for ch in linked {
@@ -1840,7 +1881,7 @@ mod tests {
         assert_eq!(net.sides[1].store().get("a").unwrap().public, new.public);
         assert!(Standing::load(&net.dirs[1]).controls("a"));
         assert!(Store::load(&net.dirs[1]).unwrap().cast_key("a").is_none());
-        let r = crate::rostering::served(&net.dirs[1], "b", "Beta").unwrap();
+        let r = crate::rostering::served(&net.dirs[1], "b", "Beta", &Fake::new()).unwrap();
         assert!(r.admits(&new.public).is_some());
         assert!(r.refuses(&old.public));
     }
@@ -1889,7 +1930,9 @@ mod tests {
         assert_eq!(b.get("c").unwrap().public, c.me.as_ref().unwrap().public);
         // Every machine serves the same roster.
         let served: Vec<Roster> = (0..3)
-            .map(|i| crate::rostering::served(&net.dirs[i], IDS[i], NAMES[i]).unwrap())
+            .map(|i| {
+                crate::rostering::served(&net.dirs[i], IDS[i], NAMES[i], &Fake::new()).unwrap()
+            })
             .collect();
         let shape = |r: &Roster| {
             (
@@ -1977,7 +2020,7 @@ mod tests {
         assert_eq!(net.linked_to(2), ["a", "b"]);
         assert!(Standing::load(&net.dirs[1]).controls("c"));
         for i in 0..3 {
-            let r = crate::rostering::served(&net.dirs[i], IDS[i], NAMES[i]).unwrap();
+            let r = crate::rostering::served(&net.dirs[i], IDS[i], NAMES[i], &Fake::new()).unwrap();
             assert!(r.refuses(&old), "{i}");
             assert!(!r.brother("c").unwrap().cast_out, "{i}");
         }
@@ -1992,7 +2035,7 @@ mod tests {
         net.take_events();
         // Alpha's roster reaches Beta alone: Beta takes Gamma's key and,
         // being the lower id, says hello to Gamma, which holds no key yet.
-        let roster = crate::rostering::served(&net.dirs[0], "a", "Alpha").unwrap();
+        let roster = crate::rostering::served(&net.dirs[0], "a", "Alpha", &Fake::new()).unwrap();
         let msg = crate::rostering::roster_message(&roster);
         let to_beta = net
             .linked(0)
@@ -2047,7 +2090,7 @@ mod tests {
         let mut net = Net::new("replay");
         let ch = net.join();
         net.take_events();
-        let roster = crate::rostering::served(&net.dirs[0], "a", "Alpha").unwrap();
+        let roster = crate::rostering::served(&net.dirs[0], "a", "Alpha", &Fake::new()).unwrap();
         let msg = crate::rostering::roster_message(&roster);
         net.sides[0].reply(ch, &msg);
         let sent = std::mem::take(&mut net.wire.lock().unwrap().sent);
@@ -2071,11 +2114,22 @@ mod tests {
         let mut net = Net::new("moved");
         let ch = net.join();
         net.take_events();
-        crate::mesh::update(&net.dirs[1], |r| {
-            crate::mesh::claim(&mut r.sessions, "s1", "b", 1);
-        });
+        // Beta claims s1, signed; Alpha's roster carries Beta's word and
+        // its own takeover of it, as a keeper's would.
+        let fake = Fake::new();
+        let beta = crate::said::Signer::of(&net.dirs[1], "b", &fake).unwrap();
+        let alpha = crate::said::Signer::of(&net.dirs[0], "a", &fake).unwrap();
+        let t = crate::mesh::Trust::load(&net.dirs[1], "b", &fake);
+        crate::mesh::own(&net.dirs[1], Some(&beta), &t, "s1", 1);
+        let owns = crate::mesh::chain(&crate::mesh::load_held(&net.dirs[1]), "s1");
+        let what = crate::said::What::Takes {
+            session: "s1".into(),
+            from: "b".into(),
+        };
+        let takes = alpha.sign(2, 2, what).unwrap();
         crate::mesh::update(&net.dirs[0], |r| {
-            crate::mesh::take_over(&mut r.sessions, "s1", 1, "a", 2);
+            r.said.extend(owns.iter().cloned());
+            r.said.push(takes.clone());
         });
         // Alpha is not Beta's keeper: its takeover is not believed.
         net.serve_roster(0);
@@ -2175,7 +2229,7 @@ mod tests {
         crate::mesh::update(&net.dirs[1], |r| {
             r.outcast.insert(gamma.clone());
         });
-        let roster = crate::rostering::served(&net.dirs[1], "b", "Beta").unwrap();
+        let roster = crate::rostering::served(&net.dirs[1], "b", "Beta", &Fake::new()).unwrap();
         net.sides[1].reply(ch, &crate::rostering::roster_message(&roster));
         net.pump();
         assert!(net.sides[0].store().get("c").is_some());
@@ -2297,13 +2351,13 @@ mod tests {
         let mut net = Net::new("offline");
         net.join();
         let key = net.sides[0].store().get("b").unwrap().public.clone();
-        cast_out_offline(&net.dirs[0], "b").unwrap();
+        cast_out_offline(&net.dirs[0], "a", "b", &Fake::new()).unwrap();
         let store = Store::load(&net.dirs[0]).unwrap();
         assert!(store.brothers.is_empty());
         assert!(store.cast_key("b").is_some());
         assert!(crate::mesh::load(&net.dirs[0]).refuses(&key));
         assert!(Standing::load(&net.dirs[0]).refuses("b", None));
-        cast_out_offline(&net.dirs[0], "nobody").unwrap();
+        cast_out_offline(&net.dirs[0], "a", "nobody", &Fake::new()).unwrap();
     }
 
     #[test]
@@ -2328,21 +2382,33 @@ mod tests {
             token: 1,
             name: "Laptop".into(),
             code: "587 941".into(),
-            replaces: false,
+            replaces: None,
         };
         let l = let_in_text(&a);
         assert!(l.starts_with("Laptop wants to join. Let it in?"));
         assert!(l.contains("shows the code 587 941."));
         assert!(!l.contains("replaces"));
-        a.replaces = true;
-        assert!(let_in_text(&a).contains("This replaces Laptop's key."));
-        a.name = "Desktop".into();
+        let d = confirm_text(&Asking {
+            name: "Desktop".into(),
+            ..a.clone()
+        });
+        assert!(d.starts_with("Does Desktop show the code 587 941?"));
+        assert!(d.contains("pretending to be Desktop: say no."));
+        // Review finding 5: the relay names a new machine "Laptop2" and
+        // gives it Desktop's id. What a yes replaces is named as this
+        // machine knows it, never by the relay's word alone.
+        a.name = "Laptop2".into();
+        a.replaces = Some("Desktop".into());
+        let r = let_in_text(&a);
+        assert!(r.starts_with("A machine asks to join as Desktop, already your brother"));
+        assert!(r.contains("The relay calls it Laptop2."));
+        assert!(r.contains("Saying yes replaces Desktop's key"));
+        assert!(!r.contains("Laptop2's key"));
         let c = confirm_text(&a);
-        assert!(c.starts_with("Does Desktop show the code 587 941?"));
-        assert!(c.contains("pretending to be Desktop: say no."));
-        assert!(c.contains("This replaces Desktop's key."));
+        assert!(c.contains("answers as Desktop, already your brother"));
+        assert!(c.contains("replaces Desktop's key") && c.contains("code 587 941"));
         // Lines run on, never broken by the source's indent.
-        for t in [l, c] {
+        for t in [l, d, r, c] {
             assert!(!t.contains("  "), "{t}");
         }
     }

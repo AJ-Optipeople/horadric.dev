@@ -333,7 +333,9 @@ fn cast_out(id: &str) -> Result<(), String> {
         return Err(format!("{id} is no brother of this node"));
     }
     if relay::with(|b| b.cast_out(id)).is_none() {
-        horadric_core::brothers::cast_out_offline(&dir, id).map_err(|e| e.to_string())?;
+        let me = super::relay::me().unwrap_or_default();
+        horadric_core::brothers::cast_out_offline(&dir, &me, id, &super::relay::LinkCrypto)
+            .map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -548,10 +550,8 @@ fn ask_and_follow(line: &mut Line, id: &str, name: &str) -> Result<(), String> {
                 println!("Say yes only if {name}'s screen shows exactly this code. If it shows");
                 println!("another, or none, something between the two may be pretending to be");
                 println!("{name}: say no.");
-                if ev["replaces"] == true {
-                    println!();
-                    println!("This replaces {name}'s key: {name} is a brother already under");
-                    println!("another key, which every brother refuses once you say yes.");
+                if let Some(held) = ev["replaces"].as_str() {
+                    replaces(held, name);
                 }
                 let ok = yes(&format!("Does {name} show {code}?"));
                 let answer =
@@ -578,6 +578,18 @@ fn ask_and_follow(line: &mut Line, id: &str, name: &str) -> Result<(), String> {
     Err(format!("{name} did not answer"))
 }
 
+/// Says plainly which brother a yes replaces, by the name this node knows
+/// it by, never the relay's alone: the relay picks both the name and the
+/// id, and could put a new machine's name on an old brother's id.
+fn replaces(held: &str, name: &str) {
+    println!();
+    println!("The relay calls it {name}, but it comes as {held}, already a brother");
+    println!("here, with a new key. Saying yes replaces {held}'s key: every brother");
+    println!("refuses its old key from then on. Say yes only if you set {held} up");
+    println!("anew yourself (its keys were lost). If {held} still runs with its old");
+    println!("keys, say no: something is pretending to be it.");
+}
+
 /// `horadric node let-in`: waits for a machine to ask this node, shows
 /// its code and asks whether to let it in.
 pub(super) fn let_in_command() -> Result<(), String> {
@@ -600,11 +612,8 @@ pub(super) fn let_in_command() -> Result<(), String> {
                 println!();
                 println!("Say yes only if {name} shows exactly this code. A brother sees this");
                 println!("node's sessions and can type into them.");
-                if ev["replaces"] == true {
-                    println!();
-                    println!("This replaces {name}'s key: {name} is a brother already under");
-                    println!("another key, which every brother refuses once you say yes. Say");
-                    println!("yes only if {name} was set up anew and you set it up yourself.");
+                if let Some(held) = ev["replaces"].as_str() {
+                    replaces(held, name);
                 }
                 let ok = yes(&format!("Let {name} in?"));
                 let answer =

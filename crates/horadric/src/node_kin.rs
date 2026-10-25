@@ -348,7 +348,7 @@ impl Machine {
     pub(super) fn kin_roster(&self) -> Option<Value> {
         let dir = horadric_hooks::state_dir()?;
         let me = relay::me()?;
-        let roster = rostering::served(&dir, &me, &machine_name())?;
+        let roster = rostering::served(&dir, &me, &machine_name(), &relay::LinkCrypto)?;
         Some(rostering::roster_message(&roster))
     }
 }

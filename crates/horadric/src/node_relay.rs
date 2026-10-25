@@ -23,7 +23,9 @@ use std::time::{Duration, Instant};
 use horadric_core::brothers::{Brothers, Event as Link, Hands, Listener, Relay};
 use horadric_core::joining::{Crypto, Listed, Store};
 use horadric_core::portal::{unframe, Config};
-use horadric_core::relaying::{after_failure, after_link, pc_dial, PING_SECS, SILENT_SECS};
+use horadric_core::relaying::{
+    after_failure, after_link, closed_word, pc_dial, PING_SECS, SILENT_SECS,
+};
 use horadric_link::ws::Socket;
 use serde_json::{json, Value};
 
@@ -52,6 +54,14 @@ impl Crypto for LinkCrypto {
 
     fn open_bound(&self, key: &[u8; 32], sealed: &[u8], aad: &[u8]) -> Option<Vec<u8>> {
         horadric_link::open_bound(key, sealed, aad)
+    }
+
+    fn sign(&self, private: &[u8; 96], msg: &[u8]) -> Option<[u8; 64]> {
+        horadric_link::ecdsa::sign(private, msg)
+    }
+
+    fn verify(&self, public: &[u8], msg: &[u8], sig: &[u8]) -> bool {
+        horadric_link::ecdsa::verify(public, msg, sig)
     }
 }
 
@@ -294,6 +304,9 @@ fn read_loop(relay: &str, secret: &str, name: &str, slot: &Slot) {
                 *slot.lock().unwrap_or_else(|e| e.into_inner()) = None;
                 UP.store(false, Ordering::SeqCst);
                 with(|b| b.connected(false));
+                if let Some(word) = closed_word(code) {
+                    eprintln!("horadric node: {word}");
+                }
                 let (wait, next, stale) = after_link(began.elapsed().as_secs(), code, backoff);
                 if stale {
                     signin::forget_access();

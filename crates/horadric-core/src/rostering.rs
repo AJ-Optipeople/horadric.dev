@@ -12,8 +12,10 @@ use std::path::Path;
 use serde_json::{json, Value};
 
 use crate::brotherhood::{Brother, Counted, Kin, Link, Roster};
-use crate::joining::Store;
+use crate::joining::{Crypto, Store};
 use crate::keeping::Book;
+use crate::mesh::Trust;
+use crate::said::{self, Signer};
 use crate::standing::Standing;
 
 /// Beside `brothers.json`: the numbers this machine's own entry was last
@@ -83,11 +85,20 @@ pub fn placeholders(store: &Store) -> Roster {
 
 /// The roster machine `me`, called `name`, serves from the files in
 /// `dir`, None before it joined any brother. Its own entry's number is
-/// raised here, past every number heard, and kept in [`COUNTED`].
-pub fn served(dir: &Path, me: &str, name: &str) -> Option<Roster> {
+/// raised here, past every number heard, and kept in [`COUNTED`]; the
+/// entry is signed, so any brother may pass it on.
+pub fn served(dir: &Path, me: &str, name: &str, crypto: &dyn Crypto) -> Option<Roster> {
     let store = Store::load(dir)?;
     if store.brothers.is_empty() {
         return None;
+    }
+    let signer = Signer::of(dir, me, crypto);
+    if let Some(signer) = &signer {
+        let t = Trust::load(dir, me, crypto);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        crate::mesh::update_held(dir, |h| crate::mesh::sign_own(h, signer, &t, now));
     }
     let heard = crate::mesh::load(dir);
     let mut mine = assemble(me, name, &store, &Book::load(dir), &Standing::load(dir));
@@ -102,7 +113,20 @@ pub fn served(dir: &Path, me: &str, name: &str) -> Option<Roster> {
         n: last.n.max(heard.n),
         ..last.clone()
     };
-    let now = mine.count(&floor);
+    let mut now = mine.count(&floor);
+    if let (Some(signer), Some(own)) = (&signer, mine.brothers.iter_mut().find(|b| b.id == me)) {
+        // CNG signs anew each time: the same entry keeps its signature, or
+        // every round would serve a roster that looks changed.
+        let print = crate::lore::hash(&said::entry_bytes(own));
+        let kept = last.signed == print && !last.sig.is_empty();
+        if kept {
+            own.sig = last.sig.clone();
+        }
+        if kept || signer.sign_entry(own) {
+            now.signed = print;
+            now.sig = own.sig.clone();
+        }
+    }
     if now != last {
         let text = serde_json::to_vec(&now).unwrap_or_default();
         if let Err(e) = crate::portal::write_private(&path, &text) {
@@ -151,7 +175,7 @@ pub fn roster_message(roster: &Roster) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::brotherhood::Owner;
+    use crate::joining::fake::Fake;
     use crate::joining::Joined;
 
     fn joined(id: &str, at: u64) -> Joined {
@@ -218,71 +242,115 @@ mod tests {
     #[test]
     fn a_served_roster_rises_with_a_change_and_holds_without_one() {
         let dir = scratch("served");
-        assert!(served(&dir, "a", "vps").is_none());
+        assert!(served(&dir, "a", "vps", &Fake::new()).is_none());
         store(vec![joined("b", 10)]).save(&dir).unwrap();
-        let first = served(&dir, "a", "vps").unwrap();
-        assert_eq!(served(&dir, "a", "vps").unwrap().n, first.n);
+        let first = served(&dir, "a", "vps", &Fake::new()).unwrap();
+        assert_eq!(served(&dir, "a", "vps", &Fake::new()).unwrap().n, first.n);
         let mut standing = Standing::default();
         standing.set_control("b", false);
         standing.save(&dir).unwrap();
-        assert!(served(&dir, "a", "vps").unwrap().n > first.n);
+        assert!(served(&dir, "a", "vps", &Fake::new()).unwrap().n > first.n);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn what_was_heard_is_served_on_and_this_machine_speaks_for_itself() {
         let dir = scratch("heard");
-        store(vec![joined("b", 10)]).save(&dir).unwrap();
-        // B said who it is and that it holds C; someone said A is another.
+        let c = Fake::new();
+        let pair = |id: &str| {
+            let mut p = [0u8; 96];
+            p[..32].copy_from_slice(&crate::portal::sha256(id.as_bytes()));
+            p
+        };
+        let key = |id: &str| crate::portal::b64url(&crate::joining::public_of(&pair(id)));
+        let mine = crate::joining::Identity {
+            public: key("a"),
+            private: crate::portal::b64url(&pair("a")),
+        };
+        Store {
+            me: Some(mine),
+            brothers: vec![Joined {
+                public: key("b"),
+                ..joined("b", 10)
+            }],
+            ..Store::default()
+        }
+        .save(&dir)
+        .unwrap();
+        // B said who it is, signed; C's entry came with it, signed by C,
+        // whom A does not hold; and someone said A is another.
+        let signed = |b: Brother, id: &str| {
+            let mut b = b;
+            b.key = key(id);
+            crate::said::sign_entry(&c, &pair(id), &mut b);
+            b
+        };
         let mut theirs = Roster::default();
-        theirs.brothers.push(Brother {
-            n: 500,
-            holds: ["a".to_string(), "c".to_string()].into(),
-            ..Brother::new("b", "Beta", "b-key", Link::Relay)
-        });
-        theirs.brothers.push(Brother {
-            n: 400,
-            ..Brother::new("c", "Gamma", "c-key", Link::Relay)
-        });
+        theirs.brothers.push(signed(
+            Brother {
+                n: 500,
+                holds: ["a".to_string(), "c".to_string()].into(),
+                ..Brother::new("b", "Beta", "", Link::Relay)
+            },
+            "b",
+        ));
+        theirs.brothers.push(signed(
+            Brother {
+                n: 400,
+                ..Brother::new("c", "Gamma", "", Link::Relay)
+            },
+            "c",
+        ));
         theirs.brothers.push(Brother {
             n: 900,
             ..Brother::new("a", "Forged", "a-forged", Link::Relay)
         });
-        theirs.sessions.insert(
-            "s".into(),
-            Owner {
-                n: 2,
-                brother: "b".into(),
-                since: 1,
-            },
-        );
-        theirs.n = 900;
-        let from = crate::mesh::Peer {
-            id: "b",
-            key: "b-key",
-            control: true,
+        let b = crate::said::Signer {
+            me: "b",
+            private: pair("b"),
+            crypto: &c,
         };
-        crate::mesh::hear(&dir, "a", from, &theirs, &[], 1);
-        let r = served(&dir, "a", "Alpha").unwrap();
+        let owns = crate::said::What::Owns {
+            session: "s".into(),
+        };
+        theirs.said.push(b.sign(1, 1, owns).unwrap());
+        theirs.n = 900;
+        let t = Trust::load(&dir, "a", &c);
+        crate::mesh::hear(&dir, "b", &theirs, &t, 1);
+        let r = served(&dir, "a", "Alpha", &c).unwrap();
         assert_eq!(r.brother("b").unwrap().name, "Beta");
-        // What B says of C is not C's word: C is not taken from it.
+        // C is not held here, so its entry is not taken.
         assert!(r.brother("c").is_none());
         assert_eq!(r.brother("a").unwrap().name, "Alpha");
         assert!(r.brothers.iter().all(|b| b.name != "Forged"));
         assert_eq!(r.owner("s").unwrap().brother, "b");
+        // B's word is served on, so a third brother can believe it.
+        assert_eq!(r.said.len(), 1);
         // This machine's entry outranks every number it heard, so a merge
-        // anywhere takes it.
-        assert!(r.brother("a").unwrap().n > 900);
+        // anywhere takes it, and it is signed, the same each round.
+        let a = r.brother("a").unwrap().clone();
+        assert!(a.n > 900);
+        assert!(crate::said::entry_verifies(&c, &a));
+        assert_eq!(served(&dir, "a", "Alpha", &c).unwrap(), r);
+        // The signature is kept beside its number every round, so CNG,
+        // which signs anew each time, serves the same entry the same way.
+        for _ in 0..2 {
+            served(&dir, "a", "Alpha", &c).unwrap();
+            let file = std::fs::read(dir.join(COUNTED)).unwrap();
+            let kept: Counted = serde_json::from_slice(&file).unwrap();
+            assert_eq!(kept.sig, a.sig);
+        }
         // B's placeholder here never outranks B's own word.
         assert_eq!(r.brothers.iter().filter(|b| b.id == "b").count(), 1);
         // Its own entry says whom it holds, with keys and who its human
         // let in.
         let mut standing = Standing::default();
-        standing.vouch("b", "b-key");
+        standing.vouch("b", &key("b"));
         standing.save(&dir).unwrap();
-        let r = served(&dir, "a", "Alpha").unwrap();
+        let r = served(&dir, "a", "Alpha", &c).unwrap();
         let kin = &r.brother("a").unwrap().held["b"];
-        assert_eq!((kin.key.as_str(), kin.vouched), ("b-key", true));
+        assert_eq!((kin.key.as_str(), kin.vouched), (key("b").as_str(), true));
+        assert!(crate::said::entry_verifies(&c, r.brother("a").unwrap()));
         let known = known(&dir, "a", "Alpha");
         assert_eq!(known.name("b"), "Beta");
         let _ = std::fs::remove_dir_all(&dir);

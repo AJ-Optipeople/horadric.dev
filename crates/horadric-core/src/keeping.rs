@@ -20,7 +20,7 @@ use serde_json::{json, Value};
 use crate::afar::Entry;
 use crate::agent::Agent;
 use crate::brotherhood::{
-    keepers_turn, offers_takeover, Heard, Owner, Owners, Presence, Roster, Said, SILENT_SECS,
+    keepers_turn, offers_takeover, Heard, Owner, Presence, Roster, Said, SILENT_SECS,
 };
 use crate::handoff::{self, git, handoff_ref, Package, Part, Record, TranscriptFile};
 use crate::keepers::{self, Meta, Side, SideFolder, Store};
@@ -450,56 +450,10 @@ pub fn waited(last: u64, started: u64, now: u64) -> bool {
     last >= started || now.saturating_sub(started) >= SILENT_SECS
 }
 
-/// Why a keeper may not take a kept session over.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Untakeable {
-    /// The session moved on since its snapshot was cut: handed or taken
-    /// to the brother of this owner, or back to the snapshot's own brother
-    /// under a higher number. What is kept is behind it, so it goes.
-    MovedOn(Owner),
-    /// Its number is at the end and cannot go up to fence the old owner.
-    Stuck,
-}
-
-/// Whether brother `from`'s snapshot of `session`, cut under roster number
-/// `held`, may be taken over by its keeper, as the roster holds the
-/// session now: only while it is still the session's newest word. Gives
-/// the number it is taken over under.
-///
-/// A snapshot that outlived a handoff (its store was not pruned in time,
-/// or the keeper was not running) would otherwise land a stale copy and,
-/// told to everyone, fence the brother the session runs on now. The
-/// roster's owner is behind the snapshot only where it is `from` under a
-/// number no higher, or another brother under a lower one, which is a
-/// roster that has not heard of `from`'s later handoff yet.
-pub fn takeable(owners: &Owners, session: &str, from: &str, held: u64) -> Result<u64, Untakeable> {
-    if let Some(o) = owners.get(session) {
-        let behind = if o.brother == from {
-            o.n <= held
-        } else {
-            o.n < held
-        };
-        if !behind {
-            return Err(Untakeable::MovedOn(o.clone()));
-        }
-    }
-    crate::mesh::owner_after(owners, session, held).ok_or(Untakeable::Stuck)
-}
-
-/// `me` takes `session` over from `from`'s snapshot cut under `held`, if
-/// [`takeable`] allows it still, in one change of the owners so nothing
-/// moves the session between the look and the take. Gives the new owner.
-pub fn take_over_from(
-    owners: &mut Owners,
-    session: &str,
-    from: &str,
-    held: u64,
-    me: &str,
-    now: u64,
-) -> Result<Owner, Untakeable> {
-    takeable(owners, session, from, held)?;
-    crate::mesh::take_over(owners, session, held, me, now).ok_or(Untakeable::Stuck)
-}
+/// Whether and how a keeper may take a kept session over is the roster's
+/// to say, by the rule every brother judges a takeover by (see
+/// [`crate::mesh::takeable`] and [`crate::mesh::take`]).
+pub use crate::mesh::Untakeable;
 
 const HOLDING_FILE: &str = "holding.json";
 
@@ -611,14 +565,16 @@ pub fn kept_of(msg: &Value) -> Option<(String, u64, bool)> {
     ))
 }
 
-/// `{"t":"takeover","sessions":{...}}`: owners that changed, or every one
-/// known when a link comes up.
-pub fn takeover_message(owners: &BTreeMap<String, Owner>) -> Value {
-    json!({"t": "takeover", "sessions": owners})
+/// `{"t":"takeover","said":[...]}`: the signed word on sessions that
+/// changed owner, or on every one this machine owns when a link comes up.
+/// Believed for its signatures alone (see [`crate::mesh::told`]).
+pub fn takeover_message(words: &[crate::said::Word]) -> Value {
+    json!({"t": "takeover", "said": words})
 }
 
-pub fn owners_of(msg: &Value) -> BTreeMap<String, Owner> {
-    serde_json::from_value(msg["sessions"].clone()).unwrap_or_default()
+/// The signed word a `takeover` carries.
+pub fn words_of(msg: &Value) -> Vec<crate::said::Word> {
+    serde_json::from_value(msg["said"].clone()).unwrap_or_default()
 }
 
 /// Whether the keeper takes a silent brother's sessions over by itself
@@ -888,7 +844,14 @@ mod tests {
         crate::mesh::claim(&mut before, "s", "lap", T - 600);
         crate::mesh::claim(&mut before, "t", "lap", T - 600);
         let mut after = before.clone();
-        crate::mesh::take_over(&mut after, "s", 1, "desk", T).unwrap();
+        after.insert(
+            "s".to_string(),
+            Owner {
+                n: 2,
+                brother: "desk".into(),
+                since: T,
+            },
+        );
         let went = crate::brotherhood::moved("lap", &before, &after);
         let fenced = lap.fence(&went, &names(), 0);
         assert_eq!(
@@ -1001,15 +964,17 @@ mod tests {
             Some(("s".into(), 3, true))
         );
         assert_eq!(kept_of(&json!({"t": "out"})), None);
-        let owners = BTreeMap::from([(
-            "s".to_string(),
-            Owner {
-                n: 2,
-                brother: "desk".into(),
-                since: T,
+        let words = vec![crate::said::Word {
+            n: 2,
+            by: "desk".into(),
+            at: T,
+            what: crate::said::What::Owns {
+                session: "s".into(),
             },
-        )]);
-        assert_eq!(owners_of(&takeover_message(&owners)), owners);
+            sig: "x".into(),
+        }];
+        assert_eq!(words_of(&takeover_message(&words)), words);
+        assert!(words_of(&json!({"t": "takeover", "sessions": {}})).is_empty());
     }
 
     #[test]
@@ -1285,63 +1250,6 @@ mod tests {
         let h = restored_heard([(&kept(None), T)]);
         assert!(offer(h, "Desk", started).is_some());
         assert!(auto_due(h, Some(AUTO_AFTER), started));
-    }
-
-    fn owner(b: &str, n: u64) -> Owner {
-        Owner {
-            n,
-            brother: b.into(),
-            since: 7,
-        }
-    }
-
-    #[test]
-    fn a_snapshot_that_outlived_a_handoff_is_never_taken_over() {
-        // Alpha's snapshot of s was cut under 2. Alpha then handed s to
-        // Beta under 3, and the store outlived it.
-        let mut o = Owners::from([("s".to_string(), owner("beta", 3))]);
-        let moved = Untakeable::MovedOn(owner("beta", 3));
-        assert_eq!(takeable(&o, "s", "alpha", 2), Err(moved.clone()));
-        assert_eq!(
-            take_over_from(&mut o, "s", "alpha", 2, "node", 9),
-            Err(moved)
-        );
-        assert_eq!(o["s"], owner("beta", 3));
-        // Handed back to Alpha under 4 after the snapshot: still behind.
-        o.insert("s".into(), owner("alpha", 4));
-        assert_eq!(
-            takeable(&o, "s", "alpha", 2),
-            Err(Untakeable::MovedOn(owner("alpha", 4)))
-        );
-        // Already taken over here: not twice.
-        o.insert("s".into(), owner("node", 3));
-        assert!(takeable(&o, "s", "alpha", 2).is_err());
-    }
-
-    #[test]
-    fn a_snapshot_still_the_newest_word_is_taken_over_one_higher() {
-        // Never heard of: taken over above the snapshot's number.
-        let mut o = Owners::new();
-        assert_eq!(takeable(&o, "s", "alpha", 2), Ok(3));
-        // Alpha's own, at the snapshot's number.
-        o.insert("s".into(), owner("alpha", 2));
-        assert_eq!(takeable(&o, "s", "alpha", 2), Ok(3));
-        let t = take_over_from(&mut o, "s", "alpha", 2, "node", 9).unwrap();
-        assert_eq!(
-            t,
-            Owner {
-                since: 9,
-                ..owner("node", 3)
-            }
-        );
-        assert_eq!(o["s"], t);
-        // A roster that has not heard Beta handed s to Alpha under 4 yet:
-        // the snapshot is newer than it, so it stands.
-        let o = Owners::from([("s".to_string(), owner("beta", 3))]);
-        assert_eq!(takeable(&o, "s", "alpha", 4), Ok(5));
-        // At the end of the numbers: refused.
-        let o = Owners::from([("s".to_string(), owner("alpha", u64::MAX))]);
-        assert_eq!(takeable(&o, "s", "alpha", u64::MAX), Err(Untakeable::Stuck));
     }
 
     #[test]

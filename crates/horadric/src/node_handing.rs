@@ -233,6 +233,8 @@ impl Machine {
             .map(|o| o.to.clone())
             .unwrap_or_default();
         let from = self.called_by(&to);
+        let number = self.keeping_number(id);
+        let said = self.keeping_handing(id, &to, number);
         let record = {
             let n = lock(&self.node);
             n.registry.get(id).and_then(|s| {
@@ -249,7 +251,8 @@ impl Machine {
                     model: model_of(n.args.get(id).map_or(&[][..], Vec::as_slice)),
                     from: from.clone(),
                     interrupted: !clean,
-                    n: self.keeping_number(id),
+                    n: number,
+                    said: said.clone(),
                     ..Record::default()
                 })
             })
@@ -291,7 +294,7 @@ impl Machine {
     /// from here.
     fn let_go(&mut self, id: &str, to: &str, n: u64) {
         self.hand.out.remove(id);
-        self.keeping_handed(id, Some(to), n);
+        self.keeping_handed(id, Some(to), n, &[]);
         let gone = {
             let mut n = lock(&self.node);
             if let Some(h) = n.hosted.remove(id) {
@@ -403,7 +406,7 @@ impl Machine {
                     places_of(&places).remove(&id);
                     let n = record.n.saturating_add(1);
                     lock(&node).took.insert(id.clone(), n);
-                    super::keeping::landed(&id, n);
+                    super::keeping::landed(&id, n, &record.said);
                     took_message(&id, n)
                 }
                 Err(e) => refused(&id, &format!("cannot resume it: {e}")),

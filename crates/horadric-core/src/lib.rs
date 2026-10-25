@@ -53,6 +53,7 @@ pub mod relaying;
 pub mod release;
 pub mod rostering;
 pub mod runeword;
+pub mod said;
 pub mod sanctuary;
 pub mod saved;
 pub mod serving;

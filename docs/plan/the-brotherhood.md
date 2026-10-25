@@ -121,6 +121,17 @@ screen. What it lacks:
   name, key and link, and each session's owner. Changes carry a number
   that only goes up, and the highest wins, so two brothers that were
   apart agree again when they meet.
+- **A brother's word is signed** (decided 2026-10-25). What one brother
+  says that others pass on (its own entry with its keepers and whom it
+  let in, a session's owner moving or ending, a cast out) carries its
+  ECDSA P-256 signature, made with the same long term key pair it joined
+  with. Any brother may pass any word on, and every brother believes it
+  for the signature alone, then judges it by one rule (`said::judge`).
+  Rejected: believing a brother only about itself over its own link,
+  which closed forgery but could not carry a handoff past the two
+  brothers it was between, so a keeper that never heard it took a
+  session over from a brother that had handed it on, and fenced the one
+  running it.
 - **Each brother has a name** ("Laptop", "vps") the human can change, and
   a mark drawn on its tiles' frames.
 - **Cast out.** Any brother can cast another out ("Cast out Laptop..."),
@@ -1142,6 +1153,35 @@ Each step is useful alone and each is verified before the next starts.
     not taken"); with Beta on a 0.32 build Alpha's Brothers menu read
     "Beta needs a newer Horadric", and the other way round Beta's read
     "Alpha needs a newer Horadric".
+    Signed on 2026-10-25, for 0.35, after a second review: the roster's
+    trust rule could not pass on a handoff. Every word on owners, every
+    cast out and every brother's own entry is signed now (`said.rs`:
+    `Word`, `What`, `Signer`, `judge`; `mesh::believe` takes them, from a
+    roster, a `takeover`, a bundle or a snapshot alike, and
+    `mesh::takeable` asks the same rule before a keeper takes over). CNG
+    signs on Windows (`update::sign`, `BCryptSignHash`), p256's `ecdsa`
+    on a node; `link_interop` checks each verifies the other's. A
+    takeover also waits while a brother linked now lists the session,
+    and never takes one its owner ended or that was let go; a cast out
+    counts only from a signer with control over the hearer; the "replaces"
+    question names the brother as held here, never by the relay's name;
+    a join reflected to its sender is refused; links and joins from
+    brothers that do not sign show "needs a newer Horadric" (hello v3,
+    join v2). The relay keeps the machines it knew longest when a user
+    is at its cap, and a PC says so plainly on 4429.
+
+    Seen with three dev instances, "Ash", "Birch" and "Cedar" (seeded
+    as joined, ports 43150 to 43152, through `wss://portal.horadric.dev`),
+    and a dev node on `exit1-eu`. Cedar kept Ash's session `signed` and
+    was then stopped; Ash handed it and another to Birch from the tray
+    and went silent; Cedar came back, linked only to Birch, and learned
+    Ash's signed handoff from Birch's roster. With Birch then gone too,
+    Cedar's automatic takeover asked the roster and refused: "signed is
+    Birch's since, its snapshots go". Then Ash ran `nodekept` kept by the
+    node, switch on; Ash died, and two minutes later the node took it
+    over by itself, signed: Birch and Cedar (CNG) believed the node's
+    p256 word, and Ash, back, fenced its copy, "taken over by exit1-eu at
+    03:37", its work on `horadric/orphaned/nodekept-9318`.
 19. **Later, each its own decision.** Teams: a WorkOS organization as a
     brotherhood of several people, each seeing the others' sessions view
     only by default, and the lore shared or not per project; catching
@@ -1155,7 +1195,8 @@ Each step is useful alone and each is verified before the next starts.
 The v3 messages both ways, splitting and joining `out` and `bundle`, the
 size rule, refusing what a view only link sends, never serving a session
 another brother owns, merging rosters, the owner and fencing rule, the
-silent and asleep timers, picking the keeper, the dimmed tile's line, the
+silent and asleep timers, picking the keeper, signing and judging a
+brother's word, the dimmed tile's line, the
 stdio framing, the systemd unit's text, the transcript path rewrite,
 the PKCE pair and the sign in URL, merging two lores and what to send a
 brother given its `have`, matching a project by repository.

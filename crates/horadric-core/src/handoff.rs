@@ -828,6 +828,13 @@ pub struct Record {
     /// line names.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub left: Vec<String>,
+    /// The signed word on whose the session is: for a handoff the sender's
+    /// own that it hands the session on under `n` + 1, for a keeper's
+    /// snapshot the owner's that it owns it under `n`, each with the words
+    /// before it. The receiver believes them as any brother would, and
+    /// passes them on (see [`crate::mesh::arrived`], [`crate::mesh::take`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub said: Vec<crate::said::Word>,
 }
 
 /// The line a handed off session's next prompt starts with.
