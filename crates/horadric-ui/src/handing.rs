@@ -158,6 +158,12 @@ struct State {
     /// Sessions whose handoff failed while leaving, so they are not tried
     /// again and again.
     stuck: HashSet<String>,
+    /// Sessions whose agent a handoff stopped, to start again should the
+    /// handoff fail.
+    stopped: HashSet<String>,
+    /// Sessions whose handoff failed after stopping them, started again
+    /// once their kill has paused them.
+    revive: HashSet<String>,
     /// Each outgoing session's ask for commits, made once since the
     /// sender asks again and again while the receiver's human decides.
     asks: HashMap<String, Value>,
@@ -495,6 +501,7 @@ impl App {
     /// every link event.
     pub(super) fn handing_tick(&mut self) {
         self.handing_back();
+        self.handing_revive();
         // A place nobody comes for any more: the sender gave up.
         if let Ok(mut p) = PLACING.lock() {
             let now = unix_now();
@@ -521,6 +528,7 @@ impl App {
                 with(|s| {
                     s.out.remove(&id);
                     s.asks.remove(&id);
+                    s.stopped.remove(&id);
                 });
                 continue;
             };
@@ -533,6 +541,28 @@ impl App {
             with(|s| s.out.insert(id.clone(), o.clone()));
             self.handing_line(&id, &line);
             self.handing_do(&id, &o, step);
+        }
+    }
+
+    /// Starts again each session a failed handoff stopped. Its kill pauses
+    /// it a moment after, so one not paused yet waits for a later tick,
+    /// and one gone from the registry is let go.
+    fn handing_revive(&mut self) {
+        let ids: Vec<String> = with(|s| s.revive.iter().cloned().collect());
+        for id in ids {
+            if self.paused.contains_key(&id) {
+                with(|s| s.revive.remove(&id));
+                if let Err(why) = self.resume(&id, false) {
+                    self.handing_line(&id, &format!("not handed off or started again: {why}"));
+                }
+            } else if self
+                .shared
+                .registry
+                .lock()
+                .is_ok_and(|r| r.get(&id).is_none())
+            {
+                with(|s| s.revive.remove(&id));
+            }
         }
     }
 
@@ -602,6 +632,7 @@ impl App {
                 if let Some(c) = self.consoles.get(id) {
                     if c.exit_code().is_none() {
                         c.kill();
+                        with(|s| s.stopped.insert(id.to_string()));
                     }
                 }
                 let ask = match with(|s| s.asks.get(id).cloned()) {
@@ -621,6 +652,9 @@ impl App {
                     s.out.remove(id);
                     s.asks.remove(id);
                     s.stuck.insert(id.to_string());
+                    if s.stopped.remove(id) {
+                        s.revive.insert(id.to_string());
+                    }
                 });
                 self.keeping_recall(id);
                 self.handing_line(id, &format!("not handed off: {why}"));
@@ -774,6 +808,7 @@ impl App {
         with(|s| {
             s.out.remove(id);
             s.took.remove(id);
+            s.stopped.remove(id);
         });
         self.keeping_handed(id, Some(to), n, &[]);
         let (tree, cwd, session) = match self.shared.registry.lock() {
