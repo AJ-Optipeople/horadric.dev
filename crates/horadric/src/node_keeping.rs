@@ -208,7 +208,8 @@ impl Machine {
     /// `ssh` is no brother of the roster.
     pub(super) fn keeping_handed(&mut self, id: &str, to: Option<&str>, n: u64, words: &[Word]) {
         let Some(to) = to else {
-            if !trusted(|d, _, t| mesh::arrived(d, words, t, id, n)).unwrap_or(false) {
+            let now = relay::now();
+            if !trusted(|d, s, t| mesh::arrived(d, s, words, t, id, n, now)).unwrap_or(false) {
                 debug(&format!(
                     "{id} runs here, but its sender's word was not believed"
                 ));
@@ -361,7 +362,7 @@ impl Machine {
         let owner_n = trusted(|d, s, t| mesh::own(d, s, t, id, relay::now())).unwrap_or(1);
         // The owner's own word that it owns it, with the snapshot.
         record.said = horadric_hooks::state_dir()
-            .map(|d| mesh::chain(&mesh::load_held(&d), id))
+            .map(|d| mesh::chain(&mesh::load_held(&d), id, &relay::me().unwrap_or_default()))
             .unwrap_or_default();
         let next = self.keep.book.next(id, &keeper, owner_n);
         self.save_book();
@@ -513,8 +514,15 @@ impl Machine {
     /// The signed word a brother told with `takeover`: sessions of this
     /// node taken over meanwhile stop and keep their work on a branch.
     fn keeping_owners(&mut self, words: &[Word]) {
-        let moved = trusted(|d, _, t| mesh::told(d, words, t)).unwrap_or_default();
-        self.keeping_moved(moved);
+        let heard = trusted(|d, _, t| mesh::told(d, words, t)).unwrap_or_default();
+        for (id, o, top) in &heard.unfollowed {
+            eprintln!(
+                "horadric node: {id} was signed at number {top}, past {}'s {}: it moved on, or it runs in two places",
+                self.shown(&o.brother),
+                o.n
+            );
+        }
+        self.keeping_moved(heard.moved);
     }
 
     /// Sessions of this node another owns now, as the roster or a
@@ -670,8 +678,11 @@ impl Machine {
         let held = horadric_hooks::state_dir()
             .map(|d| mesh::load_held(&d))
             .unwrap_or_default();
-        let over = |session: &str| {
-            held.roster.ended.contains_key(session) || held.pruned.contains_key(session)
+        let over = |from: &str, session: &str, store: &Store| {
+            let carried = Holding::load(store)
+                .map(|h| h.record.said)
+                .unwrap_or_default();
+            mesh::over(&held, session, from, &carried)
         };
         for (from, session, store) in stores(&root) {
             let gone = joined.get(&from).and_then(|b| {
@@ -683,7 +694,10 @@ impl Machine {
                     .verdict(&from, &b.name, &session, listed, ready, now)
             });
             let gone = gone
-                .or_else(|| over(&session).then(|| format!("{session} of {from} ended for good")))
+                .or_else(|| {
+                    over(&from, &session, &store)
+                        .then(|| format!("{session} of {from} ended for good"))
+                })
                 .or_else(|| {
                     (age_due && too_old(store.shelf().1, now))
                         .then(|| format!("{session} of {from} was kept a month"))
@@ -933,6 +947,9 @@ impl Machine {
                 format!("{name} was ended for good on its brother")
             }
             Untakeable::Listed(b) => format!("{name} runs on {} now", named(b)),
+            Untakeable::Unfollowed(top) => format!(
+                "{name} was signed at number {top}, past what this node can follow: it moved on, or it runs in two places"
+            ),
             Untakeable::Unheard => {
                 format!("nothing its owner signed says whose {name} is yet")
             }

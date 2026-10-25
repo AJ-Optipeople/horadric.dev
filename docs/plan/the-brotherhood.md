@@ -1182,6 +1182,36 @@ Each step is useful alone and each is verified before the next starts.
     over by itself, signed: Birch and Cedar (CNG) believed the node's
     p256 word, and Ash, back, fenced its copy, "taken over by exit1-eu at
     03:37", its work on `horadric/orphaned/nodekept-9318`.
+
+    Settled on 2026-10-25 after a third review. Whose a session is is no
+    longer judged word by word as words come, which left hearers
+    disagreeing by arrival order, but worked out from all the words held
+    on it by one pure function (`said::resolve`). A session is its
+    creator's and its id together (roster key `<origin>/<id>`), so a
+    brother naming another's session id makes a session of its own. Each
+    brother holds a session's whole chain from its creator's first word
+    (512 words at most), so a newcomer follows it; a handoff's receiver
+    signs that it runs it, and that acknowledgement settles the handoff
+    over any rival, so a former owner cannot take a session back. A
+    takeover is judged by the previous owner's signed entry (its keepers
+    and whom it lets only watch), the same on every brother. A keeper
+    holding a word it cannot follow takes nothing over and its human is
+    told. Rosters go in parts (`{"t":"said"}`, 256 KB each), each
+    brother may start 512 sessions and sign 32 cast outs at most, and a
+    frame past 1 MB is neither sent nor allowed to close a link. Two
+    brothers that cast each other out both stay out; a machine cast out
+    asks its human before it erases its keys (`horadric node leave`). A
+    cast out owner's session can still be taken over by its last entry,
+    and goes after thirty days. The relay keeps its first-seen times
+    across restarts and closes a socket whose token expired.
+
+    Seen again on the new build with the same three dev instances and a
+    fresh dev node: Ash handed `acked` to Birch, Birch acknowledged it;
+    Cedar, Ash's keeper, came back to Birch's roster only and, with Birch
+    gone too, refused: "acked is Birch's since, its snapshots go". The
+    node took `nodekept2` over by itself when Ash died, Birch and Cedar
+    believed it, and Ash came back fenced ("taken over by exit1-eu at
+    04:26"). Rosters went out in parts with no resend loop.
 19. **Later, each its own decision.** Teams: a WorkOS organization as a
     brotherhood of several people, each seeing the others' sessions view
     only by default, and the lore shared or not per project; catching

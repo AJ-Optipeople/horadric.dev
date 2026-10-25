@@ -165,11 +165,51 @@ pub fn assemble(me: &str, name: &str, store: &Store, book: &Book, standing: &Sta
     roster
 }
 
-/// The `roster` message: the roster's own fields beside `t`.
+/// The `roster` message: the roster's own fields beside `t`, but for its
+/// signed word, which goes in parts ([`messages`]), and the owners, which
+/// every brother works out from that word itself.
 pub fn roster_message(roster: &Roster) -> Value {
-    let mut msg = serde_json::to_value(roster).unwrap_or_else(|_| json!({}));
+    let bare = Roster {
+        said: Vec::new(),
+        sessions: Default::default(),
+        ..roster.clone()
+    };
+    let mut msg = serde_json::to_value(&bare).unwrap_or_else(|_| json!({}));
     msg["t"] = json!("roster");
     msg
+}
+
+/// The most a `said` message's words take, well under the relay's 1 MB a
+/// frame, so a roster of any size goes through.
+pub const SAID_PART: usize = 256 << 10;
+
+/// Everything a roster says, as the messages it goes in: the `roster`,
+/// then `{"t":"said","said":[...]}` parts of its signed word, each at most
+/// [`SAID_PART`] long. A word longer than a part on its own is left out:
+/// no brother signs one so long.
+pub fn messages(roster: &Roster) -> Vec<Value> {
+    let mut out = vec![roster_message(roster)];
+    let mut part: Vec<Value> = Vec::new();
+    let mut size = 0;
+    for w in &roster.said {
+        let Ok(v) = serde_json::to_value(w) else {
+            continue;
+        };
+        let len = v.to_string().len() + 1;
+        if len > SAID_PART {
+            continue;
+        }
+        if size + len > SAID_PART {
+            out.push(json!({"t": "said", "said": std::mem::take(&mut part)}));
+            size = 0;
+        }
+        size += len;
+        part.push(v);
+    }
+    if !part.is_empty() {
+        out.push(json!({"t": "said", "said": part}));
+    }
+    out
 }
 
 #[cfg(test)]
@@ -311,6 +351,7 @@ mod tests {
             crypto: &c,
         };
         let owns = crate::said::What::Owns {
+            origin: "b".into(),
             session: "s".into(),
         };
         theirs.said.push(b.sign(1, 1, owns).unwrap());
@@ -323,7 +364,7 @@ mod tests {
         assert!(r.brother("c").is_none());
         assert_eq!(r.brother("a").unwrap().name, "Alpha");
         assert!(r.brothers.iter().all(|b| b.name != "Forged"));
-        assert_eq!(r.owner("s").unwrap().brother, "b");
+        assert_eq!(r.owner("b/s").unwrap().brother, "b");
         // B's word is served on, so a third brother can believe it.
         assert_eq!(r.said.len(), 1);
         // This machine's entry outranks every number it heard, so a merge

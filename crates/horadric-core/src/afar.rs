@@ -127,17 +127,18 @@ pub fn folds_into(
 
 /// What brother `peer` lists that is its to show: a session the roster says
 /// another brother owns now (taken over or handed on while `peer` was
-/// silent, its last list still kept) is shown there and not here too.
+/// silent, its last list still kept) is shown there and not here too, but
+/// one another brother made up under the same id never hides `peer`'s.
 /// `relay` says `peer` is a brother of the roster at all; a node reached
 /// only over `ssh` is not, and its list stands as it is.
 pub fn shown_list(
     list: &[Entry],
     peer: &str,
-    owners: &crate::brotherhood::Owners,
+    roster: &crate::brotherhood::Roster,
     relay: bool,
 ) -> Vec<Entry> {
     list.iter()
-        .filter(|e| !relay || owners.get(&e.id).is_none_or(|o| o.brother == peer))
+        .filter(|e| !relay || !crate::mesh::shown_elsewhere(roster, &e.id, peer))
         .cloned()
         .collect()
 }
@@ -671,14 +672,19 @@ mod tests {
             brother: b.into(),
             since: 0,
         };
-        let owners = crate::brotherhood::Owners::from([
-            ("s1".to_string(), owner("vps")),
-            ("s2".to_string(), owner("lap")),
-        ]);
+        let roster = crate::brotherhood::Roster {
+            sessions: crate::brotherhood::Owners::from([
+                ("lap/s1".to_string(), owner("vps")),
+                ("lap/s2".to_string(), owner("lap")),
+                // Another brother made up s2 too: lap's own still shows.
+                ("vps/s2".to_string(), owner("vps")),
+            ]),
+            ..Default::default()
+        };
         let ids = |l: Vec<Entry>| l.into_iter().map(|e| e.id).collect::<Vec<_>>();
-        assert_eq!(ids(shown_list(&list, "lap", &owners, true)), ["s2", "s3"]);
+        assert_eq!(ids(shown_list(&list, "lap", &roster, true)), ["s2", "s3"]);
         // A node over ssh alone is no brother of the roster: all of it.
-        assert_eq!(ids(shown_list(&list, "node-x", &owners, false)).len(), 3);
+        assert_eq!(ids(shown_list(&list, "node-x", &roster, false)).len(), 3);
     }
 
     #[test]

@@ -33,6 +33,10 @@ pub struct Standing {
     /// whose word it took.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub took: BTreeMap<String, String>,
+    /// This machine heard it was cast out, by this brother (its name), and
+    /// links to nobody until its human says whether to leave.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cast_out_here: Option<String>,
 }
 
 impl Standing {

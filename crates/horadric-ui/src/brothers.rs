@@ -149,6 +149,16 @@ impl Human for Boxes {
         });
     }
 
+    fn cast_out_self(&self, token: u64, by: &str) {
+        let text = format!(
+            "{by} says this PC was cast out of the brotherhood, and it links to no brother now.\n\n\
+             Leave the brotherhood? Yes lets every brother and this PC's keys go: it comes back \
+             only when a brother asks it to join again. Say No if you think {by} was stolen: \
+             this PC keeps its keys, links to nobody, and asks again at its next start."
+        );
+        self.ask(token, text, |b, t, yes| b.leave(t, yes));
+    }
+
     fn readmit(&self, token: u64, name: &str, by: &str) {
         let text = format!(
             "{by} let {name} in again, which was cast out here.\n\n\

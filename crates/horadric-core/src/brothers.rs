@@ -20,6 +20,9 @@ use crate::portal::{b64url, frame, unb64url};
 use crate::said::Signer;
 use crate::standing::Standing;
 
+/// The most a frame to the relay may be: its limit is 1 MB.
+pub const MOST_FRAME: usize = 1 << 20;
+
 /// The sending half of a relay link. Neither call may block on the
 /// network: a link queues what it is given for its writer.
 pub trait Relay: Send {
@@ -73,6 +76,18 @@ pub trait Human: Send {
     /// who let whom in.
     fn note(&self, text: &str) {
         self.tell(text);
+    }
+    /// A brother with control here (`by`, its name) cast this machine out.
+    /// It links to nobody now, but its keys stay until its human says to
+    /// leave the brotherhood ([`Brothers::leave`] with `token`, Yes leaves):
+    /// a thief casting this machine out first must not erase it. Where no
+    /// human can be asked it stays out and keeps its keys.
+    fn cast_out_self(&self, token: u64, by: &str) {
+        let _ = token;
+        self.tell(&format!(
+            "{by} says this machine was cast out of the brotherhood. It links to no \
+             brother now. Its keys are kept until you choose to leave."
+        ));
     }
     /// Brother `by`'s human let `name` in again, which was cast out here:
     /// may it come back? Answered by [`Brothers::readmit`] with the same
@@ -170,6 +185,9 @@ pub struct Brothers {
     /// about once each: (id, key) by token while unanswered.
     readmits: HashMap<u64, (String, String)>,
     asked_back: HashSet<(String, String)>,
+    /// This machine was cast out, by this brother (its name): it links to
+    /// nobody until its human says whether to leave, with this token.
+    out: Option<(String, u64)>,
     hands: Hands,
 }
 
@@ -194,8 +212,17 @@ impl Brothers {
             token: 0,
             readmits: HashMap::new(),
             asked_back: HashSet::new(),
+            out: None,
             hands,
         };
+        // Cast out before it stopped: it stays out until its human says.
+        let out = b
+            .dir
+            .as_deref()
+            .and_then(|d| Standing::load(d).cast_out_here);
+        if let Some(by) = out {
+            b.heard_cast_out(&by);
+        }
         b.settle();
         b
     }
@@ -348,7 +375,8 @@ impl Brothers {
         // it cannot, nor wipe what it holds.
         if t == "cast_out" && !asks(&msg) {
             if held.is_some() && self.controls(peer) {
-                self.cast_out_here(peer);
+                let by = self.name_of_held(peer);
+                self.heard_cast_out(&by);
             }
             return;
         }
@@ -360,6 +388,19 @@ impl Brothers {
             if self.store.get(peer).is_none() {
                 return;
             }
+        }
+        // A roster's signed word comes in parts of its own after it, and
+        // is the brotherhood's alone: nothing else reads it.
+        if t == "said" && !asks(&msg) {
+            if held.is_some() {
+                let words = msg
+                    .get("said")
+                    .cloned()
+                    .map(|v| crate::said::lenient(v).unwrap_or_default())
+                    .unwrap_or_default();
+                self.heard_words(&words);
+            }
+            return;
         }
         let e = if asks(&msg) {
             Event::Asked {
@@ -386,7 +427,36 @@ impl Brothers {
         if heard.changed {
             debug(&format!("the roster is at {} now", heard.roster.n));
         }
-        if self.settle_on(&heard.roster) && !heard.moved.is_empty() {
+        self.act_on(heard);
+    }
+
+    /// Takes in signed word a brother passed on in a `said` part.
+    fn heard_words(&mut self, words: &[crate::said::Word]) {
+        let Some(dir) = self.dir.clone() else {
+            return;
+        };
+        let t = crate::mesh::Trust::load(&dir, &self.me, &*self.hands.crypto);
+        let heard = crate::mesh::told(&dir, words, &t);
+        self.act_on(heard);
+    }
+
+    /// Acts on what the roster says now: who is out, which sessions of
+    /// this machine went elsewhere, and which moved past what this machine
+    /// can follow, which its human is told.
+    fn act_on(&mut self, heard: crate::mesh::Heard) {
+        if !self.settle_on(&heard.roster) {
+            return;
+        }
+        for (id, o, top) in &heard.unfollowed {
+            let owner = self.name_of_held(&o.brother);
+            self.hands.human.note(&format!(
+                "A brother signed session {id} at number {top}, past {owner}'s {}, \
+                 which this machine cannot follow: it moved on, or it runs in two \
+                 places. Look at it on {owner} before anything takes it over.",
+                o.n
+            ));
+        }
+        if !heard.moved.is_empty() {
             let owners = heard.moved;
             self.hands.listener.event(Event::Moved { owners });
         }
@@ -434,8 +504,17 @@ impl Brothers {
     /// this machine was cast out, and so holds nothing any more.
     fn settle_on(&mut self, roster: &Roster) -> bool {
         let mine = self.store.me.as_ref().map(|m| m.public.clone());
-        if mine.is_some_and(|k| roster.refuses(&k)) {
-            self.cast_out_here("");
+        if let Some(mine) = mine.filter(|k| roster.refuses(k)) {
+            let by = roster
+                .said
+                .iter()
+                .find(|w| matches!(&w.what, crate::said::What::CastOut { key, .. } if *key == mine))
+                .map(|w| self.name_of_held(&w.by))
+                .unwrap_or_else(|| "A brother".to_string());
+            self.heard_cast_out(&by);
+            return false;
+        }
+        if self.out.is_some() {
             return false;
         }
         let (intros, refused) = self.judged(roster);
@@ -671,12 +750,66 @@ impl Brothers {
         self.hands.listener.event(Event::Gone { id });
     }
 
-    /// Brother `by` says this machine was cast out, or the roster does.
-    /// Every brother refuses it from now on, so it lets them all go, and
-    /// its key with them: a new key is made should the human join again,
-    /// which is the only way back.
+    /// Brother `by` (its name) says this machine was cast out, or the
+    /// roster does: it links to nobody from now on, and asks its human,
+    /// once, whether to leave. Its keys stay until the human says so, and
+    /// so do its sessions: a brother that casts this one out first, a
+    /// stolen one, must not wipe it.
+    fn heard_cast_out(&mut self, by: &str) {
+        if self.out.is_some() {
+            return;
+        }
+        let chans: Vec<u32> = self.chans.keys().copied().collect();
+        for ch in chans {
+            self.close(ch);
+        }
+        self.wanted.clear();
+        self.token += 1;
+        self.out = Some((by.to_string(), self.token));
+        if let Some(dir) = &self.dir {
+            let mut standing = Standing::load(dir);
+            if standing.cast_out_here.is_none() {
+                standing.cast_out_here = Some(by.to_string());
+                if let Err(e) = standing.save(dir) {
+                    eprintln!("horadric: cannot keep that this machine was cast out: {e}");
+                }
+            }
+        }
+        debug(&format!("{by} cast this machine out: it links to nobody"));
+        self.hands.human.cast_out_self(self.token, by);
+    }
+
+    /// The human's answer to [`Human::cast_out_self`]: Yes leaves the
+    /// brotherhood, letting every brother and its own keys go; No keeps
+    /// them, linking to nobody.
+    pub fn leave(&mut self, token: u64, yes: bool) {
+        let Some((by, t)) = self.out.clone() else {
+            return;
+        };
+        if t != token || !yes {
+            return;
+        }
+        self.cast_out_here(&by);
+    }
+
+    /// Leaves now, as [`Brothers::leave`] does with its human's yes, for a
+    /// human that answers elsewhere (a node's terminal).
+    pub fn leave_now(&mut self) {
+        if let Some((by, _)) = self.out.clone() {
+            self.cast_out_here(&by);
+        }
+    }
+
+    /// Whether this machine was cast out and links to nobody, and by whom.
+    pub fn cast_out_by(&self) -> Option<&str> {
+        self.out.as_ref().map(|(by, _)| by.as_str())
+    }
+
+    /// This machine leaves the brotherhood brother `by` (its name) cast it
+    /// out of: it lets every brother go, and its key with them: a new key
+    /// is made should the human join again, which is the only way back.
     fn cast_out_here(&mut self, by: &str) {
-        let by = self.store.get(by).map(|b| b.name.clone());
+        let by = by.to_string();
         let chans: Vec<u32> = self.chans.keys().copied().collect();
         for ch in chans {
             self.close(ch);
@@ -684,16 +817,22 @@ impl Brothers {
         let ids: Vec<String> = self.store.brothers.iter().map(|b| b.id.clone()).collect();
         self.store = Store::default();
         self.save();
+        self.out = None;
         if let Some(dir) = &self.dir {
             crate::mesh::reset(dir);
+            let mut standing = Standing::load(dir);
+            standing.cast_out_here = None;
+            if let Err(e) = standing.save(dir) {
+                eprintln!("horadric: cannot keep the brothers' standing: {e}");
+            }
         }
         for id in ids {
             self.hands.listener.event(Event::Gone { id });
         }
-        let by = by.unwrap_or_else(|| "A brother".to_string());
+
         self.hands.human.tell(&format!(
-            "{by} says this machine was cast out of the brotherhood, and every brother \
-             refuses it now. It comes back only when a brother asks it to join again."
+            "This machine left the brotherhood {by} cast it out of. It comes back only \
+             when a brother asks it to join again."
         ));
     }
 
@@ -790,7 +929,18 @@ impl Brothers {
         let Some(sealed) = self.chans.get_mut(&ch).and_then(|h| h.seal(crypto, msg)) else {
             return false;
         };
-        self.hands.relay.binary(frame(ch, &sealed));
+        let f = frame(ch, &sealed);
+        // The relay closes a link that sends a frame past its limit, and
+        // every channel of it with it: one too large goes nowhere instead.
+        if f.len() > MOST_FRAME {
+            let t = msg.get("t").and_then(Value::as_str).unwrap_or("");
+            eprintln!(
+                "horadric: a {t} of {} bytes is past the relay's limit, not sent",
+                f.len()
+            );
+            return false;
+        }
+        self.hands.relay.binary(f);
         true
     }
 
@@ -864,6 +1014,9 @@ impl Brothers {
     /// Links to every listed brother that joined before and is not
     /// linked, where this machine is the one to begin.
     fn link_joined(&mut self) {
+        if self.out.is_some() {
+            return;
+        }
         let due: Vec<String> = self
             .listed
             .iter()
@@ -891,6 +1044,10 @@ impl Brothers {
     /// with a new key.
     fn given(&mut self, ch: u32, id: &str, name: &str) {
         if self.reused(ch) {
+            return;
+        }
+        if self.out.is_some() {
+            self.hands.relay.text(&json!({"close": ch}));
             return;
         }
         let Some((public, _)) = self.identity() else {
@@ -1627,10 +1784,12 @@ mod tests {
             let me = IDS[i];
             let roster =
                 crate::rostering::served(&self.dirs[i], me, NAMES[i], &Fake::new()).unwrap();
-            let msg = crate::rostering::roster_message(&roster);
+            let msgs = crate::rostering::messages(&roster);
             let linked: Vec<u32> = self.linked(i);
             for ch in linked {
-                assert!(self.sides[i].reply(ch, &msg));
+                for msg in &msgs {
+                    assert!(self.sides[i].reply(ch, msg));
+                }
             }
             self.pump();
         }
@@ -1849,21 +2008,32 @@ mod tests {
         let events = net.take_events();
         assert!(events.contains(&(1, Event::Down { ch })));
         assert!(events.contains(&(0, Event::Down { ch })));
-        assert_eq!(gone(&events), vec![(1, "a".into()), (0, "b".into())]);
+        assert_eq!(gone(&events), vec![(1, "a".into())]);
         // Beta keeps it refused, its link key apart for a farewell.
         assert!(net.sides[1].store().get("a").is_none());
         assert!(Store::load(&net.dirs[1]).unwrap().cast_key("a").is_some());
         assert!(Standing::load(&net.dirs[1]).refuses("a", None));
         assert!(crate::mesh::load(&net.dirs[1]).refuses(&old.public));
-        // Alpha was told, sealed, and let everything go, its key too.
+        // Alpha was told, sealed, and asks its human, keeping its keys and
+        // linking to nobody meanwhile (review finding 6: a thief that casts
+        // a machine out first must not erase it).
         let told = net.take_told();
         assert_eq!(told.len(), 1);
         assert!(
             told[0].1.starts_with("Beta says this machine was cast out"),
             "{told:?}"
         );
+        assert_eq!(net.sides[0].cast_out_by(), Some("Beta"));
+        assert!(net.sides[0].store().me.is_some());
+        assert!(Standing::load(&net.dirs[0]).cast_out_here.is_some());
+        // Its human says to leave: everything goes, its key too.
+        net.sides[0].leave_now();
+        net.pump();
+        assert!(net.take_told()[0].1.starts_with("This machine left"));
+        assert_eq!(gone(&net.take_events()), vec![(0, "b".into())]);
         assert!(net.sides[0].store().brothers.is_empty());
         assert!(net.sides[0].store().me.is_none());
+        assert!(Standing::load(&net.dirs[0]).cast_out_here.is_none());
         // Alpha asks again: refused unasked, no prompt on either side.
         net.sides[0].ask("b");
         net.pump();
@@ -1899,6 +2069,13 @@ mod tests {
         let told = net.take_told();
         assert_eq!(told.len(), 1, "{told:?}");
         assert_eq!(told[0].0, 0);
+        assert_eq!(net.sides[0].cast_out_by(), Some("Beta"));
+        // Started again before its human answered: still out, asked again.
+        net.stop(0);
+        net.start(0);
+        assert_eq!(net.sides[0].cast_out_by(), Some("Beta"));
+        assert!(net.linked_to(0).is_empty());
+        net.sides[0].leave_now();
         assert!(net.sides[0].store().brothers.is_empty());
         // Not linked, and not asked about again.
         assert!(net.linked_to(1).is_empty());
@@ -1993,13 +2170,15 @@ mod tests {
         assert!(net.linked_to(2).is_empty());
         assert!(net.sides[0].store().get("c").is_none());
         assert!(Standing::load(&net.dirs[0]).refuses("c", Some(&old)));
-        assert!(net.sides[2].store().brothers.is_empty());
+        assert_eq!(net.sides[2].cast_out_by(), Some("Beta"));
         // Gamma relinking is refused on both, no one asked.
         net.restart(5);
         assert!(net.take_asked().is_empty());
         assert!(net.linked_to(2).is_empty());
-        // Alpha's human asks Gamma back in. Beta, whose own human cast it
-        // out, takes it back only once its human says so.
+        // Gamma's human leaves, and Alpha's human asks Gamma back in. Beta,
+        // whose own human cast it out, takes it back only once its human
+        // says so.
+        net.sides[2].leave_now();
         net.join_pair(0, 2);
         net.gossip();
         assert!(net.take_asked().is_empty());
@@ -2121,8 +2300,9 @@ mod tests {
         let alpha = crate::said::Signer::of(&net.dirs[0], "a", &fake).unwrap();
         let t = crate::mesh::Trust::load(&net.dirs[1], "b", &fake);
         crate::mesh::own(&net.dirs[1], Some(&beta), &t, "s1", 1);
-        let owns = crate::mesh::chain(&crate::mesh::load_held(&net.dirs[1]), "s1");
+        let owns = crate::mesh::chain(&crate::mesh::load_held(&net.dirs[1]), "s1", "b");
         let what = crate::said::What::Takes {
+            origin: "b".into(),
             session: "s1".into(),
             from: "b".into(),
         };
@@ -2135,7 +2315,7 @@ mod tests {
         net.serve_roster(0);
         let events = net.take_events();
         assert!(!events.iter().any(|(_, e)| matches!(e, Event::Moved { .. })));
-        assert_eq!(crate::mesh::owners(&net.dirs[1])["s1"].brother, "b");
+        assert_eq!(crate::mesh::owners(&net.dirs[1])["b/s1"].brother, "b");
         // Beta named Alpha its keeper: now it is.
         let mut book = crate::keeping::Book::default();
         book.set_keeper(Some("a"));
@@ -2326,6 +2506,20 @@ mod tests {
         assert!(!net.sides[0].text(&json!({"close": 3})));
         assert!(!net.sides[0].binary(3, b"{\"t\":\"hello\"}"));
         assert!(!net.sides[0].reply(3, &json!({"t": "x"})));
+    }
+
+    #[test]
+    fn a_message_past_the_relays_limit_is_not_sent_and_the_link_stays() {
+        // Review finding 1: the relay closes a link that sends a frame past
+        // 1 MB, and every channel of it.
+        let mut net = Net::new("too-large");
+        let ch = net.join();
+        net.wire.lock().unwrap().sent.clear();
+        let big = json!({"t": "said", "said": "x".repeat(MOST_FRAME)});
+        assert!(!net.sides[0].reply(ch, &big));
+        assert!(net.wire.lock().unwrap().sent.is_empty());
+        assert!(net.sides[0].reply(ch, &json!({"t": "state"})));
+        assert_eq!(net.linked(0), vec![ch]);
     }
 
     #[test]

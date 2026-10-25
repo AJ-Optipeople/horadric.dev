@@ -389,10 +389,13 @@ fn incoming(text: bool, data: &[u8]) -> Option<Incoming> {
 }
 
 /// One whole message, fragments joined, as (is text, bytes). `None` when
-/// the socket closed or broke.
+/// the socket closed or broke. A message past [`MAX_FRAME`] is read to its
+/// end and dropped rather than closing the link: one too large word must
+/// not cut every channel the link carries.
 fn receive(s: &Socket) -> Option<(bool, Vec<u8>)> {
     let mut data = Vec::new();
     let mut chunk = vec![0u8; 64 * 1024];
+    let mut too_large = false;
     loop {
         let mut read = 0u32;
         let mut kind = WINHTTP_WEB_SOCKET_BUFFER_TYPE(0);
@@ -408,11 +411,21 @@ fn receive(s: &Socket) -> Option<(bool, Vec<u8>)> {
         if err != 0 || kind == WINHTTP_WEB_SOCKET_CLOSE_BUFFER_TYPE {
             return None;
         }
-        data.extend_from_slice(&chunk[..read as usize]);
+        if !too_large {
+            data.extend_from_slice(&chunk[..read as usize]);
+        }
         if data.len() > MAX_FRAME {
-            return None;
+            too_large = true;
+            data.clear();
         }
         match kind {
+            WINHTTP_WEB_SOCKET_BINARY_MESSAGE_BUFFER_TYPE
+            | WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE
+                if too_large =>
+            {
+                eprintln!("portal: a message past {MAX_FRAME} bytes was dropped");
+                too_large = false;
+            }
             WINHTTP_WEB_SOCKET_BINARY_MESSAGE_BUFFER_TYPE => return Some((false, data)),
             WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE => return Some((true, data)),
             WINHTTP_WEB_SOCKET_BINARY_FRAGMENT_BUFFER_TYPE

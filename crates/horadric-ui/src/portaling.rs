@@ -770,9 +770,11 @@ impl Serve for Here<'_> {
         p.roster().is_some_and(|r| r.control(&me, who))
     }
 
-    fn roster(&self) -> Option<Value> {
-        let roster = self.0.portal.as_ref()?.roster()?;
-        Some(portal::roster_message(&roster))
+    fn roster(&self) -> Vec<Value> {
+        let roster = self.0.portal.as_ref().and_then(|p| p.roster());
+        roster
+            .map(|r| horadric_core::rostering::messages(&r))
+            .unwrap_or_default()
     }
 
     fn state(&self) -> &'static str {

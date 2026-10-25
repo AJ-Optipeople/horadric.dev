@@ -345,10 +345,12 @@ impl Machine {
     }
 
     /// The roster this node serves its brothers.
-    pub(super) fn kin_roster(&self) -> Option<Value> {
-        let dir = horadric_hooks::state_dir()?;
-        let me = relay::me()?;
-        let roster = rostering::served(&dir, &me, &machine_name(), &relay::LinkCrypto)?;
-        Some(rostering::roster_message(&roster))
+    pub(super) fn kin_roster(&self) -> Vec<Value> {
+        let (Some(dir), Some(me)) = (horadric_hooks::state_dir(), relay::me()) else {
+            return Vec::new();
+        };
+        rostering::served(&dir, &me, &machine_name(), &relay::LinkCrypto)
+            .map(|r| rostering::messages(&r))
+            .unwrap_or_default()
     }
 }

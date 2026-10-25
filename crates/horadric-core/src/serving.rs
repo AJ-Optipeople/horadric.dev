@@ -131,9 +131,11 @@ pub trait Serve {
     fn unsubscribe(&mut self, _endpoint: &str) {}
     /// Session `id` started waiting, with `waiting` waiting in all: push.
     fn push(&mut self, _id: &str, _waiting: usize) {}
-    /// The `roster` message, None while this machine has no brothers.
-    fn roster(&self) -> Option<Value> {
-        None
+    /// The roster's messages, sent in order: the `roster` itself, then its
+    /// signed word in parts (see `crate::rostering::messages`). None while
+    /// this machine has no brothers.
+    fn roster(&self) -> Vec<Value> {
+        Vec::new()
     }
     /// What this machine says it is doing: "awake", "sleeping" or
     /// "leaving".
@@ -667,7 +669,7 @@ impl Server {
                 .get(ch)
                 .is_some_and(|c| c.kind == Kind::Brother)
         });
-        let roster = brothers.then(|| serve.roster()).flatten();
+        let roster = if brothers { serve.roster() } else { Vec::new() };
         let lore = if brothers {
             serve.lore_projects()
         } else {
@@ -692,9 +694,11 @@ impl Server {
             out.send(ch, list.clone());
             out.send(ch, projects.clone());
             if c.kind == Kind::Brother {
-                if let Some(roster) = &roster {
-                    c.roster_sent = Some(fingerprint(roster));
-                    out.send(ch, roster.clone());
+                if !roster.is_empty() {
+                    c.roster_sent = Some(fingerprint(&Value::Array(roster.clone())));
+                    for m in &roster {
+                        out.send(ch, m.clone());
+                    }
                 }
                 out.send(ch, state_message(state));
                 for (project, have) in &lore {
@@ -866,8 +870,9 @@ impl Server {
         if !self.clients.values().any(Client::brother) {
             return;
         }
-        if let Some(roster) = serve.roster() {
-            let print = fingerprint(&roster);
+        let roster = serve.roster();
+        if !roster.is_empty() {
+            let print = fingerprint(&Value::Array(roster.clone()));
             for (&ch, c) in self.clients.iter_mut().filter(|(_, c)| c.brother()) {
                 if c.roster_sent != Some(print) {
                     c.roster_sent = Some(print);
@@ -875,7 +880,9 @@ impl Server {
                     // switch the human flipped bites on links already up
                     // rather than at their next hello.
                     c.control = serve.control(&c.who, c.kind);
-                    out.send(ch, roster.clone());
+                    for m in &roster {
+                        out.send(ch, m.clone());
+                    }
                 }
             }
         }
@@ -1088,8 +1095,8 @@ mod tests {
                 self.state
             }
         }
-        fn roster(&self) -> Option<Value> {
-            Some(json!({"t": "roster", "n": 1, "locked": self.locked}))
+        fn roster(&self) -> Vec<Value> {
+            vec![json!({"t": "roster", "n": 1, "locked": self.locked})]
         }
         fn lore_projects(&mut self) -> Vec<(Value, Value)> {
             vec![(json!("repo"), json!({"me": 3}))]

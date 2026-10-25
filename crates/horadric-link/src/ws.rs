@@ -28,6 +28,12 @@ use crate::stream::{timed_out, Stream};
 /// The relay's frames are at most 1 MB, as `portal_link` holds them to.
 pub const MAX_MESSAGE: usize = 1 << 20;
 
+/// What the reader takes in before it gives up on the link: past
+/// [`MAX_MESSAGE`] a message is read and dropped, so one too large word
+/// does not cut every channel the link carries; past this it is a broken
+/// peer.
+const MOST_READ: usize = 4 << 20;
+
 /// How long the reader holds the lock waiting for more once the bytes
 /// that woke it are read: the most a send waits behind it.
 const TURN: Duration = Duration::from_millis(5);
@@ -99,8 +105,8 @@ impl Socket {
             request.headers_mut().insert(name, value);
         }
         let config = WebSocketConfig::default()
-            .max_message_size(Some(MAX_MESSAGE))
-            .max_frame_size(Some(MAX_MESSAGE));
+            .max_message_size(Some(MOST_READ))
+            .max_frame_size(Some(MOST_READ));
         let (ws, _) = tungstenite::client::client_with_config(request, stream, Some(config))
             .map_err(|e| match e {
                 tungstenite::HandshakeError::Failure(tungstenite::Error::Http(r)) => {
@@ -135,6 +141,9 @@ impl Socket {
             // Bytes already in TLS's or the WebSocket's buffers would
             // never wake a peek, so read before waiting.
             match self.read_turn() {
+                Turn::Message(m) if m.1.len() > MAX_MESSAGE => {
+                    eprintln!("ws: a message of {} bytes was dropped", m.1.len());
+                }
                 Turn::Message(m) => return Some(m),
                 Turn::Again => continue,
                 Turn::Empty => {}

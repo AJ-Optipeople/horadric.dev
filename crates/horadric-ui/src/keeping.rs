@@ -303,6 +303,9 @@ fn untakeable(store: &Store, name: &str, why: &Untakeable) -> String {
             format!("{name} was ended for good on its brother.")
         }
         Untakeable::Listed(b) => format!("{name} runs on {} now.", named(b)),
+        Untakeable::Unfollowed(top) => format!(
+            "{name} was signed at number {top}, past what this PC can follow: it moved on, or it runs in two places."
+        ),
         Untakeable::Unheard => {
             format!("Nothing its owner signed says whose {name} is yet, so no brother would believe the takeover.")
         }
@@ -381,7 +384,8 @@ impl App {
     /// roster from either end.
     pub(super) fn keeping_handed(&mut self, id: &str, to: Option<&str>, n: u64, words: &[Word]) {
         let Some(name) = to else {
-            let ok = trusted(|d, _, t| mesh::arrived(d, words, t, id, n)).unwrap_or(false);
+            let now = unix_now();
+            let ok = trusted(|d, s, t| mesh::arrived(d, s, words, t, id, n, now)).unwrap_or(false);
             if !ok {
                 debug(&format!(
                     "{id} runs here, but its sender's word was not believed"
@@ -747,8 +751,9 @@ impl App {
         let owner_n = trusted(|d, s, t| mesh::own(d, s, t, id, unix_now())).unwrap_or(1);
         // The owner's own word that it owns it, with the snapshot: what
         // lets its keeper take over even before its roster came.
+        let me = with(|s| s.me.clone());
         record.said = horadric_hooks::state_dir()
-            .map(|d| mesh::chain(&mesh::load_held(&d), id))
+            .map(|d| mesh::chain(&mesh::load_held(&d), id, &me))
             .unwrap_or_default();
         let next: Next = with(|s| {
             s.cutting.insert(id.to_string());
@@ -930,8 +935,19 @@ impl App {
     /// branch; once the keeper has spoken, the sessions held back at start
     /// run on.
     fn keeping_owners(&mut self, who: &str, words: &[Word]) {
-        let moved = trusted(|d, _, t| mesh::told(d, words, t)).unwrap_or_default();
-        self.keeping_moved(moved);
+        let heard = trusted(|d, _, t| mesh::told(d, words, t)).unwrap_or_default();
+        for (id, o, top) in &heard.unfollowed {
+            let owner = crate::project::brother_name(&o.brother);
+            self.toasts.show(
+                Kind::Done,
+                "Cannot follow a session",
+                &format!(
+                    "{id} was signed at number {top}, past {owner}'s {}: it moved on, or it runs in two places. Look at it on {owner}.",
+                    o.n
+                ),
+            );
+        }
+        self.keeping_moved(heard.moved);
         self.keeping_release(who);
     }
 
@@ -1107,11 +1123,12 @@ impl App {
         let now = unix_now();
         // A session its owner ended, signed, is over: nothing kept of it
         // can be taken over, so it goes.
-        let over = {
-            let h = mesh::load_held(&dir);
-            move |session: &str| {
-                h.roster.ended.contains_key(session) || h.pruned.contains_key(session)
-            }
+        let held = mesh::load_held(&dir);
+        let over = |from: &str, session: &str, store: &Store| {
+            let carried = Holding::load(store)
+                .map(|h| h.record.said)
+                .unwrap_or_default();
+            mesh::over(&held, session, from, &carried)
         };
         // Hourly: an age is days long, and it walks every store.
         let age_due = with(|s| {
@@ -1131,7 +1148,10 @@ impl App {
                 })
             });
             let gone = gone
-                .or_else(|| over(&session).then(|| format!("{session} of {from} ended for good")))
+                .or_else(|| {
+                    over(&from, &session, &store)
+                        .then(|| format!("{session} of {from} ended for good"))
+                })
                 .or_else(|| {
                     (age_due && too_old(store.shelf().1, now))
                         .then(|| format!("{session} of {from} was kept a month"))

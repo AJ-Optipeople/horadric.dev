@@ -81,7 +81,7 @@ const SAVE_EVERY: Duration = Duration::from_secs(2);
 
 /// How a node's commands are written, for a word it does not know.
 const USAGE: &str = "usage: horadric node [install | --stdio | signin [--to <name>] | signout | \
-                     let-in | brothers | cast-out <name> | view-only <name> [on|off] | \
+                     let-in | brothers | cast-out <name> | leave | view-only <name> [on|off] | \
                      keeper [<name>|none] [--auto|--no-auto]]";
 
 pub fn run(args: &[String]) -> Result<(), String> {
@@ -95,6 +95,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
         Some("let-in") => control::let_in_command(),
         Some("brothers") => control::brothers_command(),
         Some("cast-out") => control::cast_out_command(rest),
+        Some("leave") => control::leave_command(),
         Some("view-only") => control::view_only_command(rest),
         Some("keeper") => control::keeper_command(rest),
         Some(other) => Err(format!("unknown `node {other}`\n{USAGE}")),
@@ -364,7 +365,7 @@ impl Serve for Machine {
         self.kin_control(who, kind)
     }
 
-    fn roster(&self) -> Option<Value> {
+    fn roster(&self) -> Vec<Value> {
         self.kin_roster()
     }
 

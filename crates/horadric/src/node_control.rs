@@ -129,6 +129,13 @@ impl horadric_core::brothers::Human for Human {
         }
     }
 
+    fn cast_out_self(&self, _token: u64, by: &str) {
+        self.tell(&format!(
+            "{by} says this node was cast out of the brotherhood. It links to no brother \
+             now and keeps its keys. `horadric node leave` lets every brother and its keys go."
+        ));
+    }
+
     fn tell(&self, text: &str) {
         eprintln!("horadric node: {text}");
         if let Some(c) = ctl().as_ref() {
@@ -267,6 +274,13 @@ fn request(conn: u64, req: &Value) -> Value {
             }
             json!({"re": "answer"})
         }
+        "leave" => match relay::with(|b| b.cast_out_by().map(str::to_string)).flatten() {
+            Some(by) => {
+                relay::with(|b| b.leave_now());
+                json!({"re": "leave", "by": by})
+            }
+            None => json!({"re": "leave", "error": "this node was not cast out"}),
+        },
         "cast-out" => match cast_out(&text("id")) {
             Ok(()) => json!({"re": "cast-out"}),
             Err(e) => json!({"re": "cast-out", "error": e}),
@@ -736,6 +750,23 @@ pub(super) fn cast_out_command(args: &[String]) -> Result<(), String> {
         }
         println!("{name} is cast out.");
     }
+    Ok(())
+}
+
+/// `horadric node leave`: a node that was cast out, and so links to
+/// nobody, lets every brother and its own keys go, its human having said
+/// so here. It comes back only when a brother asks it to join again.
+pub(super) fn leave_command() -> Result<(), String> {
+    let mut line = Line::open()?;
+    if !yes("Leave the brotherhood, forgetting every brother and this node's keys?") {
+        println!("Nothing changed.");
+        return Ok(());
+    }
+    let answer = line.ask(json!({"do": "leave"}))?;
+    if let Some(e) = answer["error"].as_str() {
+        return Err(e.to_string());
+    }
+    println!("This node left the brotherhood.");
     Ok(())
 }
 

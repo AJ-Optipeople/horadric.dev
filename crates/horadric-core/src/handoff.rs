@@ -833,7 +833,11 @@ pub struct Record {
     /// snapshot the owner's that it owns it under `n`, each with the words
     /// before it. The receiver believes them as any brother would, and
     /// passes them on (see [`crate::mesh::arrived`], [`crate::mesh::take`]).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "crate::said::lenient"
+    )]
     pub said: Vec<crate::said::Word>,
 }
 

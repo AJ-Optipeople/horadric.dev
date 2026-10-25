@@ -236,8 +236,16 @@ pub struct Roster {
     /// session's last moves and its ending, and each cast out. What a
     /// brother believes of these, it believes from here alone, whoever
     /// passed it on (see [`crate::said`] and [`crate::mesh::believe`]).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "crate::said::lenient"
+    )]
     pub said: Vec<crate::said::Word>,
+    /// The sessions this brother let go after they ended, by roster key:
+    /// its word that it heard them end, now that it holds them no more.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub let_go: Vec<String>,
 }
 
 /// A brother this machine would take a key for, and on whose word.
@@ -685,6 +693,14 @@ impl Roster {
             outcast,
             ended,
             said: said.into_iter().cloned().collect(),
+            let_go: self
+                .let_go
+                .iter()
+                .chain(&other.let_go)
+                .cloned()
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect(),
         }
     }
 

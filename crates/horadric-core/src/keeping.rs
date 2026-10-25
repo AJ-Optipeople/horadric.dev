@@ -574,7 +574,9 @@ pub fn takeover_message(words: &[crate::said::Word]) -> Value {
 
 /// The signed word a `takeover` carries.
 pub fn words_of(msg: &Value) -> Vec<crate::said::Word> {
-    serde_json::from_value(msg["said"].clone()).unwrap_or_default()
+    // Word by word: one a newer brother says, or a broken one, is left
+    // out alone.
+    crate::said::lenient(msg["said"].clone()).unwrap_or_default()
 }
 
 /// Whether the keeper takes a silent brother's sessions over by itself
@@ -969,6 +971,7 @@ mod tests {
             by: "desk".into(),
             at: T,
             what: crate::said::What::Owns {
+                origin: "desk".into(),
                 session: "s".into(),
             },
             sig: "x".into(),
