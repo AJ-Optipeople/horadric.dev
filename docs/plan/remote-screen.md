@@ -94,8 +94,35 @@ pane. The token goes in no log or reply text.
 `horadric remote close <ssh destination>` ends the tunnel kept for it
 and forgets it.
 
-`remote_screenshot {"ssh"}` fetches `/frame.jpg` through the same tunnel
-and gives it to the session as an image: the picture the human sees.
+`remote_screenshot {"ssh", "width"?}` fetches `/frame.jpg` through the
+same tunnel and gives it to the session as an image: the picture the
+human sees. Its text line gives the screen's size and, read from the
+JPEG's own header, the picture's, with the factor that turns a spot in
+the picture into screen pixels ("multiply image coordinates by 1.6"),
+since the picture is scaled down to `width` (1600 unless asked).
+
+The session operates the desktop the way it drives a web page, each
+tool taking `ssh` like the others and posting `/input` events through
+the same tunnel, one at a time, each after the one before is answered:
+
+- `remote_click {ssh, x, y, button?: "left"|"right"|"middle", double?}`
+  a move, then down and up (twice for a double click).
+- `remote_type {ssh, text}` `text` events, split so no body passes the
+  remote's 64 KiB.
+- `remote_press {ssh, key}` a key ("Enter", "Tab", "Escape", "F5", "PageDown",
+  a letter or digit) or a chord ("Ctrl+S", "Alt+F4", "Ctrl+Shift+Esc",
+  "Win+R"): the modifiers go down in order, then the key, and all come
+  up in reverse.
+- `remote_scroll {ssh, x, y, delta}` one `wheel` event, `delta` in
+  notches (times 120), negative scrolling down.
+
+x and y are screen pixels from the top left of the whole virtual
+screen. Each answers a short line ("clicked at 812,440") and no picture:
+the descriptions tell the session to look with `remote_screenshot`, act,
+then look again. Anything but `204` stops the sequence and the remote's
+own words become the tool's error, a `409` saying the window runs as
+administrator or the desktop is locked. The token is masked out of every
+error.
 
 ## Limits now
 

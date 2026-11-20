@@ -123,8 +123,27 @@ pub fn screenshot(dest: &str, dev: bool, width: u32) -> Result<(Vec<u8>, String)
     if r.body.is_empty() {
         return Err("the remote sent an empty picture".into());
     }
-    let line = remote::screen_line(&r);
+    let line = remote::screen_line(&r, remote::jpeg_size(&r.body));
     Ok((r.body, line))
+}
+
+/// Posts `events` to `dest`'s screen one at a time, each after the one
+/// before is answered, so a button's up never overtakes its down. Stops at
+/// the first the remote does not take, with what it said.
+pub fn send_input(dest: &str, dev: bool, events: &[String]) -> Result<(), String> {
+    let (port, token) = reach(dest, dev)?;
+    let path = remote::input_path(&token);
+    for event in events {
+        let r = post(port, &path, event).map_err(|e| remote::mask(&e, &token))?;
+        if r.status != 204 {
+            let said = String::from_utf8_lossy(&r.body);
+            return Err(remote::mask(
+                &remote::input_refusal(r.status, &said),
+                &token,
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// The local port of a live tunnel to `dest` and the remote's token.
@@ -494,15 +513,37 @@ fn token(dest: &str, dev: bool) -> Result<String, String> {
     Err(why)
 }
 
-/// GET `path` through the tunnel on `port`, the whole answer. HTTP/1.0,
-/// so the remote closes when done and there is no chunking to undo.
+/// GET `path` through the tunnel on `port`, the whole answer.
 fn get(port: u16, path: &str) -> Result<Response, String> {
+    request(
+        port,
+        format!("GET {path} HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\n\r\n").into_bytes(),
+    )
+}
+
+/// POST `body`, JSON, to `path` through the tunnel on `port`, the whole
+/// answer.
+fn post(port: u16, path: &str, body: &str) -> Result<Response, String> {
+    let mut bytes = format!(
+        "POST {path} HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\n\
+         Content-Length: {}\r\n\r\n",
+        body.len()
+    )
+    .into_bytes();
+    bytes.extend_from_slice(body.as_bytes());
+    request(port, bytes)
+}
+
+/// Sends `bytes`, a whole HTTP/1.0 request, through the tunnel on `port`
+/// and reads the answer. HTTP/1.0, so the remote closes when done and
+/// there is no chunking to undo.
+fn request(port: u16, bytes: Vec<u8>) -> Result<Response, String> {
     let at = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
     let mut s = TcpStream::connect_timeout(&at, Duration::from_secs(3))
         .map_err(|e| format!("the tunnel did not answer: {e}"))?;
     let _ = s.set_read_timeout(Some(FETCH_WAIT));
     let _ = s.set_write_timeout(Some(FETCH_WAIT));
-    s.write_all(format!("GET {path} HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\n\r\n").as_bytes())
+    s.write_all(&bytes)
         .map_err(|e| format!("could not ask the remote: {e}"))?;
     let mut bytes = Vec::new();
     s.read_to_end(&mut bytes)
@@ -578,8 +619,10 @@ pub fn tools() -> Vec<Value> {
             "A picture of a remote Windows machine's whole desktop (every monitor), the same \
              picture remote_open shows the user. Use it to look at a machine you work on over \
              SSH that runs Horadric with HORADRIC_SCREEN_SHARE=1: after a step, to see what \
-             came up, before you say something worked there. Its size line gives the screen in \
-             physical pixels, to turn a spot in the picture into a screen position.",
+             came up, before you say something worked there. Its text line gives the screen in \
+             physical pixels and the factor to multiply a spot in the picture by for the x and \
+             y remote_click and remote_scroll take, since the picture may be scaled down to \
+             width.",
             json!({
                 "ssh": ssh(),
                 "width": {
@@ -589,8 +632,81 @@ pub fn tools() -> Vec<Value> {
             }),
             &["ssh"],
         ),
+        crate::mcp::tool(
+            "remote_click",
+            &format!(
+                "Click on a remote Windows machine's desktop, as remote_screenshot shows it. \
+                 {ACT} x and y are screen pixels from the top left of the whole desktop: a \
+                 spot in the screenshot multiplied by the factor its text line gives."
+            ),
+            json!({
+                "ssh": ssh(),
+                "x": { "type": "integer", "description": "Screen pixels from the left" },
+                "y": { "type": "integer", "description": "Screen pixels from the top" },
+                "button": {
+                    "type": "string",
+                    "enum": ["left", "right", "middle"],
+                    "description": "Which button (default left)"
+                },
+                "double": { "type": "boolean", "description": "Click twice, to open (default false)" },
+            }),
+            &["ssh", "x", "y"],
+        ),
+        crate::mcp::tool(
+            "remote_type",
+            &format!(
+                "Type text on a remote Windows machine, into whatever has the keyboard focus \
+                 there: click the field first. Any characters, typed as Unicode, so the \
+                 keyboard layout does not change them. For Enter, Tab or a shortcut use \
+                 remote_press. {ACT}"
+            ),
+            json!({
+                "ssh": ssh(),
+                "text": { "type": "string", "description": "What to type" },
+            }),
+            &["ssh", "text"],
+        ),
+        crate::mcp::tool(
+            "remote_press",
+            &format!(
+                "Press a key or a shortcut on a remote Windows machine: a key such as Enter, \
+                 Tab, Escape, Backspace, Delete, Up, PageDown, F5 or a letter, or a chord such \
+                 as Ctrl+S, Alt+F4, Ctrl+Shift+Esc or Win+R (the modifiers Ctrl, Shift, Alt \
+                 and Win first, joined by +). {ACT}"
+            ),
+            json!({
+                "ssh": ssh(),
+                "key": { "type": "string", "description": "The key or chord, e.g. Enter or Ctrl+S" },
+            }),
+            &["ssh", "key"],
+        ),
+        crate::mcp::tool(
+            "remote_scroll",
+            &format!(
+                "Turn the mouse wheel over a spot on a remote Windows machine's desktop. \
+                 {ACT} x and y are screen pixels, as for remote_click."
+            ),
+            json!({
+                "ssh": ssh(),
+                "x": { "type": "integer", "description": "Screen pixels from the left" },
+                "y": { "type": "integer", "description": "Screen pixels from the top" },
+                "delta": {
+                    "type": "integer",
+                    "description": "Wheel notches, a few lines each: positive scrolls up, negative down"
+                },
+            }),
+            &["ssh", "x", "y", "delta"],
+        ),
     ]
 }
+
+/// What every input tool's description says: how to work with it, and
+/// what it can not reach.
+const ACT: &str = "For a machine you work on over SSH that runs Horadric with \
+     HORADRIC_SCREEN_SHARE=1. Look first with remote_screenshot, act, then look again to see \
+     what it did: nothing comes back but a line. The user sees the same desktop live in \
+     remote_open's tab while you work. Input to a program running as administrator (Sysmac \
+     Studio) is refused, as is input while the desktop is locked.";
 
 /// Answers a `remote_` tool, None for any other. `open_in_pane` opens a URL in the
 /// browser pane and gives back what the app said of the page.
@@ -599,7 +715,15 @@ pub fn call(
     args: &Value,
     open_in_pane: impl FnOnce(&str) -> Result<Value, String>,
 ) -> Option<Result<Vec<Value>, String>> {
-    if !matches!(name, "remote_open" | "remote_screenshot") {
+    if !matches!(
+        name,
+        "remote_open"
+            | "remote_screenshot"
+            | "remote_click"
+            | "remote_type"
+            | "remote_press"
+            | "remote_scroll"
+    ) {
         return None;
     }
     let dest = match args.get("ssh").and_then(Value::as_str).map(str::trim) {
@@ -607,6 +731,11 @@ pub fn call(
         _ => return Some(Err("say which machine: ssh, a destination ssh takes".into())),
     };
     let dev = dev_env();
+    if let Some(events) = input_events(name, args) {
+        return Some(events.and_then(|(events, done)| {
+            send_input(&dest, dev, &events).map(|()| vec![crate::mcp::text(done)])
+        }));
+    }
     Some(if name == "remote_open" {
         let show = |url: &str| open_in_pane(url).map(|a| crate::mcp::describe(&a));
         open(&dest, dev, show).map(|o| {
@@ -630,6 +759,57 @@ pub fn call(
                 crate::mcp::text(line),
             ]
         })
+    })
+}
+
+/// The events an input tool posts and the line it answers with once they
+/// are taken, None for a tool that posts none. Everything is checked here,
+/// before a tunnel is started for it.
+fn input_events(name: &str, args: &Value) -> Option<Result<(Vec<String>, String), String>> {
+    let int = |k: &str| -> Result<i32, String> {
+        args.get(k)
+            .and_then(Value::as_i64)
+            .and_then(|n| i32::try_from(n).ok())
+            .ok_or_else(|| format!("say {k}, a whole number"))
+    };
+    let s = |k: &str| args.get(k).and_then(Value::as_str);
+    Some(match name {
+        "remote_click" => (|| {
+            let (x, y) = (int("x")?, int("y")?);
+            let double = args.get("double").and_then(Value::as_bool).unwrap_or(false);
+            let events = remote::click_events(x, y, s("button"), double)?;
+            let what = if double { "double clicked" } else { "clicked" };
+            let button = match s("button") {
+                Some(b @ ("right" | "middle")) => format!(" with the {b} button"),
+                _ => String::new(),
+            };
+            Ok((events, format!("{what} at {x},{y}{button}")))
+        })(),
+        "remote_type" => s("text")
+            .ok_or_else(|| "say what to type: text".to_string())
+            .and_then(|text| {
+                let events = remote::text_events(text)?;
+                Ok((events, format!("typed {} characters", text.chars().count())))
+            }),
+        "remote_press" => s("key")
+            .ok_or_else(|| "say which key: key, e.g. Enter or Ctrl+S".to_string())
+            .and_then(|key| {
+                let vks = remote::parse_chord(key)?;
+                Ok((
+                    remote::press_events(&vks),
+                    format!("pressed {}", key.trim()),
+                ))
+            }),
+        "remote_scroll" => (|| {
+            let (x, y, delta) = (int("x")?, int("y")?, int("delta")?);
+            let event = remote::wheel_event(x, y, delta)?;
+            let way = if delta > 0 { "up" } else { "down" };
+            Ok((
+                vec![event],
+                format!("scrolled {way} {} notches at {x},{y}", delta.unsigned_abs()),
+            ))
+        })(),
+        _ => return None,
     })
 }
 
@@ -664,7 +844,62 @@ mod tests {
         for t in tools() {
             let said = t["description"].as_str().unwrap();
             assert!(said.contains("HORADRIC_SCREEN_SHARE=1"), "{said}");
-            assert_eq!(t["inputSchema"]["required"], json!(["ssh"]));
+            assert_eq!(t["inputSchema"]["required"][0], "ssh");
         }
+    }
+
+    #[test]
+    fn input_is_checked_before_ssh_starts() {
+        let e = |name: &str, args: Value| {
+            call(name, &args, |_: &str| -> Result<Value, String> {
+                panic!("nothing may open")
+            })
+            .expect("a remote tool")
+            .unwrap_err()
+        };
+        assert!(e("remote_click", json!({ "ssh": "vm", "x": 1 })).contains("say y"));
+        assert!(e(
+            "remote_click",
+            json!({ "ssh": "vm", "x": 1, "y": 2, "button": "back" })
+        )
+        .contains("button"));
+        assert!(e("remote_type", json!({ "ssh": "vm", "text": "" })).contains("text"));
+        assert!(e("remote_press", json!({ "ssh": "vm", "key": "Ctrl+Nope" })).contains("Nope"));
+        assert!(e("remote_press", json!({ "ssh": "vm" })).contains("key"));
+        assert!(e(
+            "remote_scroll",
+            json!({ "ssh": "vm", "x": 1, "y": 2, "delta": 0 })
+        )
+        .contains("notches"));
+        assert!(e("remote_press", json!({ "key": "Enter" })).contains("ssh"));
+    }
+
+    #[test]
+    fn input_tools_say_what_they_did() {
+        let done = |name: &str, args: Value| input_events(name, &args).unwrap().unwrap().1;
+        assert_eq!(
+            done("remote_click", json!({ "x": 812, "y": 440 })),
+            "clicked at 812,440"
+        );
+        assert_eq!(
+            done(
+                "remote_click",
+                json!({ "x": 1, "y": 2, "button": "right", "double": true })
+            ),
+            "double clicked at 1,2 with the right button"
+        );
+        assert_eq!(
+            done("remote_type", json!({ "text": "æøå" })),
+            "typed 3 characters"
+        );
+        assert_eq!(
+            done("remote_press", json!({ "key": " Ctrl+S " })),
+            "pressed Ctrl+S"
+        );
+        assert_eq!(
+            done("remote_scroll", json!({ "x": 5, "y": 6, "delta": -3 })),
+            "scrolled down 3 notches at 5,6"
+        );
+        assert!(input_events("remote_open", &json!({})).is_none());
     }
 }

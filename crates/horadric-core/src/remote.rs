@@ -201,21 +201,237 @@ pub fn parse_response(bytes: &[u8]) -> Result<Response, Unread> {
 }
 
 /// The line said beside a frame: how large the remote's screen is, which
-/// the picture is a scaled copy of.
-pub fn screen_line(r: &Response) -> String {
+/// the picture is a scaled copy of, and how to turn a spot in the picture
+/// into the screen position the input tools take. `image` is the
+/// picture's own size, when it could be read.
+pub fn screen_line(r: &Response, image: Option<(u32, u32)>) -> String {
     let n = |k: &str| r.header(k).and_then(|v| v.parse::<i64>().ok());
-    match (
-        n("x-screen-width"),
-        n("x-screen-height"),
-        n("x-screen-left"),
-        n("x-screen-top"),
-    ) {
-        (Some(w), Some(h), left, top) => format!(
-            "The remote screen is {w} x {h} physical pixels, its top left at {}, {}.",
-            left.unwrap_or(0),
-            top.unwrap_or(0)
+    let (Some(w), Some(h)) = (n("x-screen-width"), n("x-screen-height")) else {
+        return "The remote did not say how large its screen is.".to_string();
+    };
+    let screen = format!("The remote screen is {w} x {h} physical pixels.");
+    match image {
+        Some((iw, ih)) if iw > 0 => {
+            let factor = w as f64 / f64::from(iw);
+            let factor = format!("{:.3}", factor);
+            let factor = factor.trim_end_matches('0').trim_end_matches('.');
+            format!(
+                "{screen} This image is {iw} x {ih} of that screen: multiply image \
+                 coordinates by {factor} for the x and y the remote_ input tools take, \
+                 counted from the screen's top left."
+            )
+        }
+        _ => format!(
+            "{screen} Scale image coordinates by {w} / the image's width for the x and y \
+             the remote_ input tools take, counted from the screen's top left."
         ),
-        _ => "The remote did not say how large its screen is.".to_string(),
+    }
+}
+
+/// The width and height a JPEG says it has, from its start of frame
+/// marker. None when the bytes are not a JPEG with one.
+pub fn jpeg_size(bytes: &[u8]) -> Option<(u32, u32)> {
+    if bytes.get(..2)? != [0xff, 0xd8] {
+        return None;
+    }
+    let mut at = 2;
+    loop {
+        // Fill bytes may stand before a marker.
+        while *bytes.get(at)? == 0xff && *bytes.get(at + 1)? == 0xff {
+            at += 1;
+        }
+        if *bytes.get(at)? != 0xff {
+            return None;
+        }
+        let marker = *bytes.get(at + 1)?;
+        let len = usize::from(u16::from_be_bytes([
+            *bytes.get(at + 2)?,
+            *bytes.get(at + 3)?,
+        ]));
+        // Every start of frame but the three that are not one: DHT, JPG, DAC.
+        if (0xc0..=0xcf).contains(&marker) && !matches!(marker, 0xc4 | 0xc8 | 0xcc) {
+            let h = u16::from_be_bytes([*bytes.get(at + 5)?, *bytes.get(at + 6)?]);
+            let w = u16::from_be_bytes([*bytes.get(at + 7)?, *bytes.get(at + 8)?]);
+            return Some((u32::from(w), u32::from(h)));
+        }
+        if marker == 0xda || len < 2 {
+            return None;
+        }
+        at += 2 + len;
+    }
+}
+
+/// The path input events are posted to.
+pub fn input_path(token: &str) -> String {
+    format!("/input?t={token}")
+}
+
+/// The events of a click at `x`, `y` with `button` (left, right or
+/// middle; left when None), twice over for a double click: a move first,
+/// so the program under it sees the pointer arrive as it would by hand.
+pub fn click_events(
+    x: i32,
+    y: i32,
+    button: Option<&str>,
+    double: bool,
+) -> Result<Vec<String>, String> {
+    let button = match button.unwrap_or("left") {
+        b @ ("left" | "right" | "middle") => b,
+        other => return Err(format!("button is left, right or middle, not {other:?}")),
+    };
+    let mut out = vec![serde_json::json!({ "kind": "move", "x": x, "y": y }).to_string()];
+    for _ in 0..if double { 2 } else { 1 } {
+        for kind in ["down", "up"] {
+            out.push(
+                serde_json::json!({ "kind": kind, "x": x, "y": y, "button": button }).to_string(),
+            );
+        }
+    }
+    Ok(out)
+}
+
+/// One notch of a mouse wheel, as Windows counts it.
+pub const WHEEL_NOTCH: i32 = 120;
+
+/// The event of scrolling `notches` at `x`, `y`, negative being down.
+/// Held to a hundred notches either way, more than any page needs.
+pub fn wheel_event(x: i32, y: i32, notches: i32) -> Result<String, String> {
+    if notches == 0 {
+        return Err("delta is a number of notches other than 0: negative scrolls down".into());
+    }
+    let delta = notches.clamp(-100, 100) * WHEEL_NOTCH;
+    Ok(serde_json::json!({ "kind": "wheel", "x": x, "y": y, "delta": delta }).to_string())
+}
+
+/// The most characters one text event carries. The remote reads a body of
+/// 64 KiB at most, and a character escaped in JSON takes 12 bytes at most.
+const TEXT_CHUNK: usize = 4000;
+
+/// The events that type `text`, in pieces small enough for the remote to
+/// read each, split between characters.
+pub fn text_events(text: &str) -> Result<Vec<String>, String> {
+    if text.is_empty() {
+        return Err("say what to type: text".into());
+    }
+    let chars: Vec<char> = text.chars().collect();
+    Ok(chars
+        .chunks(TEXT_CHUNK)
+        .map(|c| {
+            let piece: String = c.iter().collect();
+            serde_json::json!({ "kind": "text", "text": piece }).to_string()
+        })
+        .collect())
+}
+
+/// The virtual key of a modifier name, any case.
+fn modifier_vk(name: &str) -> Option<u16> {
+    Some(match name.to_ascii_lowercase().as_str() {
+        "ctrl" | "control" => 0x11,
+        "shift" => 0x10,
+        "alt" => 0x12,
+        "win" | "windows" | "meta" | "super" => 0x5b,
+        _ => return None,
+    })
+}
+
+/// The virtual key of a key name, any case: a letter, a digit, F1 to F24
+/// or a named key.
+fn key_vk(name: &str) -> Option<u16> {
+    let lower = name.to_ascii_lowercase();
+    let mut chars = lower.chars();
+    if let (Some(c), None) = (chars.next(), chars.next()) {
+        if c.is_ascii_lowercase() {
+            return Some(c.to_ascii_uppercase() as u16);
+        }
+        if c.is_ascii_digit() {
+            return Some(c as u16);
+        }
+    }
+    if let Some(n) = lower.strip_prefix('f').and_then(|n| n.parse::<u16>().ok()) {
+        return (1..=24).contains(&n).then_some(0x6f + n);
+    }
+    Some(match lower.as_str() {
+        "enter" | "return" => 0x0d,
+        "tab" => 0x09,
+        "escape" | "esc" => 0x1b,
+        "backspace" => 0x08,
+        "delete" | "del" => 0x2e,
+        "insert" | "ins" => 0x2d,
+        "space" => 0x20,
+        "up" | "arrowup" => 0x26,
+        "down" | "arrowdown" => 0x28,
+        "left" | "arrowleft" => 0x25,
+        "right" | "arrowright" => 0x27,
+        "home" => 0x24,
+        "end" => 0x23,
+        "pageup" | "pgup" => 0x21,
+        "pagedown" | "pgdn" => 0x22,
+        _ => modifier_vk(name)?,
+    })
+}
+
+/// The virtual keys of a key or chord such as `Enter`, `Ctrl+S` or
+/// `Ctrl+Shift+Esc`, in the order they go down: the modifiers as written,
+/// then the key. A modifier alone (`Win`) is a key too.
+pub fn parse_chord(chord: &str) -> Result<Vec<u16>, String> {
+    let parts: Vec<&str> = chord.split('+').map(str::trim).collect();
+    let Some((key, mods)) = parts.split_last() else {
+        return Err("say which key".into());
+    };
+    let mut vks = Vec::with_capacity(parts.len());
+    for m in mods {
+        let vk = modifier_vk(m).ok_or_else(|| {
+            format!("{m:?} in {chord:?} is not Ctrl, Shift, Alt or Win, which come before the key")
+        })?;
+        if vks.contains(&vk) {
+            return Err(format!("{m:?} is in {chord:?} twice"));
+        }
+        vks.push(vk);
+    }
+    let vk = key_vk(key).ok_or_else(|| {
+        format!(
+            "{key:?} is not a key: a letter, a digit, F1 to F24, Enter, Tab, Escape, \
+             Backspace, Delete, Insert, Space, Up, Down, Left, Right, Home, End, PageUp, \
+             PageDown, or a modifier"
+        )
+    })?;
+    if vks.contains(&vk) {
+        return Err(format!("{key:?} is in {chord:?} twice"));
+    }
+    vks.push(vk);
+    Ok(vks)
+}
+
+/// The events that press `vks` together: each down in order, then each up
+/// in reverse, so the modifiers hold until the key is let go.
+pub fn press_events(vks: &[u16]) -> Vec<String> {
+    let event = |vk: u16, down: bool| {
+        serde_json::json!({ "kind": "key", "vk": vk, "down": down }).to_string()
+    };
+    vks.iter()
+        .map(|&vk| event(vk, true))
+        .chain(vks.iter().rev().map(|&vk| event(vk, false)))
+        .collect()
+}
+
+/// Why the remote did not take an input event, in words for the caller:
+/// what it said, and for a refusal what usually causes one.
+pub fn input_refusal(status: u16, said: &str) -> String {
+    let said = said.trim();
+    match status {
+        409 => format!(
+            "the remote's Windows did not take the input ({}): the window under it runs as \
+             administrator (Sysmac Studio does), which the remote's Horadric can not reach, \
+             or the desktop is locked",
+            if said.is_empty() {
+                "no reason given"
+            } else {
+                said
+            }
+        ),
+        400 => format!("the remote did not take the event: {said}"),
+        413 => "the remote found the event too large".to_string(),
+        s => status_refusal(s),
     }
 }
 
@@ -282,7 +498,16 @@ pub fn without_tunnel(list: &[Tunnel], dest: &str, remote: u16) -> Vec<Tunnel> {
 mod tests {
     use super::*;
 
+    use serde_json::{json, Value};
+
     const TOKEN: &str = "0123456789abcdef0123456789abcdef";
+
+    fn values(events: &[String]) -> Vec<Value> {
+        events
+            .iter()
+            .map(|e| serde_json::from_str(e).unwrap())
+            .collect()
+    }
 
     #[test]
     fn dev_forwards_to_its_own_port() {
@@ -362,9 +587,168 @@ mod tests {
         assert_eq!(r.header("X-SCREEN-HEIGHT"), Some("1440"));
         assert_eq!(r.body, b"\xff\xd8\xff");
         assert_eq!(
-            screen_line(&r),
-            "The remote screen is 2560 x 1440 physical pixels, its top left at -1920, 0."
+            screen_line(&r, Some((1600, 900))),
+            "The remote screen is 2560 x 1440 physical pixels. This image is 1600 x 900 of \
+             that screen: multiply image coordinates by 1.6 for the x and y the remote_ input \
+             tools take, counted from the screen's top left."
         );
+        assert!(screen_line(&r, Some((2560, 1440))).contains("multiply image coordinates by 1 "));
+        assert!(screen_line(&r, Some((1000, 563))).contains("by 2.56 "));
+        assert!(screen_line(&r, None).contains("2560 / the image's width"));
+    }
+
+    /// A JPEG head with a start of frame `marker` of `w` by `h`, after an
+    /// APP0 segment, as an encoder writes them.
+    fn jpeg(marker: u8, w: u16, h: u16) -> Vec<u8> {
+        let mut b = vec![0xff, 0xd8, 0xff, 0xe0, 0x00, 0x04, 0xaa, 0xbb];
+        b.extend([0xff, 0xc4, 0x00, 0x03, 0x00]);
+        b.extend([0xff, marker, 0x00, 0x11, 0x08]);
+        b.extend(h.to_be_bytes());
+        b.extend(w.to_be_bytes());
+        b.extend([0x03, 0x01]);
+        b
+    }
+
+    #[test]
+    fn a_jpeg_says_its_size_in_its_start_of_frame() {
+        assert_eq!(jpeg_size(&jpeg(0xc0, 1600, 900)), Some((1600, 900)));
+        assert_eq!(jpeg_size(&jpeg(0xc2, 800, 451)), Some((800, 451)));
+        let mut filled = jpeg(0xc0, 10, 20);
+        filled.insert(8, 0xff);
+        assert_eq!(jpeg_size(&filled), Some((10, 20)));
+        assert_eq!(jpeg_size(&jpeg(0xc0, 10, 20)[..15]), None);
+        assert_eq!(jpeg_size(b"\x89PNG\r\n"), None);
+        assert_eq!(jpeg_size(&[0xff, 0xd8, 0xff, 0xda, 0x00, 0x02]), None);
+        assert_eq!(jpeg_size(&[]), None);
+    }
+
+    #[test]
+    fn a_click_moves_then_presses_and_lets_go() {
+        assert_eq!(input_path(TOKEN), format!("/input?t={TOKEN}"));
+        let one = values(&click_events(812, 440, None, false).unwrap());
+        assert_eq!(
+            one,
+            [
+                json!({ "kind": "move", "x": 812, "y": 440 }),
+                json!({ "kind": "down", "x": 812, "y": 440, "button": "left" }),
+                json!({ "kind": "up", "x": 812, "y": 440, "button": "left" }),
+            ]
+        );
+        let double = values(&click_events(1, 2, Some("right"), true).unwrap());
+        assert_eq!(double.len(), 5);
+        assert_eq!(double[3], double[1]);
+        assert_eq!(
+            double[4],
+            json!({ "kind": "up", "x": 1, "y": 2, "button": "right" })
+        );
+        assert!(click_events(1, 2, Some("back"), false).is_err());
+    }
+
+    #[test]
+    fn a_scroll_counts_notches_down_as_negative() {
+        assert_eq!(
+            values(&[wheel_event(5, 6, -3).unwrap()]),
+            [json!({ "kind": "wheel", "x": 5, "y": 6, "delta": -360 })]
+        );
+        let delta = |n| values(&[wheel_event(0, 0, n).unwrap()])[0]["delta"].clone();
+        assert_eq!(delta(1), 120);
+        assert_eq!(delta(1000), 12000);
+        assert!(wheel_event(0, 0, 0).is_err());
+    }
+
+    #[test]
+    fn text_goes_in_pieces_the_remote_reads_whole() {
+        assert_eq!(
+            values(&text_events("æøå \"x\"").unwrap()),
+            [json!({ "kind": "text", "text": "æøå \"x\"" })]
+        );
+        let long = "\u{1F600}".repeat(TEXT_CHUNK + 1);
+        let pieces = text_events(&long).unwrap();
+        assert_eq!(pieces.len(), 2);
+        assert!(pieces.iter().all(|p| p.len() < 64 * 1024));
+        assert!(text_events("").is_err());
+    }
+
+    #[test]
+    fn keys_are_named_as_on_the_keyboard() {
+        assert_eq!(parse_chord("a"), Ok(vec![0x41]));
+        assert_eq!(parse_chord("Z"), Ok(vec![0x5a]));
+        assert_eq!(parse_chord("0"), Ok(vec![0x30]));
+        assert_eq!(parse_chord("9"), Ok(vec![0x39]));
+        assert_eq!(parse_chord("F1"), Ok(vec![0x70]));
+        assert_eq!(parse_chord("f5"), Ok(vec![0x74]));
+        assert_eq!(parse_chord("F24"), Ok(vec![0x87]));
+        assert!(parse_chord("F0").is_err());
+        assert!(parse_chord("F25").is_err());
+        for (name, vk) in [
+            ("Enter", 0x0d),
+            ("Return", 0x0d),
+            ("Tab", 0x09),
+            ("Escape", 0x1b),
+            ("Esc", 0x1b),
+            ("Backspace", 0x08),
+            ("Delete", 0x2e),
+            ("Insert", 0x2d),
+            ("Space", 0x20),
+            ("Up", 0x26),
+            ("Down", 0x28),
+            ("Left", 0x25),
+            ("ArrowRight", 0x27),
+            ("Home", 0x24),
+            ("End", 0x23),
+            ("PageUp", 0x21),
+            ("PageDown", 0x22),
+            ("Win", 0x5b),
+        ] {
+            assert_eq!(parse_chord(name), Ok(vec![vk]), "{name}");
+            assert_eq!(parse_chord(&name.to_uppercase()), Ok(vec![vk]), "{name}");
+        }
+    }
+
+    #[test]
+    fn chords_hold_their_modifiers_in_order() {
+        assert_eq!(parse_chord("Ctrl+S"), Ok(vec![0x11, 0x53]));
+        assert_eq!(parse_chord("Alt+F4"), Ok(vec![0x12, 0x73]));
+        assert_eq!(parse_chord("Ctrl+Shift+Esc"), Ok(vec![0x11, 0x10, 0x1b]));
+        assert_eq!(parse_chord("Win+R"), Ok(vec![0x5b, 0x52]));
+        assert_eq!(
+            parse_chord("ctrl + alt + delete"),
+            Ok(vec![0x11, 0x12, 0x2e])
+        );
+        assert!(parse_chord("S+Ctrl").is_err());
+        assert!(parse_chord("Ctrl+Ctrl+S").is_err());
+        assert!(parse_chord("Ctrl+Ctrl").is_err());
+        assert!(parse_chord("Ctrl+").is_err());
+        assert!(parse_chord("").is_err());
+        assert!(parse_chord("Hyper+S").is_err());
+        assert!(parse_chord("Ctrl+Enterr").is_err());
+    }
+
+    #[test]
+    fn a_chord_goes_down_in_order_and_up_in_reverse() {
+        let key = |vk: u16, down: bool| json!({ "kind": "key", "vk": vk, "down": down });
+        assert_eq!(
+            values(&press_events(&[0x11, 0x53])),
+            [
+                key(0x11, true),
+                key(0x53, true),
+                key(0x53, false),
+                key(0x11, false)
+            ]
+        );
+    }
+
+    #[test]
+    fn input_refusals_pass_on_what_the_remote_said() {
+        let e = input_refusal(409, "1 of 2 events taken\n");
+        assert!(
+            e.contains("1 of 2 events taken") && e.contains("administrator"),
+            "{e}"
+        );
+        assert!(input_refusal(409, "").contains("no reason given"));
+        assert!(input_refusal(400, "no such key: 0").ends_with("no such key: 0"));
+        assert!(input_refusal(413, "").contains("too large"));
+        assert!(input_refusal(403, "").contains("token"));
     }
 
     #[test]
@@ -380,7 +764,7 @@ mod tests {
         assert_eq!(r.status, 403);
         assert!(r.body.is_empty());
         assert_eq!(
-            screen_line(&r),
+            screen_line(&r, Some((10, 10))),
             "The remote did not say how large its screen is."
         );
     }
