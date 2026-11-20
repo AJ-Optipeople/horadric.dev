@@ -21,10 +21,22 @@
   #sessions { display: flex; gap: 6px; overflow: hidden; flex: 1; }
   .s { padding: 1px 8px; border-radius: 10px; background: #22232a; color: #a8a8b0; }
   .s.waiting { background: #6a4a12; color: #ffd98a; }
-  #stage { position: fixed; top: 31px; left: 0; right: 0; bottom: 0; display: flex;
-    align-items: center; justify-content: center; }
-  #screen { display: block; max-width: 100%; max-height: 100%; user-select: none;
-    -webkit-user-drag: none; }
+  #zoom { display: flex; gap: 2px; align-items: center; }
+  #zoom button { padding: 2px 7px; }
+  #level { min-width: 38px; text-align: center; color: #9a9aa2; }
+  select { font: inherit; color: #d8d8dc; background: #26272e; border: 1px solid #3a3b44;
+    border-radius: 4px; padding: 1px 4px; }
+  #stage { position: fixed; top: 31px; left: 0; right: 0; bottom: 0; overflow: auto; }
+  /* Auto margins centre the picture while it is smaller than the stage and
+     fall to nothing once it is larger, so scrolling reaches every edge
+     instead of clipping the far side of a centred box. */
+  #pad { display: flex; min-width: 100%; min-height: 100%; width: max-content; }
+  #screen { display: block; margin: auto; user-select: none; -webkit-user-drag: none; }
+  /* At fit nothing overflows, and a scrollbar from rounding would shrink
+     the room the fit was worked out for. */
+  #stage.fit { overflow: hidden; }
+  #stage.pan { cursor: grab; }
+  #stage.panning { cursor: grabbing; }
   #stage.control #screen { cursor: crosshair; outline: 2px solid #c0603e; }
 </style>
 </head>
@@ -32,10 +44,17 @@
 <div id="bar">
   <span id="state">Connecting</span>
   <button id="control" title="Send mouse and keyboard to the remote. Esc twice stops.">Take control</button>
+  <span id="zoom">
+    <button id="out" title="Zoom out (Ctrl+wheel while not in control)">-</button>
+    <span id="level">Fit</span>
+    <button id="in" title="Zoom in (Ctrl+wheel while not in control)">+</button>
+    <button id="one" title="Switch between fitting the tab and one remote pixel per screen pixel">1:1</button>
+  </span>
+  <select id="res" hidden title="The remote machine's own screen resolution"></select>
   <span id="notice"></span>
   <div id="sessions"></div>
 </div>
-<div id="stage"><img id="screen" alt=""></div>
+<div id="stage"><div id="pad"><img id="screen" alt=""></div></div>
 <script>
 "use strict";
 // The token leaves the address at once: the tab's URL is shown to
@@ -56,6 +75,9 @@ const stateEl = document.getElementById("state");
 const button = document.getElementById("control");
 const list = document.getElementById("sessions");
 const noticeEl = document.getElementById("notice");
+const levelEl = document.getElementById("level");
+const oneButton = document.getElementById("one");
+const resEl = document.getElementById("res");
 
 // The virtual screen the last frame showed, in its physical pixels.
 let screen = { left: 0, top: 0, width: 0, height: 0 };
@@ -73,10 +95,10 @@ const FRAME_MS = 200;
 async function poll() {
   const began = performance.now();
   try {
-    const w = Math.max(16, Math.round(stage.clientWidth * (window.devicePixelRatio || 1)));
-    const r = await fetch("/frame.jpg?" + q + "&w=" + w, { cache: "no-store" });
+    const r = await fetch("/frame.jpg?" + q + "&w=" + wanted(), { cache: "no-store" });
     if (r.status === 403) { setState("Wrong token", "lost"); return; }
     if (!r.ok) throw new Error(r.status);
+    const was = screen;
     screen = {
       left: +r.headers.get("X-Screen-Left") || 0,
       top: +r.headers.get("X-Screen-Top") || 0,
@@ -87,6 +109,11 @@ async function poll() {
     await new Promise((done) => { img.onload = img.onerror = done; img.src = url; });
     if (shown) URL.revokeObjectURL(shown);
     shown = url;
+    if (screen.width !== was.width || screen.height !== was.height) {
+      layout();
+      // Changed over there, by the list below or by someone at the machine.
+      if (was.width) loadDisplay();
+    }
     setState(control ? "In control" : "Watching", "live");
     setTimeout(poll, Math.max(0, FRAME_MS - (performance.now() - began)));
   } catch (e) {
@@ -94,6 +121,156 @@ async function poll() {
     setTimeout(poll, 1000);
   }
 }
+
+// Zoom counts remote pixels per device pixel of this screen: at 1 each
+// pixel over there is one pixel here, which is as sharp as it gets.
+const ZOOMS = [0.5, 0.75, 1, 1.5, 2];
+const ZOOM_KEY = "horadric-screen-zoom";
+let zoom = "fit";
+try {
+  const saved = localStorage.getItem(ZOOM_KEY);
+  if (saved && ZOOMS.includes(+saved)) zoom = +saved;
+} catch (e) { /* storage refused: start at fit */ }
+
+function ratio() { return window.devicePixelRatio || 1; }
+
+// The zoom at which the whole screen just fits the stage, both ways: a
+// wide tab is often limited by its height, not its width.
+function fitZoom() {
+  if (!screen.width || !screen.height) return 1;
+  const css = Math.min(stage.clientWidth / screen.width, stage.clientHeight / screen.height);
+  return css * ratio();
+}
+
+function current() { return zoom === "fit" ? fitZoom() : zoom; }
+
+// The picture is given its size outright. Left at its natural size, a
+// frame fetched smaller than the stage (the first, or one during a resize)
+// would stay small, and one in device pixels would show too large.
+function layout() {
+  if (screen.width && screen.height) {
+    const css = current() / ratio();
+    img.style.width = screen.width * css + "px";
+    img.style.height = screen.height * css + "px";
+  }
+  levelEl.textContent = zoom === "fit" ? "Fit" : Math.round(zoom * 100) + "%";
+  oneButton.textContent = zoom === "fit" ? "1:1" : "Fit";
+  stage.classList.toggle("fit", zoom === "fit");
+  stage.classList.toggle("pan", !control && zoom !== "fit");
+}
+
+// The frame width that fills the picture's device pixels exactly: any
+// fewer and the browser stretches it soft, any more is sent for nothing.
+function wanted() {
+  if (!screen.width) return Math.max(16, Math.round(stage.clientWidth * ratio()));
+  return Math.max(16, Math.min(screen.width, Math.round(screen.width * current())));
+}
+
+// Changes the zoom keeping the point at (x, y) of the stage where it is.
+function setZoom(next, x, y) {
+  if (x === undefined) { x = stage.clientWidth / 2; y = stage.clientHeight / 2; }
+  const before = img.getBoundingClientRect();
+  const box = stage.getBoundingClientRect();
+  const fx = before.width ? (box.left + x - before.left) / before.width : 0.5;
+  const fy = before.height ? (box.top + y - before.top) / before.height : 0.5;
+  zoom = next;
+  try { localStorage.setItem(ZOOM_KEY, String(zoom)); } catch (e) { /* kept for this page only */ }
+  layout();
+  stage.scrollLeft = img.offsetLeft + fx * img.offsetWidth - x;
+  stage.scrollTop = img.offsetTop + fy * img.offsetHeight - y;
+}
+
+// One step along the levels, with fit standing at its own place among them.
+function step(up, x, y) {
+  const fit = fitZoom();
+  const at = current();
+  const near = (a, b) => Math.abs(a - b) < 0.01;
+  const levels = ZOOMS.filter((z) => !near(z, fit)).concat([fit]).sort((a, b) => a - b);
+  const next = up
+    ? levels.find((z) => z > at + 0.001)
+    : levels.slice().reverse().find((z) => z < at - 0.001);
+  if (next === undefined) return;
+  setZoom(next === fit ? "fit" : next, x, y);
+}
+
+document.getElementById("in").addEventListener("click", (e) => { step(true); e.currentTarget.blur(); });
+document.getElementById("out").addEventListener("click", (e) => { step(false); e.currentTarget.blur(); });
+oneButton.addEventListener("click", () => { setZoom(zoom === "fit" ? 1 : "fit"); oneButton.blur(); });
+window.addEventListener("resize", layout);
+
+// Ctrl+wheel zooms the picture while the remote is only watched. In control
+// it belongs to the remote (zoom in its own apps), and the buttons remain.
+stage.addEventListener("wheel", (e) => {
+  if (!e.ctrlKey) return;
+  // Never the pane's own zoom, in control or not: it would change the
+  // picture's size under the sums above.
+  e.preventDefault();
+  if (control || !e.deltaY) return;
+  const box = stage.getBoundingClientRect();
+  step(e.deltaY < 0, e.clientX - box.left, e.clientY - box.top);
+}, { passive: false });
+
+// Dragging pans a picture larger than the stage, while not in control.
+let panning = null;
+stage.addEventListener("mousedown", (e) => {
+  if (control || e.button !== 0 || zoom === "fit") return;
+  e.preventDefault();
+  panning = { x: e.clientX, y: e.clientY, left: stage.scrollLeft, top: stage.scrollTop };
+  stage.classList.add("panning");
+});
+window.addEventListener("mousemove", (e) => {
+  if (!panning) return;
+  stage.scrollLeft = panning.left - (e.clientX - panning.x);
+  stage.scrollTop = panning.top - (e.clientY - panning.y);
+});
+window.addEventListener("mouseup", () => {
+  if (!panning) return;
+  panning = null;
+  stage.classList.remove("panning");
+});
+
+// The remote's own resolution. An older server has no /display, and then
+// the list stays hidden.
+let modes = [];
+const modeName = (m) => m.width + " × " + m.height;
+async function loadDisplay() {
+  try {
+    const r = await fetch("/display?" + q, { cache: "no-store" });
+    if (r.status === 404) { resEl.hidden = true; return; }
+    if (!r.ok) return;
+    const d = await r.json();
+    const cur = d.current;
+    const same = (m) => cur && m.width === cur.width && m.height === cur.height;
+    modes = (d.modes || []).slice();
+    if (cur && !modes.some(same)) modes.unshift(cur);
+    resEl.replaceChildren(...modes.map((m, i) => {
+      const o = document.createElement("option");
+      o.value = String(i);
+      o.textContent = modeName(m);
+      o.selected = same(m);
+      return o;
+    }));
+    resEl.hidden = !modes.length;
+  } catch (e) { /* the frame loop already says the link is down */ }
+}
+resEl.addEventListener("change", async () => {
+  const m = modes[+resEl.value];
+  resEl.blur();
+  if (!m) return;
+  const sure = window.confirm("This changes the remote machine's own screen resolution to "
+    + modeName(m) + ", for anyone using it there too. Change it?");
+  if (sure) {
+    try {
+      const r = await fetch("/display?" + q, {
+        method: "POST", body: JSON.stringify({ width: m.width, height: m.height }),
+      });
+      if (!r.ok) notice((await r.text()) || "the remote refused the resolution (" + r.status + ")");
+    } catch (e) { notice("the resolution change did not reach the remote"); }
+  }
+  // Also puts the list back on the resolution in use when it was refused
+  // or called off.
+  loadDisplay();
+});
 
 async function sessions() {
   try {
@@ -311,12 +488,15 @@ function setControl(on) {
   button.classList.toggle("on", on);
   button.textContent = on ? "Release control" : "Take control";
   stage.classList.toggle("control", on);
+  layout();
   if (stateEl.className === "live") setState(on ? "In control" : "Watching", "live");
   button.blur();
 }
 button.addEventListener("click", () => setControl(!control));
 
+layout();
 poll();
+loadDisplay();
 sessions();
 setInterval(sessions, 3000);
 </script>
