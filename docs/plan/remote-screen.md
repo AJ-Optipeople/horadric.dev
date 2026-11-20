@@ -36,7 +36,9 @@ is 32 hex characters in `<state dir>\screen-token`, written on first
 start and kept. Without it, or with a wrong one: `403`. Reading the
 token takes a login on the machine, so a tunnel alone is not enough.
 
-- `GET /?t=` the viewer page (HTML, self contained).
+- `GET /` the viewer page (HTML, self contained). It alone needs no
+  token: it holds no data, and a reload of the tab comes back without
+  the token in its address.
 - `GET /frame.jpg?t=&w=<max width>` the whole virtual screen (all
   monitors) as a JPEG with the cursor drawn in, scaled down to at most
   `w` pixels wide when `w` is given. Headers `X-Screen-Left`,

@@ -190,8 +190,12 @@ fn handle(stream: &TcpStream, token: &str, registry: &Mutex<Registry>) -> io::Re
 
     let (path, query) = share::split_target(&target);
     // The tunnel's far end is any local port, so the Host header says
-    // nothing; the token is the guard, on every path.
-    if !share::token_ok(share::query_param(query, "t").as_deref(), token) {
+    // nothing; the token is the guard on every path that shows or moves
+    // anything. The viewer page itself holds no data and is served
+    // without it, because it drops the token from its address, so a
+    // reload of the tab comes back without one and finds it in the tab.
+    let page = method == "GET" && path == "/";
+    if !page && !share::token_ok(share::query_param(query, "t").as_deref(), token) {
         return respond(stream, "403 Forbidden", "text/plain", b"forbidden");
     }
     match (method.as_str(), path) {
