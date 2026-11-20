@@ -58,6 +58,21 @@ token takes a login on the machine, so a tunnel alone is not enough.
   (the button, Esc twice, the tab losing focus) releases every key and
   mouse button it holds down there. A single Esc goes to the remote
   after 600 ms unless a second one follows.
+- `GET /display?t=` the primary display's resolution and the ones it
+  offers, as JSON
+  `{"current":{"width":2560,"height":1440},"modes":[{"width":2560,"height":1440},{"width":1920,"height":1080}]}`:
+  each width and height the driver lists at the bits per pixel in use,
+  once whatever its refresh rates, none smaller than 800 by 600, widest
+  first.
+- `POST /display?t=` with `{"width":1920,"height":1080}` switches the
+  primary display to one of those, kept in the registry, at the refresh
+  rate in use when the new size has it. Answers `204`, `400` when the
+  size is not offered or the body is not one, or `409` with the
+  `DISP_CHANGE` code Windows refused it with. Frames after it come at
+  the new size, as each one reads the virtual screen afresh. This
+  changes the remote machine's own desktop, for RDP and for the
+  programs' layout too, unlike the viewer's zoom, which only scales the
+  picture here.
 - `GET /sessions?t=` the remote's Horadric sessions as JSON
   `[{"id","name","project","state","waiting"}]`, `waiting` being the
   question or approval it waits on, or null.

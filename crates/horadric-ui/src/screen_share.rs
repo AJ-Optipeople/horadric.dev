@@ -14,14 +14,17 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use horadric_core::screen_share::{self as share, Button, Input, SessionRow};
+use horadric_core::screen_share::{self as share, Button, Input, Mode, SessionRow, Size};
 use horadric_core::Registry;
-use windows::core::{Error, PWSTR};
+use windows::core::{Error, PCWSTR, PWSTR};
 use windows::Win32::Foundation::E_FAIL;
 use windows::Win32::Graphics::Gdi::{
-    BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC, ReleaseDC,
-    SelectObject, SetBrushOrgEx, SetStretchBltMode, StretchBlt, CAPTUREBLT, HALFTONE, HBITMAP, HDC,
-    HGDIOBJ, HPALETTE, SRCCOPY,
+    BitBlt, ChangeDisplaySettingsExW, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC,
+    DeleteObject, EnumDisplayDevicesW, EnumDisplaySettingsW, GetDC, ReleaseDC, SelectObject,
+    SetBrushOrgEx, SetStretchBltMode, StretchBlt, CAPTUREBLT, CDS_UPDATEREGISTRY, DEVMODEW,
+    DISPLAY_DEVICEW, DISPLAY_DEVICE_PRIMARY_DEVICE, DISP_CHANGE_SUCCESSFUL, DM_BITSPERPEL,
+    DM_DISPLAYFREQUENCY, DM_PELSHEIGHT, DM_PELSWIDTH, ENUM_CURRENT_SETTINGS,
+    ENUM_DISPLAY_SETTINGS_MODE, HALFTONE, HBITMAP, HDC, HGDIOBJ, HPALETTE, SRCCOPY,
 };
 use windows::Win32::Graphics::Imaging::{
     CLSID_WICImagingFactory, GUID_ContainerFormatJpeg, GUID_WICPixelFormat24bppBGR,
@@ -217,17 +220,10 @@ fn handle(stream: &TcpStream, token: &str, registry: &Mutex<Registry>) -> io::Re
             sessions(registry).as_bytes(),
         ),
         ("POST", "/input") => {
-            if content_length > share::MAX_BODY {
-                respond(stream, "413 Payload Too Large", "", b"")?;
-                drain(stream, &mut reader);
+            let Some(body) = read_body(stream, &mut reader, content_length)? else {
                 return Ok(());
-            }
-            let mut body = vec![0u8; content_length];
-            reader.read_exact(&mut body)?;
-            let parsed = std::str::from_utf8(&body)
-                .map_err(|e| e.to_string())
-                .and_then(share::parse_input);
-            match parsed {
+            };
+            match body.and_then(|b| share::parse_input(&b)) {
                 Ok(input) => match send(&input) {
                     Ok(()) => respond(stream, "204 No Content", "", b""),
                     Err(why) => respond(stream, "409 Conflict", "text/plain", why.as_bytes()),
@@ -235,8 +231,56 @@ fn handle(stream: &TcpStream, token: &str, registry: &Mutex<Registry>) -> io::Re
                 Err(why) => respond(stream, "400 Bad Request", "text/plain", why.as_bytes()),
             }
         }
+        ("GET", "/display") => {
+            let display = Display::primary();
+            let current = display.current();
+            let sizes = share::display_sizes(&display.modes(), current.bits);
+            respond(
+                stream,
+                "200 OK",
+                "application/json",
+                share::display_json(current.size(), &sizes).as_bytes(),
+            )
+        }
+        ("POST", "/display") => {
+            let Some(body) = read_body(stream, &mut reader, content_length)? else {
+                return Ok(());
+            };
+            match body.and_then(|b| share::parse_size(&b)) {
+                Ok(size) => match Display::primary().resize(size) {
+                    Ok(()) => respond(stream, "204 No Content", "", b""),
+                    Err(Refused::NotOffered) => respond(
+                        stream,
+                        "400 Bad Request",
+                        "text/plain",
+                        b"not a resolution this display offers",
+                    ),
+                    Err(Refused::Windows(why)) => {
+                        respond(stream, "409 Conflict", "text/plain", why.as_bytes())
+                    }
+                },
+                Err(why) => respond(stream, "400 Bad Request", "text/plain", why.as_bytes()),
+            }
+        }
         _ => respond(stream, "404 Not Found", "text/plain", b"not found"),
     }
+}
+
+/// A posted body as text, or why it is not text. None when it was too big,
+/// which is answered here already.
+fn read_body(
+    stream: &TcpStream,
+    reader: &mut BufReader<&TcpStream>,
+    length: usize,
+) -> io::Result<Option<Result<String, String>>> {
+    if length > share::MAX_BODY {
+        respond(stream, "413 Payload Too Large", "", b"")?;
+        drain(stream, reader);
+        return Ok(None);
+    }
+    let mut body = vec![0u8; length];
+    reader.read_exact(&mut body)?;
+    Ok(Some(String::from_utf8(body).map_err(|e| e.to_string())))
 }
 
 /// Reads and drops what is left of a body not read, a bounded amount for
@@ -605,6 +649,133 @@ fn mouse((dx, dy): (i32, i32), flags: MOUSE_EVENT_FLAGS, wheel: i32) -> INPUT {
                 dwExtraInfo: 0,
             },
         },
+    }
+}
+
+/// The primary display, by its device name, so the resolution read and
+/// the one set are of the same monitor.
+struct Display {
+    /// The device name, NUL ended, or empty when no device said it was
+    /// primary: Windows then takes its default display, which is it.
+    name: Vec<u16>,
+}
+
+/// Why a resolution was not set.
+enum Refused {
+    NotOffered,
+    Windows(String),
+}
+
+impl Display {
+    fn primary() -> Display {
+        let mut device = DISPLAY_DEVICEW {
+            cb: std::mem::size_of::<DISPLAY_DEVICEW>() as u32,
+            ..Default::default()
+        };
+        for i in 0.. {
+            // SAFETY: `device` is a DISPLAY_DEVICEW with `cb` set, as asked.
+            if !unsafe { EnumDisplayDevicesW(PCWSTR::null(), i, &mut device, 0) }.as_bool() {
+                break;
+            }
+            if device.StateFlags.0 & DISPLAY_DEVICE_PRIMARY_DEVICE.0 != 0 {
+                let end = (device.DeviceName.iter().position(|c| *c == 0))
+                    .unwrap_or(device.DeviceName.len());
+                let mut name = device.DeviceName[..end].to_vec();
+                name.push(0);
+                return Display { name };
+            }
+        }
+        Display { name: Vec::new() }
+    }
+
+    fn device(&self) -> PCWSTR {
+        if self.name.is_empty() {
+            PCWSTR::null()
+        } else {
+            PCWSTR(self.name.as_ptr())
+        }
+    }
+
+    fn settings(&self, which: ENUM_DISPLAY_SETTINGS_MODE) -> Option<DEVMODEW> {
+        let mut mode = DEVMODEW {
+            dmSize: std::mem::size_of::<DEVMODEW>() as u16,
+            ..Default::default()
+        };
+        // SAFETY: the name outlives the call and ends in NUL, and `mode`
+        // is a DEVMODEW with `dmSize` set, as asked.
+        unsafe { EnumDisplaySettingsW(self.device(), which, &mut mode) }
+            .as_bool()
+            .then_some(mode)
+    }
+
+    /// The mode in use, all zero when Windows will not say.
+    fn current(&self) -> Mode {
+        self.settings(ENUM_CURRENT_SETTINGS)
+            .as_ref()
+            .map(mode_of)
+            .unwrap_or(Mode {
+                width: 0,
+                height: 0,
+                bits: 0,
+                refresh: 0,
+            })
+    }
+
+    /// Every mode the driver lists, refresh rates and all.
+    fn all(&self) -> Vec<DEVMODEW> {
+        (0..)
+            .map_while(|i| self.settings(ENUM_DISPLAY_SETTINGS_MODE(i)))
+            .collect()
+    }
+
+    fn modes(&self) -> Vec<Mode> {
+        self.all().iter().map(mode_of).collect()
+    }
+
+    /// Switches to `size` for good, written to the registry. It takes the
+    /// driver's own mode for the size rather than the current one with a
+    /// new size edited in, which the driver may not take.
+    fn resize(&self, size: Size) -> Result<(), Refused> {
+        let current = self.current();
+        let all = self.all();
+        let modes: Vec<Mode> = all.iter().map(mode_of).collect();
+        if !share::display_sizes(&modes, current.bits).contains(&size) {
+            return Err(Refused::NotOffered);
+        }
+        let picked = share::pick_mode(&modes, size, current.bits, current.refresh)
+            .and_then(|m| modes.iter().position(|o| *o == m))
+            .ok_or(Refused::NotOffered)?;
+        let mut mode = all[picked];
+        mode.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT;
+        if mode.dmBitsPerPel != 0 {
+            mode.dmFields |= DM_BITSPERPEL;
+        }
+        // 0 and 1 stand for the hardware's default rate, not a rate.
+        if mode.dmDisplayFrequency > 1 {
+            mode.dmFields |= DM_DISPLAYFREQUENCY;
+        }
+        // SAFETY: `mode` came from EnumDisplaySettingsW with its size set,
+        // and the name outlives the call.
+        let code = unsafe {
+            ChangeDisplaySettingsExW(self.device(), Some(&mode), None, CDS_UPDATEREGISTRY, None)
+        };
+        if code == DISP_CHANGE_SUCCESSFUL {
+            Ok(())
+        } else {
+            Err(Refused::Windows(format!(
+                "Windows refused the resolution: {}",
+                share::disp_change_name(code.0)
+            )))
+        }
+    }
+}
+
+fn mode_of(m: &DEVMODEW) -> Mode {
+    Mode {
+        width: m.dmPelsWidth,
+        height: m.dmPelsHeight,
+        bits: m.dmBitsPerPel,
+        refresh: m.dmDisplayFrequency,
     }
 }
 

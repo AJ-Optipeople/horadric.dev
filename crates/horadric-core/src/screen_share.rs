@@ -213,6 +213,96 @@ pub fn sessions_json(mut rows: Vec<SessionRow>) -> String {
     serde_json::to_string(&rows).unwrap_or_else(|_| "[]".into())
 }
 
+/// A display resolution in pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Size {
+    pub width: u32,
+    pub height: u32,
+}
+
+/// One mode the display driver offers, as EnumDisplaySettingsW lists it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Mode {
+    pub width: u32,
+    pub height: u32,
+    pub bits: u32,
+    pub refresh: u32,
+}
+
+impl Mode {
+    pub fn size(&self) -> Size {
+        Size {
+            width: self.width,
+            height: self.height,
+        }
+    }
+}
+
+/// Below this nothing a program lays out fits, and some drivers offer
+/// 640 by 480 still.
+const SMALLEST: Size = Size {
+    width: 800,
+    height: 600,
+};
+
+/// The sizes worth offering out of every mode the driver lists: those at
+/// the bits per pixel in use, none smaller than [`SMALLEST`], each size
+/// once however many refresh rates it comes in, widest first.
+pub fn display_sizes(modes: &[Mode], bits: u32) -> Vec<Size> {
+    let mut sizes: Vec<Size> = modes
+        .iter()
+        .filter(|m| m.bits == bits && m.width >= SMALLEST.width && m.height >= SMALLEST.height)
+        .map(Mode::size)
+        .collect();
+    sizes.sort_by_key(|s| std::cmp::Reverse((s.width, s.height)));
+    sizes.dedup();
+    sizes
+}
+
+/// What `GET /display` answers.
+pub fn display_json(current: Size, modes: &[Size]) -> String {
+    // A struct, not `json!`, so the keys keep the order the docs show.
+    #[derive(Serialize)]
+    struct Display<'a> {
+        current: Size,
+        modes: &'a [Size],
+    }
+    serde_json::to_string(&Display { current, modes }).unwrap_or_else(|_| "{}".into())
+}
+
+/// The size `POST /display` asks for, or why the body is not one.
+pub fn parse_size(body: &str) -> Result<Size, String> {
+    serde_json::from_str(body).map_err(|e| e.to_string())
+}
+
+/// Which of the driver's modes to switch to for `want`: one at the bits
+/// per pixel in use, at the refresh rate in use when the size comes in
+/// it, else at the highest it does. A mode the driver listed is one it
+/// takes, where the current mode with a new size edited in may not be.
+pub fn pick_mode(modes: &[Mode], want: Size, bits: u32, refresh: u32) -> Option<Mode> {
+    modes
+        .iter()
+        .filter(|m| m.size() == want && m.bits == bits)
+        .max_by_key(|m| (m.refresh == refresh, m.refresh))
+        .copied()
+}
+
+/// The name of a code ChangeDisplaySettingsExW answers, for the reason a
+/// refused change gives.
+pub fn disp_change_name(code: i32) -> &'static str {
+    match code {
+        0 => "DISP_CHANGE_SUCCESSFUL",
+        1 => "DISP_CHANGE_RESTART",
+        -1 => "DISP_CHANGE_FAILED",
+        -2 => "DISP_CHANGE_BADMODE",
+        -3 => "DISP_CHANGE_NOTUPDATED",
+        -4 => "DISP_CHANGE_BADFLAGS",
+        -5 => "DISP_CHANGE_BADPARAM",
+        -6 => "DISP_CHANGE_BADDUALVIEW",
+        _ => "an unknown DISP_CHANGE code",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -402,5 +492,101 @@ mod tests {
         assert_eq!(v[1]["project"], "p");
         assert_eq!(v[1]["state"], "working");
         assert_eq!(sessions_json(Vec::new()), "[]");
+    }
+
+    fn mode(width: u32, height: u32, bits: u32, refresh: u32) -> Mode {
+        Mode {
+            width,
+            height,
+            bits,
+            refresh,
+        }
+    }
+
+    fn size(width: u32, height: u32) -> Size {
+        Size { width, height }
+    }
+
+    #[test]
+    fn sizes_are_merged_filtered_and_widest_first() {
+        let modes = [
+            mode(640, 480, 32, 60),
+            mode(800, 600, 32, 60),
+            mode(1920, 1080, 32, 60),
+            mode(1920, 1080, 32, 144),
+            mode(2560, 1440, 32, 60),
+            mode(1920, 1200, 32, 60),
+            mode(3840, 2160, 16, 60),
+            mode(1024, 576, 32, 60),
+            mode(1680, 1050, 32, 60),
+        ];
+        assert_eq!(
+            display_sizes(&modes, 32),
+            [
+                size(2560, 1440),
+                size(1920, 1200),
+                size(1920, 1080),
+                size(1680, 1050),
+                size(800, 600),
+            ]
+        );
+        assert_eq!(display_sizes(&modes, 16), [size(3840, 2160)]);
+        assert!(display_sizes(&[], 32).is_empty());
+    }
+
+    #[test]
+    fn the_display_answer_has_current_and_modes() {
+        let json = display_json(size(2560, 1440), &[size(2560, 1440), size(1920, 1080)]);
+        assert_eq!(
+            json,
+            r#"{"current":{"width":2560,"height":1440},"modes":[{"width":2560,"height":1440},{"width":1920,"height":1080}]}"#
+        );
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["current"]["width"], 2560);
+        assert_eq!(v["modes"][1]["height"], 1080);
+        assert_eq!(
+            display_json(size(1, 2), &[]),
+            r#"{"current":{"width":1,"height":2},"modes":[]}"#
+        );
+    }
+
+    #[test]
+    fn a_size_parses_or_says_why() {
+        assert_eq!(
+            parse_size(r#"{"width":1920,"height":1080}"#),
+            Ok(size(1920, 1080))
+        );
+        assert!(parse_size(r#"{"width":1920}"#).is_err());
+        assert!(parse_size(r#"{"width":-1,"height":2}"#).is_err());
+        assert!(parse_size("").is_err());
+    }
+
+    #[test]
+    fn the_mode_keeps_bits_and_refresh_where_it_can() {
+        let modes = [
+            mode(1920, 1080, 32, 60),
+            mode(1920, 1080, 32, 144),
+            mode(1920, 1080, 32, 120),
+            mode(1920, 1080, 16, 60),
+            mode(1280, 720, 32, 30),
+            mode(1280, 720, 32, 50),
+        ];
+        let want = size(1920, 1080);
+        assert_eq!(pick_mode(&modes, want, 32, 60), Some(modes[0]));
+        assert_eq!(pick_mode(&modes, want, 32, 120), Some(modes[2]));
+        assert_eq!(pick_mode(&modes, want, 32, 75), Some(modes[1]));
+        assert_eq!(pick_mode(&modes, want, 16, 144), Some(modes[3]));
+        assert_eq!(pick_mode(&modes, size(1280, 720), 32, 60), Some(modes[5]));
+        assert_eq!(pick_mode(&modes, size(1024, 768), 32, 60), None);
+        assert_eq!(pick_mode(&modes, want, 24, 60), None);
+    }
+
+    #[test]
+    fn display_change_codes_have_names() {
+        assert_eq!(disp_change_name(0), "DISP_CHANGE_SUCCESSFUL");
+        assert_eq!(disp_change_name(1), "DISP_CHANGE_RESTART");
+        assert_eq!(disp_change_name(-2), "DISP_CHANGE_BADMODE");
+        assert_eq!(disp_change_name(-6), "DISP_CHANGE_BADDUALVIEW");
+        assert_eq!(disp_change_name(7), "an unknown DISP_CHANGE code");
     }
 }
