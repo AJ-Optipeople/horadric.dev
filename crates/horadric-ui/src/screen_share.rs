@@ -628,14 +628,21 @@ fn send(input: &Input) -> Result<(), String> {
             })
             .collect(),
     };
-    // SAFETY: the slice and the size describe the same INPUTs.
-    let sent = unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
-    // SendInput says nothing more than a short count: these two are
-    // what makes it refuse in practice.
-    if (sent as usize) < inputs.len() {
-        return Err(
-            "input blocked: the window under it runs elevated, or the desktop is locked".into(),
-        );
+    // A long text in one SendInput outruns the program reading its queue:
+    // Notepad dropped the rest of the text, or repeated its last character.
+    for (i, piece) in inputs.chunks(40).enumerate() {
+        if i > 0 {
+            thread::sleep(Duration::from_millis(15));
+        }
+        // SAFETY: the slice and the size describe the same INPUTs.
+        let sent = unsafe { SendInput(piece, std::mem::size_of::<INPUT>() as i32) };
+        // SendInput says nothing more than a short count: these two are
+        // what makes it refuse in practice.
+        if (sent as usize) < piece.len() {
+            return Err(
+                "input blocked: the window under it runs elevated, or the desktop is locked".into(),
+            );
+        }
     }
     Ok(())
 }
