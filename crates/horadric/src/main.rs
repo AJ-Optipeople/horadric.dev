@@ -46,6 +46,7 @@ mod portal;
 mod release;
 #[cfg(not(target_os = "linux"))]
 mod reload;
+mod remote;
 mod run;
 #[cfg(windows)]
 mod runestep;
@@ -145,6 +146,11 @@ Usage:
                                Code's JSON on stdin and passes it to the app
   horadric mcp                   The MCP server Horadric gives its sessions: the tools
                                that open, drive and close the project's browser pane
+  horadric remote open [--dev] DEST
+                               Watch the desktop of a Windows machine reached by ssh DEST,
+                               whose Horadric runs with HORADRIC_SCREEN_SHARE=1, in the
+                               browser pane (through a tunnel kept for the next time);
+                               --dev or HORADRIC_REMOTE_DEV=1 watches its dev instance
   horadric portal [off|phones|forget N|all|relay URL]
                                Town Portal, Horadric from your phone: turn it on and show
                                a pairing QR code that works once, for 5 minutes; turn it
@@ -273,6 +279,7 @@ fn main() -> ExitCode {
         Some("status") => status::run(),
         Some("name") => name_command(&args[1..]),
         Some("mcp") => mcp::run(),
+        Some("remote") => remote::run(&args[1..]),
         #[cfg(windows)]
         Some("portal") => portal::run(&args[1..]),
         #[cfg(windows)]

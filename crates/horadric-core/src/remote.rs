@@ -1,0 +1,387 @@
+//! Watching another machine's desktop: the pure half of the client. A
+//! remote Horadric started with `HORADRIC_SCREEN_SHARE=1` serves its screen
+//! on its own `127.0.0.1`, this machine reaches it through `ssh -L`, and
+//! every request carries the token the remote keeps in its state folder.
+//! See `docs/plan/remote-screen.md`.
+//!
+//! Here: what `ssh` is started with, what a token looks like, the URLs and
+//! how they are shown without the token, reading an HTTP answer, and the
+//! file that remembers the tunnels so sessions share them.
+
+use serde::{Deserialize, Serialize};
+
+use crate::ssh;
+
+/// Where a remote's installed Horadric serves its screen.
+pub const PORT: u16 = 43119;
+/// Where a remote's dev instance serves it, so one on this machine can be
+/// tried against the installed one beside it.
+pub const DEV_PORT: u16 = 43120;
+
+/// What stands for the token wherever a URL is shown.
+pub const MASK: &str = "<token>";
+
+/// How wide a remote screenshot is unless asked otherwise.
+pub const FRAME_WIDTH: u32 = 1600;
+
+/// The file in the state folder that remembers the tunnels.
+pub const TUNNELS_FILE: &str = "remote-tunnels.json";
+
+/// The remote port to forward to.
+pub fn remote_port(dev: bool) -> u16 {
+    if dev {
+        DEV_PORT
+    } else {
+        PORT
+    }
+}
+
+/// Why `dest` can not be handed to `ssh` as a destination, None when it can.
+pub fn refusal(dest: &str) -> Option<String> {
+    if ssh::usable(dest) {
+        None
+    } else {
+        Some(format!(
+            "{dest:?} is not an ssh destination: one word, not starting with -"
+        ))
+    }
+}
+
+/// Options every `ssh` here is started with. `BatchMode`, since nobody
+/// sees a prompt for a password or a new host key; keepalives, so a link
+/// that died quietly ends the tunnel and the next call starts a fresh one.
+fn common() -> Vec<String> {
+    [
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=15",
+        "-o",
+        "ServerAliveInterval=15",
+        "-o",
+        "ServerAliveCountMax=3",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
+}
+
+/// What `ssh` is started with to forward `local` on this machine to
+/// `remote` on the remote's own loopback. `ExitOnForwardFailure`, so a
+/// port taken meanwhile ends it rather than leaving a tunnel that forwards
+/// nothing. The `--` ends the options, so `dest` is only a destination.
+pub fn tunnel_args(dest: &str, local: u16, remote: u16) -> Vec<String> {
+    let mut args = vec!["-N".to_string()];
+    args.extend(common());
+    args.extend([
+        "-o".into(),
+        "ExitOnForwardFailure=yes".into(),
+        "-L".into(),
+        format!("{local}:127.0.0.1:{remote}"),
+        "--".into(),
+        dest.into(),
+    ]);
+    args
+}
+
+/// What `ssh` is started with to print the remote's token. Through
+/// `cmd /c`, since a Windows host's default shell may be PowerShell, and
+/// this reads the same from either.
+pub fn token_args(dest: &str, dev: bool) -> Vec<String> {
+    let folder = if dev { "Horadric-dev" } else { "Horadric" };
+    let mut args = common();
+    args.extend([
+        "--".into(),
+        dest.into(),
+        format!(r#"cmd /c type "%APPDATA%\{folder}\screen-token""#),
+    ]);
+    args
+}
+
+/// The token in what the remote printed: 32 hex characters, nothing else
+/// but white space and a byte order mark around them.
+pub fn parse_token(printed: &str) -> Option<String> {
+    let t = printed.trim_matches(|c: char| c.is_whitespace() || c == '\u{feff}');
+    (t.len() == 32 && t.chars().all(|c| c.is_ascii_hexdigit())).then(|| t.to_ascii_lowercase())
+}
+
+/// The viewer page through a tunnel on `port`.
+pub fn view_url(port: u16, token: &str) -> String {
+    format!("http://127.0.0.1:{port}/?t={token}")
+}
+
+/// The path of one frame, at most `width` pixels wide.
+pub fn frame_path(token: &str, width: u32) -> String {
+    format!("/frame.jpg?t={token}&w={width}")
+}
+
+/// `text` with the token in it replaced, for anything shown or logged. An
+/// empty token would replace between every character, so it changes
+/// nothing.
+pub fn mask(text: &str, token: &str) -> String {
+    if token.is_empty() {
+        text.to_string()
+    } else {
+        text.replace(token, MASK)
+    }
+}
+
+/// An HTTP answer read whole: the status, the headers with their names in
+/// lower case, and the body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Response {
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+}
+
+impl Response {
+    /// The first header called `name`, any case.
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.as_str())
+    }
+}
+
+/// Reads what an HTTP/1.0 request got back, None when it is not an HTTP
+/// answer (a tunnel whose far end refused closes the connection with
+/// nothing said).
+pub fn parse_response(bytes: &[u8]) -> Option<Response> {
+    let end = bytes.windows(4).position(|w| w == b"\r\n\r\n")?;
+    let head = std::str::from_utf8(&bytes[..end]).ok()?;
+    let mut lines = head.split("\r\n");
+    let status_line = lines.next()?;
+    let mut parts = status_line.split_whitespace();
+    if !parts.next()?.starts_with("HTTP/") {
+        return None;
+    }
+    let status = parts.next()?.parse().ok()?;
+    let headers = lines
+        .filter_map(|l| l.split_once(':'))
+        .map(|(n, v)| (n.trim().to_ascii_lowercase(), v.trim().to_string()))
+        .collect();
+    Some(Response {
+        status,
+        headers,
+        body: bytes[end + 4..].to_vec(),
+    })
+}
+
+/// The line said beside a frame: how large the remote's screen is, which
+/// the picture is a scaled copy of.
+pub fn screen_line(r: &Response) -> String {
+    let n = |k: &str| r.header(k).and_then(|v| v.parse::<i64>().ok());
+    match (
+        n("x-screen-width"),
+        n("x-screen-height"),
+        n("x-screen-left"),
+        n("x-screen-top"),
+    ) {
+        (Some(w), Some(h), left, top) => format!(
+            "The remote screen is {w} x {h} physical pixels, its top left at {}, {}.",
+            left.unwrap_or(0),
+            top.unwrap_or(0)
+        ),
+        _ => "The remote did not say how large its screen is.".to_string(),
+    }
+}
+
+/// Why an answer other than 200 came back, in words for the caller.
+pub fn status_refusal(status: u16) -> String {
+    match status {
+        403 => "the remote refused the token: it may have been made again since it was read"
+            .to_string(),
+        404 => "the remote's Horadric does not serve its screen at that path: it may be older"
+            .to_string(),
+        s => format!("the remote answered {s}"),
+    }
+}
+
+/// One tunnel kept open: `ssh` process `pid` forwards `port` here to
+/// `remote` on `dest`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Tunnel {
+    pub dest: String,
+    pub remote: u16,
+    pub port: u16,
+    pub pid: u32,
+}
+
+/// The tunnels remembered in [`TUNNELS_FILE`]. A file that does not read
+/// is no tunnels, which only means a fresh one is started.
+pub fn parse_tunnels(text: &str) -> Vec<Tunnel> {
+    serde_json::from_str(text).unwrap_or_default()
+}
+
+/// The tunnels as the file keeps them.
+pub fn tunnels_text(list: &[Tunnel]) -> String {
+    let mut out = serde_json::to_string_pretty(list).unwrap_or_else(|_| "[]".into());
+    out.push('\n');
+    out
+}
+
+/// The tunnel remembered for `dest` and `remote`, if any.
+pub fn find_tunnel<'a>(list: &'a [Tunnel], dest: &str, remote: u16) -> Option<&'a Tunnel> {
+    list.iter().find(|t| t.dest == dest && t.remote == remote)
+}
+
+/// `list` with `t` in place of any other for the same destination and
+/// remote port.
+pub fn with_tunnel(list: &[Tunnel], t: Tunnel) -> Vec<Tunnel> {
+    let mut out: Vec<Tunnel> = list
+        .iter()
+        .filter(|o| !(o.dest == t.dest && o.remote == t.remote))
+        .cloned()
+        .collect();
+    out.push(t);
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TOKEN: &str = "0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn dev_forwards_to_its_own_port() {
+        assert_eq!(remote_port(false), 43119);
+        assert_eq!(remote_port(true), 43120);
+    }
+
+    #[test]
+    fn a_destination_ssh_would_misread_is_refused() {
+        assert_eq!(refusal("me@vm"), None);
+        assert!(refusal("-oProxyCommand=x").is_some());
+        assert!(refusal("a b").is_some());
+        assert!(refusal("").is_some());
+    }
+
+    #[test]
+    fn the_tunnel_forwards_to_the_remote_loopback_and_ends_on_failure() {
+        let a = tunnel_args("vm", 50000, 43119);
+        assert_eq!(a[0], "-N");
+        assert!(a.contains(&"BatchMode=yes".to_string()));
+        assert!(a.contains(&"ExitOnForwardFailure=yes".to_string()));
+        let l = a.iter().position(|x| x == "-L").unwrap();
+        assert_eq!(a[l + 1], "50000:127.0.0.1:43119");
+        assert_eq!(&a[a.len() - 2..], ["--", "vm"]);
+    }
+
+    #[test]
+    fn the_token_is_read_through_cmd_from_the_right_folder() {
+        let a = token_args("vm", false);
+        assert!(a.contains(&"BatchMode=yes".to_string()));
+        assert_eq!(a[a.len() - 3..a.len() - 1], ["--", "vm"]);
+        assert_eq!(
+            a.last().unwrap(),
+            r#"cmd /c type "%APPDATA%\Horadric\screen-token""#
+        );
+        assert!(token_args("vm", true)
+            .last()
+            .unwrap()
+            .contains(r"%APPDATA%\Horadric-dev\screen-token"));
+    }
+
+    #[test]
+    fn a_token_is_32_hex_and_nothing_else() {
+        assert_eq!(parse_token(&format!("{TOKEN}\r\n")).as_deref(), Some(TOKEN));
+        assert_eq!(
+            parse_token(&format!("\u{feff}{}", TOKEN.to_uppercase())).as_deref(),
+            Some(TOKEN)
+        );
+        assert_eq!(parse_token(&TOKEN[..31]), None);
+        assert_eq!(parse_token(&format!("{TOKEN}0")), None);
+        assert_eq!(parse_token(&TOKEN.replace('a', "g")), None);
+        assert_eq!(
+            parse_token("The system cannot find the file specified."),
+            None
+        );
+        assert_eq!(parse_token(""), None);
+    }
+
+    #[test]
+    fn urls_carry_the_token_and_masking_hides_it() {
+        let url = view_url(50123, TOKEN);
+        assert_eq!(url, format!("http://127.0.0.1:50123/?t={TOKEN}"));
+        assert_eq!(mask(&url, TOKEN), "http://127.0.0.1:50123/?t=<token>");
+        assert_eq!(
+            frame_path(TOKEN, 800),
+            format!("/frame.jpg?t={TOKEN}&w=800")
+        );
+        assert_eq!(mask("abc", ""), "abc");
+    }
+
+    #[test]
+    fn an_http_answer_is_read_into_status_headers_and_body() {
+        let raw = b"HTTP/1.0 200 OK\r\nContent-Type: image/jpeg\r\nX-Screen-Width: 2560\r\nX-Screen-Height:1440\r\nX-Screen-Left: -1920\r\n\r\n\xff\xd8\xff";
+        let r = parse_response(raw).unwrap();
+        assert_eq!(r.status, 200);
+        assert_eq!(r.header("content-type"), Some("image/jpeg"));
+        assert_eq!(r.header("X-SCREEN-HEIGHT"), Some("1440"));
+        assert_eq!(r.body, b"\xff\xd8\xff");
+        assert_eq!(
+            screen_line(&r),
+            "The remote screen is 2560 x 1440 physical pixels, its top left at -1920, 0."
+        );
+    }
+
+    #[test]
+    fn nothing_or_not_http_is_no_answer() {
+        assert_eq!(parse_response(b""), None);
+        assert_eq!(parse_response(b"HTTP/1.0 200 OK\r\n"), None);
+        assert_eq!(parse_response(b"SSH-2.0-OpenSSH\r\n\r\n"), None);
+        let r = parse_response(b"HTTP/1.1 403 Forbidden\r\n\r\n").unwrap();
+        assert_eq!(r.status, 403);
+        assert!(r.body.is_empty());
+        assert_eq!(
+            screen_line(&r),
+            "The remote did not say how large its screen is."
+        );
+    }
+
+    #[test]
+    fn refusals_say_why() {
+        assert!(status_refusal(403).contains("token"));
+        assert!(status_refusal(404).contains("older"));
+        assert_eq!(status_refusal(500), "the remote answered 500");
+    }
+
+    #[test]
+    fn tunnels_are_kept_one_per_destination_and_port() {
+        let a = Tunnel {
+            dest: "vm".into(),
+            remote: PORT,
+            port: 50000,
+            pid: 10,
+        };
+        let dev = Tunnel {
+            remote: DEV_PORT,
+            port: 50001,
+            pid: 11,
+            ..a.clone()
+        };
+        let list = with_tunnel(&with_tunnel(&[], a.clone()), dev.clone());
+        assert_eq!(list.len(), 2);
+        let newer = Tunnel {
+            port: 50002,
+            pid: 12,
+            ..a.clone()
+        };
+        let list = with_tunnel(&list, newer.clone());
+        assert_eq!(list.len(), 2);
+        assert_eq!(find_tunnel(&list, "vm", PORT), Some(&newer));
+        assert_eq!(find_tunnel(&list, "vm", DEV_PORT), Some(&dev));
+        assert_eq!(find_tunnel(&list, "other", PORT), None);
+        assert_eq!(parse_tunnels(&tunnels_text(&list)), list);
+    }
+
+    #[test]
+    fn an_unreadable_tunnels_file_is_no_tunnels() {
+        assert!(parse_tunnels("").is_empty());
+        assert!(parse_tunnels("{not json").is_empty());
+        assert!(parse_tunnels(r#"{"dest":"vm"}"#).is_empty());
+    }
+}

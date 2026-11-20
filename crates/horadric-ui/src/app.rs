@@ -808,6 +808,8 @@ fn run_app(port: u16, reload: bool) -> windows::core::Result<()> {
         }
     });
 
+    crate::screen_share::start(Arc::clone(&registry));
+
     // A title the model made goes on the tiles holding its conversation
     // at once, not at their next hook. A /rename stays.
     let titled = Arc::clone(&registry);

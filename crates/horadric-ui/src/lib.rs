@@ -230,6 +230,8 @@ mod retinue;
 #[cfg(windows)]
 pub mod sanctuary;
 #[cfg(windows)]
+mod screen_share;
+#[cfg(windows)]
 mod settings;
 #[cfg(windows)]
 mod snapping;

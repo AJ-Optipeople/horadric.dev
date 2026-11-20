@@ -1,0 +1,241 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Remote screen</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body { margin: 0; height: 100%; background: #101114; color: #d8d8dc;
+    font: 13px "Segoe UI", system-ui, sans-serif; overflow: hidden; }
+  #bar { position: fixed; top: 0; left: 0; right: 0; height: 30px; display: flex;
+    align-items: center; gap: 10px; padding: 0 10px; background: #1a1b20;
+    border-bottom: 1px solid #2a2b31; z-index: 2; white-space: nowrap; }
+  #state { min-width: 90px; color: #9a9aa2; }
+  #state.live { color: #7fc77f; }
+  #state.lost { color: #e07a6a; }
+  button { font: inherit; color: #d8d8dc; background: #26272e; border: 1px solid #3a3b44;
+    border-radius: 4px; padding: 2px 10px; cursor: pointer; }
+  button.on { background: #7a3a2a; border-color: #c0603e; color: #fff; }
+  #sessions { display: flex; gap: 6px; overflow: hidden; flex: 1; }
+  .s { padding: 1px 8px; border-radius: 10px; background: #22232a; color: #a8a8b0; }
+  .s.waiting { background: #6a4a12; color: #ffd98a; }
+  #stage { position: fixed; top: 31px; left: 0; right: 0; bottom: 0; display: flex;
+    align-items: center; justify-content: center; }
+  #screen { display: block; max-width: 100%; max-height: 100%; user-select: none;
+    -webkit-user-drag: none; }
+  #stage.control #screen { cursor: crosshair; outline: 2px solid #c0603e; }
+</style>
+</head>
+<body>
+<div id="bar">
+  <span id="state">Connecting</span>
+  <button id="control" title="Send mouse and keyboard to the remote. Esc twice stops.">Take control</button>
+  <div id="sessions"></div>
+</div>
+<div id="stage"><img id="screen" alt=""></div>
+<script>
+"use strict";
+const token = new URLSearchParams(location.search).get("t") || "";
+const q = "t=" + encodeURIComponent(token);
+const img = document.getElementById("screen");
+const stage = document.getElementById("stage");
+const stateEl = document.getElementById("state");
+const button = document.getElementById("control");
+const list = document.getElementById("sessions");
+
+// The virtual screen the last frame showed, in its physical pixels.
+let screen = { left: 0, top: 0, width: 0, height: 0 };
+let control = false;
+let shown = null;
+
+function setState(text, cls) {
+  stateEl.textContent = text;
+  stateEl.className = cls || "";
+}
+
+// About five frames a second: the next fetch goes once the last picture
+// is in, so a slow link gets fewer frames, never a queue of them.
+const FRAME_MS = 200;
+async function poll() {
+  const began = performance.now();
+  try {
+    const w = Math.max(16, Math.round(stage.clientWidth * (window.devicePixelRatio || 1)));
+    const r = await fetch("/frame.jpg?" + q + "&w=" + w, { cache: "no-store" });
+    if (r.status === 403) { setState("Wrong token", "lost"); return; }
+    if (!r.ok) throw new Error(r.status);
+    screen = {
+      left: +r.headers.get("X-Screen-Left") || 0,
+      top: +r.headers.get("X-Screen-Top") || 0,
+      width: +r.headers.get("X-Screen-Width") || 0,
+      height: +r.headers.get("X-Screen-Height") || 0,
+    };
+    const url = URL.createObjectURL(await r.blob());
+    await new Promise((done) => { img.onload = img.onerror = done; img.src = url; });
+    if (shown) URL.revokeObjectURL(shown);
+    shown = url;
+    setState(control ? "In control" : "Watching", "live");
+    setTimeout(poll, Math.max(0, FRAME_MS - (performance.now() - began)));
+  } catch (e) {
+    setState("Lost, retrying", "lost");
+    setTimeout(poll, 1000);
+  }
+}
+
+async function sessions() {
+  try {
+    const r = await fetch("/sessions?" + q, { cache: "no-store" });
+    if (!r.ok) throw new Error(r.status);
+    const rows = await r.json();
+    list.replaceChildren(...rows.map((s) => {
+      const el = document.createElement("span");
+      el.className = "s" + (s.waiting !== null ? " waiting" : "");
+      el.textContent = s.name + " · " + s.state;
+      el.title = s.project + (s.waiting ? "\n" + s.waiting : "");
+      return el;
+    }));
+  } catch (e) { /* the frame loop already says the link is down */ }
+}
+
+function post(event) {
+  if (!control) return;
+  fetch("/input?" + q, { method: "POST", body: JSON.stringify(event) }).catch(() => {});
+}
+
+// Where on the remote's virtual screen a point of the picture is.
+function at(e) {
+  const r = img.getBoundingClientRect();
+  if (!r.width || !r.height || !screen.width) return null;
+  const x = Math.round((e.clientX - r.left) / r.width * screen.width);
+  const y = Math.round((e.clientY - r.top) / r.height * screen.height);
+  return {
+    x: Math.min(Math.max(x, 0), screen.width - 1),
+    y: Math.min(Math.max(y, 0), screen.height - 1),
+  };
+}
+
+const BUTTONS = ["left", "middle", "right"];
+let moveTimer = null, lastMove = null;
+img.addEventListener("mousemove", (e) => {
+  if (!control) return;
+  lastMove = at(e);
+  // At most one move each 40 ms; the last one always goes.
+  if (moveTimer) return;
+  moveTimer = setTimeout(() => {
+    moveTimer = null;
+    if (lastMove) post({ kind: "move", ...lastMove });
+  }, 40);
+});
+img.addEventListener("mousedown", (e) => {
+  if (!control || !BUTTONS[e.button]) return;
+  e.preventDefault();
+  const p = at(e);
+  if (p) post({ kind: "down", ...p, button: BUTTONS[e.button] });
+});
+window.addEventListener("mouseup", (e) => {
+  if (!control || !BUTTONS[e.button]) return;
+  const p = at(e);
+  if (p) post({ kind: "up", ...p, button: BUTTONS[e.button] });
+});
+img.addEventListener("wheel", (e) => {
+  if (!control) return;
+  e.preventDefault();
+  const p = at(e);
+  if (!p) return;
+  // A notch is 120 on Windows and about 100 pixels in a browser.
+  const per = e.deltaMode === 1 ? 40 : e.deltaMode === 2 ? 800 : 1.2;
+  const delta = Math.max(-1200, Math.min(1200, Math.round(-e.deltaY * per)));
+  if (delta) post({ kind: "wheel", ...p, delta });
+}, { passive: false });
+document.addEventListener("contextmenu", (e) => { if (control) e.preventDefault(); });
+
+// KeyboardEvent.code to a Windows virtual key. The code names the key's
+// place, not its letter, so the remote's own layout decides what it types.
+const VK = {
+  Backspace: 8, Tab: 9, Enter: 13, NumpadEnter: 13, ShiftLeft: 160, ShiftRight: 161,
+  ControlLeft: 162, ControlRight: 163, AltLeft: 164, AltRight: 165, Pause: 19,
+  CapsLock: 20, Escape: 27, Space: 32, PageUp: 33, PageDown: 34, End: 35, Home: 36,
+  ArrowLeft: 37, ArrowUp: 38, ArrowRight: 39, ArrowDown: 40, PrintScreen: 44,
+  Insert: 45, Delete: 46, MetaLeft: 91, MetaRight: 92, OSLeft: 91, OSRight: 92,
+  ContextMenu: 93, NumpadMultiply: 106, NumpadAdd: 107, NumpadSubtract: 109,
+  NumpadDecimal: 110, NumpadDivide: 111, NumLock: 144, ScrollLock: 145,
+  Semicolon: 186, Equal: 187, Comma: 188, Minus: 189, Period: 190, Slash: 191,
+  Backquote: 192, BracketLeft: 219, Backslash: 220, BracketRight: 221, Quote: 222,
+  IntlBackslash: 226,
+};
+for (let i = 0; i < 26; i++) VK["Key" + String.fromCharCode(65 + i)] = 65 + i;
+for (let i = 0; i < 10; i++) { VK["Digit" + i] = 48 + i; VK["Numpad" + i] = 96 + i; }
+for (let i = 1; i <= 24; i++) VK["F" + i] = 111 + i;
+
+const held = new Set();      // virtual keys down on the remote
+const typed = new Set();     // codes whose press went as text, so their release does not go
+let lastEscape = 0;
+
+function printable(e) {
+  // One character, not a name like "Enter"; AltGr makes characters too.
+  const one = [...e.key].length === 1;
+  const plain = !e.ctrlKey && !e.altKey && !e.metaKey;
+  return one && (plain || e.getModifierState("AltGraph"));
+}
+
+function release() {
+  for (const vk of held) post({ kind: "key", vk, down: false });
+  held.clear();
+  typed.clear();
+}
+
+window.addEventListener("keydown", (e) => {
+  if (!control) return;
+  e.preventDefault();
+  if (e.code === "Escape" && !e.repeat) {
+    const now = performance.now();
+    if (now - lastEscape < 600) { setControl(false); return; }
+    lastEscape = now;
+  }
+  if (printable(e)) {
+    if (e.getModifierState("AltGraph")) {
+      // AltGr arrives as Ctrl and Alt, and a character typed under them
+      // would be a shortcut over there.
+      for (const vk of [162, 163, 164, 165]) {
+        if (held.delete(vk)) post({ kind: "key", vk, down: false });
+      }
+    }
+    typed.add(e.code);
+    post({ kind: "text", text: e.key });
+    return;
+  }
+  if (e.key === "Dead") return;
+  const vk = VK[e.code];
+  if (!vk) return;
+  held.add(vk);
+  post({ kind: "key", vk, down: true });
+});
+window.addEventListener("keyup", (e) => {
+  if (!control) return;
+  e.preventDefault();
+  if (typed.delete(e.code)) return;
+  const vk = VK[e.code];
+  if (!vk || !held.has(vk)) return;
+  held.delete(vk);
+  post({ kind: "key", vk, down: false });
+});
+// A key held when the tab loses focus would stay down over there.
+window.addEventListener("blur", release);
+
+function setControl(on) {
+  if (!on) release();
+  control = on;
+  button.classList.toggle("on", on);
+  button.textContent = on ? "Release control" : "Take control";
+  stage.classList.toggle("control", on);
+  if (stateEl.className === "live") setState(on ? "In control" : "Watching", "live");
+  button.blur();
+}
+button.addEventListener("click", () => setControl(!control));
+
+poll();
+sessions();
+setInterval(sessions, 3000);
+</script>
+</body>
+</html>
