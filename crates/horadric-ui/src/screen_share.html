@@ -14,6 +14,7 @@
   #state { min-width: 90px; color: #9a9aa2; }
   #state.live { color: #7fc77f; }
   #state.lost { color: #e07a6a; }
+  #notice { color: #e0a86a; overflow: hidden; text-overflow: ellipsis; flex: 0 1 auto; }
   button { font: inherit; color: #d8d8dc; background: #26272e; border: 1px solid #3a3b44;
     border-radius: 4px; padding: 2px 10px; cursor: pointer; }
   button.on { background: #7a3a2a; border-color: #c0603e; color: #fff; }
@@ -31,18 +32,30 @@
 <div id="bar">
   <span id="state">Connecting</span>
   <button id="control" title="Send mouse and keyboard to the remote. Esc twice stops.">Take control</button>
+  <span id="notice"></span>
   <div id="sessions"></div>
 </div>
 <div id="stage"><img id="screen" alt=""></div>
 <script>
 "use strict";
-const token = new URLSearchParams(location.search).get("t") || "";
+// The token leaves the address at once: the tab's URL is shown to
+// whoever reads the pane, the agent included. This tab keeps it for its
+// own requests, and a reload finds it again.
+const TOKEN_KEY = "horadric-screen-token";
+let token = new URLSearchParams(location.search).get("t");
+try {
+  if (token) sessionStorage.setItem(TOKEN_KEY, token);
+  else token = sessionStorage.getItem(TOKEN_KEY);
+} catch (e) { /* storage refused: the token still lives in this page */ }
+token = token || "";
+if (location.search) history.replaceState(null, "", location.pathname + location.hash);
 const q = "t=" + encodeURIComponent(token);
 const img = document.getElementById("screen");
 const stage = document.getElementById("stage");
 const stateEl = document.getElementById("state");
 const button = document.getElementById("control");
 const list = document.getElementById("sessions");
+const noticeEl = document.getElementById("notice");
 
 // The virtual screen the last frame showed, in its physical pixels.
 let screen = { left: 0, top: 0, width: 0, height: 0 };
@@ -97,9 +110,40 @@ async function sessions() {
   } catch (e) { /* the frame loop already says the link is down */ }
 }
 
+// Why the remote refused an input, shown for a few seconds.
+let noticeTimer = null;
+function notice(text) {
+  noticeEl.textContent = text;
+  noticeEl.title = text;
+  clearTimeout(noticeTimer);
+  noticeTimer = setTimeout(() => { noticeEl.textContent = ""; noticeEl.title = ""; }, 5000);
+}
+
+// Events go one at a time, each once the one before is answered: separate
+// requests may arrive in any order, and an up before its down leaves a
+// button held over there. A move waiting at the end is replaced by a newer
+// one, since only where the pointer ends up matters; nothing else is
+// dropped.
+const outbox = [];
+let sending = false;
 function post(event) {
   if (!control) return;
-  fetch("/input?" + q, { method: "POST", body: JSON.stringify(event) }).catch(() => {});
+  const last = outbox[outbox.length - 1];
+  if (event.kind === "move" && last && last.kind === "move") outbox[outbox.length - 1] = event;
+  else outbox.push(event);
+  pump();
+}
+async function pump() {
+  if (sending) return;
+  sending = true;
+  while (outbox.length) {
+    const event = outbox.shift();
+    try {
+      const r = await fetch("/input?" + q, { method: "POST", body: JSON.stringify(event) });
+      if (!r.ok) notice((await r.text()) || "the remote refused input (" + r.status + ")");
+    } catch (e) { /* the frame loop already says the link is down */ }
+  }
+  sending = false;
 }
 
 // Where on the remote's virtual screen a point of the picture is.
@@ -115,10 +159,13 @@ function at(e) {
 }
 
 const BUTTONS = ["left", "middle", "right"];
+const pressed = new Set();   // mouse buttons down on the remote
+let lastAt = null;           // the last position sent or about to be
 let moveTimer = null, lastMove = null;
 img.addEventListener("mousemove", (e) => {
   if (!control) return;
   lastMove = at(e);
+  if (lastMove) lastAt = lastMove;
   // At most one move each 40 ms; the last one always goes.
   if (moveTimer) return;
   moveTimer = setTimeout(() => {
@@ -130,18 +177,25 @@ img.addEventListener("mousedown", (e) => {
   if (!control || !BUTTONS[e.button]) return;
   e.preventDefault();
   const p = at(e);
-  if (p) post({ kind: "down", ...p, button: BUTTONS[e.button] });
+  if (!p) return;
+  lastAt = p;
+  pressed.add(BUTTONS[e.button]);
+  post({ kind: "down", ...p, button: BUTTONS[e.button] });
 });
 window.addEventListener("mouseup", (e) => {
   if (!control || !BUTTONS[e.button]) return;
-  const p = at(e);
-  if (p) post({ kind: "up", ...p, button: BUTTONS[e.button] });
+  const p = at(e) || lastAt;
+  if (!p) return;
+  lastAt = p;
+  pressed.delete(BUTTONS[e.button]);
+  post({ kind: "up", ...p, button: BUTTONS[e.button] });
 });
 img.addEventListener("wheel", (e) => {
   if (!control) return;
   e.preventDefault();
   const p = at(e);
   if (!p) return;
+  lastAt = p;
   // A notch is 120 on Windows and about 100 pixels in a browser.
   const per = e.deltaMode === 1 ? 40 : e.deltaMode === 2 ? 800 : 1.2;
   const delta = Math.max(-1200, Math.min(1200, Math.round(-e.deltaY * per)));
@@ -169,7 +223,14 @@ for (let i = 1; i <= 24; i++) VK["F" + i] = 111 + i;
 
 const held = new Set();      // virtual keys down on the remote
 const typed = new Set();     // codes whose press went as text, so their release does not go
-let lastEscape = 0;
+const ESCAPE = 27;
+const ESCAPE_TWICE_MS = 600;
+let escapeTimer = null;      // a first Esc held back, in case a second ends control
+
+function sendEscape() {
+  post({ kind: "key", vk: ESCAPE, down: true });
+  post({ kind: "key", vk: ESCAPE, down: false });
+}
 
 function printable(e) {
   // One character, not a name like "Enter"; AltGr makes characters too.
@@ -178,19 +239,41 @@ function printable(e) {
   return one && (plain || e.getModifierState("AltGraph"));
 }
 
+// Lets go of everything held over there: keys and mouse buttons alike
+// would otherwise stay down once input stops coming.
 function release() {
+  if (escapeTimer) {
+    // One Esc pressed and nothing after it: it was meant for the remote.
+    clearTimeout(escapeTimer);
+    escapeTimer = null;
+    sendEscape();
+  }
   for (const vk of held) post({ kind: "key", vk, down: false });
   held.clear();
   typed.clear();
+  if (lastAt) {
+    for (const b of pressed) post({ kind: "up", ...lastAt, button: b });
+  }
+  pressed.clear();
 }
 
 window.addEventListener("keydown", (e) => {
   if (!control) return;
   e.preventDefault();
-  if (e.code === "Escape" && !e.repeat) {
-    const now = performance.now();
-    if (now - lastEscape < 600) { setControl(false); return; }
-    lastEscape = now;
+  const plain = !e.ctrlKey && !e.altKey && !e.shiftKey && !e.metaKey;
+  if (e.code === "Escape" && plain) {
+    // A plain Esc waits to see whether a second follows, so the two that
+    // end control send nothing; its release is not held, so it goes
+    // nowhere either.
+    if (e.repeat) return;
+    if (escapeTimer) {
+      clearTimeout(escapeTimer);
+      escapeTimer = null;
+      setControl(false);
+      return;
+    }
+    escapeTimer = setTimeout(() => { escapeTimer = null; sendEscape(); }, ESCAPE_TWICE_MS);
+    return;
   }
   if (printable(e)) {
     if (e.getModifierState("AltGraph")) {

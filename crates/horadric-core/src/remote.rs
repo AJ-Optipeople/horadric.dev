@@ -69,7 +69,9 @@ fn common() -> Vec<String> {
 /// What `ssh` is started with to forward `local` on this machine to
 /// `remote` on the remote's own loopback. `ExitOnForwardFailure`, so a
 /// port taken meanwhile ends it rather than leaving a tunnel that forwards
-/// nothing. The `--` ends the options, so `dest` is only a destination.
+/// nothing. The local end binds to loopback by name, so no `ssh_config`
+/// `GatewayPorts` can open it to the network. The end of options marker
+/// before `dest` keeps it only a destination.
 pub fn tunnel_args(dest: &str, local: u16, remote: u16) -> Vec<String> {
     let mut args = vec!["-N".to_string()];
     args.extend(common());
@@ -77,7 +79,7 @@ pub fn tunnel_args(dest: &str, local: u16, remote: u16) -> Vec<String> {
         "-o".into(),
         "ExitOnForwardFailure=yes".into(),
         "-L".into(),
-        format!("{local}:127.0.0.1:{remote}"),
+        format!("127.0.0.1:{local}:127.0.0.1:{remote}"),
         "--".into(),
         dest.into(),
     ]);
@@ -145,27 +147,56 @@ impl Response {
     }
 }
 
-/// Reads what an HTTP/1.0 request got back, None when it is not an HTTP
-/// answer (a tunnel whose far end refused closes the connection with
-/// nothing said).
-pub fn parse_response(bytes: &[u8]) -> Option<Response> {
-    let end = bytes.windows(4).position(|w| w == b"\r\n\r\n")?;
-    let head = std::str::from_utf8(&bytes[..end]).ok()?;
+/// Why what came back is not an answer to use.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Unread {
+    /// Not HTTP at all: a tunnel whose far end refused closes the
+    /// connection with nothing said.
+    NotHttp,
+    /// The body stopped before the length the head gave, so a link that
+    /// dropped mid frame is not taken for a whole picture.
+    CutShort { said: usize, got: usize },
+}
+
+/// Reads what an HTTP/1.0 request got back. A body longer than its
+/// `Content-Length` is cut to it; one shorter is refused.
+pub fn parse_response(bytes: &[u8]) -> Result<Response, Unread> {
+    let end = bytes
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .ok_or(Unread::NotHttp)?;
+    let head = std::str::from_utf8(&bytes[..end]).map_err(|_| Unread::NotHttp)?;
     let mut lines = head.split("\r\n");
-    let status_line = lines.next()?;
-    let mut parts = status_line.split_whitespace();
-    if !parts.next()?.starts_with("HTTP/") {
-        return None;
+    let mut parts = lines.next().unwrap_or("").split_whitespace();
+    if !parts.next().is_some_and(|p| p.starts_with("HTTP/")) {
+        return Err(Unread::NotHttp);
     }
-    let status = parts.next()?.parse().ok()?;
-    let headers = lines
+    let status = parts
+        .next()
+        .and_then(|s| s.parse().ok())
+        .ok_or(Unread::NotHttp)?;
+    let headers: Vec<(String, String)> = lines
         .filter_map(|l| l.split_once(':'))
         .map(|(n, v)| (n.trim().to_ascii_lowercase(), v.trim().to_string()))
         .collect();
-    Some(Response {
+    let mut body = bytes[end + 4..].to_vec();
+    let said = headers
+        .iter()
+        .find(|(n, _)| n == "content-length")
+        .and_then(|(_, v)| v.parse::<usize>().ok());
+    if let Some(said) = said {
+        if body.len() < said {
+            return Err(Unread::CutShort {
+                said,
+                got: body.len(),
+            });
+        }
+        body.truncate(said);
+    }
+    Ok(Response {
         status,
         headers,
-        body: bytes[end + 4..].to_vec(),
+        body,
     })
 }
 
@@ -239,6 +270,14 @@ pub fn with_tunnel(list: &[Tunnel], t: Tunnel) -> Vec<Tunnel> {
     out
 }
 
+/// `list` without the tunnel for `dest` and `remote`, for closing it.
+pub fn without_tunnel(list: &[Tunnel], dest: &str, remote: u16) -> Vec<Tunnel> {
+    list.iter()
+        .filter(|t| !(t.dest == dest && t.remote == remote))
+        .cloned()
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -266,7 +305,7 @@ mod tests {
         assert!(a.contains(&"BatchMode=yes".to_string()));
         assert!(a.contains(&"ExitOnForwardFailure=yes".to_string()));
         let l = a.iter().position(|x| x == "-L").unwrap();
-        assert_eq!(a[l + 1], "50000:127.0.0.1:43119");
+        assert_eq!(a[l + 1], "127.0.0.1:50000:127.0.0.1:43119");
         assert_eq!(&a[a.len() - 2..], ["--", "vm"]);
     }
 
@@ -330,9 +369,13 @@ mod tests {
 
     #[test]
     fn nothing_or_not_http_is_no_answer() {
-        assert_eq!(parse_response(b""), None);
-        assert_eq!(parse_response(b"HTTP/1.0 200 OK\r\n"), None);
-        assert_eq!(parse_response(b"SSH-2.0-OpenSSH\r\n\r\n"), None);
+        assert_eq!(parse_response(b""), Err(Unread::NotHttp));
+        assert_eq!(parse_response(b"HTTP/1.0 200 OK\r\n"), Err(Unread::NotHttp));
+        assert_eq!(
+            parse_response(b"SSH-2.0-OpenSSH\r\n\r\n"),
+            Err(Unread::NotHttp)
+        );
+        assert_eq!(parse_response(b"HTTP/1.0\r\n\r\n"), Err(Unread::NotHttp));
         let r = parse_response(b"HTTP/1.1 403 Forbidden\r\n\r\n").unwrap();
         assert_eq!(r.status, 403);
         assert!(r.body.is_empty());
@@ -340,6 +383,21 @@ mod tests {
             screen_line(&r),
             "The remote did not say how large its screen is."
         );
+    }
+
+    #[test]
+    fn a_body_is_held_to_its_content_length() {
+        let short = b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\n12345";
+        assert_eq!(
+            parse_response(short),
+            Err(Unread::CutShort { said: 10, got: 5 })
+        );
+        let exact = b"HTTP/1.1 200 OK\r\ncontent-length: 5\r\n\r\n12345";
+        assert_eq!(parse_response(exact).unwrap().body, b"12345");
+        let long = b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\n12345";
+        assert_eq!(parse_response(long).unwrap().body, b"123");
+        let unsaid = b"HTTP/1.0 200 OK\r\n\r\n12345";
+        assert_eq!(parse_response(unsaid).unwrap().body, b"12345");
     }
 
     #[test]
@@ -376,6 +434,9 @@ mod tests {
         assert_eq!(find_tunnel(&list, "vm", DEV_PORT), Some(&dev));
         assert_eq!(find_tunnel(&list, "other", PORT), None);
         assert_eq!(parse_tunnels(&tunnels_text(&list)), list);
+        let closed = without_tunnel(&list, "vm", PORT);
+        assert_eq!(closed, vec![dev.clone()]);
+        assert_eq!(without_tunnel(&closed, "other", PORT), closed);
     }
 
     #[test]

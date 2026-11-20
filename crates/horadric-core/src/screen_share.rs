@@ -160,13 +160,15 @@ pub fn parse_input(body: &str) -> Result<Input, String> {
 
 /// A pixel `at` on a virtual screen `extent` pixels across, as the 0 to
 /// 65535 SendInput takes for an absolute position on the virtual desk.
-/// Off the screen it is held to the edge.
+/// It aims at the pixel's centre: Windows turns the number back into a
+/// pixel by scaling down and dropping the fraction, so aiming at an edge
+/// can land on the pixel before. Off the screen it is held to the edge.
 pub fn absolute(at: i32, extent: i32) -> i32 {
-    if extent <= 1 {
+    if extent <= 0 {
         return 0;
     }
     let at = i64::from(at.clamp(0, extent - 1));
-    ((at * 65535 + i64::from(extent - 1) / 2) / i64::from(extent - 1)) as i32
+    ((2 * at + 1) * 65536 / (2 * i64::from(extent))).clamp(0, 65535) as i32
 }
 
 /// Whether a virtual key sits in the extended part of the keyboard, which
@@ -349,14 +351,21 @@ mod tests {
     }
 
     #[test]
-    fn positions_span_the_whole_absolute_range() {
-        assert_eq!(absolute(0, 1920), 0);
-        assert_eq!(absolute(1919, 1920), 65535);
-        assert_eq!(absolute(5000, 1920), 65535);
-        assert_eq!(absolute(-3, 1920), 0);
+    fn positions_aim_at_the_middle_of_their_pixel() {
+        assert_eq!(absolute(0, 1920), 17);
+        assert_eq!(absolute(1919, 1920), 65518);
+        assert_eq!(absolute(5000, 1920), 65518);
+        assert_eq!(absolute(-3, 1920), 17);
         assert_eq!(absolute(960, 1921), 32768);
-        assert_eq!(absolute(5, 1), 0);
+        assert_eq!(absolute(5, 1), 32768);
         assert_eq!(absolute(5, 0), 0);
+        // Scaled back as Windows does, every pixel lands on itself.
+        for extent in [1, 3, 1920, 2561, 7680] {
+            for at in 0..extent {
+                let back = i64::from(absolute(at, extent)) * i64::from(extent) / 65536;
+                assert_eq!(back, i64::from(at), "{at} of {extent}");
+            }
+        }
     }
 
     #[test]

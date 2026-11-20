@@ -1,4 +1,4 @@
-//! `horadric remote open` and the `remote_` tools of `horadric mcp`: a
+//! `horadric remote open` and `close`, and the `remote_` tools of `horadric mcp`: a
 //! remote machine's desktop, served by its own Horadric, watched in a tab
 //! of the browser pane through an SSH tunnel. The pure half is
 //! `horadric_core::remote`; this half starts `ssh`, remembers the tunnels
@@ -7,16 +7,19 @@
 //! A tunnel is an `ssh -N -L` started apart from this process, so it
 //! outlives the command that opened it, and remembered in the state
 //! folder, so the next `remote open` and every session's MCP server use
-//! the same one while it lives. The token never leaves this module in
-//! anything shown: what is said or printed has it masked.
+//! the same one while it lives. Reading, starting and writing a tunnel is
+//! done under a lock file, so two sessions opening the same machine at
+//! once share one tunnel rather than leaving one running unremembered.
+//! The token never leaves this module in anything shown: what is said or
+//! printed has it masked.
 
-use std::io::{Read, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use horadric_core::remote::{self, Response, Tunnel};
+use horadric_core::remote::{self, Response, Tunnel, Unread};
 use horadric_hooks::{OWNER_ENV, SESSION_ENV};
 use serde_json::{json, Value};
 
@@ -30,14 +33,26 @@ const FETCH_WAIT: Duration = Duration::from_secs(20);
 /// The env that points everything here at a remote dev instance.
 const DEV_ENV: &str = "HORADRIC_REMOTE_DEV";
 
-/// `horadric remote open [--dev] <destination>`.
+/// A lock on the tunnels file older than this was left by a process that
+/// died holding it: starting a tunnel takes [`TUNNEL_WAIT`] at most.
+const LOCK_STALE: Duration = Duration::from_secs(30);
+
+/// `horadric remote open|close [--dev] <destination>`.
 pub fn run(args: &[String]) -> Result<(), String> {
-    let usage = "usage: horadric remote open [--dev] <ssh destination>";
+    let usage = "usage: horadric remote open|close [--dev] <ssh destination>";
     let (dev_flag, rest): (Vec<&String>, Vec<&String>) =
         args.iter().skip(1).partition(|a| *a == "--dev");
+    let dev = !dev_flag.is_empty() || dev_env();
     match (args.first().map(String::as_str), rest.as_slice()) {
+        (Some("close"), [dest]) => {
+            if close(dest, remote::remote_port(dev))? {
+                println!("Closed the tunnel to {dest}.");
+            } else {
+                println!("No tunnel to {dest} was open.");
+            }
+            Ok(())
+        }
         (Some("open"), [dest]) => {
-            let dev = !dev_flag.is_empty() || dev_env();
             let opened = open(dest, dev, |url| {
                 let session = std::env::var(SESSION_ENV).ok().filter(|s| !s.is_empty());
                 match session {
@@ -140,22 +155,104 @@ fn tunnels_path() -> Result<PathBuf, String> {
         .ok_or_else(|| "there is no state folder".into())
 }
 
+fn read_tunnels(path: &Path) -> Vec<Tunnel> {
+    remote::parse_tunnels(&std::fs::read_to_string(path).unwrap_or_default())
+}
+
+fn write_tunnels(path: &Path, list: &[Tunnel]) -> Result<(), String> {
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    std::fs::write(path, remote::tunnels_text(list)).map_err(|e| e.to_string())
+}
+
+/// The lock file beside the tunnels file, held while it is read, a tunnel
+/// started and it written again. A file made with `create_new`, since
+/// that is the one exclusive step every Windows file system has; removed
+/// when dropped.
+struct Lock(PathBuf);
+
+impl Lock {
+    fn take(tunnels: &Path) -> Result<Lock, String> {
+        let path = tunnels.with_extension("lock");
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let deadline = Instant::now() + LOCK_STALE + Duration::from_secs(5);
+        loop {
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(_) => return Ok(Lock(path)),
+                // Denied is a lock file being removed right now.
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        ErrorKind::AlreadyExists | ErrorKind::PermissionDenied
+                    ) =>
+                {
+                    let age = std::fs::metadata(&path)
+                        .and_then(|m| m.modified())
+                        .ok()
+                        .and_then(|t| t.elapsed().ok());
+                    if age.is_some_and(|a| a > LOCK_STALE) {
+                        let _ = std::fs::remove_file(&path);
+                    }
+                }
+                Err(e) => return Err(format!("could not lock the tunnel list: {e}")),
+            }
+            if Instant::now() > deadline {
+                return Err("another session held the tunnel list too long".into());
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+}
+
+impl Drop for Lock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// Whether a remembered tunnel's `ssh` still runs and forwards.
+fn live(t: &Tunnel) -> bool {
+    is_ssh(t.pid) && answers(t.port)
+}
+
 /// A live tunnel's local port for `dest`, the one remembered when its
 /// `ssh` still runs and forwards, else a new one.
 fn tunnel(dest: &str, remote_port: u16) -> Result<u16, String> {
     let path = tunnels_path()?;
-    let known = remote::parse_tunnels(&std::fs::read_to_string(&path).unwrap_or_default());
+    let _lock = Lock::take(&path)?;
+    let known = read_tunnels(&path);
     if let Some(t) = remote::find_tunnel(&known, dest, remote_port) {
-        if is_ssh(t.pid) && answers(t.port) {
+        if live(t) {
             return Ok(t.port);
+        }
+        // An ssh that runs but no longer forwards would linger forever
+        // once its entry is replaced, since nothing else remembers it.
+        if is_ssh(t.pid) {
+            kill(t.pid);
         }
     }
     let local = free_port()?;
     let log = path.with_file_name(format!("remote-ssh-{local}.log"));
-    let pid = start_tunnel(dest, local, remote_port, &log)?;
+    let started = start_tunnel(dest, local, remote_port, &log);
     let _ = std::fs::remove_file(&log);
-    // Read again: another session may have kept a tunnel meanwhile.
-    let known = remote::parse_tunnels(&std::fs::read_to_string(&path).unwrap_or_default());
+    let pid = started?;
+    // The lock keeps sessions apart, but one taken from a holder thought
+    // dead, or a Horadric from before the lock, may have kept a tunnel
+    // meanwhile: one is enough, and theirs is already remembered.
+    let known = read_tunnels(&path);
+    if let Some(t) = remote::find_tunnel(&known, dest, remote_port) {
+        if t.pid != pid && live(t) {
+            kill(pid);
+            return Ok(t.port);
+        }
+    }
     let list = remote::with_tunnel(
         &known,
         Tunnel {
@@ -165,11 +262,50 @@ fn tunnel(dest: &str, remote_port: u16) -> Result<u16, String> {
             pid,
         },
     );
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    std::fs::write(&path, remote::tunnels_text(&list)).map_err(|e| e.to_string())?;
+    write_tunnels(&path, &list)?;
     Ok(local)
+}
+
+/// Ends the tunnel kept for `dest` and forgets it; false when none was.
+fn close(dest: &str, remote_port: u16) -> Result<bool, String> {
+    if let Some(why) = remote::refusal(dest) {
+        return Err(why);
+    }
+    let path = tunnels_path()?;
+    let _lock = Lock::take(&path)?;
+    let known = read_tunnels(&path);
+    let Some(t) = remote::find_tunnel(&known, dest, remote_port) else {
+        return Ok(false);
+    };
+    if is_ssh(t.pid) {
+        kill(t.pid);
+    }
+    write_tunnels(&path, &remote::without_tunnel(&known, dest, remote_port))?;
+    Ok(true)
+}
+
+/// Ends process `pid`, which the caller has seen is an `ssh`.
+#[cfg(windows)]
+fn kill(pid: u32) {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
+    // SAFETY: the handle is opened, used and closed here.
+    unsafe {
+        if let Ok(h) = OpenProcess(PROCESS_TERMINATE, false, pid) {
+            let _ = TerminateProcess(h, 1);
+            let _ = CloseHandle(h);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn kill(pid: u32) {
+    let _ = Command::new("kill")
+        .arg(pid.to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
 }
 
 /// A port nobody listens on now. Released before `ssh` takes it, so
@@ -371,10 +507,13 @@ fn get(port: u16, path: &str) -> Result<Response, String> {
     let mut bytes = Vec::new();
     s.read_to_end(&mut bytes)
         .map_err(|e| format!("the remote's answer was cut off: {e}"))?;
-    remote::parse_response(&bytes).ok_or_else(|| {
-        "nothing answered on the remote's screen port: Horadric must run there with \
-         HORADRIC_SCREEN_SHARE=1 set when it started"
-            .to_string()
+    remote::parse_response(&bytes).map_err(|e| match e {
+        Unread::NotHttp => "nothing answered on the remote's screen port: Horadric must run \
+                            there with HORADRIC_SCREEN_SHARE=1 set when it started"
+            .to_string(),
+        Unread::CutShort { said, got } => {
+            format!("the remote's answer was cut off: {got} of {said} bytes came")
+        }
     })
 }
 
@@ -428,8 +567,9 @@ pub fn tools() -> Vec<Value> {
              when you work on a Windows machine over SSH (a VM, say) that runs Horadric with \
              HORADRIC_SCREEN_SHARE=1: open it as you start, so the user follows what happens \
              there and sees a dialog that waits for someone, rather than you working blind. \
-             It opens an SSH tunnel of its own (key login, no prompts); the URL carries a \
-             secret token that you are never shown.",
+             It opens an SSH tunnel of its own (key login, no prompts). The URL carries a \
+             secret token, which is left out of this tool's reply, and the page drops it \
+             from its address once loaded.",
             json!({ "ssh": ssh() }),
             &["ssh"],
         ),

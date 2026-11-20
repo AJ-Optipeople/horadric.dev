@@ -8,7 +8,7 @@
 //! keys.
 
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -30,8 +30,8 @@ use windows::Win32::Graphics::Imaging::{
 };
 use windows::Win32::System::Com::StructuredStorage::{IPropertyBag2, PROPBAG2};
 use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, STREAM_SEEK_END,
-    STREAM_SEEK_SET,
+    CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
+    STREAM_SEEK_END, STREAM_SEEK_SET,
 };
 use windows::Win32::System::Variant::VARIANT;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -95,20 +95,45 @@ fn write_token(path: &Path, token: &str) -> io::Result<()> {
 fn serve(port: u16, token: &str, registry: &Arc<Mutex<Registry>>) -> io::Result<()> {
     let listener = bind(port)?;
     for stream in listener.incoming() {
-        let Ok(stream) = stream else { continue };
+        let stream = match stream {
+            Ok(s) => s,
+            // Out of handles or memory fails every accept alike: a pause
+            // keeps that from taking a core while it lasts.
+            Err(_) => {
+                thread::sleep(Duration::from_millis(100));
+                continue;
+            }
+        };
         let token = token.to_string();
         let registry = Arc::clone(registry);
         thread::spawn(move || {
             let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
             let _ = stream.set_write_timeout(Some(Duration::from_secs(10)));
-            // WIC is COM; this thread is its own apartment.
-            unsafe {
-                let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-            }
             let _ = handle(&stream, &token, &registry);
         });
     }
     Ok(())
+}
+
+/// COM on this thread for as long as it lives, for WIC. Left again when
+/// dropped, and only when joining succeeded, as COM counts them in pairs.
+struct Com(bool);
+
+impl Com {
+    fn join() -> Com {
+        // SAFETY: no pointers; the pair is kept by `Drop`.
+        Com(unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.is_ok())
+    }
+}
+
+impl Drop for Com {
+    fn drop(&mut self) {
+        if self.0 {
+            // SAFETY: matches the successful CoInitializeEx above, on the
+            // same thread, since a `Com` is never sent anywhere.
+            unsafe { CoUninitialize() };
+        }
+    }
 }
 
 /// Binds, retrying for a few seconds: after a reload the Horadric before
@@ -173,15 +198,18 @@ fn handle(stream: &TcpStream, token: &str, registry: &Mutex<Registry>) -> io::Re
             "text/html; charset=utf-8",
             VIEWER.as_bytes(),
         ),
-        ("GET", "/frame.jpg") => match frame(share::max_width(query)) {
-            Ok(f) => respond_frame(stream, &f),
-            Err(e) => respond(
-                stream,
-                "500 Internal Server Error",
-                "text/plain",
-                e.to_string().as_bytes(),
-            ),
-        },
+        ("GET", "/frame.jpg") => {
+            let _com = Com::join();
+            match frame(share::max_width(query)) {
+                Ok(f) => respond_frame(stream, &f),
+                Err(e) => respond(
+                    stream,
+                    "500 Internal Server Error",
+                    "text/plain",
+                    e.to_string().as_bytes(),
+                ),
+            }
+        }
         ("GET", "/sessions") => respond(
             stream,
             "200 OK",
@@ -190,7 +218,9 @@ fn handle(stream: &TcpStream, token: &str, registry: &Mutex<Registry>) -> io::Re
         ),
         ("POST", "/input") => {
             if content_length > share::MAX_BODY {
-                return respond(stream, "413 Payload Too Large", "", b"");
+                respond(stream, "413 Payload Too Large", "", b"")?;
+                drain(stream, &mut reader);
+                return Ok(());
             }
             let mut body = vec![0u8; content_length];
             reader.read_exact(&mut body)?;
@@ -198,15 +228,25 @@ fn handle(stream: &TcpStream, token: &str, registry: &Mutex<Registry>) -> io::Re
                 .map_err(|e| e.to_string())
                 .and_then(share::parse_input);
             match parsed {
-                Ok(input) => {
-                    send(&input);
-                    respond(stream, "204 No Content", "", b"")
-                }
+                Ok(input) => match send(&input) {
+                    Ok(()) => respond(stream, "204 No Content", "", b""),
+                    Err(why) => respond(stream, "409 Conflict", "text/plain", why.as_bytes()),
+                },
                 Err(why) => respond(stream, "400 Bad Request", "text/plain", why.as_bytes()),
             }
         }
         _ => respond(stream, "404 Not Found", "text/plain", b"not found"),
     }
+}
+
+/// Reads and drops what is left of a body not read, a bounded amount for
+/// a short while. Closing with bytes unread makes Windows reset the
+/// connection, and the client then sees the reset, not the answer sent.
+fn drain(stream: &TcpStream, reader: &mut impl Read) {
+    const MOST: u64 = 1024 * 1024;
+    let _ = stream.shutdown(Shutdown::Write);
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
+    let _ = io::copy(&mut reader.take(MOST), &mut io::sink());
 }
 
 fn read_line(reader: &mut impl BufRead) -> io::Result<Option<String>> {
@@ -487,8 +527,9 @@ unsafe fn encode_jpeg(bitmap: HBITMAP) -> windows::core::Result<Vec<u8>> {
     Ok(jpeg)
 }
 
-/// Plays one event into this desktop.
-fn send(input: &Input) {
+/// Plays one event into this desktop, or says why Windows took less of it
+/// than was given.
+fn send(input: &Input) -> Result<(), String> {
     let screen = screen();
     let at = |x: i32, y: i32| {
         (
@@ -539,9 +580,16 @@ fn send(input: &Input) {
             })
             .collect(),
     };
-    unsafe {
-        SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+    // SAFETY: the slice and the size describe the same INPUTs.
+    let sent = unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
+    // SendInput says nothing more than a short count: these two are
+    // what makes it refuse in practice.
+    if (sent as usize) < inputs.len() {
+        return Err(
+            "input blocked: the window under it runs elevated, or the desktop is locked".into(),
+        );
     }
+    Ok(())
 }
 
 fn mouse((dx, dy): (i32, i32), flags: MOUSE_EVENT_FLAGS, wheel: i32) -> INPUT {

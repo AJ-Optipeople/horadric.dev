@@ -28,7 +28,10 @@ Off unless the user environment variable `HORADRIC_SCREEN_SHARE=1` is
 set when the app starts (a normal install serves nothing new). Then the
 app listens on `127.0.0.1:43119` (`43120` for a dev instance).
 
-Every request carries the token as `?t=<token>` in the query. The token
+Every request carries the token as `?t=<token>` in the query. The viewer
+moves it from its own address into the tab's `sessionStorage` as it
+loads, so the tab's URL (which the agent can read) no longer shows it,
+and adds it to each request itself. The token
 is 32 hex characters in `<state dir>\screen-token`, written on first
 start and kept. Without it, or with a wrong one: `403`. Reading the
 token takes a login on the machine, so a tunnel alone is not enough.
@@ -46,7 +49,15 @@ token takes a login on the machine, so a tunnel alone is not enough.
   `{"kind":"wheel","x":..,"y":..,"delta":-120}`,
   `{"kind":"key","vk":13,"down":true}`,
   `{"kind":"text","text":"æøå"}` (typed as Unicode).
-  Answers `204`, or `400` with a reason.
+  Answers `204`, `400` with a reason, `409` when Windows took fewer
+  events than given (the window under them runs elevated, or the
+  desktop is locked), shown briefly in the viewer's bar, or `413` for a
+  body over 64 KiB. The viewer posts one event at a time, each after the
+  one before is answered, so a button's up never overtakes its down; a
+  move still waiting is replaced by a newer one. Letting go of control
+  (the button, Esc twice, the tab losing focus) releases every key and
+  mouse button it holds down there. A single Esc goes to the remote
+  after 600 ms unless a second one follows.
 - `GET /sessions?t=` the remote's Horadric sessions as JSON
   `[{"id","name","project","state","waiting"}]`, `waiting` being the
   question or approval it waits on, or null.
@@ -55,11 +66,16 @@ token takes a login on the machine, so a tunnel alone is not enough.
 
 `horadric remote open <ssh destination>` and the MCP tool
 `remote_open {"ssh": "<destination>"}`: start
-`ssh -N -L <free local port>:127.0.0.1:43119 -o ExitOnForwardFailure=yes
-<destination>` (kept for the destination, reused while alive), read the
+`ssh -N -L 127.0.0.1:<free local port>:127.0.0.1:43119 -o
+ExitOnForwardFailure=yes <destination>` (kept for the destination,
+reused while alive, under a lock file so two sessions opening one
+machine at once share one tunnel), read the
 token with `ssh <destination> cmd /c type "%APPDATA%\Horadric\screen-token"`,
 and open `http://127.0.0.1:<port>/?t=<token>` in a tab of the browser
 pane. The token goes in no log or reply text.
+
+`horadric remote close <ssh destination>` ends the tunnel kept for it
+and forgets it.
 
 `remote_screenshot {"ssh"}` fetches `/frame.jpg` through the same tunnel
 and gives it to the session as an image: the picture the human sees.
